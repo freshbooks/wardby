@@ -201,7 +201,8 @@ async function startReviews(
         await host
           .completeCheck(repository, {
             checkId,
-            conclusion: "neutral",
+            // Not neutral: branch protection counts a neutral required check as passing.
+            conclusion: "failure",
             title: "Review could not be started",
             summary: "wardby could not start this review. Use Re-run to try again.",
           })

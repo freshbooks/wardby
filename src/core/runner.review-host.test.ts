@@ -238,7 +238,7 @@ describe("repo_* built-ins in the native run loop", () => {
     await executeRun("run1", { ...providers(llm), reviewHosts: { github: host } }, db);
     expect(host.completeCheck).toHaveBeenCalledWith(
       REPO,
-      expect.objectContaining({ checkId: "11", conclusion: "neutral" }),
+      expect.objectContaining({ checkId: "11", conclusion: "failure" }),
     );
     expect(state.runHostCheck!.completedAt).toBeInstanceOf(Date);
   });

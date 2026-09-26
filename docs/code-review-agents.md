@@ -21,6 +21,13 @@ Once an agent is linked to a repository with the `pull_request` trigger:
   rather than posted again.
 - The check completes as `success` (APPROVE), `failure`
   (CHANGES_REQUESTED), or `neutral` (COMMENT).
+- A review run that ends without publishing a review (it failed, was
+  stopped, could not be started, or ran out of budget) completes its check as
+  `failure`, never `neutral`: branch protection counts a neutral required
+  check as passing, so the pull request stays blocked until a review actually
+  runs. When the cause is budget, the check says so ("Review could not run:
+  out of budget") and names the budget that was used up; use **Re-run** after
+  raising the budget or once it resets.
 - On a later review, the agent sees its own unresolved inline threads and
   can **resolve the ones the new head fixes**, so fixed findings collapse on
   the PR page. Only threads that agent started are resolved; people's
@@ -59,9 +66,11 @@ comment with the outcome:
 - that the request was **interrupted** and should be repeated, when the run
   was lost (for example, the instance running it was replaced and could not
   finish it in time);
+- that the run, or one of its coding sub-runs, **ran out of budget**, or
+  could not start for lack of it, with the run's budget amount (and the
+  budget group, when the group's remaining allowance is what limited it);
 - the run's final status for any other unsuccessful end (`failed`,
-  `budget_exhausted`, ...). Error text is never posted; look the run up by
-  its id.
+  `cancelled`, ...). Error text is never posted; look the run up by its id.
 
 Where to comment is recorded together with the run, so even a run whose
 instance stopped before posting "Working on it" gets its outcome comment.
@@ -462,7 +471,7 @@ independent check) required alongside it.
 
 ## Accepted gap: a run that fails outside its normal finish path leaves its check open
 
-A run's in-progress check is only closed (completed `neutral`, "Use Re-run
+A run's in-progress check is only closed (completed `failure`, "Use Re-run
 to try again") when the run reaches a terminal state through its normal
 finish path in the runner. A run that fails before or outside that path can
 leave its check showing "in progress" indefinitely — for example a run the

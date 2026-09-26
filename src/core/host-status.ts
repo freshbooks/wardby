@@ -10,6 +10,7 @@
  */
 import type { Prisma, PrismaClient, Run } from "#prisma";
 import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
+import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
 
 const log = logger.child({ module: "host-status" });
@@ -81,6 +82,7 @@ export function outcomeBody(
   repository: string,
   pullRequests: PullRequestOutcome[],
   failedChildren: FailedChild[] = [],
+  opts: { budgetSentence?: string } = {},
 ): string {
   const links = pullRequests.map((pr) => {
     const ref =
@@ -94,6 +96,10 @@ export function outcomeBody(
   if (run.status === "lost") {
     return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
   }
+  if (run.status === "budget_exhausted" || run.status === "refused") {
+    // A refused run could not start for lack of budget; see budgetSentence.
+    return `❌ ${opts.budgetSentence ?? "Out of budget."}${partial}\n\n${footer}`;
+  }
   if (run.status !== "succeeded") {
     // Only the status: a run's error text can carry internal detail that does not belong on the host.
     return `❌ Stopped: the run ended with status \`${run.status}\`.${partial}\n\n${footer}`;
@@ -102,8 +108,16 @@ export function outcomeBody(
   const quoted = reply ? `\n\n${quoteReply(reply)}` : "";
   if (failedChildren.length > 0) {
     // The agent itself finished, but the work it handed off did not.
-    const which = failedChildren.map((c) => `\`${c.id}\` (\`${c.status}\`)`).join(", ");
-    return `❌ A sub-run did not succeed: ${which}.${partial}${quoted}\n\n${footer}`;
+    const outOfBudget = failedChildren.filter((c) => c.status === "budget_exhausted");
+    const other = failedChildren.filter((c) => c.status !== "budget_exhausted");
+    const lines: string[] = [];
+    if (outOfBudget.length > 0) {
+      lines.push(`A sub-run ran out of budget: ${outOfBudget.map((c) => `\`${c.id}\``).join(", ")}.`);
+    }
+    if (other.length > 0) {
+      lines.push(`A sub-run did not succeed: ${other.map((c) => `\`${c.id}\` (\`${c.status}\`)`).join(", ")}.`);
+    }
+    return `❌ ${lines.join(" ")}${partial}${quoted}\n\n${footer}`;
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
   return `✅ Finished without opening a pull request.${quoted}\n\n${footer}`;
@@ -141,7 +155,11 @@ export async function completeHostStatus(
     const failedChildren = children
       .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
       .map((c) => ({ id: c.id, status: c.status }));
-    const body = outcomeBody(run, status.repository, pullRequests, failedChildren);
+    const budgetSentence =
+      run.status === "budget_exhausted" || run.status === "refused"
+        ? await loadBudgetSentence(db, run.id, run.status)
+        : undefined;
+    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, { budgetSentence });
     let commentId = status.commentId;
     if (commentId) {
       await host.editComment(status.repository, {

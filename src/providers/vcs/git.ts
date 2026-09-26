@@ -13,6 +13,8 @@ import {
 } from "../../coding/protocol.js";
 import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess } from "./github.js";
 import type {
+  ContinuationFinishedDetails,
+  ContinuationOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
   PreparedWorkspace,
@@ -581,8 +583,8 @@ export class GitVcsProvider implements VcsProvider {
    */
   async notifyContinuationFinished(
     workspace: PreparedWorkspace,
-    outcome: "succeeded" | "failed",
-    details?: { summary?: string; agentName?: string },
+    outcome: ContinuationOutcome,
+    details?: ContinuationFinishedDetails,
   ): Promise<void> {
     if (!workspace.continuation) return;
     try {
@@ -595,15 +597,20 @@ export class GitVcsProvider implements VcsProvider {
       };
       const label = runLabel(details?.agentName, workspace.runId);
       const summarySuffix = details?.summary ? `\n\n${details.summary}` : "";
+      const budgetSuffix = details?.budgetSentence ? ` ${details.budgetSentence}` : "";
       const body =
-        outcome === "succeeded" ? `✅ ${label} finished.${summarySuffix}` : `❌ ${label} failed.${summarySuffix}`;
+        outcome === "succeeded"
+          ? `✅ ${label} finished.${summarySuffix}`
+          : outcome === "budget_exhausted"
+            ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
+            : `❌ ${label} failed.${summarySuffix}`;
       await Promise.allSettled([
         this.options.github.updateContinuationStatusComment({ ...identity, body }),
         this.options.github.completeContinuationCheckRun({
           repository: workspace.repository,
           headSha: workspace.baseCommit,
           runId: workspace.runId,
-          outcome,
+          outcome: outcome === "succeeded" ? "succeeded" : "failed",
         }),
       ]);
     } catch {

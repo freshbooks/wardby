@@ -121,8 +121,35 @@ describe("outcomeBody", () => {
     expect(body).toMatch(/^❌ Interrupted before it finished .*Repeat your request to retry\./);
   });
 
+  it("reports a run that ran out of budget, or could not start for lack of it, with the budget sentence", () => {
+    const sentence = "Out of budget: this run's $3.00 budget was used up.";
+    const body = outcomeBody(run("budget_exhausted", "internal detail"), REPO, [], [], { budgetSentence: sentence });
+    expect(body).toBe(`❌ ${sentence}\n\n<sub>wardby run \`r1\`</sub>`);
+    const refused = outcomeBody(run("refused"), REPO, [], [], {
+      budgetSentence: "Out of budget: this run could not start within its $1.00 budget.",
+    });
+    expect(refused).toMatch(/^❌ Out of budget: this run could not start/);
+    // Without numbers it still says why.
+    expect(outcomeBody(run("budget_exhausted"), REPO, [])).toMatch(/^❌ Out of budget\./);
+  });
+
+  it("says a sub-run ran out of budget", () => {
+    const body = outcomeBody(run("succeeded", "done"), REPO, [], [{ id: "c9", status: "budget_exhausted" }]);
+    expect(body).toMatch(/^❌ A sub-run ran out of budget: `c9`\./);
+    const mixed = outcomeBody(
+      run("succeeded"),
+      REPO,
+      [],
+      [
+        { id: "c9", status: "budget_exhausted" },
+        { id: "c10", status: "failed" },
+      ],
+    );
+    expect(mixed).toMatch(/^❌ A sub-run ran out of budget: `c9`\. A sub-run did not succeed: `c10` \(`failed`\)\./);
+  });
+
   it("reports any other unsuccessful run by its status, never its error text", () => {
-    for (const status of ["failed", "budget_exhausted", "cancelled", "refused"] as const) {
+    for (const status of ["failed", "cancelled"] as const) {
       const body = outcomeBody(run(status, "secret-ish internal detail"), REPO, []);
       expect(body).toMatch(/^❌ Stopped/);
       expect(body).toContain(`\`${status}\``);
@@ -223,6 +250,18 @@ describe("completeHostStatus", () => {
     const d = db({ row: row(), children: [child(null, "failed", "c9"), child(null, "running", "c10")] });
     await completeHostStatus(d as never, finished, { github: h });
     expect(h.editComment.mock.calls[0][1].body).toMatch(/^❌ A sub-run did not succeed: `c9` \(`failed`\)\./);
+  });
+
+  it("reports a run that ran out of budget with its amounts", async () => {
+    const h = host();
+    const d = db({
+      row: row(),
+      run: { agent: { budgetUsd: 3, budgetGroup: { name: "reviewers" } }, codingRun: { budgetReservedUsd: 0.52 } },
+    });
+    await completeHostStatus(d as never, { id: "r1", status: "budget_exhausted", finalText: null }, { github: h });
+    expect(h.editComment.mock.calls[0][1].body).toMatch(
+      /^❌ Out of budget: this run's \$0\.52 budget was used up \(the "reviewers" budget group had only that much left of its limit\)\./,
+    );
   });
 
   it("leaves a row without a comment to the follow-up, unless asked to post", async () => {

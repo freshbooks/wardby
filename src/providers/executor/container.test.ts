@@ -7,6 +7,8 @@ import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-acces
 import { ReviewHostError, type HostPermission } from "../review-host/types.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
+  ContinuationFinishedDetails,
+  ContinuationOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
   PreparedWorkspace,
@@ -172,10 +174,15 @@ class FakeStore implements ContainerExecutionStore {
     this.completions.push({ status, result: structuredClone(result) });
   }
 
-  async terminate(runId: string, status: "failed" | "refused" | "lost" | "cancelled", error: string): Promise<void> {
+  async terminate(
+    runId: string,
+    status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
+    error: string,
+    audit?: { failureCategory: string; diagnosticId: string },
+  ): Promise<void> {
     if (runId !== this.run.runId || ["succeeded", "budget_exhausted"].includes(this.run.status)) return;
     this.run.status = status;
-    this.terminations.push({ status, error });
+    this.terminations.push({ status, error, ...(audit ? { audit } : {}) });
   }
 }
 
@@ -249,7 +256,12 @@ class FakeVcs implements VcsProvider {
   lastPrepareInput?: VcsPrepareInput;
   notifyStartedCalls = 0;
   lastNotifyStartedAgentName?: string;
-  notifyFinishedCalls: Array<{ outcome: "succeeded" | "failed"; summary?: string; agentName?: string }> = [];
+  notifyFinishedCalls: Array<{
+    outcome: ContinuationOutcome;
+    summary?: string;
+    agentName?: string;
+    budgetSentence?: string;
+  }> = [];
 
   constructor(
     private readonly root: string,
@@ -296,10 +308,15 @@ class FakeVcs implements VcsProvider {
   }
   async notifyContinuationFinished(
     _workspace: PreparedWorkspace,
-    outcome: "succeeded" | "failed",
-    details?: { summary?: string; agentName?: string },
+    outcome: ContinuationOutcome,
+    details?: ContinuationFinishedDetails,
   ): Promise<void> {
-    this.notifyFinishedCalls.push({ outcome, summary: details?.summary, agentName: details?.agentName });
+    this.notifyFinishedCalls.push({
+      outcome,
+      summary: details?.summary,
+      agentName: details?.agentName,
+      ...(details?.budgetSentence ? { budgetSentence: details.budgetSentence } : {}),
+    });
     this.events.push(`notifyFinished:${outcome}`);
   }
   private makeWorkspace(input: VcsPrepareInput): PreparedWorkspace {
@@ -317,6 +334,8 @@ class FakeVcs implements VcsProvider {
 class FakeSessions implements CodingSessionController {
   creates = 0;
   cancels = 0;
+  /** Sessions the proxy refused a request of for budget. */
+  exhausted = new Set<string>();
   lastInput?: Parameters<CodingSessionController["createSession"]>[0];
 
   constructor(
@@ -340,6 +359,9 @@ class FakeSessions implements CodingSessionController {
     this.store.run.tokensIn = 100;
     this.store.run.tokensOut = 20;
     this.store.run.costUsd = 0.01;
+  }
+  async budgetExhausted(sessionId: string): Promise<boolean> {
+    return this.exhausted.has(sessionId);
   }
 }
 
@@ -526,12 +548,72 @@ describe("ContainerExecutor", () => {
       ]);
     });
 
-    it("notifies finished with 'failed' when the budget is exhausted", async () => {
+    it("notifies finished with 'budget_exhausted' when the budget is exhausted", async () => {
       const created = await harness({ budgetUsd: 0.005 });
       await created.executor.start("run-1");
 
       expect(created.vcs.notifyStartedCalls).toBe(1);
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        {
+          outcome: "budget_exhausted",
+          agentName: "knock-knock-implement",
+          budgetSentence: "Out of budget: this run's $0.01 budget was used up.",
+        },
+      ]);
+    });
+
+    it("ends a failed job as budget_exhausted when the proxy refused its session for budget", async () => {
+      const created = await harness({ budgetUsd: 0.52, agentBudgetUsd: 3, budgetGroupName: "reviewers" });
+      created.sessions.exhausted.add("session-1");
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.terminations).toEqual([
+        {
+          status: "budget_exhausted",
+          error: "coding_budget_exhausted",
+          audit: { failureCategory: "budget", diagnosticId: expect.stringMatching(/^coding_diag_/) },
+        },
+      ]);
+      expect(created.observer.events.find((event) => event.stage === "terminal")).toMatchObject({
+        outcome: "budget_exhausted",
+        failureCategory: "budget",
+      });
+      // The operator still gets the real reason.
+      expect(logged.some((entry) => String(entry.payload.reason).includes("job_coding_stream_failed"))).toBe(true);
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        {
+          outcome: "budget_exhausted",
+          agentName: "knock-knock-implement",
+          budgetSentence:
+            'Out of budget: this run\'s $0.52 budget was used up (the "reviewers" budget group had only that much left of its limit).',
+        },
+      ]);
+    });
+
+    it("ends a failed job as failed when the proxy never refused its session for budget", async () => {
+      const created = await harness();
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("failed");
+      expect((created.store.terminations[0] as { error: string }).error).toMatch(
+        /^coding_failure_executor:coding_diag_/,
+      );
       expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed", agentName: "knock-knock-implement" }]);
+    });
+
+    it("ends a run whose result could not be finalized as budget_exhausted when its session was refused", async () => {
+      const created = await harness();
+      created.sessions.exhausted.add("session-1");
+      created.jobs.result = { exitCode: 0, reason: "completed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ outcome: "budget_exhausted" });
     });
 
     it("notifies finished with 'failed' when the underlying job fails", async () => {
