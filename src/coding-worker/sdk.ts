@@ -19,8 +19,13 @@ export function codexSdkOptions(config: WorkerClientConfig) {
           base_url: `${config.proxyBaseUrl.replace(/\/$/, "")}/v1`,
           env_key: "CODEX_API_KEY",
           wire_api: "responses",
-          request_max_retries: 0,
-          stream_max_retries: 0,
+          // One failed request (a 5xx, a connection reset) or a dropped
+          // stream would otherwise end the whole run and its spend. Every
+          // retry is a new request through the proxy, so it passes the run's
+          // budget reservation again; a budget refusal (429) retried is
+          // refused again at no cost.
+          request_max_retries: 3,
+          stream_max_retries: 3,
           supports_websockets: false,
         },
       },
