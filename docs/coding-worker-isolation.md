@@ -41,6 +41,10 @@ answers, and pins the vetted address into the socket lookup. Redirects are
 denied. Injected fetch implementations are a test seam and must not be used in
 production composition.
 
+The Codex worker retries a failed model request, or a response stream that
+drops, up to three times each before it fails the run. Every retry is a new
+request through the proxy, so it is checked against the run's budget again.
+
 The proxy also binds a second listener, the **deny port** (`8788`,
 `CODING_PROXY_DENY_PORT`), which serves nothing: it accepts a connection,
 sends no bytes and closes it immediately

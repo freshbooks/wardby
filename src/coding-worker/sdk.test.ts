@@ -20,4 +20,15 @@ describe("codexSdkOptions", () => {
     });
     expect(JSON.stringify(options.config.shell_environment_policy)).not.toContain("rrp_worker_capability");
   });
+
+  it("retries a failed model request or a dropped stream a few times instead of failing the run", () => {
+    const provider = codexSdkOptions({
+      proxyBaseUrl: "http://proxy:8080",
+      capability: "c",
+      developerInstructions: "i",
+      environment: {},
+    }).config.model_providers.wardby_proxy;
+    expect(provider.request_max_retries).toBe(3);
+    expect(provider.stream_max_retries).toBe(3);
+  });
 });
