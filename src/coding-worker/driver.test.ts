@@ -262,6 +262,56 @@ describe("runCodingWorker", () => {
     ).rejects.toThrow("coding_stream_failed");
   });
 
+  describe("a Codex stream that throws", () => {
+    const throwing = (message: string) => () => ({
+      startThread: () => ({
+        runStreamed: async () => ({
+          events: (async function* () {
+            yield { type: "turn.started" } as WorkerEvent;
+            throw new Error(message);
+          })(),
+        }),
+      }),
+    });
+    const run = async (message: string) =>
+      runCodingWorker({
+        input,
+        workspace: await tempWorkspace(),
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createClient: throwing(message),
+      });
+
+    it("is classified into a fixed code, never carrying the message", async () => {
+      const cases: Array<[string, string]> = [
+        ["unexpected status 401 Unauthorized: secret-detail", "coding_stream_proxy_denied"],
+        ["unexpected status 403 Forbidden", "coding_stream_proxy_denied"],
+        ["exceeded retry limit, last status: 429 Too Many Requests", "coding_stream_rate_limited"],
+        ["unexpected status 502 Bad Gateway: upstream_transport_error", "coding_stream_upstream_error"],
+        ["stream disconnected: request timed out", "coding_stream_timeout"],
+        [
+          "error sending request for url (http://proxy/v1/responses): connection refused",
+          "coding_stream_proxy_unreachable",
+        ],
+        ["connection reset by peer", "coding_stream_proxy_unreachable"],
+        ["Codex Exec exited with code 1: something private", "coding_stream_agent_exited"],
+        ["provider detail must not escape", "coding_stream_failed"],
+      ];
+      for (const [message, code] of cases) {
+        const failure = run(message);
+        await expect(failure).rejects.toThrow(code);
+        await expect(failure).rejects.not.toThrow(/secret|private|provider detail/);
+      }
+    });
+
+    it("reports budget exhaustion as an outcome, not a failure", async () => {
+      await expect(run("unexpected status 429 Too Many Requests: wardby_budget_exhausted")).resolves.toMatchObject({
+        outcome: "budget_exhausted",
+      });
+    });
+  });
+
   it("reports a fixed code when structured output violates the worker schema", async () => {
     await expect(
       runCodingWorker({

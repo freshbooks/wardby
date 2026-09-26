@@ -132,7 +132,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
   });
   let finalJson: string | undefined;
   let failure: string | undefined;
-  let streamFailed = false;
+  let streamFailure: string | undefined;
   try {
     for await (const event of streamed.events) {
       const safeProgress = progress(options.input, event);
@@ -144,11 +144,11 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
         failure = event.type === "turn.failed" ? event.error?.message : event.message;
       }
     }
-  } catch {
-    streamFailed = true;
+  } catch (error) {
+    streamFailure = streamFailureCode(error);
   }
   if (!finalJson) {
-    if (failure?.includes("wardby_budget_exhausted")) {
+    if (failure?.includes("wardby_budget_exhausted") || streamFailure === BUDGET_EXHAUSTED) {
       const exhausted: CodingAgentOutput = {
         schemaVersion: CODING_PROTOCOL_VERSION,
         runId: options.input.runId,
@@ -164,10 +164,10 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
       });
       return exhausted;
     }
-    if (streamFailed) throw new Error("coding_stream_failed");
+    if (streamFailure) throw new Error(streamFailure);
     throw new Error(failure ? "coding_turn_failed" : "coding_output_missing");
   }
-  if (streamFailed) throw new Error("coding_stream_failed");
+  if (streamFailure) throw new Error(streamFailure === BUDGET_EXHAUSTED ? "coding_stream_failed" : streamFailure);
   let output: CodingAgentOutput;
   try {
     output = parseCodingAgentOutputJson(finalJson);
@@ -183,4 +183,31 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
   }
   options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "completed", outcome: output.outcome });
   return output;
+}
+
+const BUDGET_EXHAUSTED = "budget_exhausted";
+
+/**
+ * What a Codex stream failure was, as a fixed code: the error text itself can
+ * carry prompts, repository content or provider detail, so only the matched
+ * category ever leaves the worker. Checked in order; the proxy's own budget
+ * refusal (a 429 carrying wardby_budget_exhausted) wins over the generic 429.
+ */
+const STREAM_FAILURE_CODES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/wardby_budget_exhausted/, BUDGET_EXHAUSTED],
+  [/\b40[13]\b|unauthori[sz]ed|forbidden/, "coding_stream_proxy_denied"],
+  [/\b429\b|too many requests|rate.?limit/, "coding_stream_rate_limited"],
+  [/\b5\d\d\b|bad gateway|service unavailable|internal server error/, "coding_stream_upstream_error"],
+  [/timed? ?out/, "coding_stream_timeout"],
+  [
+    /connection (?:refused|reset|closed)|econn(?:refused|reset)|enotfound|eai_again|error sending request|broken pipe|dns/,
+    "coding_stream_proxy_unreachable",
+  ],
+  [/exited with (?:code|signal)|exit code/, "coding_stream_agent_exited"],
+];
+
+function streamFailureCode(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  for (const [pattern, code] of STREAM_FAILURE_CODES) if (pattern.test(message)) return code;
+  return "coding_stream_failed";
 }
