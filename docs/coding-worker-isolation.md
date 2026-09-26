@@ -90,6 +90,62 @@ For alerting, the control plane logs one `warn` line per such run with
 `event: "coding.provider_failure"`, the `runId`, the `class`, and the raw
 `upstreamCode`.
 
+### Model request allowlist
+
+The network policy only helps if the one reachable destination, the proxy,
+cannot be asked to reach somewhere else. Model APIs can do that on the
+caller's behalf: an OpenAI hosted `mcp` tool or a remote `input_image` URL
+makes OpenAI's servers contact any host, and hosted-tool fees and non-default
+service tiers are billed outside the metered tokens. Code in a Codex worker can
+read the run capability, so the proxy validates every request body against an
+allowlist before it resolves a credential, and refuses anything else with a
+`400` (`src/providers/coding-proxy/proxy.ts`).
+
+- **Anthropic Messages** (`parseAnthropicRequest`): a fixed set of keys,
+  text/`tool_use`/`tool_result`/thinking blocks, exactly the two Wardby tool
+  names, and the reviewed beta values.
+- **OpenAI Responses** (`parseOpenAiRequest`), built from what the pinned
+  Codex CLI actually sends (recorded in
+  `src/providers/coding-proxy/fixtures/codex-<version>-responses-requests.json`
+  and exercised end to end by `src/coding-worker/codex-compatibility.test.ts`):
+  - Top-level keys: `model`, `instructions`, `input`, `tools`, `tool_choice`,
+    `parallel_tool_calls`, `reasoning`, `store`, `stream`, `include`,
+    `prompt_cache_key`, `text`, `client_metadata`, `max_output_tokens`,
+    `background`, `service_tier`. Any other key, including `prompt`,
+    `previous_response_id`, `conversation` and `metadata`, is refused with
+    `openai_request_key_not_allowed:<key>`.
+  - Tools: `function` and `custom` definitions, and `namespace` groups of
+    them, either in `tools` or in Codex's `additional_tools` input item. Every
+    other tool type, including all hosted tools (`web_search`, `mcp`,
+    `code_interpreter`, `image_generation`, `file_search`, `local_shell`, and
+    so on), is refused with `openai_tool_not_allowed:<type>`. Tool names are
+    checked for shape (`[A-Za-z0-9_-]{1,128}`) but not against a fixed list:
+    they change with the model and the Codex version (for example `exec` in
+    code mode against `exec_command` otherwise), and a client-side tool runs
+    inside the worker, where the container boundary already governs it.
+    `tool_choice` may only be `auto`, `none` or `required`.
+  - Input items: `message` (`input_text`/`input_image` for user, developer
+    and system; `output_text` for assistant), `reasoning`, `function_call`,
+    `function_call_output`, `custom_tool_call`, `custom_tool_call_output`,
+    `agent_message` and `additional_tools`, each with only the keys Codex
+    sends. Anything else (`input_file`, `input_audio`, `item_reference`,
+    replayed hosted-tool calls, `compaction`, `local_shell_call`) is refused
+    with `openai_input_not_allowed:<type>`. An `input_image` must be an inline
+    `data:image/{png,jpeg,gif,webp};base64,` URL, as Codex's `view_image`
+    produces; a remote URL or a `file_id` is refused with
+    `openai_remote_input_not_allowed`.
+  - Pinned values: `include` only `reasoning.encrypted_content`; `reasoning`
+    only `effort`, `summary` and `context` with known values; `text` only
+    `verbosity` and a `text` or `json_schema` format; `service_tier` only
+    unset, `auto` or `default` (`service_tier_not_allowed`). The proxy still
+    forces `store: false` and `background: false` and adds a
+    `max_output_tokens` ceiling when Codex omits it.
+
+Upgrading the pinned `@openai/codex-sdk` means re-recording that fixture
+against a local fake upstream and rerunning the compatibility test. A Codex
+release that sends a new key or item type fails closed at the proxy rather
+than silently widening what reaches OpenAI.
+
 The proxy also binds a second listener, the **deny port** (`8788`,
 `CODING_PROXY_DENY_PORT`), which serves nothing: it accepts a connection,
 sends no bytes and closes it immediately

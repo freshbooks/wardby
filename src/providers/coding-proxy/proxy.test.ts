@@ -726,3 +726,309 @@ describe("CodingProxy Anthropic Messages", () => {
     expect(await h.ledger.getRequest(reservedRequestId(h.events))).toMatchObject({ status: "uncertain" });
   });
 });
+
+interface CodexFixture {
+  scenario: string;
+  body: Record<string, unknown>;
+}
+
+const codexFixtures = async (): Promise<CodexFixture[]> =>
+  JSON.parse(await fixture("codex-0.153.4-responses-requests.json")) as CodexFixture[];
+
+const INLINE_PNG =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+function codexBody(change: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    model: "test-model",
+    input: [
+      { type: "message", id: "msg_1", role: "developer", content: [{ type: "input_text", text: "rules" }] },
+      { type: "message", id: "msg_2", role: "user", content: [{ type: "input_text", text: "task" }] },
+    ],
+    tools: [
+      {
+        type: "function",
+        name: "exec_command",
+        description: "Runs a command",
+        strict: false,
+        parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] },
+      },
+    ],
+    tool_choice: "auto",
+    parallel_tool_calls: false,
+    reasoning: { effort: "medium", context: "all_turns" },
+    store: false,
+    stream: true,
+    include: ["reasoning.encrypted_content"],
+    prompt_cache_key: "01a0df85-39f7-7e02-9eb9-8bf291a02304",
+    text: { verbosity: "low" },
+    client_metadata: { session_id: "01a0df85-39f7-7e02-9eb9-8bf291a02304" },
+    ...change,
+  };
+}
+
+function withInput(...items: unknown[]): Record<string, unknown> {
+  const body = codexBody();
+  return { ...body, input: [...(body.input as unknown[]), ...items] };
+}
+
+describe("CodingProxy OpenAI Responses allowlist", () => {
+  it("forwards every recorded request of the pinned Codex CLI unchanged apart from the proxy's own fields", async () => {
+    const fixtures = await codexFixtures();
+    expect(fixtures.length).toBeGreaterThanOrEqual(10);
+    for (const [index, { scenario, body }] of fixtures.entries()) {
+      const h = await harness({ fetch: async () => new Response(completedSse(), { status: 200 }) });
+      const request = { ...body, model: "test-model" };
+
+      await execute(h, `codex-fixture-${index}`, new TestSink(), JSON.stringify(request));
+
+      expect(h.fetch, scenario).toHaveBeenCalledTimes(1);
+      const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(forwarded, scenario).toEqual({
+        ...request,
+        max_output_tokens: PROXY_DEFAULT_MAX_OUTPUT_TOKENS,
+        store: false,
+        background: false,
+      });
+    }
+  });
+
+  it("covers both the responses-lite and the classic tool layouts and every Codex item type", async () => {
+    const fixtures = await codexFixtures();
+    const itemTypes = new Set<string>();
+    const toolTypes = new Set<string>();
+    for (const { body } of fixtures) {
+      for (const item of body.input as Record<string, unknown>[]) {
+        itemTypes.add(String(item.type));
+        const tools = item.type === "additional_tools" ? (item.tools as Record<string, unknown>[]) : [];
+        for (const tool of [...tools, ...((body.tools as Record<string, unknown>[] | undefined) ?? [])]) {
+          toolTypes.add(String(tool.type));
+          for (const nested of (tool.tools as Record<string, unknown>[] | undefined) ?? []) {
+            toolTypes.add(String(nested.type));
+          }
+        }
+      }
+    }
+    expect([...itemTypes].sort()).toEqual([
+      "additional_tools",
+      "agent_message",
+      "custom_tool_call",
+      "custom_tool_call_output",
+      "function_call",
+      "function_call_output",
+      "message",
+      "reasoning",
+    ]);
+    expect([...toolTypes].sort()).toEqual(["custom", "function", "namespace"]);
+  });
+
+  it("forwards a minimal request, an inline data: image in a tool output, and service_tier default", async () => {
+    for (const [key, body] of Object.entries({
+      minimal: { model: "test-model", input: "hello", stream: true },
+      image: withInput(
+        { type: "function_call", call_id: "call_1", name: "view_image", arguments: '{"path":"a.png"}' },
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: [{ type: "input_image", image_url: INLINE_PNG, detail: "high" }],
+        },
+      ),
+      tier: codexBody({ service_tier: "default" }),
+    })) {
+      const h = await harness({ fetch: async () => new Response(completedSse(), { status: 200 }) });
+      await execute(h, `allowed-${key}`, new TestSink(), JSON.stringify(body));
+      expect(h.fetch, key).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it.each([
+    ["stored prompt", { prompt: { id: "pmpt_attacker" } }, "openai_request_key_not_allowed:prompt"],
+    ["previous response", { previous_response_id: "resp_1" }, "openai_request_key_not_allowed:previous_response_id"],
+    ["conversation", { conversation: "conv_1" }, "openai_request_key_not_allowed:conversation"],
+    ["request metadata", { metadata: { a: "b" } }, "openai_request_key_not_allowed:metadata"],
+    ["unknown key", { safety_identifier: "x" }, "openai_request_key_not_allowed:safety_identifier"],
+    ["odd key name", { "we!rd key": 1 }, "openai_request_key_not_allowed:other"],
+    ["priority tier", { service_tier: "priority" }, "service_tier_not_allowed"],
+    ["flex tier", { service_tier: "flex" }, "service_tier_not_allowed"],
+    ["background", { background: true }, "background_not_allowed"],
+    ["web search tool", { tools: [{ type: "web_search" }] }, "openai_tool_not_allowed:web_search"],
+    [
+      "remote MCP tool",
+      { tools: [{ type: "mcp", server_label: "x", server_url: "https://attacker.example/mcp" }] },
+      "openai_tool_not_allowed:mcp",
+    ],
+    [
+      "code interpreter",
+      { tools: [{ type: "code_interpreter", container: { type: "auto" } }] },
+      "openai_tool_not_allowed:code_interpreter",
+    ],
+    ["image generation", { tools: [{ type: "image_generation" }] }, "openai_tool_not_allowed:image_generation"],
+    [
+      "file search",
+      { tools: [{ type: "file_search", vector_store_ids: ["vs_1"] }] },
+      "openai_tool_not_allowed:file_search",
+    ],
+    ["local shell", { tools: [{ type: "local_shell" }] }, "openai_tool_not_allowed:local_shell"],
+    [
+      "hosted tool inside a namespace",
+      { tools: [{ type: "namespace", name: "ns", description: "", tools: [{ type: "web_search" }] }] },
+      "openai_tool_not_allowed:web_search",
+    ],
+    [
+      "nested namespace",
+      {
+        tools: [
+          {
+            type: "namespace",
+            name: "ns",
+            description: "",
+            tools: [{ type: "namespace", name: "inner", description: "", tools: [] }],
+          },
+        ],
+      },
+      "openai_tool_not_allowed:namespace",
+    ],
+    [
+      "function tool with an extra key",
+      { tools: [{ type: "function", name: "f", parameters: {}, server_url: "https://attacker.example" }] },
+      "invalid_openai_tool",
+    ],
+    ["invalid tool name", { tools: [{ type: "function", name: "bad name", parameters: {} }] }, "invalid_openai_tool"],
+    ["hosted tool choice", { tool_choice: { type: "web_search" } }, "openai_tool_choice_not_allowed"],
+    [
+      "extra include",
+      { include: ["reasoning.encrypted_content", "web_search_call.action.sources"] },
+      "openai_include_not_allowed",
+    ],
+    ["unknown reasoning effort", { reasoning: { effort: "unbounded" } }, "openai_reasoning_not_allowed"],
+    [
+      "unknown reasoning key",
+      { reasoning: { effort: "low", generate_summary: "auto" } },
+      "openai_reasoning_not_allowed",
+    ],
+    ["text format json_object", { text: { format: { type: "json_object" } } }, "openai_text_not_allowed"],
+    ["client metadata object value", { client_metadata: { a: { b: 1 } } }, "invalid_openai_request"],
+  ])("rejects %s before credential resolution", async (_name, change, code) => {
+    const resolve = vi.fn(async () => "secret");
+    const h = await harness({ credentials: { resolve } });
+
+    await expect(
+      execute(h, `openai-reject-${_name}`, new TestSink(), JSON.stringify(codexBody(change))),
+    ).rejects.toMatchObject({ status: 400, code });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "remote image URL in a user message",
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_image", image_url: "https://attacker.example/x.png?d=secret" }],
+      },
+      "openai_remote_input_not_allowed",
+    ],
+    [
+      "image file_id",
+      { type: "message", role: "user", content: [{ type: "input_image", file_id: "file_1" }] },
+      "openai_remote_input_not_allowed",
+    ],
+    [
+      "non-image data URL",
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_image", image_url: "data:text/html;base64,PGgxPg==" }],
+      },
+      "openai_remote_input_not_allowed",
+    ],
+    [
+      "remote image in a tool output",
+      {
+        type: "function_call_output",
+        call_id: "call_1",
+        output: [{ type: "input_image", image_url: "https://attacker.example/x.png" }],
+      },
+      "openai_remote_input_not_allowed",
+    ],
+    [
+      "remote image in a custom tool output",
+      {
+        type: "custom_tool_call_output",
+        call_id: "call_1",
+        output: [{ type: "input_image", image_url: "http://attacker.example/x.png" }],
+      },
+      "openai_remote_input_not_allowed",
+    ],
+    [
+      "input_file with a URL",
+      { type: "message", role: "user", content: [{ type: "input_file", file_url: "https://attacker.example/a.pdf" }] },
+      "openai_input_not_allowed:input_file",
+    ],
+    [
+      "input_file with inline data",
+      { type: "message", role: "user", content: [{ type: "input_file", filename: "a.pdf", file_data: "JVBERi0=" }] },
+      "openai_input_not_allowed:input_file",
+    ],
+    [
+      "input_audio",
+      { type: "message", role: "user", content: [{ type: "input_audio", input_audio: { data: "", format: "wav" } }] },
+      "openai_input_not_allowed:input_audio",
+    ],
+    ["item_reference", { type: "item_reference", id: "msg_1" }, "openai_input_not_allowed:item_reference"],
+    [
+      "web search call replay",
+      { type: "web_search_call", id: "ws_1", status: "completed", action: { type: "search", query: "x" } },
+      "openai_input_not_allowed:web_search_call",
+    ],
+    [
+      "mcp approval response",
+      { type: "mcp_approval_response", approval_request_id: "a", approve: true },
+      "openai_input_not_allowed:mcp_approval_response",
+    ],
+    ["compaction item", { type: "compaction", encrypted_content: "x" }, "openai_input_not_allowed:compaction"],
+    [
+      "local shell call",
+      { type: "local_shell_call", call_id: "c", status: "completed", action: { type: "exec", command: ["ls"] } },
+      "openai_input_not_allowed:local_shell_call",
+    ],
+    [
+      "hosted tool smuggled through additional_tools",
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [{ type: "mcp", server_label: "x", server_url: "https://attacker.example/mcp" }],
+      },
+      "openai_tool_not_allowed:mcp",
+    ],
+    [
+      "extra key on a function call",
+      { type: "function_call", call_id: "c", name: "f", arguments: "{}", server_url: "https://attacker.example" },
+      "invalid_openai_request",
+    ],
+    [
+      "output_text annotations",
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "x", annotations: [{ type: "url_citation", url: "https://a" }] }],
+      },
+      "invalid_openai_request",
+    ],
+    [
+      "an image in an assistant message",
+      { type: "message", role: "assistant", content: [{ type: "input_image", image_url: INLINE_PNG }] },
+      "openai_input_not_allowed:input_image",
+    ],
+  ])("rejects an input item carrying %s", async (_name, item, code) => {
+    const resolve = vi.fn(async () => "secret");
+    const h = await harness({ credentials: { resolve } });
+
+    await expect(
+      execute(h, `openai-reject-input-${_name}`, new TestSink(), JSON.stringify(withInput(item))),
+    ).rejects.toMatchObject({ status: 400, code });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+});

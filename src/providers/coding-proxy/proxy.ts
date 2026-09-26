@@ -116,6 +116,349 @@ export function capabilityHash(capability: string): string {
   return createHash("sha256").update(capability).digest("base64url");
 }
 
+// OpenAI Responses allowlist. Everything a request may carry is listed here;
+// anything else is refused before a credential is resolved. It mirrors what the
+// pinned Codex CLI (src/coding-worker/package.json) actually sends, recorded in
+// fixtures/codex-<version>-responses-requests.json. Only client-side tools
+// (function, custom, and namespaces of them) are allowed: a hosted tool (web
+// search, remote MCP, code interpreter, image generation, file search, ...), a
+// remote image or file, a stored prompt, or a previous response would make
+// OpenAI fetch or run something outside the worker's egress policy and outside
+// the token-metered budget. Tool names vary by model and Codex version, so they
+// are checked for shape, not against a fixed list: a client-side tool the model
+// calls is executed by the worker itself, which the container boundary governs.
+const OPENAI_REQUEST_KEYS = new Set([
+  "model",
+  "instructions",
+  "input",
+  "tools",
+  "tool_choice",
+  "parallel_tool_calls",
+  "reasoning",
+  "store",
+  "stream",
+  "include",
+  "prompt_cache_key",
+  "text",
+  "client_metadata",
+  "max_output_tokens",
+  "background",
+  "service_tier",
+]);
+const OPENAI_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const OPENAI_REASONING_SUMMARIES = new Set(["auto", "concise", "detailed", "none"]);
+const OPENAI_REASONING_CONTEXTS = new Set(["all_turns", "current_turn"]);
+const OPENAI_INCLUDES = new Set(["reasoning.encrypted_content"]);
+// Unset and "auto"/"default" are standard processing unless the OpenAI project
+// itself is configured otherwise; "priority", "flex" and "scale" are billed at
+// rates the pricing table does not track.
+const OPENAI_SERVICE_TIERS = new Set(["auto", "default"]);
+const OPENAI_TOOL_CHOICES = new Set(["auto", "none", "required"]);
+const OPENAI_VERBOSITIES = new Set(["low", "medium", "high"]);
+const OPENAI_IMAGE_DETAILS = new Set(["auto", "low", "high", "original"]);
+const OPENAI_MESSAGE_ROLES = new Set(["user", "developer", "system", "assistant"]);
+const OPENAI_MESSAGE_PHASES = new Set(["commentary", "final_answer"]);
+const OPENAI_GRAMMAR_SYNTAXES = new Set(["lark", "regex"]);
+const OPENAI_INPUT_PARTS = new Set(["input_text", "input_image"]);
+const OPENAI_ASSISTANT_PARTS = new Set(["output_text"]);
+const OPENAI_AGENT_MESSAGE_PARTS = new Set(["input_text", "encrypted_content"]);
+const OPENAI_TOOL_NAME = /^[A-Za-z0-9_-]{1,128}$/;
+const OPENAI_CODE_SUFFIX = /^[A-Za-z0-9_.-]{1,64}$/;
+// Only an inline base64 image: Codex's view_image and code-mode image() send
+// local files this way. A URL (or a file_id) would make OpenAI fetch it.
+const OPENAI_INLINE_IMAGE = /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+const MAX_OPENAI_ITEMS = 10_000;
+const MAX_OPENAI_TOOLS = 512;
+const MAX_OPENAI_ID_LENGTH = 512;
+const MAX_OPENAI_METADATA_ENTRIES = 64;
+const MAX_OPENAI_METADATA_VALUE_LENGTH = 16 * 1024;
+
+function openAiCode(prefix: string, value: unknown): string {
+  return `${prefix}:${typeof value === "string" && OPENAI_CODE_SUFFIX.test(value) ? value : "other"}`;
+}
+
+function openAiRecord(value: unknown, code = "invalid_openai_request"): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new CodingProxyError(400, code);
+  return value as Record<string, unknown>;
+}
+
+function openAiOnlyKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  code = "invalid_openai_request",
+): void {
+  const allowed = new Set(keys);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new CodingProxyError(400, code);
+}
+
+function openAiString(value: unknown, maxLength: number, code = "invalid_openai_request"): void {
+  if (typeof value !== "string" || value.length > maxLength) throw new CodingProxyError(400, code);
+}
+
+function openAiOptional(value: unknown, check: (value: unknown) => void): void {
+  if (value !== undefined) check(value);
+}
+
+function openAiId(value: unknown): void {
+  if (typeof value !== "string" || value.length < 1 || value.length > MAX_OPENAI_ID_LENGTH) {
+    throw new CodingProxyError(400, "invalid_openai_request");
+  }
+}
+
+function openAiToolName(value: unknown, code = "invalid_openai_request"): void {
+  if (typeof value !== "string" || !OPENAI_TOOL_NAME.test(value)) throw new CodingProxyError(400, code);
+}
+
+function validateOpenAiFunctionTool(tool: Record<string, unknown>): void {
+  openAiOnlyKeys(tool, ["type", "name", "description", "strict", "parameters"], "invalid_openai_tool");
+  openAiToolName(tool.name, "invalid_openai_tool");
+  openAiOptional(tool.description, (value) => openAiString(value, MAX_TOOL_TEXT_BYTES, "invalid_openai_tool"));
+  if (tool.strict !== undefined && typeof tool.strict !== "boolean") {
+    throw new CodingProxyError(400, "invalid_openai_tool");
+  }
+  openAiOptional(tool.parameters, (value) => openAiRecord(value, "invalid_openai_tool"));
+}
+
+function validateOpenAiCustomTool(tool: Record<string, unknown>): void {
+  openAiOnlyKeys(tool, ["type", "name", "description", "format"], "invalid_openai_tool");
+  openAiToolName(tool.name, "invalid_openai_tool");
+  openAiOptional(tool.description, (value) => openAiString(value, MAX_TOOL_TEXT_BYTES, "invalid_openai_tool"));
+  if (tool.format === undefined) return;
+  const format = openAiRecord(tool.format, "invalid_openai_tool");
+  if (format.type === "text") return openAiOnlyKeys(format, ["type"], "invalid_openai_tool");
+  openAiOnlyKeys(format, ["type", "syntax", "definition"], "invalid_openai_tool");
+  if (format.type !== "grammar" || typeof format.syntax !== "string" || !OPENAI_GRAMMAR_SYNTAXES.has(format.syntax)) {
+    throw new CodingProxyError(400, "invalid_openai_tool");
+  }
+  openAiString(format.definition, MAX_TOOL_TEXT_BYTES, "invalid_openai_tool");
+}
+
+function validateOpenAiTools(value: unknown, count: { value: number }, nested = false): void {
+  if (!Array.isArray(value)) throw new CodingProxyError(400, "invalid_openai_tool");
+  for (const candidate of value) {
+    if (++count.value > MAX_OPENAI_TOOLS) throw new CodingProxyError(400, "invalid_openai_tool");
+    const tool = openAiRecord(candidate, "invalid_openai_tool");
+    if (tool.type === "function") {
+      validateOpenAiFunctionTool(tool);
+    } else if (tool.type === "custom") {
+      validateOpenAiCustomTool(tool);
+    } else if (tool.type === "namespace" && !nested) {
+      openAiOnlyKeys(tool, ["type", "name", "description", "tools"], "invalid_openai_tool");
+      openAiToolName(tool.name, "invalid_openai_tool");
+      openAiOptional(tool.description, (value) => openAiString(value, MAX_TOOL_TEXT_BYTES, "invalid_openai_tool"));
+      validateOpenAiTools(tool.tools, count, true);
+    } else {
+      throw new CodingProxyError(400, openAiCode("openai_tool_not_allowed", tool.type));
+    }
+  }
+}
+
+function validateOpenAiContentPart(value: unknown, allowed: ReadonlySet<string>): void {
+  const part = openAiRecord(value);
+  if (typeof part.type !== "string" || !allowed.has(part.type)) {
+    throw new CodingProxyError(400, openAiCode("openai_input_not_allowed", part.type));
+  }
+  if (part.type === "input_image") {
+    if (part.file_id !== undefined || typeof part.image_url !== "string" || !OPENAI_INLINE_IMAGE.test(part.image_url)) {
+      throw new CodingProxyError(400, "openai_remote_input_not_allowed");
+    }
+    openAiOnlyKeys(part, ["type", "image_url", "detail"]);
+    if (part.detail !== undefined && (typeof part.detail !== "string" || !OPENAI_IMAGE_DETAILS.has(part.detail))) {
+      throw new CodingProxyError(400, "invalid_openai_request");
+    }
+  } else if (part.type === "encrypted_content") {
+    openAiOnlyKeys(part, ["type", "encrypted_content"]);
+    openAiString(part.encrypted_content, PROXY_MAX_BODY_BYTES);
+  } else {
+    openAiOnlyKeys(part, ["type", "text"]);
+    openAiString(part.text, PROXY_MAX_BODY_BYTES);
+  }
+}
+
+function validateOpenAiContent(value: unknown, allowed: ReadonlySet<string>, allowString = true): void {
+  if (typeof value === "string" && allowString) return;
+  if (!Array.isArray(value) || value.length > MAX_OPENAI_ITEMS)
+    throw new CodingProxyError(400, "invalid_openai_request");
+  for (const part of value) validateOpenAiContentPart(part, allowed);
+}
+
+function validateOpenAiTextParts(value: unknown, type: string): void {
+  if (!Array.isArray(value) || value.length > MAX_OPENAI_ITEMS)
+    throw new CodingProxyError(400, "invalid_openai_request");
+  for (const candidate of value) {
+    const part = openAiRecord(candidate);
+    openAiOnlyKeys(part, ["type", "text"]);
+    if (part.type !== type) throw new CodingProxyError(400, openAiCode("openai_input_not_allowed", part.type));
+    openAiString(part.text, PROXY_MAX_BODY_BYTES);
+  }
+}
+
+function validateOpenAiInputItem(value: unknown, toolCount: { value: number }): void {
+  const item = openAiRecord(value);
+  switch (item.type) {
+    case undefined:
+    case "message": {
+      openAiOnlyKeys(item, ["type", "id", "role", "content", "phase"]);
+      openAiOptional(item.id, openAiId);
+      if (typeof item.role !== "string" || !OPENAI_MESSAGE_ROLES.has(item.role)) {
+        throw new CodingProxyError(400, "invalid_openai_request");
+      }
+      if (item.phase !== undefined && (typeof item.phase !== "string" || !OPENAI_MESSAGE_PHASES.has(item.phase))) {
+        throw new CodingProxyError(400, "invalid_openai_request");
+      }
+      validateOpenAiContent(item.content, item.role === "assistant" ? OPENAI_ASSISTANT_PARTS : OPENAI_INPUT_PARTS);
+      return;
+    }
+    case "reasoning":
+      openAiOnlyKeys(item, ["type", "id", "summary", "content", "encrypted_content"]);
+      openAiOptional(item.id, openAiId);
+      validateOpenAiTextParts(item.summary, "summary_text");
+      if (item.content !== undefined && item.content !== null) validateOpenAiTextParts(item.content, "reasoning_text");
+      if (item.encrypted_content !== undefined && item.encrypted_content !== null) {
+        openAiString(item.encrypted_content, PROXY_MAX_BODY_BYTES);
+      }
+      return;
+    case "function_call":
+      openAiOnlyKeys(item, ["type", "id", "call_id", "name", "namespace", "arguments"]);
+      openAiOptional(item.id, openAiId);
+      openAiId(item.call_id);
+      openAiToolName(item.name);
+      openAiOptional(item.namespace, (value) => openAiToolName(value));
+      openAiString(item.arguments, PROXY_MAX_BODY_BYTES);
+      return;
+    case "custom_tool_call":
+      openAiOnlyKeys(item, ["type", "id", "status", "call_id", "name", "input"]);
+      openAiOptional(item.id, openAiId);
+      openAiOptional(item.status, (value) => openAiString(value, 64));
+      openAiId(item.call_id);
+      openAiToolName(item.name);
+      openAiString(item.input, PROXY_MAX_BODY_BYTES);
+      return;
+    case "function_call_output":
+    case "custom_tool_call_output":
+      openAiOnlyKeys(
+        item,
+        item.type === "function_call_output"
+          ? ["type", "id", "call_id", "output"]
+          : ["type", "id", "call_id", "name", "output"],
+      );
+      openAiOptional(item.id, openAiId);
+      openAiId(item.call_id);
+      openAiOptional(item.name, (value) => openAiToolName(value));
+      validateOpenAiContent(item.output, OPENAI_INPUT_PARTS);
+      return;
+    case "agent_message":
+      openAiOnlyKeys(item, ["type", "id", "author", "recipient", "content"]);
+      openAiOptional(item.id, openAiId);
+      openAiOptional(item.author, (value) => openAiString(value, MAX_OPENAI_ID_LENGTH));
+      openAiOptional(item.recipient, (value) => openAiString(value, MAX_OPENAI_ID_LENGTH));
+      validateOpenAiContent(item.content, OPENAI_AGENT_MESSAGE_PARTS, false);
+      return;
+    case "additional_tools":
+      openAiOnlyKeys(item, ["type", "id", "role", "tools"]);
+      openAiOptional(item.id, openAiId);
+      if (item.role !== undefined && item.role !== "developer")
+        throw new CodingProxyError(400, "invalid_openai_request");
+      validateOpenAiTools(item.tools, toolCount);
+      return;
+    default:
+      throw new CodingProxyError(400, openAiCode("openai_input_not_allowed", item.type));
+  }
+}
+
+function validateOpenAiReasoning(value: unknown): void {
+  const reasoning = openAiRecord(value, "openai_reasoning_not_allowed");
+  openAiOnlyKeys(reasoning, ["effort", "summary", "context"], "openai_reasoning_not_allowed");
+  for (const [key, allowed] of [
+    ["effort", OPENAI_REASONING_EFFORTS],
+    ["summary", OPENAI_REASONING_SUMMARIES],
+    ["context", OPENAI_REASONING_CONTEXTS],
+  ] as const) {
+    const setting = reasoning[key];
+    if (setting !== undefined && (typeof setting !== "string" || !allowed.has(setting))) {
+      throw new CodingProxyError(400, "openai_reasoning_not_allowed");
+    }
+  }
+}
+
+function validateOpenAiText(value: unknown): void {
+  const text = openAiRecord(value, "openai_text_not_allowed");
+  openAiOnlyKeys(text, ["verbosity", "format"], "openai_text_not_allowed");
+  if (text.verbosity !== undefined && (typeof text.verbosity !== "string" || !OPENAI_VERBOSITIES.has(text.verbosity))) {
+    throw new CodingProxyError(400, "openai_text_not_allowed");
+  }
+  if (text.format === undefined) return;
+  const format = openAiRecord(text.format, "openai_text_not_allowed");
+  if (format.type === "text") return openAiOnlyKeys(format, ["type"], "openai_text_not_allowed");
+  openAiOnlyKeys(format, ["type", "name", "schema", "strict", "description"], "openai_text_not_allowed");
+  if (format.type !== "json_schema" || typeof format.name !== "string" || !OPENAI_TOOL_NAME.test(format.name)) {
+    throw new CodingProxyError(400, "openai_text_not_allowed");
+  }
+  openAiRecord(format.schema, "openai_text_not_allowed");
+  if (format.strict !== undefined && typeof format.strict !== "boolean") {
+    throw new CodingProxyError(400, "openai_text_not_allowed");
+  }
+  openAiOptional(format.description, (value) => openAiString(value, MAX_TOOL_TEXT_BYTES, "openai_text_not_allowed"));
+}
+
+function validateOpenAiClientMetadata(value: unknown): void {
+  const metadata = openAiRecord(value);
+  const entries = Object.entries(metadata);
+  if (entries.length > MAX_OPENAI_METADATA_ENTRIES) throw new CodingProxyError(400, "invalid_openai_request");
+  for (const [key, entry] of entries) {
+    if (key.length > 128) throw new CodingProxyError(400, "invalid_openai_request");
+    openAiString(entry, MAX_OPENAI_METADATA_VALUE_LENGTH);
+  }
+}
+
+function validateOpenAiBody(body: Record<string, unknown>): void {
+  for (const key of Object.keys(body)) {
+    if (!OPENAI_REQUEST_KEYS.has(key))
+      throw new CodingProxyError(400, openAiCode("openai_request_key_not_allowed", key));
+  }
+  if (body.background !== undefined && body.background !== false) {
+    throw new CodingProxyError(400, body.background === true ? "background_not_allowed" : "invalid_openai_request");
+  }
+  if (body.service_tier !== undefined) {
+    if (typeof body.service_tier !== "string" || !OPENAI_SERVICE_TIERS.has(body.service_tier)) {
+      throw new CodingProxyError(400, "service_tier_not_allowed");
+    }
+  }
+  if (body.store !== undefined && typeof body.store !== "boolean") {
+    throw new CodingProxyError(400, "invalid_openai_request");
+  }
+  openAiOptional(body.instructions, (value) => openAiString(value, PROXY_MAX_BODY_BYTES));
+  const toolCount = { value: 0 };
+  if (body.tools !== undefined) validateOpenAiTools(body.tools, toolCount);
+  if (body.tool_choice !== undefined) {
+    if (typeof body.tool_choice !== "string" || !OPENAI_TOOL_CHOICES.has(body.tool_choice)) {
+      throw new CodingProxyError(400, "openai_tool_choice_not_allowed");
+    }
+  }
+  if (body.parallel_tool_calls !== undefined && typeof body.parallel_tool_calls !== "boolean") {
+    throw new CodingProxyError(400, "invalid_openai_request");
+  }
+  openAiOptional(body.reasoning, validateOpenAiReasoning);
+  if (body.include !== undefined) {
+    const include = body.include;
+    if (
+      !Array.isArray(include) ||
+      new Set(include).size !== include.length ||
+      include.some((entry) => typeof entry !== "string" || !OPENAI_INCLUDES.has(entry))
+    ) {
+      throw new CodingProxyError(400, "openai_include_not_allowed");
+    }
+  }
+  openAiOptional(body.prompt_cache_key, (value) => openAiString(value, MAX_OPENAI_ID_LENGTH));
+  openAiOptional(body.text, validateOpenAiText);
+  openAiOptional(body.client_metadata, validateOpenAiClientMetadata);
+  if (typeof body.input === "string") return;
+  if (!Array.isArray(body.input) || body.input.length > MAX_OPENAI_ITEMS) {
+    throw new CodingProxyError(400, "invalid_openai_request");
+  }
+  for (const item of body.input) validateOpenAiInputItem(item, toolCount);
+}
+
 function parseOpenAiRequest(rawBody: string): ParsedRequest {
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
   let value: unknown;
@@ -139,7 +482,7 @@ function parseOpenAiRequest(rawBody: string): ParsedRequest {
     throw new CodingProxyError(400, "invalid_max_output_tokens");
   }
   if (body.stream !== true && body.stream !== false) throw new CodingProxyError(400, "stream_required");
-  if (body.background === true) throw new CodingProxyError(400, "background_not_allowed");
+  validateOpenAiBody(body);
   const normalized = { ...body, max_output_tokens: maxOutputTokens, store: false, background: false };
   const encoded = JSON.stringify(normalized);
   if (Buffer.byteLength(encoded) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
