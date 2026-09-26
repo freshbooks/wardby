@@ -6,6 +6,16 @@ describe("safeWorkerErrorCode", () => {
   it("preserves only fixed worker-owned codes", () => {
     expect(safeWorkerErrorCode(new Error("coding_turn_failed"))).toBe("coding_turn_failed");
     expect(safeWorkerErrorCode(new Error("coding_stream_failed"))).toBe("coding_stream_failed");
+    for (const code of [
+      "coding_stream_proxy_denied",
+      "coding_stream_rate_limited",
+      "coding_stream_upstream_error",
+      "coding_stream_timeout",
+      "coding_stream_proxy_unreachable",
+      "coding_stream_agent_exited",
+    ]) {
+      expect(safeWorkerErrorCode(new Error(code))).toBe(code);
+    }
     expect(safeWorkerErrorCode(new Error("coding_output_invalid"))).toBe("coding_output_invalid");
     expect(safeWorkerErrorCode(new Error("provider_secret_value"))).toBe("worker_failed");
   });
