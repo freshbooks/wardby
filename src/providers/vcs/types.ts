@@ -114,10 +114,21 @@ export interface VcsProvider {
    * (the same text that goes in the PR body -- see
    * `FinalizeChangesDetails.summary`) so the "done" status reflects what
    * actually happened instead of a caller having to go find out.
+   * `budget_exhausted` is a failure that ran out of budget;
+   * `details.budgetSentence` then says how (see core/budget-wording.ts).
    */
   notifyContinuationFinished?(
     workspace: PreparedWorkspace,
-    outcome: "succeeded" | "failed",
-    details?: { summary?: string; agentName?: string },
+    outcome: ContinuationOutcome,
+    details?: ContinuationFinishedDetails,
   ): Promise<void>;
+}
+
+export type ContinuationOutcome = "succeeded" | "failed" | "budget_exhausted";
+
+export interface ContinuationFinishedDetails {
+  summary?: string;
+  agentName?: string;
+  /** Host-safe sentence naming the run's budget; used with `budget_exhausted`. */
+  budgetSentence?: string;
 }

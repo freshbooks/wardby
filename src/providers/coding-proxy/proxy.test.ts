@@ -224,6 +224,30 @@ describe("CodingProxy", () => {
     expect(h.fetch).not.toHaveBeenCalled();
   });
 
+  it("records the first budget refusal on the session", async () => {
+    const raw = requestBody();
+    const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });
+    const exactBudget = estimateReservationUsd(Buffer.byteLength(normalized), 10, PRICE);
+    let now = NOW;
+    const h = await harness({ budgetUsd: exactBudget, now: () => now });
+    const hash = capabilityHash(h.session.capability);
+    expect((await h.ledger.findSessionByCapabilityHash(hash))?.budgetExhaustedAt ?? null).toBeNull();
+    await expect(execute(h, "first")).rejects.toMatchObject({ code: "wardby_budget_exhausted" });
+    now = new Date(NOW.getTime() + 1_000);
+    await expect(execute(h, "second")).rejects.toMatchObject({ code: "wardby_budget_exhausted" });
+    expect((await h.ledger.findSessionByCapabilityHash(hash))?.budgetExhaustedAt).toEqual(NOW);
+  });
+
+  it("tells the executor whether a session was refused for budget", async () => {
+    const raw = requestBody();
+    const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });
+    const h = await harness({ budgetUsd: estimateReservationUsd(Buffer.byteLength(normalized), 10, PRICE) });
+    expect(await h.proxy.budgetExhausted(h.session.id)).toBe(false);
+    await expect(execute(h, "first")).rejects.toMatchObject({ code: "wardby_budget_exhausted" });
+    expect(await h.proxy.budgetExhausted(h.session.id)).toBe(true);
+    expect(await h.proxy.budgetExhausted("no-such-session")).toBe(false);
+  });
+
   it("serializes concurrent reservations so only one request can consume the remaining budget", async () => {
     const raw = requestBody();
     const normalized = JSON.stringify({ ...JSON.parse(raw), store: false, background: false });

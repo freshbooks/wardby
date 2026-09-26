@@ -60,7 +60,7 @@ export const ORPHANED_CHECK_BATCH = 50;
 export const ORPHANED_CHECK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Completes (neutral) open host checks whose run reached a terminal status
+ * Completes (as a failure) open host checks whose run reached a terminal status
  * at least ORPHANED_CHECK_GRACE_MS and at most ORPHANED_CHECK_MAX_AGE_MS
  * ago. Newest-finished first, so old checks the host keeps refusing cannot
  * starve newer ones. A check the host still refuses after the max age (the
@@ -69,7 +69,7 @@ export const ORPHANED_CHECK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * no host is configured. `closeOpenHostCheck` is best-effort and never throws.
  */
 export async function closeOrphanedHostChecks(
-  db: Pick<PrismaClient, "runHostCheck">,
+  db: Pick<PrismaClient, "runHostCheck" | "run">,
   hosts: ReviewHostRegistry | undefined,
   now: Date = new Date(),
 ): Promise<void> {

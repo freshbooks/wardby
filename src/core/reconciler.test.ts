@@ -410,17 +410,26 @@ describe("reconcileOnce orphaned host checks", () => {
     const runs = [
       baseRun({ id: "lost1", status: "lost", finishedAt: LONG_DONE }),
       baseRun({ id: "failed1", status: "failed", finishedAt: LONG_DONE }),
+      baseRun({ id: "refused1", status: "refused", finishedAt: LONG_DONE }),
     ];
-    const checks = [hostCheck("lost1"), hostCheck("failed1")];
+    const checks = [hostCheck("lost1"), hostCheck("failed1"), hostCheck("refused1")];
     const { db } = withHostChecks(fakeDb(runs), runs, checks);
     const host = fakeHost();
 
     await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, { github: host });
 
-    expect(host.completeCheck).toHaveBeenCalledTimes(2);
+    expect(host.completeCheck).toHaveBeenCalledTimes(3);
     expect(host.completeCheck).toHaveBeenCalledWith(
       "o/n",
-      expect.objectContaining({ checkId: "c-lost1", conclusion: "neutral", title: "Review did not complete" }),
+      expect.objectContaining({ checkId: "c-lost1", conclusion: "failure", title: "Review did not complete" }),
+    );
+    expect(host.completeCheck).toHaveBeenCalledWith(
+      "o/n",
+      expect.objectContaining({
+        checkId: "c-refused1",
+        conclusion: "failure",
+        title: "Review could not run: out of budget",
+      }),
     );
     expect(checks.every((c) => c.completedAt !== null)).toBe(true);
   });

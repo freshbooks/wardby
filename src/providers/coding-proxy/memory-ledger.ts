@@ -9,7 +9,12 @@ import type {
 } from "./types.js";
 
 function cloneSession(session: ProxySession): ProxySession {
-  return { ...session, allowedModels: [...session.allowedModels], deadlineAt: new Date(session.deadlineAt) };
+  return {
+    ...session,
+    allowedModels: [...session.allowedModels],
+    deadlineAt: new Date(session.deadlineAt),
+    budgetExhaustedAt: session.budgetExhaustedAt ? new Date(session.budgetExhaustedAt) : null,
+  };
 }
 
 function cloneRequest(request: ProxyRequest): ProxyRequest {
@@ -57,7 +62,10 @@ export class MemoryProxyLedger implements ProxyLedger {
       if (request.status === "completed") committedOrHeld += request.actualCostUsd!;
       if (request.status === "reserved" || request.status === "uncertain") committedOrHeld += request.reservationUsd;
     }
-    if (committedOrHeld + input.reservationUsd >= session.budgetUsd) return { outcome: "budget_exhausted" };
+    if (committedOrHeld + input.reservationUsd >= session.budgetUsd) {
+      session.budgetExhaustedAt ??= new Date(input.now);
+      return { outcome: "budget_exhausted" };
+    }
 
     const request: ProxyRequest = { ...input, pricing: { ...input.pricing }, status: "reserved" };
     this.requests.set(request.id, request);
@@ -103,6 +111,10 @@ export class MemoryProxyLedger implements ProxyLedger {
   async cancelSession(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session) session.status = "cancelled";
+  }
+
+  async budgetExhausted(sessionId: string): Promise<boolean> {
+    return Boolean(this.sessions.get(sessionId)?.budgetExhaustedAt);
   }
 
   async getRequest(requestId: string): Promise<ProxyRequest | null> {

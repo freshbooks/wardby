@@ -534,6 +534,11 @@ export class CodingProxy {
     for (const controller of this.activeRequests.get(sessionId) ?? []) controller.abort();
   }
 
+  /** Whether this session's run was refused a model request for budget. */
+  budgetExhausted(sessionId: string): Promise<boolean> {
+    return this.ledger.budgetExhausted(sessionId);
+  }
+
   async execute(input: ExecuteProxyRequest, sink: ProxyResponseSink): Promise<void> {
     const session = await this.authenticate(input.bearer);
     if (session.protocol !== input.protocol) {

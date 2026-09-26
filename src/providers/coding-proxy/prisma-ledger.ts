@@ -41,6 +41,7 @@ interface SessionRow {
   budgetUsd: unknown;
   status: string;
   registryTokenHash: string | null;
+  budgetExhaustedAt?: Date | null;
 }
 
 interface RequestRow {
@@ -80,6 +81,7 @@ function sessionFromRow(row: SessionRow): ProxySession {
     budgetUsd: Number(row.budgetUsd),
     status: row.status as ProxySessionStatus,
     registryTokenHash: row.registryTokenHash,
+    budgetExhaustedAt: row.budgetExhaustedAt ?? null,
   };
 }
 
@@ -144,7 +146,8 @@ export class PrismaProxyLedger implements ProxyLedger {
 
   async findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
-      SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash"
+      SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
+             "budgetExhaustedAt"
       FROM "CodingProxySession" WHERE "capabilityHash" = ${capabilityHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : null;
@@ -181,6 +184,10 @@ export class PrismaProxyLedger implements ProxyLedger {
           FROM "CodingProxyRequest" WHERE "sessionId" = ${input.sessionId}
         `;
       if (Number(totals[0]?.held ?? 0) + input.reservationUsd >= Number(row.budgetUsd)) {
+        await tx.$executeRaw`
+            UPDATE "CodingProxySession" SET "budgetExhaustedAt" = COALESCE("budgetExhaustedAt", ${input.now})
+            WHERE "id" = ${input.sessionId}
+          `;
         return { outcome: "budget_exhausted" } as const;
       }
       const pricing = JSON.stringify({
@@ -286,6 +293,13 @@ export class PrismaProxyLedger implements ProxyLedger {
       UPDATE "CodingProxySession" SET "status" = 'cancelled', "updatedAt" = CURRENT_TIMESTAMP
       WHERE "id" = ${sessionId} AND "status" = 'active'
     `;
+  }
+
+  async budgetExhausted(sessionId: string): Promise<boolean> {
+    const rows = await this.db.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "CodingProxySession" WHERE "id" = ${sessionId} AND "budgetExhaustedAt" IS NOT NULL
+    `;
+    return rows.length > 0;
   }
 
   getRequest(requestId: string): Promise<ProxyRequest | null> {

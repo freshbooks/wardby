@@ -52,7 +52,9 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     });
     expect(await ledger.findSessionByCapabilityHash(`hash-${suffix}`)).toMatchObject({
       protocol: "openai-responses",
+      budgetExhaustedAt: null,
     });
+    expect(await ledger.budgetExhausted(sessionId)).toBe(false);
     const request = (id: string) => ({
       id: `${id}-${suffix}`,
       sessionId,
@@ -67,6 +69,13 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     const admitted = [first, second].filter((result) => result.outcome === "reserved");
     expect(admitted).toHaveLength(1);
     expect([first.outcome, second.outcome]).toContain("budget_exhausted");
+    const refusedAt = (await ledger.findSessionByCapabilityHash(`hash-${suffix}`))?.budgetExhaustedAt;
+    expect(refusedAt).toBeInstanceOf(Date);
+    expect(await ledger.budgetExhausted(sessionId)).toBe(true);
+    expect(await ledger.budgetExhausted(`missing-${suffix}`)).toBe(false);
+    const later = await ledger.reserve({ ...request("c"), now: new Date(Date.now() + 5_000) });
+    expect(later.outcome).toBe("budget_exhausted");
+    expect((await ledger.findSessionByCapabilityHash(`hash-${suffix}`))?.budgetExhaustedAt).toEqual(refusedAt);
 
     const requestId = admitted[0].outcome === "reserved" ? admitted[0].request.id : "";
     const usage = { inputTokens: 10, outputTokens: 4, cachedInputTokens: 2, cacheWriteTokens: 0, reasoningTokens: 1 };

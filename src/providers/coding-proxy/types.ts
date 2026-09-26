@@ -27,6 +27,8 @@ export interface ProxySession {
   budgetUsd: number;
   status: ProxySessionStatus;
   registryTokenHash?: string | null;
+  /** When the ledger first refused a request of this session for budget. */
+  budgetExhaustedAt?: Date | null;
 }
 
 export interface ProxyRequest {
@@ -80,6 +82,8 @@ export interface ProxyLedger {
   release(requestId: string, upstreamStatus: number): Promise<void>;
   markUncertain(requestId: string, upstreamStatus?: number): Promise<void>;
   cancelSession(sessionId: string): Promise<void>;
+  /** Whether a request of this session was ever refused for budget. */
+  budgetExhausted(sessionId: string): Promise<boolean>;
   getRequest(requestId: string): Promise<ProxyRequest | null>;
 }
 

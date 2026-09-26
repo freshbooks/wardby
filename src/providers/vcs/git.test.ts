@@ -567,6 +567,21 @@ describe("GitVcsProvider", () => {
         expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
       });
 
+      it("says the run ran out of budget, with the budget sentence, and fails the check run", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "budget_exhausted", {
+          agentName: "builder",
+          budgetSentence: "Out of budget: this run's $3.00 budget was used up.",
+        });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "❌ builder (wardby run run-2) ran out of budget. Out of budget: this run's $3.00 budget was used up.",
+        );
+        expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
+      });
+
       it("is a no-op for a fresh (non-continuation) workspace", async () => {
         const { provider, github, input } = await harness();
         const prepared = await provider.prepareWorkspace(input);

@@ -187,13 +187,13 @@ describe("routeHostEvent", () => {
     expect(result.runIds).toEqual(["run-a2"]);
   });
 
-  it("completes the started check neutral when dispatch fails", async () => {
+  it("completes the started check as a failure when dispatch fails, so a required check blocks the merge", async () => {
     vi.mocked(dispatchRun).mockResolvedValueOnce(null);
     const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }]);
     await routeHostEvent(pr, d);
     expect(d.hosts.github.completeCheck).toHaveBeenCalledWith(
       REPO,
-      expect.objectContaining({ checkId: "11", conclusion: "neutral", title: "Review could not be started" }),
+      expect.objectContaining({ checkId: "11", conclusion: "failure", title: "Review could not be started" }),
     );
   });
 

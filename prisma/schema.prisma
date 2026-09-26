@@ -488,6 +488,9 @@ model CodingProxySession {
   /// Hash of the derived registry-only token (see deriveRegistryToken); the
   /// token itself is never persisted.
   registryTokenHash String?               @unique
+  /// Set the first time the proxy refuses a request of this session for
+  /// budget; lets the executor report the run as out of budget.
+  budgetExhaustedAt DateTime?
 
   @@index([deadlineAt])
 }

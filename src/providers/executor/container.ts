@@ -4,6 +4,7 @@ import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
+import { budgetSentence } from "../../core/budget-wording.js";
 import { logger } from "../../core/logger.js";
 import { requiredLevel, type RepoAccessGate } from "../../core/repo-access.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
@@ -22,7 +23,7 @@ import { getAnthropicPricing } from "../llm/pricing-anthropic.js";
 import { isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import type { ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
-import type { PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
+import type { ContinuationOutcome, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 
@@ -70,6 +71,9 @@ export interface ContainerRunSnapshot {
   /** Revision-in-place: set when this run continues another run's branch/PR. See preflight(). */
   rootCodingRunId: string | null;
   budgetUsd: number;
+  /** The agent's own per-run budget; `budgetUsd` is less when its budget group had less left. */
+  agentBudgetUsd?: number;
+  budgetGroupName?: string | null;
   tokensIn: number;
   tokensOut: number;
   costUsd: number;
@@ -101,7 +105,7 @@ export interface ContainerExecutionStore {
   complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void>;
   terminate(
     runId: string,
-    status: "failed" | "refused" | "lost" | "cancelled",
+    status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     error: string,
     audit?: CodingFailureAudit,
   ): Promise<void>;
@@ -121,7 +125,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
   async load(runId: string): Promise<ContainerRunSnapshot | null> {
     const row = await this.db.run.findUnique({
       where: { id: runId },
-      include: { agent: { include: { codingProfile: true } }, codingRun: { include: { proxySession: true } } },
+      include: {
+        agent: { include: { codingProfile: true, budgetGroup: { select: { name: true } } } },
+        codingRun: { include: { proxySession: true } },
+      },
     });
     if (!row?.codingRun) return null;
     return {
@@ -141,6 +148,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       collectExclude: row.codingRun.collectExclude,
       rootCodingRunId: row.codingRun.rootCodingRunId,
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
+      agentBudgetUsd: Number(row.agent.budgetUsd),
+      budgetGroupName: row.agent.budgetGroup?.name ?? null,
       tokensIn: row.tokensIn,
       tokensOut: row.tokensOut,
       costUsd: Number(row.costUsd),
@@ -290,7 +299,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
 
   async terminate(
     runId: string,
-    status: "failed" | "refused" | "lost" | "cancelled",
+    status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     error: string,
     audit?: CodingFailureAudit,
   ): Promise<void> {
@@ -319,6 +328,8 @@ export interface CodingSessionController {
     budgetUsd: number;
   }): Promise<{ id: string; capability: string }>;
   cancelSession(sessionId: string): Promise<void>;
+  /** Whether the proxy refused a request of this session for budget. */
+  budgetExhausted?(sessionId: string): Promise<boolean>;
 }
 
 /** Plain capabilities live only for the short provisioning window. */
@@ -610,8 +621,13 @@ export class ContainerExecutor implements Executor {
       this.options.capabilities.delete(runId);
       if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
       if (handle) await this.options.jobs.stop(handle, "executor_failure").catch(() => undefined);
-      const status = !spendEnabled && error instanceof PreflightError ? "refused" : "failed";
-      const failure = this.failure(error);
+      const outOfBudget = spendEnabled && (await this.outOfBudget(sessionId));
+      const status = outOfBudget
+        ? "budget_exhausted"
+        : !spendEnabled && error instanceof PreflightError
+          ? "refused"
+          : "failed";
+      const failure = outOfBudget ? this.budgetFailure(error) : this.failure(error);
       this.emit({
         stage: "stopping",
         runId,
@@ -624,7 +640,10 @@ export class ContainerExecutor implements Executor {
       if (handle) await this.options.jobs.remove(handle).catch(() => undefined);
       if (workspace) {
         await this.options.vcs.cleanup(workspace).catch(() => undefined);
-        await this.options.vcs.notifyContinuationFinished?.(workspace, "failed", { agentName: run.agentName });
+        await this.options.vcs.notifyContinuationFinished?.(workspace, outOfBudget ? "budget_exhausted" : "failed", {
+          agentName: run.agentName,
+          ...(outOfBudget ? { budgetSentence: this.budgetSentence(run) } : {}),
+        });
       }
       this.emit({ stage: "cleanup", runId, jobId: handle?.id, cleanupSucceeded: true });
     }
@@ -744,14 +763,23 @@ export class ContainerExecutor implements Executor {
     const sessionId = existingSessionId ?? run.proxySessionId;
     if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
     // For notifyContinuationFinished in the `finally` below -- defaults to
-    // "failed" and is only flipped right before an actual success return.
-    let outcome: "succeeded" | "failed" = "failed";
+    // "failed" and is only flipped right before a success or out-of-budget return.
+    let outcome: ContinuationOutcome = "failed";
     let finishedSummary: string | undefined;
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
         const reason = collected?.diagnostic ?? collected?.reason ?? jobState;
         this.emit({ stage: "collected", runId: run.runId, jobId: handle.id });
+        // The worker usually fails outright when the proxy refuses a model
+        // request for budget; the session records that refusal.
+        if (await this.outOfBudget(sessionId)) {
+          const failure = this.budgetFailure(`job_${reason}`, { issues: collected?.diagnosticIssues });
+          await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
+          this.terminal(run, "budget_exhausted", failure.audit);
+          outcome = "budget_exhausted";
+          return;
+        }
         const status = jobState === "lost" ? "lost" : "failed";
         const failure = this.failure(`job_${reason}`, { issues: collected?.diagnosticIssues });
         await this.options.store.terminate(run.runId, status, failure.error, failure.audit);
@@ -772,6 +800,7 @@ export class ContainerExecutor implements Executor {
           this.resultFor(output, current, "budget_exhausted"),
         );
         this.terminal(current, "budget_exhausted");
+        outcome = "budget_exhausted";
         return;
       }
       if (output.outcome === "no_changes") {
@@ -795,6 +824,7 @@ export class ContainerExecutor implements Executor {
           this.resultFor(output, current, "budget_exhausted"),
         );
         this.terminal(current, "budget_exhausted");
+        outcome = "budget_exhausted";
         return;
       }
       // One more (usually cached) check right before anything is pushed: access
@@ -816,9 +846,16 @@ export class ContainerExecutor implements Executor {
       outcome = "succeeded";
       finishedSummary = output.summary;
     } catch (error) {
-      const failure = this.failure(error);
-      await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
-      this.terminal(run, "failed", failure.audit);
+      if (await this.outOfBudget(sessionId)) {
+        const failure = this.budgetFailure(error);
+        await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
+        this.terminal(run, "budget_exhausted", failure.audit);
+        outcome = "budget_exhausted";
+      } else {
+        const failure = this.failure(error);
+        await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
+        this.terminal(run, "failed", failure.audit);
+      }
     } finally {
       await this.options.jobs.remove(handle).catch(() => undefined);
       const input = this.preflightForCleanup(run);
@@ -829,6 +866,7 @@ export class ContainerExecutor implements Executor {
         await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
           summary: finishedSummary,
           agentName: run.agentName,
+          ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
         });
       }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
@@ -1037,14 +1075,45 @@ export class ContainerExecutor implements Executor {
       // notification actually firing) -- safe to call again because
       // notifyContinuationFinished is find-and-update-or-no-op, never
       // find-or-create.
-      await this.options.vcs.notifyContinuationFinished?.(
-        workspace,
-        run.status === "succeeded" ? "succeeded" : "failed",
-        { agentName: run.agentName },
-      );
+      const outcome: ContinuationOutcome =
+        run.status === "succeeded" ? "succeeded" : run.status === "budget_exhausted" ? "budget_exhausted" : "failed";
+      await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
+        agentName: run.agentName,
+        ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
+      });
     }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
+  }
+
+  /** Whether the proxy refused this run's session for budget. Never throws. */
+  private async outOfBudget(sessionId: string | null | undefined): Promise<boolean> {
+    if (!sessionId || !this.options.sessions.budgetExhausted) return false;
+    return this.options.sessions.budgetExhausted(sessionId).catch(() => false);
+  }
+
+  /** The host-safe sentence for a run that ran out of budget. */
+  private budgetSentence(run: ContainerRunSnapshot): string {
+    return budgetSentence({
+      runBudgetUsd: run.budgetUsd,
+      agentBudgetUsd: run.agentBudgetUsd ?? run.budgetUsd,
+      budgetGroupName: run.budgetGroupName,
+    });
+  }
+
+  /**
+   * A failure the proxy's budget refusal caused. The failure itself is still
+   * logged under its diagnostic id, so the operator keeps the real reason.
+   */
+  private budgetFailure(
+    error: unknown,
+    options: { issues?: string[] } = {},
+  ): { error: string; audit: CodingFailureAudit } {
+    const logged = this.failure(error, options);
+    return {
+      error: "coding_budget_exhausted",
+      audit: { failureCategory: "budget", diagnosticId: logged.audit.diagnosticId },
+    };
   }
 
   private emit(event: Parameters<CodingRunObserver["emit"]>[0]): void {
