@@ -21,6 +21,15 @@ type PrismaProxyLedgerTx = Pick<Prisma.TransactionClient, "$queryRaw" | "$execut
  *  package registry's (coding-proxy/main.ts). */
 export const LEDGER_TRANSACTION_MAX_WAIT_MS = 5_000;
 
+/** How long a ledger transaction may run once started (Prisma's default is
+ *  5 s). Each is a handful of small queries, but a proxy busy with package
+ *  installs (the registry's dependency walk parses large npm documents on the
+ *  same event loop) can stall between them; a live lockfile install expired
+ *  one ("A commit cannot be executed on an expired transaction") and failed
+ *  the model request. The row lock it holds is per session, so a longer
+ *  window only delays that run's own next request. */
+export const LEDGER_TRANSACTION_TIMEOUT_MS = 20_000;
+
 interface SessionRow {
   id: string;
   runId: string;
@@ -115,7 +124,10 @@ export class PrismaProxyLedger implements ProxyLedger {
   constructor(private readonly db: PrismaProxyLedgerDb) {}
 
   private transaction<T>(fn: (tx: PrismaProxyLedgerTx) => Promise<T>): Promise<T> {
-    return this.db.$transaction(fn, { maxWait: LEDGER_TRANSACTION_MAX_WAIT_MS });
+    return this.db.$transaction(fn, {
+      maxWait: LEDGER_TRANSACTION_MAX_WAIT_MS,
+      timeout: LEDGER_TRANSACTION_TIMEOUT_MS,
+    });
   }
 
   async createSession(input: CreateProxySessionInput): Promise<void> {
