@@ -74,10 +74,14 @@ export const DEFAULT_GRAPH_TIMEOUT_MS = 180_000;
  *  expansion may hold a whole parsed npm packument (tens of MB for the
  *  largest), so this bounds the walk's peak memory, not only its upstream
  *  load: 8 at once OOM-killed a 512Mi proxy in a live lockfile install. */
-const GRAPH_WALK_CONCURRENCY = 4;
+const GRAPH_WALK_CONCURRENCY = 2;
 /** Graph-walk expansions in flight at once across every run, so one run's
- *  walk cannot starve the others' upstream fetches. */
-export const DEFAULT_MAX_GRAPH_CONCURRENCY = 6;
+ *  walk cannot starve the others' upstream fetches -- or the proxy's event
+ *  loop: parsing packuments is CPU work on the same loop that carries model
+ *  traffic (per-walk 2 and global 3 since a live install at 4/6 on 500m
+ *  expired a ledger transaction). The walk is only the fallback now; lockfile
+ *  verification answers most installs without it. */
+export const DEFAULT_MAX_GRAPH_CONCURRENCY = 3;
 /** A node whose metadata or audit fails transiently is retried once more
  *  in the same walk, then parked; a later miss retries it again, up to
  *  this many attempts per node per run. */

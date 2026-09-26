@@ -2,9 +2,11 @@
 # lockfile (React 19, Vite 8, Vitest 5, jsdom; ~220 packages) through the
 # registry's on-demand dependency-graph walk, with the packument memory fix and
 # the default 3-day release age: peak 1752 MiB RSS (heap 549 MiB). 3Gi leaves
-# over 50% headroom. Autopilot needs CPU:memory between 1:1 and 1:6.5, so CPU
-# rises to 500m (1:6). Lockfile installs move to lockfile verification in a
-# follow-up, after which this can come down.
+# over 50% headroom. CPU is a full core (1:3, inside Autopilot's 1:1-1:6.5):
+# at 500m, a lockfile install whose too-new pins fell back to the graph walk
+# starved the event loop that also carries model traffic -- TLS handshakes
+# timed out and a ledger transaction expired, failing the run. Lockfile
+# verification now handles most installs without the walk.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,8 +19,8 @@ spec:
         - name: proxy
           resources:
             requests:
-              cpu: 500m
+              cpu: 1000m
               memory: 3Gi
             limits:
-              cpu: 500m
+              cpu: 1000m
               memory: 3Gi
