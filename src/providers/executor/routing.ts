@@ -1,4 +1,5 @@
 import type { CodingImageSelector, Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
+import type { CodingProvider } from "../../coding/provider.js";
 
 export interface ExecutionKindResolver {
   kindForRun(runId: string): Promise<"native" | "coding" | null>;
@@ -62,8 +63,8 @@ export class RoutingExecutor implements Executor {
     return this.coding.readCodingServiceDeclaration(input);
   }
 
-  supportsCodingServices(): boolean {
-    return this.coding.supportsCodingServices?.() === true;
+  supportsCodingServices(provider: CodingProvider): boolean {
+    return this.coding.supportsCodingServices?.(provider) === true;
   }
 }
 

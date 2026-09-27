@@ -54,7 +54,10 @@ export interface Executor {
    * executor without it gives coding runs no services.
    */
   readCodingServiceDeclaration?(input: { repository: string; baseRef: string }): Promise<string | null>;
-  /** Whether this executor's job launcher can start coding-run services (the Kubernetes launcher). */
-  supportsCodingServices?(): boolean;
+  /**
+   * Whether this executor can start coding-run services for a run of `provider`: its job launcher
+   * starts them (Kubernetes, Docker) and the provider's commands can reach them (Codex).
+   */
+  supportsCodingServices?(provider: CodingProvider): boolean;
 }
 import type { CodingProvider } from "../../coding/provider.js";

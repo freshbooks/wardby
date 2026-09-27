@@ -3,6 +3,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
+import type { CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
 import { parseStoredServices, storedServiceNames, workerServices } from "../../coding/services/catalog.js";
 import { MAX_SERVICE_DECLARATION_BYTES, SERVICE_DECLARATION_PATH } from "../../coding/services/declaration.js";
@@ -1011,8 +1012,12 @@ export class ContainerExecutor implements Executor {
     });
   }
 
-  supportsCodingServices(): boolean {
-    return this.options.jobs.supportsServices === true;
+  /**
+   * Services need a launcher that starts them and a Codex run: Claude Code's repository commands
+   * run in a tool container with no network, which could never reach a service.
+   */
+  supportsCodingServices(provider: CodingProvider): boolean {
+    return this.options.jobs.supportsServices === true && provider === "codex";
   }
 
   private async requireCurrent(runId: string): Promise<ContainerRunSnapshot> {
@@ -1031,7 +1036,7 @@ export class ContainerExecutor implements Executor {
     }
     const services = parseStoredServices(run.services);
     // Dispatch refuses services this deployment can't start; this is the backstop.
-    if (services.length > 0 && this.options.jobs.supportsServices !== true) {
+    if (services.length > 0 && !this.supportsCodingServices(provider)) {
       throw new Error("coding_services_unsupported_launcher");
     }
     return {

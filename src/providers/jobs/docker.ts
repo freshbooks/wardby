@@ -576,6 +576,8 @@ function terminalResult(
 }
 
 export class DockerJobLauncher implements WorkspaceJobLauncher {
+  /** Starts JobSpec.services: a network keeper plus one hardened container per service (docker-services.ts). */
+  readonly supportsServices = true;
   private readonly stateRoot: string;
   private readonly workspaceRoot: string;
   private readonly docker: DockerCommandRunner;

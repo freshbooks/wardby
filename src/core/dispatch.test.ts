@@ -1019,6 +1019,20 @@ describe("coding-run services", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it("asks the executor about the agent's own coding provider", async () => {
+    const agent = servicesAgent();
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const supports = vi.fn(() => true);
+    const executor: Executor = {
+      start: vi.fn(async () => {}),
+      async stop() {},
+      readCodingServiceDeclaration: async () => DECLARATION,
+      supportsCodingServices: supports,
+    };
+    await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(supports).toHaveBeenCalledWith("codex");
+  });
+
   it("reads nothing for a native agent", async () => {
     const state = fakeDb(nativeAgent());
     const { executor, reads } = servicesExecutor(DECLARATION);

@@ -91,6 +91,6 @@ export interface JobLauncher {
 /** A launcher that can safely copy a terminal worker workspace back to trusted storage. */
 export interface WorkspaceJobLauncher extends JobLauncher {
   materializeWorkspace: (handle: JobHandle, destination: string) => Promise<void>;
-  /** Whether this launcher starts JobSpec.services (the Kubernetes launcher does; Docker does not). */
+  /** Whether this launcher starts JobSpec.services (the Kubernetes and Docker launchers do). */
   readonly supportsServices?: boolean;
 }

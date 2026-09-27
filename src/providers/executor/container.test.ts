@@ -517,7 +517,7 @@ describe("ContainerExecutor", () => {
       expect(asked).toEqual([
         { repository: "openai/example", ref: "release", path: ".wardby/services.yaml", maxBytes: 8192 },
       ]);
-      expect(created.executor.supportsCodingServices()).toBe(true);
+      expect(created.executor.supportsCodingServices("codex")).toBe(true);
     });
 
     it("reads no declaration when its VCS provider can't read files", async () => {
@@ -525,6 +525,14 @@ describe("ContainerExecutor", () => {
       await expect(
         created.executor.readCodingServiceDeclaration({ repository: "openai/example", baseRef: "main" }),
       ).resolves.toBeNull();
+    });
+
+    it("supports services only for Codex runs on a launcher that starts them", async () => {
+      const created = await harness();
+      expect(created.executor.supportsCodingServices("codex")).toBe(true);
+      expect(created.executor.supportsCodingServices("claude-code")).toBe(false);
+      created.jobs.supportsServices = false;
+      expect(created.executor.supportsCodingServices("codex")).toBe(false);
     });
   });
 

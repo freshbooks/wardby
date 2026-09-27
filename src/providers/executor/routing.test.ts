@@ -128,10 +128,11 @@ describe("RoutingExecutor", () => {
       "services: {}\n",
     );
     expect(coding.readCodingServiceDeclaration).toHaveBeenCalledWith({ repository: "o/r", baseRef: "main" });
-    expect(executor.supportsCodingServices()).toBe(true);
+    expect(executor.supportsCodingServices("codex")).toBe(true);
+    expect(coding.supportsCodingServices).toHaveBeenCalledWith("codex");
 
     const bare = new RoutingExecutor({ kindForRun: async () => "coding" }, native, native);
     await expect(bare.readCodingServiceDeclaration({ repository: "o/r", baseRef: "main" })).resolves.toBeNull();
-    expect(bare.supportsCodingServices()).toBe(false);
+    expect(bare.supportsCodingServices("codex")).toBe(false);
   });
 });

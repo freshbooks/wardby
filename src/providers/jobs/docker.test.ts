@@ -1020,6 +1020,11 @@ function commands(docker: FakeDocker, group: string, action: string): Array<read
 }
 
 describe("Docker launcher with services", () => {
+  it("declares that it starts services", async () => {
+    const { launcher } = await harness("docker-supports-services");
+    expect(launcher.supportsServices).toBe(true);
+  });
+
   it("starts the network keeper, then each service, then the worker in the keeper's namespace", async () => {
     const created = await servicesHarness("docker-services");
     created.docker.present.add(POSTGRES.image);
