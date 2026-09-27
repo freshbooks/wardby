@@ -34,7 +34,8 @@ import {
 } from "../../coding/protocol.js";
 import { getModelPricing } from "../llm/pricing.js";
 import { getAnthropicPricing } from "../llm/pricing-anthropic.js";
-import { isImmutableDockerImage } from "../jobs/docker-isolation.js";
+import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
+import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
 import type { ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { ContinuationOutcome, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
@@ -63,6 +64,19 @@ function proxyProtocol(provider: string): ProxyProtocol {
   if (provider === "codex") return "openai-responses";
   if (provider === "claude-code") return "anthropic-messages";
   throw new Error("coding_provider_unsupported");
+}
+
+/**
+ * Claude Code's commands run in its tool runner, which never reports back through the agent, so the
+ * host rewrites registry-proxy download URLs in collected lockfiles itself (the Codex driver does it
+ * in the worker). Best effort and symlink-safe (lockfiles.ts); a Codex workspace is left alone.
+ */
+export async function normalizeCollectedLockfiles(provider: string, workspacePath: string): Promise<string[]> {
+  if (provider !== "claude-code") return [];
+  return normalizeRegistryLockfiles({
+    workspace: workspacePath,
+    proxyBaseUrl: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+  });
 }
 
 export interface ContainerRunSnapshot {
@@ -850,6 +864,7 @@ export class ContainerExecutor implements Executor {
       const workspace = existingWorkspace ?? (await this.options.vcs.recoverWorkspace(preparedInput));
       if (!workspace) throw new Error("coding_workspace_lost");
       await this.options.jobs.materializeWorkspace(handle, workspace.workspacePath);
+      await normalizeCollectedLockfiles(current.provider, workspace.workspacePath);
       current = await this.requireCurrent(run.runId);
       if (current.costUsd > current.budgetUsd) {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
