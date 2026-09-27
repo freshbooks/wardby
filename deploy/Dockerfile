@@ -5,6 +5,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY prisma ./prisma
 COPY scripts ./scripts
+COPY help ./help
 COPY src ./src
 COPY tsconfig.json tsconfig.build.json prisma.config.ts ./
 # build runs prisma generate (into src/generated/prisma) before tsc, so the

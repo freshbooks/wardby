@@ -11,34 +11,36 @@ function helpUsage(): string {
 Search is offline and fuzzy across titles, tags, headings, summaries, and article text.`;
 }
 
+function print(message: string): void {
+  process.stdout.write(`${message}\n`);
+}
+
 function printPage(page: HelpPage): void {
-  console.log(page.markdown.trim());
+  print(page.markdown.trim());
 }
 
 function printList(catalog: HelpCatalog): void {
-  console.log(`Wardby help (${catalog.pages.length} articles)`);
+  print(`Wardby help (${catalog.pages.length} articles)`);
   for (const page of catalog.pages) {
-    console.log(`\n${page.id}\n  ${page.title} — ${page.summary}`);
+    print(`\n${page.id}\n  ${page.title} — ${page.summary}`);
   }
-  console.log(
-    "\nUse `wardby help search <terms>` to find an article, then `wardby help open <article-id>` to read it.",
-  );
+  print("\nUse `wardby help search <terms>` to find an article, then `wardby help open <article-id>` to read it.");
 }
 
 function printResults(catalog: HelpCatalog, query: string): void {
   const results = searchHelp(catalog, query);
   if (!results.length) {
-    console.log(`No help articles matched "${query}".`);
+    print(`No help articles matched "${query}".`);
     return;
   }
 
-  console.log(`Help results for "${query}":`);
+  print(`Help results for "${query}":`);
   for (const result of results.slice(0, 10)) {
-    console.log(`\n${result.page.title} (${result.page.id})`);
+    print(`\n${result.page.title} (${result.page.id})`);
     if (result.matchedHeading && result.matchedHeading.text !== result.page.title) {
-      console.log(`  Match: ${result.matchedHeading.text}`);
+      print(`  Match: ${result.matchedHeading.text}`);
     }
-    console.log(`  ${result.excerpt}`);
+    print(`  ${result.excerpt}`);
   }
 }
 
