@@ -47,19 +47,21 @@ export function dockerServiceContainerNames(spec: JobSpec): string[] {
     .map((service) => dockerServiceContainerName(spec.runId, service.name));
 }
 
-/** Re-validated here, not trusted from dispatch, as the Kubernetes launcher does. */
+/**
+ * Re-validated here, not trusted from dispatch, as the Kubernetes launcher does. Returns the
+ * schema's parsed output (defaults such as `serviceEnv`/`writablePaths` filled in), never the raw
+ * spec, so a caller never has to guard against a missing default field, and any shape the schema
+ * rejects throws the isolation error rather than surfacing as a TypeError further down.
+ */
 export function validateDockerServices(spec: JobSpec): ResolvedCodingService[] {
   if (spec.services === undefined) return [];
   const names = spec.services.map((service) => service.name);
-  if (
-    spec.provider === "claude-code" ||
-    spec.services.length === 0 ||
-    new Set(names).size !== names.length ||
-    !StoredCodingServicesSchema.safeParse(spec.services).success
-  ) {
+  if (spec.provider === "claude-code" || spec.services.length === 0 || new Set(names).size !== names.length) {
     throw isolationError();
   }
-  return spec.services;
+  const parsed = StoredCodingServicesSchema.safeParse(spec.services);
+  if (!parsed.success) throw isolationError();
+  return parsed.data;
 }
 
 /** Its data path at its disk size, then SERVICE_SCRATCH_MIB for each writable path: the Kubernetes sizes. */
@@ -147,7 +149,8 @@ export function buildDockerServicePlan(spec: JobSpec): DockerServiceContainer[] 
 /**
  * Before a service starts: exactly the controls buildServiceCreateArgs asked for. No mounts at all,
  * so an image VOLUME outside the entry's dataPath/writablePaths (an anonymous, unbounded host
- * volume) fails here rather than run.
+ * volume) fails here rather than run. Re-validates the spec and requires `service` to be one of its
+ * validated entries (by name and version), rather than trusting the caller's pairing of the two.
  */
 export function assertServiceContainerInspection(
   container: DockerContainerInspection,
@@ -155,6 +158,10 @@ export function assertServiceContainerInspection(
   service: ResolvedCodingService,
   networkKeeperId?: string,
 ): void {
+  const validated = validateDockerServices(spec);
+  if (!validated.some((entry) => entry.name === service.name && entry.version === service.version)) {
+    throw isolationError();
+  }
   const names = isolationNames(spec.runId);
   const host = container.HostConfig;
   const security = host?.SecurityOpt ?? [];
@@ -180,23 +187,32 @@ export function assertServiceContainerInspection(
     host.ShmSize !== SERVICE_SHM_MIB * 1024 * 1024 ||
     host.Memory !== memory ||
     host.MemorySwap !== memory ||
+    // cgroup v2 hosts may report this as null after accepting the explicit
+    // no-swappiness request; MemorySwap still attests that swap is disabled.
+    (host.MemorySwappiness !== 0 && host.MemorySwappiness !== null) ||
     host.PidsLimit !== SERVICE_PIDS_LIMIT ||
     host.NanoCpus !== service.resources.cpuMillicores * 1_000_000 ||
     !networkModes.includes(host.NetworkMode ?? "") ||
+    host.PidMode !== "" ||
     host.RestartPolicy?.Name !== "no" ||
     host.LogConfig?.Type !== "local" ||
+    host.LogConfig.Config?.["max-size"] !== "1m" ||
+    host.LogConfig.Config?.["max-file"] !== "2" ||
     !security.includes("no-new-privileges=true") ||
     !security.includes("seccomp=builtin") ||
     (host.Devices?.length ?? 0) !== 0 ||
     (host.DeviceRequests?.length ?? 0) !== 0 ||
     (host.Dns?.length ?? 0) !== 0 ||
+    (host.DnsOptions?.length ?? 0) !== 0 ||
+    (host.DnsSearch?.length ?? 0) !== 0 ||
     (host.ExtraHosts?.length ?? 0) !== 0 ||
     (host.GroupAdd?.length ?? 0) !== 0 ||
     Object.keys(host.PortBindings ?? {}).length !== 0 ||
-    host.PublishAllPorts === true ||
+    host.PublishAllPorts !== false ||
     (host.Mounts?.length ?? 0) !== 0 ||
     (container.Mounts?.length ?? 0) !== 0 ||
     Object.keys(container.NetworkSettings?.Networks ?? {}).length !== 0 ||
+    Object.keys(container.NetworkSettings?.Ports ?? {}).length !== 0 ||
     Object.keys(actualTmpfs).length !== Object.keys(expectedTmpfs).length ||
     Object.entries(expectedTmpfs).some(([path, options]) => actualTmpfs[path] !== options) ||
     env.some((value) => value.startsWith("WARDBY_")) ||

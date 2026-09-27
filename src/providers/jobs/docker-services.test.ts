@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
-import { resolvedFromDefinition } from "../../coding/services/catalog.js";
+import { resolvedFromDefinition, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import { isolationNames, isolationToken, type DockerContainerInspection } from "./docker-isolation.js";
 import {
   assertServiceContainerInspection,
@@ -12,6 +12,7 @@ import {
   SERVICE_PIDS_LIMIT,
   serviceMemoryMib,
   serviceTmpfsOptions,
+  validateDockerServices,
 } from "./docker-services.js";
 import type { JobSpec } from "./types.js";
 
@@ -61,12 +62,15 @@ function validServiceInspection(networkMode = `container:${KEEPER_ID}`): DockerC
       MemorySwappiness: 0,
       PidsLimit: SERVICE_PIDS_LIMIT,
       NanoCpus: 500_000_000,
+      PidMode: "",
       RestartPolicy: { Name: "no" },
       LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
       SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
       Devices: [],
       DeviceRequests: null,
       Dns: [],
+      DnsOptions: [],
+      DnsSearch: [],
       ExtraHosts: null,
       GroupAdd: null,
       PortBindings: {},
@@ -180,6 +184,20 @@ describe("Docker service containers", () => {
     ).toThrow("docker_isolation_unsupported");
   });
 
+  it("fills catalog defaults and never throws a raw TypeError on an invalid spec", () => {
+    const { serviceEnv: _serviceEnv, writablePaths: _writablePaths, ...withoutDefaults } = POSTGRES;
+    const filled = validateDockerServices({
+      ...spec,
+      services: [withoutDefaults as unknown as ResolvedCodingService],
+    });
+    expect(filled).toEqual([{ ...POSTGRES, serviceEnv: {}, writablePaths: [] }]);
+
+    expect(() => validateDockerServices({ ...spec, services: [{ ...POSTGRES, port: 0 }] })).toThrow(
+      "docker_isolation_unsupported",
+    );
+    expect(() => validateDockerServices({ ...spec, services: [{ ...POSTGRES, port: 0 }] })).not.toThrow(TypeError);
+  });
+
   it("attests a service container before it starts", () => {
     expect(() => assertServiceContainerInspection(validServiceInspection(), spec, POSTGRES, KEEPER_ID)).not.toThrow();
     const byName = validServiceInspection(`container:${isolationNames(spec.runId).networkKeeperContainer}`);
@@ -195,6 +213,25 @@ describe("Docker service containers", () => {
       { ...valid, Config: { ...valid.Config, Env: ["PATH=/usr/bin:/bin"] } },
       { ...valid, Config: { ...valid.Config, Env: [...(valid.Config?.Env ?? []), "WARDBY_RUN_CAPABILITY=x"] } },
       { ...valid, Config: { ...valid.Config, User: "0:0" } },
+      { ...valid, Config: { ...valid.Config, Image: "postgres:16" } },
+      { ...valid, Config: { ...valid.Config, Labels: { ...valid.Config?.Labels, "io.wardby.managed": "false" } } },
+      { ...valid, HostConfig: { ...valid.HostConfig, ReadonlyRootfs: false } },
+      { ...valid, HostConfig: { ...valid.HostConfig, CapDrop: [] } },
+      { ...valid, HostConfig: { ...valid.HostConfig, SecurityOpt: ["seccomp=builtin"] } },
+      { ...valid, HostConfig: { ...valid.HostConfig, NanoCpus: 250_000_000 } },
+      { ...valid, HostConfig: { ...valid.HostConfig, PidMode: "host" } },
+      { ...valid, HostConfig: { ...valid.HostConfig, DnsOptions: ["ndots:1"] } },
+      { ...valid, HostConfig: { ...valid.HostConfig, DnsSearch: ["example.com"] } },
+      {
+        ...valid,
+        HostConfig: {
+          ...valid.HostConfig,
+          LogConfig: { Type: "local", Config: { "max-size": "10m", "max-file": "2" } },
+        },
+      },
+      { ...valid, HostConfig: { ...valid.HostConfig, MemorySwappiness: 60 } },
+      { ...valid, HostConfig: { ...valid.HostConfig, PublishAllPorts: undefined } },
+      { ...valid, NetworkSettings: { Networks: {}, Ports: { "5432/tcp": [{}] } } },
     ];
     for (const drift of drifts) {
       expect(() => assertServiceContainerInspection(drift, spec, POSTGRES, KEEPER_ID)).toThrow(
@@ -202,6 +239,9 @@ describe("Docker service containers", () => {
       );
     }
     expect(() => assertServiceContainerInspection(valid, spec, POSTGRES, "0".repeat(64))).toThrow(
+      "docker_isolation_unsupported",
+    );
+    expect(() => assertServiceContainerInspection(valid, spec, REDIS, KEEPER_ID)).toThrow(
       "docker_isolation_unsupported",
     );
   });
