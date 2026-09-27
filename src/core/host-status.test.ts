@@ -206,6 +206,19 @@ describe("outcomeBody", () => {
     );
   });
 
+  it("says a coding sub-run could not open its changes when it touched a protected path, without naming it, and doesn't double-count it", () => {
+    const body = outcomeBody(
+      run("succeeded"),
+      REPO,
+      [],
+      [{ id: "c9", status: "failed", failureCategory: "protected_path" }],
+    );
+    expect(body).toBe(
+      "❌ A sub-run could not open its changes: it changed a file its agent may not edit, so none of its changes were kept.\n\n<sub>wardby run `r1`</sub>",
+    );
+    expect(body).not.toContain("did not succeed");
+  });
+
   it("still reports a sub-run refused for budget by its status", () => {
     const body = outcomeBody(
       run("succeeded"),

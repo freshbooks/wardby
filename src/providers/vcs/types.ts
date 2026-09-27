@@ -119,6 +119,8 @@ export interface VcsProvider {
    * `budget_exhausted` is a failure that ran out of budget;
    * `details.budgetSentence` then says how (see core/budget-wording.ts).
    * A `failed` run the model provider refused carries `details.providerSentence`.
+   * A `failed` run whose changes touched a protected path carries
+   * `details.protectedPathSentence` (see coding/protected-path-wording.ts).
    */
   notifyContinuationFinished?(
     workspace: PreparedWorkspace,
@@ -146,4 +148,6 @@ export interface ContinuationFinishedDetails {
   providerSentence?: string;
   /** Host-safe sentence naming a coding-run service that never became ready (coding/services/wording.ts); used with `failed`. */
   serviceSentence?: string;
+  /** Host-safe sentence naming a protected path the run's changes touched (coding/protected-path-wording.ts); used with `failed`. */
+  protectedPathSentence?: string;
 }
