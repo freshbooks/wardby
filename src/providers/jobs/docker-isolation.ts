@@ -8,6 +8,11 @@ const KEEPER_PIDS_LIMIT = 32;
 export const CODING_PROXY_ALIAS = "wardby-proxy";
 export const CODING_PROXY_PORT = 8787;
 /**
+ * The one variable Claude's tool runner receives: its package-registry and service settings as JSON
+ * (claude-tool-setup.ts). Never the run capability.
+ */
+export const CLAUDE_TOOL_SETUP_ENV = "WARDBY_TOOL_SETUP";
+/**
  * The proxy's deny port. Nothing is served here (see coding-proxy/deny-port.ts);
  * it is the enforcement witness — the one destination a run's NetworkPolicy must
  * refuse while permitting CODING_PROXY_PORT on the same pod.
@@ -398,7 +403,7 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
   ];
 }
 
-function claudeToolLimits(spec: JobSpec): { cpus: number; memoryMb: number; pids: number } {
+export function claudeToolLimits(spec: JobSpec): { cpus: number; memoryMb: number; pids: number } {
   return {
     cpus: 0.25,
     memoryMb: Math.min(512, Math.max(128, Math.floor(spec.limits.memoryMb / 3))),
