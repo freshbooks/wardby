@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { CODING_PROTOCOL_VERSION, parseCodingAgentOutputJson, type CodingAgentOutput } from "../coding/protocol.js";
 import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
 import { registryWorkerSetup } from "../coding/registry/worker-config.js";
+import { describeError } from "./debug-trace.js";
 import { safeWorkerErrorCode } from "./errors.js";
 import type { WorkerEvent, WorkerProgressEvent, WorkerRunOptions } from "./types.js";
 
@@ -135,6 +136,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
   let streamFailure: string | undefined;
   try {
     for await (const event of streamed.events) {
+      options.trace?.record("event", event);
       const safeProgress = progress(options.input, event);
       if (safeProgress) options.onProgress?.(safeProgress);
       if (event.type === "item.completed" && event.item?.type === "agent_message") {
@@ -142,9 +144,11 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
       }
       if (event.type === "turn.failed" || event.type === "error") {
         failure = event.type === "turn.failed" ? event.error?.message : event.message;
+        options.trace?.record(event.type === "turn.failed" ? "turn_failed" : "error_event", { message: failure });
       }
     }
   } catch (error) {
+    options.trace?.record("stream_error", describeError(error));
     streamFailure = streamFailureCode(error);
   }
   if (!finalJson) {

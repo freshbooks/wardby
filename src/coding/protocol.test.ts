@@ -109,6 +109,13 @@ describe("CodingTaskInputSchema", () => {
     expect(() => CodingTaskInputSchema.parse({ ...input, credential: "secret" })).toThrow();
   });
 
+  it("accepts an optional boolean debugTrace, absent meaning off", () => {
+    expect(CodingTaskInputSchema.parse(input)).not.toHaveProperty("debugTrace");
+    expect(CodingTaskInputSchema.parse({ ...input, debugTrace: true })).toMatchObject({ debugTrace: true });
+    expect(CodingTaskInputSchema.parse({ ...input, debugTrace: false })).toMatchObject({ debugTrace: false });
+    expect(() => CodingTaskInputSchema.parse({ ...input, debugTrace: "yes" })).toThrow();
+  });
+
   it("requires a deterministic head ref", () => {
     expect(() => CodingTaskInputSchema.parse({ ...input, headRef: "attacker/branch" })).toThrow(/runId/);
   });

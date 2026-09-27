@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -439,6 +440,25 @@ describe("ContainerExecutor", () => {
     const created = await harness({ workspaceDiskMb: 8192 });
     await created.executor.start("run-1");
     expect(created.jobs.specs[0]?.limits.diskMb).toBe(8192);
+  });
+
+  it("hands the worker debugTrace only for a traced run, leaving other inputs unchanged", async () => {
+    const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return input!;
+    };
+    const tracedInput = await launchedInput({ debugTrace: true });
+    expect(tracedInput).toMatchObject({ runId: "run-1", debugTrace: true });
+    const plainInput = await launchedInput({ debugTrace: false });
+    expect(plainInput).not.toHaveProperty("debugTrace");
+    const { debugTrace: _flag, deadlineAt: _a, ...tracedRest } = tracedInput;
+    const { deadlineAt: _b, ...plainRest } = plainInput;
+    expect(tracedRest).toEqual(plainRest);
   });
 
   it("falls back to the deployment's default disk size", async () => {

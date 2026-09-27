@@ -282,6 +282,38 @@ describe("dispatchRun", () => {
     expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, workspaceDiskMb: 8192 })]);
   });
 
+  it.each([
+    ["an unexpired debug trace", new Date("2026-09-26T12:30:00Z"), true],
+    ["an expired debug trace", new Date("2026-09-26T11:59:59Z"), false],
+    ["no debug trace", null, false],
+  ] as const)("fixes debugTrace on the run at dispatch from %s", async (_label, debugTraceUntil, expected) => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+        debugTraceUntil,
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = { async start() {}, async stop() {} };
+
+    const result = await dispatchRun({
+      db: state.db,
+      executor,
+      agentId: agent.id,
+      now: new Date("2026-09-26T12:00:00Z"),
+    });
+
+    expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, debugTrace: expected })]);
+  });
+
   it("copies the profile's collectExclude onto the run at dispatch", async () => {
     const agent = {
       ...nativeAgent(),

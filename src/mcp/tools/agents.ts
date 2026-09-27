@@ -23,6 +23,7 @@ import {
 import { EVERYONE_KEY, atLeast, canDelegate, deleteGrantsFor, effectiveAccess } from "../../core/grants.js";
 import { projectTool } from "./tools.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
+import { logger } from "../../core/logger.js";
 import { authorizeRepositoryForSet, type RepositoryAuthorization } from "../auth/repo-authorization.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
@@ -36,6 +37,17 @@ import { textResult } from "./text-result.js";
 function requireWorkerImageRefScope(ctx: McpRequestContext): void {
   requireScope(ctx, ctx.canonicalUri, "agents:admin");
 }
+
+// A debug trace makes the worker log prompts and repository content to its
+// pod log, so turning it on (or off) is an admin action, gated like
+// workerImageRef and audited.
+function requireDebugTraceScope(ctx: McpRequestContext): void {
+  requireScope(ctx, ctx.canonicalUri, "agents:admin");
+}
+
+const agentsLog = logger.child({ module: "mcp-agents" });
+
+const MAX_DEBUG_TRACE_MINUTES = 24 * 60;
 
 /** Package allowlists widen what a run may download, so they need their own approval. */
 function requirePackageApproval(ctx: McpRequestContext): void {
@@ -127,7 +139,10 @@ const UpdateAgentSchema = z
     budgetGroupId: agentFields.budgetGroupId.nullable().optional(),
     memoryEnabled: agentFields.memoryEnabled.optional(),
     effort: agentFields.effort.nullable().optional(),
-    codingProfile: CodingProfilePatchSchema.optional(),
+    codingProfile: CodingProfilePatchSchema.extend({
+      /** Not a stored profile field: sets CodingAgentProfile.debugTraceUntil = now + minutes (null clears). */
+      debugTraceMinutes: z.number().int().min(1).max(MAX_DEBUG_TRACE_MINUTES).nullable().optional(),
+    }).optional(),
     repositoryAdminOverride: z.boolean().optional(),
   })
   .strict();
@@ -351,7 +366,19 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           enum: [...LLM_EFFORT_LEVELS, null],
           description: "Reasoning effort for native agents. Null clears it back to the provider default.",
         },
-        codingProfile: profileJsonSchema,
+        codingProfile: {
+          ...profileJsonSchema,
+          properties: {
+            ...profileJsonSchema.properties,
+            debugTraceMinutes: {
+              type: ["integer", "null"],
+              minimum: 1,
+              maximum: MAX_DEBUG_TRACE_MINUTES,
+              description:
+                "Admins only (agents:admin): trace every coding run of this agent for this many minutes from now; the worker writes its full stream trace, which can include prompts and repository content, to the run pod's log. Null turns it off.",
+            },
+          },
+        },
         repositoryAdminOverride: REPOSITORY_ADMIN_OVERRIDE,
       },
       required: ["id"],
@@ -359,6 +386,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     handler: async (rawArgs: unknown, ctx) => {
       const args = parseUpdateAgent(rawArgs);
       if (args.codingProfile?.workerImageRef !== undefined) requireWorkerImageRefScope(ctx);
+      const debugTraceMinutes = args.codingProfile?.debugTraceMinutes;
+      if (debugTraceMinutes !== undefined) requireDebugTraceScope(ctx);
       if (args.codingProfile?.packageAllowlist !== undefined || args.codingProfile?.packagePolicy !== undefined)
         requirePackageApproval(ctx);
 
@@ -437,6 +466,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         throw new McpError(400, "repositoryAdminOverride only applies when the coding repository changes.");
       }
 
+      const debugTraceUntil =
+        debugTraceMinutes === undefined
+          ? undefined
+          : debugTraceMinutes === null
+            ? null
+            : new Date(Date.now() + debugTraceMinutes * 60_000);
+
       const agent = await ctx.db.$transaction(
         async (tx) => {
           const existing = await tx.agent.findUnique({ where: { id: args.id }, include: { codingProfile: true } });
@@ -475,7 +511,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               throw new McpError(400, "Detach all native sandbox tools before changing an agent to coding.");
             }
             const currentProfile = existing.codingProfile ? storedProfile(existing.codingProfile) : undefined;
-            const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...args.codingProfile });
+            const { debugTraceMinutes: _minutes, ...profilePatch } = args.codingProfile ?? {};
+            const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...profilePatch });
             if (!profileResult.success) throw invalidArguments("coding profile", profileResult.error);
             nextProfile = profileResult.data;
             const nextModel = args.model ?? existing.model;
@@ -497,14 +534,15 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
 
           const { id, codingProfile: _profilePatch, repositoryAdminOverride: _override, ...updates } = args;
           const stamp = authorization ? profileStamp(authorization) : {};
+          const trace = debugTraceUntil === undefined ? {} : { debugTraceUntil };
           const profileMutation =
             nextKind === "native"
               ? existing.codingProfile
                 ? { delete: true as const }
                 : undefined
               : existing.codingProfile
-                ? { update: { ...nextProfile!, ...stamp } }
-                : { create: { ...nextProfile!, ...stamp } };
+                ? { update: { ...nextProfile!, ...stamp, ...trace } }
+                : { create: { ...nextProfile!, ...stamp, ...trace } };
           return tx.agent.update({
             where: { id },
             data: {
@@ -516,6 +554,17 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
+      if (debugTraceUntil !== undefined) {
+        agentsLog.info(
+          {
+            event: "coding.debug_trace.set",
+            agentId: agent.id,
+            until: debugTraceUntil?.toISOString() ?? null,
+            by: ctx.principal.id,
+          },
+          "coding debug trace set",
+        );
+      }
       return textResult(agent);
     },
   });

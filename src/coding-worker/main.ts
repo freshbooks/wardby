@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
+import { describeError, workerDebugTracer, type DebugTracer } from "./debug-trace.js";
 import { runCodingWorker } from "./driver.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "./errors.js";
 import { createCodexSdkClient } from "./sdk.js";
@@ -18,21 +19,28 @@ const controller = new AbortController();
 for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => controller.abort());
 
 let stage: "input" | "execution" | "output" = "input";
+// Only for a run the operator asked to trace; see debug-trace.ts. Pod log only.
+let trace: DebugTracer | undefined;
 try {
   const input = await readCodingInput(INPUT_PATH);
   stage = "execution";
+  const proxyBaseUrl = required("WARDBY_PROXY_URL");
+  const capability = required("WARDBY_RUN_CAPABILITY");
+  trace = workerDebugTracer(input, capability, (line) => process.stdout.write(line));
   const output = await runCodingWorker({
     input,
     workspace: WORKSPACE_PATH,
-    proxyBaseUrl: required("WARDBY_PROXY_URL"),
-    capability: required("WARDBY_RUN_CAPABILITY"),
+    proxyBaseUrl,
+    capability,
     signal: controller.signal,
     createClient: createCodexSdkClient,
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
+    trace,
   });
   stage = "output";
   await writeCodingOutputAtomic(OUTPUT_PATH, output);
 } catch (error) {
+  trace?.record("worker_error", { stage, error: describeError(error) });
   const safeCode = safeWorkerErrorCode(error);
   const code = controller.signal.aborted
     ? "worker_cancelled"

@@ -6,6 +6,7 @@ import { deriveRegistryToken } from "../coding/registry/token.js";
 import type { CodingTaskInput } from "../coding/protocol.js";
 import { CODING_OUTPUT_JSON_SCHEMA, runCodingWorker, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
 import type { WorkerClientConfig, WorkerEvent, WorkerThread } from "./types.js";
+import { createDebugTracer } from "./debug-trace.js";
 
 async function tempWorkspace(): Promise<string> {
   return mkdtemp(join(tmpdir(), "wardby-driver-"));
@@ -326,6 +327,88 @@ describe("runCodingWorker", () => {
         ),
       }),
     ).rejects.toThrow("coding_output_invalid");
+  });
+});
+
+describe("runCodingWorker debug trace", () => {
+  const capability = `rrp_${"C".repeat(43)}`;
+  const throwingClient = (message: string) => () => ({
+    startThread: () => ({
+      runStreamed: async () => ({
+        events: (async function* () {
+          yield { type: "turn.started" } as WorkerEvent;
+          yield { type: "error", message: "reconnecting 1/3" } as WorkerEvent;
+          throw new Error(message, { cause: new Error("spawn detail") });
+        })(),
+      }),
+    }),
+  });
+  const traced = () => {
+    const lines: string[] = [];
+    const trace = createDebugTracer({ runId: input.runId, secrets: [capability], write: (line) => lines.push(line) });
+    const records = () =>
+      lines.map((line) => (JSON.parse(line) as { debugTrace: { kind: string; data: unknown } }).debugTrace);
+    return { trace, lines, records };
+  };
+
+  it("records every stream event and the full stream error when traced, with the same fixed code", async () => {
+    const { trace, lines, records } = traced();
+    const failure = runCodingWorker({
+      input,
+      workspace: await tempWorkspace(),
+      proxyBaseUrl: "http://proxy",
+      capability,
+      signal: new AbortController().signal,
+      createClient: throwingClient(`Codex Exec exited with code 1: thread panicked, key ${capability}`),
+      trace,
+    });
+    await expect(failure).rejects.toThrow("coding_stream_agent_exited");
+    const kinds = records().map((record) => record.kind);
+    expect(kinds).toEqual(["event", "event", "error_event", "stream_error"]);
+    expect(records()[2].data).toEqual({ message: "reconnecting 1/3" });
+    const streamError = records()[3].data as { message: string; stack: string; cause: { message: string } };
+    expect(streamError.message).toContain("thread panicked");
+    expect(streamError.stack).toContain("thread panicked");
+    expect(streamError.cause.message).toBe("spawn detail");
+    expect(lines.join("")).not.toContain(capability);
+  });
+
+  it("records a turn.failed event's text when traced", async () => {
+    const { trace, records } = traced();
+    await expect(
+      runCodingWorker({
+        input,
+        workspace: await tempWorkspace(),
+        proxyBaseUrl: "http://proxy",
+        capability,
+        signal: new AbortController().signal,
+        createClient: clientFor([{ type: "turn.failed", error: { message: "model refused: context too long" } }], {}),
+        trace,
+      }),
+    ).rejects.toThrow("coding_turn_failed");
+    expect(records().map((record) => record.kind)).toEqual(["event", "turn_failed"]);
+    expect(records()[1].data).toEqual({ message: "model refused: context too long" });
+  });
+
+  it("writes nothing to stdout or stderr and fails identically when not traced", async () => {
+    const stdout = vi.spyOn(process.stdout, "write");
+    const stderr = vi.spyOn(process.stderr, "write");
+    try {
+      const failure = runCodingWorker({
+        input,
+        workspace: await tempWorkspace(),
+        proxyBaseUrl: "http://proxy",
+        capability,
+        signal: new AbortController().signal,
+        createClient: throwingClient("Codex Exec exited with code 1: private"),
+      });
+      await expect(failure).rejects.toThrow(/^coding_stream_agent_exited$/);
+      expect(stdout).not.toHaveBeenCalled();
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+    }
   });
 });
 

@@ -213,6 +213,9 @@ const testResultSchema = z
   })
   .strict();
 
+/** Longest line a debug-traced worker writes to its log (src/coding-worker/debug-trace.ts). */
+export const MAX_DEBUG_TRACE_LINE_BYTES = 16 * 1024;
+
 export const CodingTaskInputSchema = z
   .object({
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
@@ -233,6 +236,13 @@ export const CodingTaskInputSchema = z
      * only enforces that headRef is internally consistent with it.
      */
     continuationOf: z.object({ runId: runIdSchema }).strict().optional(),
+    /**
+     * Admin-requested debug trace (CodingAgentProfile.debugTraceUntil): the
+     * worker writes its full stream trace to its own log. Absent means off;
+     * the control plane writes the key only when true, so an input for an
+     * untraced run is unchanged for workers that predate it.
+     */
+    debugTrace: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {

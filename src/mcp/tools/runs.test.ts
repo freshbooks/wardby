@@ -34,6 +34,7 @@ interface FakeRunRow {
     queuedAt?: Date | null;
     failureCategory?: string | null;
     diagnosticId?: string | null;
+    debugTrace?: boolean;
   } | null;
   registryFetches?: Array<{
     ecosystem: string;
@@ -248,6 +249,36 @@ describe("run observability tools", () => {
     const result = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
     const body = parseText(result as never) as Record<string, unknown>;
     expect(body).toMatchObject({ status: "failed", failureCategory: "github", diagnosticId: "coding_diag_1234" });
+    await client.close();
+  });
+
+  it("get_run says a coding run was traced only when it was", async () => {
+    const now = new Date();
+    const row = (id: string, debugTrace: boolean) => ({
+      id,
+      agentId: "a1",
+      status: "failed",
+      trigger: "manual" as const,
+      turns: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      finalText: null,
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+      codingRun: { result: null, debugTrace },
+    });
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }], [row("r1", true), row("r2", false)]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const traced = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r1" } })) as never);
+    expect(traced).toMatchObject({ debugTrace: true });
+    const plain = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never);
+    expect(plain).not.toHaveProperty("debugTrace");
     await client.close();
   });
 

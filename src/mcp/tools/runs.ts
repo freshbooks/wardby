@@ -67,7 +67,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       }
       const codingRun = await ctx.db.codingRun.findUnique({
         where: { runId: run.id },
-        select: { result: true, queuedAt: true, failureCategory: true, diagnosticId: true },
+        select: { result: true, queuedAt: true, failureCategory: true, diagnosticId: true, debugTrace: true },
       });
       const codingResult = publicCodingRunResult(codingRun?.result);
       // A pending coding run with queuedAt is waiting for a concurrency slot
@@ -100,6 +100,8 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ...(failureCategory ? { failureCategory } : {}),
         ...(diagnosticId ? { diagnosticId } : {}),
         ...(codingQueuedAt ? { codingQueuedAt } : {}),
+        // An admin turned on the debug trace: the worker's full trace is in its pod log.
+        ...(codingRun?.debugTrace ? { debugTrace: true } : {}),
         ...(codingRun ? { packages, packageRefusals, packagePlan } : {}),
       });
     },

@@ -83,6 +83,8 @@ export interface ContainerRunSnapshot {
   result: unknown;
   workerImage: string | null;
   workspaceDiskMb: number | null;
+  /** Admin-requested debug trace, fixed at dispatch (CodingRun.debugTrace). */
+  debugTrace?: boolean;
   /** The agent's CURRENT coding-profile repository (null if the profile is gone); may differ from `repository`. */
   profileRepository: string | null;
   /** How the profile's repository was authorized (CodingAgentProfile.repositoryAuthorizedVia). */
@@ -162,6 +164,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       result: row.codingRun.result,
       workerImage: row.codingRun.workerImage,
       workspaceDiskMb: row.codingRun.workspaceDiskMb,
+      debugTrace: row.codingRun.debugTrace,
       profileRepository: row.agent.codingProfile?.repository ?? null,
       repositoryAuthorizedVia: row.agent.codingProfile?.repositoryAuthorizedVia ?? null,
     };
@@ -1005,6 +1008,8 @@ export class ContainerExecutor implements Executor {
       budgetUsd: run.budgetUsd,
       deadlineAt: deadlineAt.toISOString(),
       continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
+      // Only when true: an untraced run's input stays exactly what older workers expect.
+      ...(run.debugTrace ? { debugTrace: true } : {}),
     });
     // The run directory is 0700; world-readable mode only crosses Docker's UID boundary.
     await writeFile(temporary, JSON.stringify(input), { flag: "wx", mode: 0o444 });
