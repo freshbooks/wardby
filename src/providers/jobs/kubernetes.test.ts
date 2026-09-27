@@ -185,6 +185,11 @@ describe("KubernetesJobLauncher", () => {
     expect(handle).toEqual({ backend: "kubernetes", id: `wardby-coding/${h.names.token}` });
     expect(await h.api.readNetworkPolicy("wardby-coding", h.names.policy)).toBeDefined();
     expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(true);
+    const secret = h.api.objects.get(`secret/wardby-coding/${h.names.secret}`) as {
+      stringData: Record<string, string>;
+    };
+    // A Codex launch's Secret carries only the capability: no tool-setup key.
+    expect(Object.keys(secret.stringData)).toEqual(["capability"]);
     const commands = h.api.execCalls.map((c) => c.command.join(" "));
     // Three consecutive "blocked" probes before anything is seeded.
     expect(h.api.execCalls.slice(0, 3).every((c) => isEnforcementProbe(c.command))).toBe(true);
@@ -451,6 +456,21 @@ describe("KubernetesJobLauncher planned handles", () => {
     expect(h.launcher.plannedHandle({ ...h.spec, runId: "../escape" })).toBeUndefined();
   });
 
+  it("gives a claude-code spec with a registry-digest tool image the same handle as its codex counterpart", async () => {
+    const h = await harness();
+    const claudeSpec: JobSpec = {
+      ...h.spec,
+      provider: "claude-code",
+      toolImage: `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`,
+    };
+    expect(h.launcher.plannedHandle(claudeSpec)).toEqual(h.launcher.plannedHandle(h.spec));
+  });
+
+  it("has no planned handle for a claude-code spec without a tool image", async () => {
+    const h = await harness();
+    expect(h.launcher.plannedHandle({ ...h.spec, provider: "claude-code" })).toBeUndefined();
+  });
+
   it("cleans the cluster through a handle persisted before launch (crash recovery)", async () => {
     const h = await harness();
     const planned = h.launcher.plannedHandle(h.spec)!;
@@ -462,6 +482,99 @@ describe("KubernetesJobLauncher planned handles", () => {
     expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
     expect(h.api.objects.has(`networkpolicy/wardby-coding/${h.names.policy}`)).toBe(false);
     expect(h.api.objects.has(`secret/wardby-coding/${h.names.secret}`)).toBe(false);
+  });
+});
+
+describe("Claude Code", () => {
+  const TOOL_IMAGE = `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`;
+  const claudeOf = (spec: JobSpec): JobSpec => ({ ...spec, provider: "claude-code", toolImage: TOOL_IMAGE });
+  const toolStatus = (over: Partial<V1ContainerStatus> = {}): V1ContainerStatus => ({
+    name: "tool-runner",
+    ready: true,
+    started: true,
+    image: TOOL_IMAGE,
+    imageID: TOOL_IMAGE,
+    restartCount: 0,
+    state: { running: {} },
+    ...over,
+  });
+  const setToolRunner = (h: Awaited<ReturnType<typeof harness>>, status: V1ContainerStatus) => {
+    const pod = structuredClone(h.api.objects.get(`pod/wardby-coding/${h.names.pod}`)) as V1Pod;
+    pod.status = { ...pod.status, initContainerStatuses: [status] };
+    h.api.put("pod", "wardby-coding", pod);
+  };
+
+  it("launches the pod with the tool runner and puts only the registry-only setup next to the capability", async () => {
+    const h = await harness("run-claude-ok");
+    await h.launcher.launch(claudeOf(h.spec));
+    const pod = h.api.objects.get(`pod/wardby-coding/${h.names.pod}`) as V1Pod;
+    expect(pod.spec!.initContainers!.map((c) => c.name)).toEqual(["storage-init", "tool-runner"]);
+    const secret = h.api.objects.get(`secret/wardby-coding/${h.names.secret}`) as {
+      stringData: Record<string, string>;
+    };
+    expect(Object.keys(secret.stringData).sort()).toEqual(["capability", "tool-setup"]);
+    expect(secret.stringData["tool-setup"]).not.toContain(CAPABILITY);
+    expect(JSON.parse(secret.stringData["tool-setup"]).schemaVersion).toBe(1);
+  });
+
+  it.each([
+    ["it restarted", { restartCount: 1 }],
+    ["it exited", { state: { terminated: { exitCode: 1, reason: "Error" } } }],
+  ])("fails the launch by name when the tool runner %s before the keeper started", async (_label, over) => {
+    const h = await harness("run-claude-bad-start");
+    h.api.createPod = async (ns, body) => {
+      const created = await FakeKubernetesApi.prototype.createPod.call(h.api, ns, body);
+      h.api.put("pod", ns, {
+        ...created,
+        status: { phase: "Pending", initContainerStatuses: [toolStatus(over as Partial<V1ContainerStatus>)] },
+      });
+      return created;
+    };
+    await expect(h.launcher.launch(claudeOf(h.spec))).rejects.toThrow("kubernetes_tool_runner_failed");
+  });
+
+  it("names the tool runner when it never started by the pod-start bound", async () => {
+    const g = await harness("run-claude-slow");
+    let clock = 0;
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: g.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: g.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      now: () => clock,
+      sleep: async (ms) => void (clock += ms),
+      readyTimeoutMs: 1_000,
+    });
+    g.api.createPod = async (ns, body) => {
+      const created = await FakeKubernetesApi.prototype.createPod.call(g.api, ns, body);
+      g.api.put("pod", ns, {
+        ...created,
+        status: { phase: "Pending", initContainerStatuses: [toolStatus({ started: false, ready: false })] },
+      });
+      return created;
+    };
+    await expect(launcher.launch(claudeOf(g.spec))).rejects.toThrow("kubernetes_tool_runner_unready");
+  });
+
+  it("fails a running job with worker_tool_runner_failed when the tool runner crashes mid-run", async () => {
+    const h = await harness("run-claude-crash");
+    const handle = await h.launcher.launch(claudeOf(h.spec));
+    setToolRunner(h, toolStatus({ restartCount: 1 }));
+    expect(await h.launcher.status(handle)).toMatchObject({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "worker_tool_runner_failed",
+    });
+  });
+
+  it("still succeeds when the worker finished cleanly, whatever the tool runner does afterwards", async () => {
+    const h = await harness("run-claude-done");
+    const handle = await h.launcher.launch(claudeOf(h.spec));
+    await h.finish(handle);
+    setToolRunner(h, toolStatus({ state: { terminated: { exitCode: 143, reason: "Error" } } }));
+    expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
   });
 });
 

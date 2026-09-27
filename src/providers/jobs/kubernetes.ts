@@ -28,7 +28,7 @@ import { PassThrough, Writable, type Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
-import type { V1ConfigMap, V1Pod } from "@kubernetes/client-node";
+import type { V1ConfigMap, V1ContainerStatus, V1Pod } from "@kubernetes/client-node";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
 import {
@@ -48,6 +48,7 @@ import {
   KEEPER_SEEDED_MARKER,
   KUBERNETES_ISOLATION_ERROR,
   STORAGE_ROOT,
+  TOOL_RUNNER_CONTAINER,
   WORKER_CONTAINER,
   assertRunNetworkPolicyMatches,
   assertRunPodMatches,
@@ -61,6 +62,7 @@ import {
   serviceContainerName,
   validateKubernetesSpec,
 } from "./kubernetes-isolation.js";
+import { claudeToolSetup } from "./claude-tool-setup.js";
 import { readProxyWitness } from "./kubernetes-witness.js";
 import { safeExtract } from "./safe-extract.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
@@ -368,6 +370,12 @@ function exitedCleanlyInTime(pod: V1Pod, finishedAt: Date | string | undefined, 
   return Number.isFinite(finished) && finished <= deadlineAt + FINISHED_AT_SKEW_MS;
 }
 
+/** A Claude run's tool runner that restarted or exited: its socket (and any in-flight command) is gone. */
+function toolRunnerFailed(statuses: readonly V1ContainerStatus[] | undefined): boolean {
+  const tool = statuses?.find((status) => status.name === TOOL_RUNNER_CONTAINER);
+  return tool !== undefined && ((tool.restartCount ?? 0) > 0 || tool.state?.terminated !== undefined);
+}
+
 /** Maps a pod read-back onto the next record state; `undefined` means "no change". Never called for terminal records. */
 function observePod(
   pod: V1Pod | undefined,
@@ -389,6 +397,16 @@ function observePod(
   }
   if (now >= record.deadlineAt || pod.status?.reason === "DeadlineExceeded") {
     return { phase: "failed", result: { exitCode: 124, reason: "timed_out" }, deleteGraceSeconds: STOP_GRACE_SECONDS };
+  }
+  // Docker's worker_tool_runner_failed, for the same reason: without its tool runner a Claude worker
+  // can only stall until the deadline. Checked only while the worker still runs, so a clean finish
+  // (checked above) or the pod's own teardown never reads as a tool-runner failure.
+  if (!terminated && toolRunnerFailed(pod.status?.initContainerStatuses)) {
+    return {
+      phase: "failed",
+      result: { exitCode: 1, reason: "failed", diagnostic: "worker_tool_runner_failed" },
+      deleteGraceSeconds: STOP_GRACE_SECONDS,
+    };
   }
   if (terminated) {
     // An exit 0 that failed the guard above (pod being deleted, no usable finish time) is not a success.
@@ -749,14 +767,16 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       platform,
     });
     const policy = buildRunNetworkPolicy(spec, this.namespace);
+    const toolSetup = spec.provider === "claude-code" ? claudeToolSetup(spec, capability) : undefined;
     await this.createIfMissing(() =>
-      this.api.createSecret(this.namespace, buildCapabilitySecret(spec, this.namespace, capability)),
+      this.api.createSecret(this.namespace, buildCapabilitySecret(spec, this.namespace, capability, toolSetup)),
     );
     await this.createIfMissing(() => this.api.createNetworkPolicy(this.namespace, policy));
     await this.createIfMissing(() => this.api.createPod(this.namespace, pod));
     await this.waitForKeeper(
       names,
       (spec.services ?? []).map((service) => service.name),
+      spec.provider === "claude-code",
     );
 
     const [actualPod, actualPolicy] = await Promise.all([
@@ -805,7 +825,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
-  private async waitForKeeper(names: RunNames, serviceNames: readonly string[]): Promise<void> {
+  private async waitForKeeper(names: RunNames, serviceNames: readonly string[], toolRunner = false): Promise<void> {
     const started = this.now();
     for (;;) {
       const pod = await this.api.readPod(this.namespace, names.pod);
@@ -825,6 +845,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
         );
       });
       if (failedService !== undefined) throw serviceUnreadyError(failedService);
+      if (toolRunner && toolRunnerFailed(initStatuses)) throw new Error("kubernetes_tool_runner_failed");
       const keeper = statuses.find((status) => status.name === KEEPER_CONTAINER);
       if (
         [...initStatuses, ...statuses].some((status) =>
@@ -838,6 +859,9 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       }
       if (keeper?.ready === true) return;
       if (this.now() - started >= this.readyTimeoutMs) {
+        if (toolRunner && initStatuses.find((status) => status.name === TOOL_RUNNER_CONTAINER)?.started !== true) {
+          throw new Error("kubernetes_tool_runner_unready");
+        }
         // At the bound, a service that never passed its startup probe (still pulling, still starting)
         // is why the keeper never started.
         const waiting = serviceNames.find((name) => sidecar(name)?.started !== true);
