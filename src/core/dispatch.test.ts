@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
 import { MAX_CODING_TASK_BYTES } from "../coding/protocol.js";
+import { BUILTIN_CODING_SERVICES } from "../coding/services/builtins.js";
+import { resolvedFromDefinition } from "../coding/services/catalog.js";
+import {
+  DECLARATION_UNAVAILABLE_SENTENCE,
+  LAUNCHER_UNSUPPORTED_SENTENCE,
+  SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
+} from "../coding/services/wording.js";
 import { dispatchRun, isSerializationConflict, type DispatchDb } from "./dispatch.js";
 
 interface FakeBudget {
@@ -10,7 +17,12 @@ interface FakeBudget {
   groupRuns?: Record<string, any>[];
 }
 
-function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[] = [], budget: FakeBudget = {}) {
+function fakeDb(
+  agent: Record<string, any>,
+  seedCodingRuns: Record<string, any>[] = [],
+  budget: FakeBudget = {},
+  catalog: Record<string, any>[] = [],
+) {
   let transactionActive = false;
   const rawStatements: string[] = [];
   let runNumber = 0;
@@ -58,6 +70,10 @@ function fakeDb(agent: Record<string, any>, seedCodingRuns: Record<string, any>[
       },
     },
     webhook: {},
+    codingService: {
+      findMany: async ({ where }: any) =>
+        catalog.filter((row) => where.OR.some((key: any) => key.name === row.name && key.version === row.version)),
+    },
     budgetGroup: {
       findUnique: async ({ where }: any) => (budget.group && where.id === budget.group.id ? budget.group : null),
     },
@@ -808,5 +824,205 @@ describe("isSerializationConflict", () => {
     ["another error carrying 40001", { name: "Error", cause: { originalCode: "40001" } }],
   ])("does not retry %s", (_label, err) => {
     expect(isSerializationConflict(err)).toBe(false);
+  });
+});
+
+describe("coding-run services", () => {
+  const POSTGRES_16 = BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!;
+  const CATALOG = [{ id: "builtin-postgres-16", builtin: true, createdById: null, ...POSTGRES_16 }];
+  const DECLARATION = 'services:\n  postgres: "16"\n';
+
+  function servicesAgent(services: string[] | null = ["postgres"], systemPrompt = "") {
+    return {
+      ...nativeAgent(),
+      kind: "coding",
+      systemPrompt,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Run the tests",
+        timeoutSec: 900,
+        protectedPaths: ["CODEOWNERS"],
+        services,
+      },
+    };
+  }
+
+  function servicesExecutor(declaration: string | null | Error, supports = true) {
+    const reads: Array<{ repository: string; baseRef: string }> = [];
+    const start = vi.fn(async () => {});
+    const executor: Executor = {
+      start,
+      async stop() {},
+      async readCodingServiceDeclaration(input) {
+        reads.push(input);
+        if (declaration instanceof Error) throw declaration;
+        return declaration;
+      },
+      supportsCodingServices: () => supports,
+    };
+    return { executor, reads, start };
+  }
+
+  it("resolves the base branch's declaration, snapshots the service, and tells the builder about it", async () => {
+    const agent = servicesAgent();
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const { executor, reads, start } = servicesExecutor(DECLARATION);
+
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+
+    expect(reads).toEqual([{ repository: "openai/wardby", baseRef: "main" }]);
+    expect(result?.run.status).toBe("pending");
+    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16)]);
+    expect(state.codingRuns[0].task).toContain("Services for this run:");
+    expect(state.codingRuns[0].task).toContain("- postgres 16: DATABASE_URL=postgres://test:test@127.0.0.1:5432/test");
+    expect(state.codingRuns[0].task).toMatch(/\n\nRequest:\nRun the tests$/);
+    expect(start).toHaveBeenCalledWith(result?.run.id);
+  });
+
+  it("gives a run no services and leaves its task alone when the repository declares none", async () => {
+    const agent = servicesAgent();
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const { executor } = servicesExecutor(null);
+    await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(state.codingRuns[0].services).toEqual([]);
+    expect(state.codingRuns[0].task).toBe("Run the tests");
+  });
+
+  it.each([
+    ["an empty allowed list", []],
+    ["no allowed list", null],
+  ])("never reads the declaration for an agent with %s, and dispatches exactly as before", async (_label, allowed) => {
+    const agent = servicesAgent(allowed);
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const { executor, reads, start } = servicesExecutor(new Error("must not be called"), false);
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(reads).toEqual([]);
+    expect(result?.run.status).toBe("pending");
+    expect(state.codingRuns[0].services).toEqual([]);
+    expect(state.codingRuns[0].task).toBe("Run the tests");
+    expect(start).toHaveBeenCalledWith(result?.run.id);
+  });
+
+  it("reads the declaration from the branch the run works on: an override, or a continuation's root", async () => {
+    const agent = servicesAgent();
+    const overridden = servicesExecutor(null);
+    await dispatchRun({
+      db: fakeDb(agent, [], {}, CATALOG).db,
+      executor: overridden.executor,
+      agentId: agent.id,
+      codingBaseRef: "refs/heads/release",
+    });
+    expect(overridden.reads).toEqual([{ repository: "openai/wardby", baseRef: "release" }]);
+
+    const root = {
+      runId: "root_run",
+      repository: "openai/wardby",
+      baseRef: "develop",
+      headRef: "wardby/run-root_run",
+      rootCodingRunId: null,
+      result: {
+        schemaVersion: 1,
+        outcome: "pull_request_opened",
+        repository: "openai/wardby",
+        baseRef: "develop",
+        headRef: "wardby/run-root_run",
+        commitSha: "a".repeat(40),
+        pullRequestUrl: "https://github.com/openai/wardby/pull/5",
+        pullRequestNumber: 5,
+        summary: "Opened.",
+        tests: [],
+        usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 },
+      },
+    };
+    const continued = servicesExecutor(null);
+    const state = fakeDb(agent, [root], {}, CATALOG);
+    await dispatchRun({
+      db: state.db,
+      executor: continued.executor,
+      agentId: agent.id,
+      continuesCodingRunId: "root_run",
+    });
+    expect(continued.reads).toEqual([{ repository: "openai/wardby", baseRef: "develop" }]);
+    expect(state.codingRuns[1]).toMatchObject({
+      baseRef: "develop",
+      headRef: "wardby/run-root_run",
+      rootCodingRunId: "root_run",
+    });
+  });
+
+  it.each([
+    [
+      "the agent isn't allowed the service",
+      servicesAgent(["redis"]),
+      DECLARATION,
+      "service_not_allowed: This repository asks for `postgres`, which this agent isn't allowed to use. An admin or the agent's owner can allow it.",
+    ],
+    [
+      "the catalog doesn't have the version",
+      servicesAgent(),
+      'services:\n  postgres: "18"\n',
+      "service_unknown: This repository asks for `postgres 18`, which wardby's service catalog doesn't have.",
+    ],
+    [
+      "the declaration is invalid",
+      servicesAgent(),
+      'services:\n  Postgres: "16"\n',
+      "service_declaration_invalid: `.wardby/services.yaml` is invalid: line 2: a service name must be lowercase letters, digits and hyphens, starting with a letter.",
+    ],
+    [
+      "the declaration is too large",
+      servicesAgent(),
+      new Error("github_file_too_large"),
+      "service_declaration_invalid: `.wardby/services.yaml` is invalid: it is larger than 8192 bytes.",
+    ],
+    [
+      "the declaration can't be read",
+      servicesAgent(),
+      new Error("github_api_error:502"),
+      `service_declaration_unavailable: ${DECLARATION_UNAVAILABLE_SENTENCE}`,
+    ],
+    [
+      "the agent's instructions plus the services note leave no room for the task",
+      servicesAgent(["postgres"], "x".repeat(MAX_CODING_TASK_BYTES - 200)),
+      DECLARATION,
+      `service_declaration_invalid: ${SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE}`,
+    ],
+  ])("refuses the run, never starting it, when %s", async (_label, agent, declaration, error) => {
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const { executor, start } = servicesExecutor(declaration);
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(result?.run).toMatchObject({ status: "refused", error });
+    expect(state.codingRuns).toEqual([]);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("still fails over-long instructions with the generic size error when the run has no services", async () => {
+    const agent = servicesAgent(["postgres"], "x".repeat(MAX_CODING_TASK_BYTES - 10));
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const { executor } = servicesExecutor(null);
+    await expect(dispatchRun({ db: state.db, executor, agentId: agent.id })).rejects.toThrow(
+      /exceed the 16384-byte coding task limit/,
+    );
+  });
+
+  it("refuses services on a deployment whose launcher can't start them", async () => {
+    const agent = servicesAgent();
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const { executor, start } = servicesExecutor(DECLARATION, false);
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(result?.run).toMatchObject({
+      status: "refused",
+      error: `service_launcher_unsupported: ${LAUNCHER_UNSUPPORTED_SENTENCE}`,
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("reads nothing for a native agent", async () => {
+    const state = fakeDb(nativeAgent());
+    const { executor, reads } = servicesExecutor(DECLARATION);
+    await dispatchRun({ db: state.db, executor, agentId: "agent_1" });
+    expect(reads).toEqual([]);
   });
 });
