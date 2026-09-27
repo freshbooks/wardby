@@ -26,7 +26,8 @@ the run's capability; npm and pip never receive the run's model-API
 capability. See [Installing packages in coding runs](coding-packages.md).
 Registry mode serves both providers: Claude Code's tool runner gets that
 registry-only token's settings from the trusted launcher, delivered as
-`WARDBY_TOOL_SETUP` — never the run capability.
+`WARDBY_TOOL_SETUP` — never the run capability. Claude Code runs support the
+`node` toolchain (npm) today; pip is available to Codex runs only.
 
 Claude Code uses a credential-separated composite job. Its agent container
 holds the run capability and is attached only to the proxy network; it never
@@ -37,7 +38,16 @@ registry-only settings in `WARDBY_TOOL_SETUP`. The two talk over a private
 Unix socket (`/run/wardby/tool/runner.sock`). The trade is deliberate: the
 tool runner can reach the proxy, but the proxy accepts nothing from it for a
 model call. Both containers, the socket volume, keeper, network, and
-artifacts are attested and cleaned as one persisted handle.
+artifacts are attested and cleaned as one persisted handle. On Docker, the tool
+runner gets a fixed 0.25 CPU, a third of the run's memory (clamped between
+128 and 512 MiB), and 64 PIDs, and the agent gets the rest, so a Claude Code
+run needs `cpus ≥ 0.35`, `memoryMb ≥ 256`, and `pids ≥ 96` (the default
+`CODING_PIDS` is 128).
+
+**Upgrading with Claude Code runs in flight (Docker launcher).** Let in-flight
+Claude Code runs finish, or stop them, before upgrading the control plane. A
+run launched by a different version fails the new version's container
+attestation and is reported lost.
 
 The proxy accepts a run-scoped capability, resolves only exact configured HTTPS
 hostnames, rejects IP literals and every private, loopback, link-local,
@@ -481,14 +491,20 @@ One pod per run, built by the canonical, deny-by-default policy in
   and before the service sidecars, `keeper`, and `worker`. It mounts the
   workspace and the `tool` socket directory, gets its `WARDBY_TOOL_SETUP`
   environment variable from the run Secret's `tool-setup` key (never the run
-  capability), and shares the pod's network namespace, so the run's one
-  egress rule (the proxy) applies to it the same as the worker. Its
+  capability), and shares the pod's network and IPC namespaces with the
+  worker, like every container in a pod: loopback and abstract Unix sockets
+  are common to both, and the worker listens on nothing. The run's one egress
+  rule (the proxy) applies to it the same as the worker. Unlike on Docker
+  (where it runs under `--init`), it has no init process on Kubernetes; it
+  stops when the pod is deleted. Its
   `startupProbe` runs `test -S /run/wardby/tool/runner.sock`, so the keeper
   and worker wait for the socket to exist before they start. Of the pod's
   resources, the tool runner gets a fixed 0.25 CPU and a third of the run's
   memory (clamped between 128 and 512 MiB); the agent (`worker`) gets the
   rest of both. The two also split the worker's 1024 MiB ephemeral-storage
-  reservation: 256 MiB to the tool runner, 768 MiB to the agent.
+  reservation: 256 MiB to the tool runner, 768 MiB to the agent. GKE
+  Autopilot may round each container's requests up to its own minimums, so
+  there the split is approximate.
 - **Service sidecars** (only for a run with services, see
   [coding-services.md](coding-services.md)): one init container per service,
   `service-<name>`, with `restartPolicy: Always` and a `startupProbe` from its
@@ -934,9 +950,10 @@ values. The list is kept only when every entry matches
 | `kubernetes_proxy_witness_unusable: <reason>`                                | The proxy Service is not a usable enforcement witness (missing, no ClusterIP, a required port not exposed as TCP, or no ready endpoint serving both 8787 and 8788). Seen **unwrapped** like this from `provision`'s per-launch re-read, which runs after an earlier witness check already passed -- a supplied `preflight`, or this launcher's own memoized read, the likelier production sighting being a proxy that degrades after that read succeeded; the launcher's own memoized read reports the same condition wrapped as `kubernetes_isolation_unsupported` (with this string on `cause`), and the preflight reports it as `:proxy-service`. Fails closed before the pod is created. |
 | `kubernetes_pod_start_timeout`                                               | The keeper didn't become ready within `readyTimeoutMs` (default 120s). Historically caused by the subPath root-ownership issue the `storage-init` init container now fixes; if seen again, check init-container status first.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `kubernetes_pod_start_failed`                                                | The pod (or its `storage-init` init container) failed outright rather than timing out.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `kubernetes_tool_runner_failed`                                              | (Claude Code only) The tool runner sidecar restarted, exited, or its image could not be pulled before the keeper started.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `kubernetes_tool_runner_failed`                                              | (Claude Code only) The tool runner sidecar restarted, exited, or its image could not be pulled before the keeper started. A malformed `WARDBY_TOOL_SETUP` makes the tool runner exit before it is ready (`tool_setup_invalid` in its log), which surfaces as this code on Kubernetes and as `docker_tool_runner_not_ready` on Docker.                                                                                                                                                                                                                                                                                                                                                        |
 | `kubernetes_tool_runner_unready`                                             | (Claude Code only) The tool runner sidecar never started (its socket startup probe never passed) by the pod-start bound (`readyTimeoutMs`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `worker_tool_runner_failed`                                                  | (Claude Code only; also seen on the Docker launcher) The tool runner died mid-run, after the pod/containers started successfully.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `claude_tool_setup_too_large`                                                | (Claude Code only) The run's tool-runner setup (registry settings plus every service test variable) would exceed the tool runner's bounds (1024 variables, 4096 bytes per value, 96 KiB in total), so the launch fails before the tool runner is created.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `kubernetes_isolation_unsupported:tool-image-not-registry-digest`            | (Claude Code only) `CODING_CLAUDE_TOOL_RUNNER_IMAGE` isn't a registry digest. Checked on every launch, not only preflight.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `kubernetes_isolation_unsupported:claude-limits-too-small`                   | (Claude Code only) The run's `cpus`/`memoryMb` are too small to leave the tool runner its fixed floor: Claude Code needs `cpus ≥ 0.35` and `memoryMb ≥ 256`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `kubernetes_seed_failed`                                                     | Streaming the workspace or input artifact into the keeper failed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |

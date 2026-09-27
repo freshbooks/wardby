@@ -10,13 +10,16 @@ command inside a separate, credential-free tool-runner container that shares
 the run's proxy network with the agent, so it can reach the proxy the same
 way Codex's driver does; it never receives the run's model capability, only
 the registry-only settings the trusted launcher builds for it (delivered as
-`WARDBY_TOOL_SETUP`). See [Claude Code](#claude-code) below.
+`WARDBY_TOOL_SETUP`). Claude Code runs support the `node` toolchain (npm)
+today; `pip` installs need a Codex run on the `node-python` worker. See
+[Claude Code](#claude-code) below.
 
 ## Claude Code
 
-`npm install` and `pip install` run inside Claude Code's tool-runner
-container, the same container that mounts the workspace and runs every other
-shell command — the agent container never runs one. The npm lockfile check
+Claude Code runs support the `node` toolchain today: `npm install` runs
+inside Claude Code's tool-runner container (which has no Python, so `pip` is
+not available there), the same container that mounts the workspace and runs
+every other shell command — the agent container never runs one. The npm lockfile check
 (the shim on `PATH` that plans `npm ci`/`npm install` against the proxy
 before it runs; see "Lockfile installs: verified, then approved exactly"
 below) applies there exactly as it does for Codex. Before a Claude Code run's
