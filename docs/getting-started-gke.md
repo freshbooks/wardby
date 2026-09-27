@@ -530,6 +530,17 @@ it, set `replicas: 0` in
 A PriorityClass's value and preemption policy cannot be changed in place:
 delete the class and re-run `up.sh` to change them.
 
+### Coding-run services
+
+A coding run whose agent allows [services](coding-services.md) waits for each
+service's sidecar to become ready before its pod starts the coding agent, up
+to `KUBERNETES_READY_TIMEOUT_MS` (default 120000, i.e. 120 seconds) on the
+control plane. Pulling a service's image adds to that wait, so the first run
+that schedules onto a fresh node — one that has never pulled the image before
+— can need more of the bound than a run on a node that already has it
+cached. Raise `KUBERNETES_READY_TIMEOUT_MS` if you see runs fail
+`service_unready` only on new nodes.
+
 ### Roll back
 
 Images are pinned by digest, so undoing a rollout restores exactly what ran

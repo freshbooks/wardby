@@ -21,4 +21,7 @@ Wardby refuses the run before a coding worker starts.
 3. Trigger a new run.
 
 Each allowed service reserves CPU, memory and disk for the whole run, so allow
-only what the agent's repositories need. See [Coding services](../coding-services.md).
+only what the agent's repositories need. This error implies the agent already
+allows at least one service — an agent whose `codingProfile.services` is empty
+never reads the declaration at all, so it never reaches this check. See
+[Coding services](../coding-services.md).

@@ -469,7 +469,9 @@ One pod per run, built by the canonical, deny-by-default policy in
 - **Service sidecars** (only for a run with services, see
   [coding-services.md](coding-services.md)): one init container per service,
   `service-<name>`, with `restartPolicy: Always` and a `startupProbe` from its
-  catalog entry, after `storage-init` and before `keeper` and `worker`, so
+  catalog entry — this native-sidecar shape (an init container that keeps
+  running) needs Kubernetes 1.29 or later — after `storage-init` and before
+  `keeper` and `worker`, so
   neither starts until every service is ready. Each runs its catalog image,
   pinned by digest, with the same security context as every other container
   (uid 10001, read-only root filesystem, no privilege escalation, all

@@ -19,6 +19,10 @@ Docker launcher refuses such runs.
 2. remove `.wardby/services.yaml` from the base branch if the repository's
    tests do not need the services on this deployment.
 
-Wardby does not start a run without the services a repository declares. See
-[Coding-worker troubleshooting](../troubleshooting/coding-workers.md) and
-[Coding services](../coding-services.md).
+This error only applies to an agent that already allows at least one service
+(`codingProfile.services` is non-empty): wardby reads a repository's
+declaration only for such an agent, and refuses rather than silently starting
+the run without the services it names. An agent that allows no services never
+reads the declaration at all, so its runs are unaffected and start normally on
+any launcher. See [Coding-worker troubleshooting](../troubleshooting/coding-workers.md)
+and [Coding services](../coding-services.md).

@@ -66,12 +66,7 @@ export default tseslint.config(
     // Deliberate control-character rejection in user-supplied coding-agent
     // input (commit refs, prompts) -- not an accidental escape, the thing
     // this rule exists to catch.
-    files: [
-      "src/coding/profile.ts",
-      "src/coding/protocol.ts",
-      "src/coding/collect-exclude.ts",
-      "src/coding/services/catalog.ts",
-    ],
+    files: ["src/coding/profile.ts", "src/coding/protocol.ts", "src/coding/collect-exclude.ts"],
     rules: { "no-control-regex": "off" },
   },
   {

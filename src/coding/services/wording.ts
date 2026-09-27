@@ -43,7 +43,7 @@ export function notAllowedServiceSentence(name: string): string {
 }
 
 /**
- * A `service_declaration_invalid` refusal for the resolver (Task 4): the
+ * A `service_declaration_invalid` refusal for the resolver: the declared
  * services parsed, but the instruction note they add to the coding task would
  * push it over MAX_CODING_TASK_BYTES.
  */

@@ -14,8 +14,9 @@ length of the run. Three parties agree before a service starts:
 
 - **The repository** declares it in `.wardby/services.yaml` on its base branch,
   for example `services: { postgres: "16" }`. Wardby reads the file from the
-  base branch, never from the run's own branch, so a change takes effect only
-  after it is merged.
+  run's base branch (the agent's `baseRef`, or a `baseRef` given to
+  `trigger_agent` for that run), never from the run's own branch, so a change
+  to the declaration takes effect only once it is merged into that base.
 - **The service catalog** says what each name and version is: a digest-pinned
   image, its readiness check, resources, and the variables the agent's shells
   receive (`testEnv`, such as `DATABASE_URL`). `list_services` and
@@ -26,11 +27,22 @@ length of the run. Three parties agree before a service starts:
 - **The agent's owner** lists the catalog names its runs may use in
   `codingProfile.services`. An empty list, the default, allows none.
 
-Services need the Kubernetes job launcher. Each run gets its own empty
-instance as a native sidecar in the run's pod, reachable on `127.0.0.1`; the
-run's sandbox and NetworkPolicy do not change, and the instance is deleted with
-the pod. Each sidecar's CPU, memory and disk count toward the run's pod, its
+An agent with an empty list never reads the repository's declaration at all —
+wardby only looks at `.wardby/services.yaml` for an agent that allows at least
+one service. Such an agent's runs simply start without services, whatever a
+repository declares, and none of the errors below can apply to them.
+
+Services need the Kubernetes job launcher, and Kubernetes 1.29 or later (each
+service runs as a native sidecar: an init container with `restartPolicy:
+Always`, a feature that needs that version). Each run gets its own empty
+instance as a sidecar in the run's pod, reachable on `127.0.0.1`; the run's
+sandbox and NetworkPolicy do not change, and the instance is deleted with the
+pod. Each sidecar's CPU, memory and disk count toward the run's pod, its
 namespace quota, and what a managed cluster bills for it.
+
+A bring-your-own worker image
+([`docs/coding-worker-byo-images.md`](../docs/coding-worker-byo-images.md))
+needs driver v11 or later to run with services.
 
 Catalog values are visible to anyone with `agents:read`. Use throwaway test
 credentials only; never put a real secret in `serviceEnv` or `testEnv`.

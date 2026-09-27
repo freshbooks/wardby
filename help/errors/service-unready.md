@@ -29,4 +29,9 @@ launcher's pod-start bound runs out.
    mirror the image into a nearby registry.
 4. Trigger a new run once the cause is fixed.
 
+When this run is a sub-run another agent dispatched (for example a router
+handing work to a coding agent), the parent sees a failed sub-run on its own
+status comment, with a line naming the service: "A sub-run could not start:
+The `<name>` service didn't become ready, so the run couldn't start."
+
 See [Coding services](../coding-services.md).

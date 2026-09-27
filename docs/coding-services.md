@@ -7,8 +7,12 @@ the agent's owner says which ones the agent may use. Every run gets its own
 fresh, empty instance, and the run's sandbox and network policy do not change.
 
 Services need the Kubernetes job launcher (`JOB_LAUNCHER=kubernetes`, see
-[coding-worker-isolation.md](coding-worker-isolation.md)). On the Docker
-launcher a run that asks for services is refused.
+[coding-worker-isolation.md](coding-worker-isolation.md)) running Kubernetes
+1.29 or later, which the native sidecars below need. On the Docker
+launcher, a run whose agent allows at least one service is refused if its
+repository declares one — an agent that allows none never reads the
+declaration in the first place (see "Allowing services for an agent" below),
+so its runs are unaffected by this and start normally on either launcher.
 
 ## How it works
 
@@ -18,8 +22,10 @@ launcher a run that asks for services is refused.
    branch through the GitHub App (never from the run's own branch), checks each
    entry against the service catalog and the agent's allowed services, and
    either refuses the run or records the resolved services on it.
-3. The run's pod starts each service as a sidecar before anything else in the
-   run. The coding agent does not start until every service reports ready.
+3. The run's pod starts each service as a native sidecar (an init container
+   with `restartPolicy: Always`, a Kubernetes feature that needs Kubernetes
+   1.29 or later) before anything else in the run. The coding agent does not
+   start until every service reports ready.
 4. The agent's shells receive each service's variables (such as
    `DATABASE_URL`), and its instructions gain a short note listing the services,
    their variables, and that they start empty.
@@ -47,9 +53,12 @@ services:
   environment come from the catalog, never from the repository.
 - No file means no services.
 
-The file is read from the base branch, so a change to it takes effect only
-after it is merged. A coding agent may propose one in a pull request (see
-"Letting a coding agent change the declaration" below).
+The file is read from the run's base branch — the agent's `baseRef`, or a
+`baseRef` given to `trigger_agent` for that run — never from the run's own
+branch. So a builder agent's edit to the declaration in its own pull request
+takes effect once that pull request is merged into the base branch, not
+before. A coding agent may propose a change in a pull request (see "Letting a
+coding agent change the declaration" below).
 
 ### Telling your tests where the services are
 
@@ -159,6 +168,16 @@ catalog has):
 
 sent with `update_agent` (or `create_agent`'s `codingProfile`). A name the
 catalog doesn't have is refused. An empty list, the default, means no services.
+
+An agent with an empty list never reads `.wardby/services.yaml` at all —
+dispatch only looks at the file when the agent allows at least one service.
+So an agent that allows no services just starts its runs without services,
+whatever a repository declares; every refusal in "Errors" below applies only
+to an agent that allows at least one service.
+
+A [bring-your-own worker image](coding-worker-byo-images.md) must be built on
+driver v11 or later to run with services; an agent whose `workerImageRef`
+predates driver v11 rejects the run input once services are on it.
 
 ## Letting a coding agent change the declaration
 
