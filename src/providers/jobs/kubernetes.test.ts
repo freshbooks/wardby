@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { jobLauncherContract } from "./contract-suite.js";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
 import { KubernetesConflictError } from "./kubernetes-api.js";
-import { KubernetesJobLauncher, hostTarArchive } from "./kubernetes.js";
+import { KubernetesJobLauncher, hostTarArchive, type KubernetesJobLauncherOptions } from "./kubernetes.js";
 import { kubernetesRunNames } from "./kubernetes-isolation.js";
 import type { JobHandle, JobSpec } from "./types.js";
 
@@ -228,6 +228,16 @@ describe("KubernetesJobLauncher", () => {
     const g = await harness("run-gvisor", { runtimeClassName: "gvisor" });
     await g.launcher.launch(g.spec);
     expect(g.warnings).toEqual([]);
+  });
+
+  it("warns with the specific validation reason and rethrows unchanged when the spec is rejected", async () => {
+    const h = await harness();
+    await expect(h.launcher.launch({ ...h.spec, toolImage: IMAGE })).rejects.toThrow(
+      "kubernetes_isolation_unsupported:tool-image-set",
+    );
+    expect(h.warnings.some((w) => w.includes("kubernetes_isolation_unsupported:tool-image-set"))).toBe(true);
+    // Nothing beyond the fixed reason tag leaked into the warning: no image reference, no limit value.
+    expect(h.warnings.join("\n")).not.toContain(IMAGE);
   });
 
   it("fails closed and cleans up when attestation finds a mutated pod", async () => {
@@ -914,10 +924,7 @@ describe("KubernetesJobLauncher exit-0 guard", () => {
 });
 
 describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
-  function clockedLauncher(
-    h: Awaited<ReturnType<typeof harness>>,
-    extra: { preflight?: () => Promise<{ proxyIp: string }> } = {},
-  ) {
+  function clockedLauncher(h: Awaited<ReturnType<typeof harness>>, extra: Partial<KubernetesJobLauncherOptions> = {}) {
     let clock = 0;
     const sleeps: number[] = [];
     const launcher = new KubernetesJobLauncher({
@@ -1011,6 +1018,36 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     await h.launcher.launch(h.spec);
     const probe = h.api.execCalls.find((c) => isEnforcementProbe(c.command))!;
     expect(probe.command[2]).toContain("timeout: 3000");
+  });
+
+  it("bounds each probe exec at the default 10 s when no exec timeout is configured", async () => {
+    const h = await harness();
+    await h.launcher.launch(h.spec);
+    const probe = h.api.execCalls.find((c) => isEnforcementProbe(c.command))!;
+    expect(probe.timeoutMs).toBe(10_000);
+  });
+
+  it("bounds each probe exec at a configured enforcementExecTimeoutMs", async () => {
+    const h = await harness();
+    const { launcher } = clockedLauncher(h, { enforcementExecTimeoutMs: 60_000 });
+    await launcher.launch(h.spec);
+    const probes = h.api.execCalls.filter((c) => isEnforcementProbe(c.command));
+    expect(probes.length).toBeGreaterThan(0);
+    expect(probes.every((c) => c.timeoutMs === 60_000)).toBe(true);
+  });
+
+  it("derives an overall enforcement bound long enough for a full streak at a raised exec timeout", async () => {
+    const h = await harness();
+    // clockedLauncher hard-codes enforcementTimeoutMs: 5_000; left un-overridden here to prove the
+    // launcher itself raises the effective floor to enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK
+    // (60_000 * 3 = 180_000) rather than giving up after the ~10 probes a bare 5_000 ms bound would allow.
+    const { launcher } = clockedLauncher(h, { enforcementExecTimeoutMs: 60_000 });
+    const original = h.api.onExec;
+    h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 3 : original(call));
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
+    const probes = h.api.execCalls.filter((c) => isEnforcementProbe(c.command));
+    expect(probes.length).toBeGreaterThan(100);
+    expect(probes.every((c) => c.timeoutMs === 60_000)).toBe(true);
   });
 
   it("execs the probe in the keeper as an argv array with the validated IP literal, never a shell", async () => {
