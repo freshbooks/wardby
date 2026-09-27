@@ -223,12 +223,13 @@ export const CodingTaskOverrideSchema = boundedText(MAX_CODING_TASK_BYTES);
 /**
  * A coding worker receives only its task text, so a coding agent's own
  * instructions (its systemPrompt) travel inside that text, ahead of the
- * request. Blank instructions leave the task unchanged. The combination must
- * still fit MAX_CODING_TASK_BYTES; exceeding it is an error naming both parts
- * rather than a silent truncation of either.
+ * request, followed by any note wardby generates for the run (the services it
+ * started: src/coding/services/note.ts). Blank instructions and no note leave
+ * the task unchanged. The combination must still fit MAX_CODING_TASK_BYTES;
+ * exceeding it is an error naming both parts rather than a silent truncation.
  */
-export function composeCodingTask(instructions: string | null | undefined, task: string): string {
-  const standing = instructions?.trim();
+export function composeCodingTask(instructions: string | null | undefined, task: string, note?: string): string {
+  const standing = [instructions?.trim(), note?.trim()].filter((part): part is string => Boolean(part)).join("\n\n");
   if (!standing) return task;
   const composed = `Standing instructions for this coding agent:\n${standing}\n\nRequest:\n${task}`;
   if (byteLength(composed) > MAX_CODING_TASK_BYTES) {
