@@ -38,9 +38,9 @@ const MAX_RUN_ID_BYTES = 128;
 const MAX_COST_USD = 1_000_000;
 const MAX_JSON_NESTING_DEPTH = 64;
 const INVALID_MULTILINE_CONTROL = /[\u0000\u000B\u000C\u000E-\u001F\u007F]/;
-const INVALID_SINGLE_LINE_CONTROL = /[\u0000-\u001F\u007F]/;
+export const INVALID_SINGLE_LINE_CONTROL = /[\u0000-\u001F\u007F]/;
 
-function byteLength(value: string): number {
+export function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 

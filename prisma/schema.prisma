@@ -392,6 +392,10 @@ model CodingAgentProfile {
   /// Admin-requested debug trace: while now < debugTraceUntil, every coding
   /// run of this agent is dispatched with CodingRun.debugTrace set. Null = off.
   debugTraceUntil          DateTime?
+  /// Coding-run services (docs/coding-services.md): the catalog names
+  /// (CodingService.name) this agent's runs may start, any version the catalog
+  /// has. Empty = none. Owner-set through update_agent.
+  services                 Json      @default("[]")
 
   /// How `repository` was authorized for this agent (see AgentRepository.authorizedVia):
   /// "host_permission", "admin", or "grandfathered". Null = never authorized; runs are refused.
@@ -438,6 +442,10 @@ model CodingRun {
   /// Fixed at dispatch from the profile's debugTraceUntil: the worker writes a
   /// full stream trace to its own pod log (never to the database).
   debugTrace        Boolean             @default(false)
+  /// Coding-run services resolved at dispatch from the base branch's
+  /// .wardby/services.yaml: one snapshot per service (the catalog entry minus
+  /// kind), fixed for the run's lifetime. Empty = none.
+  services          Json                @default("[]")
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?
@@ -461,6 +469,42 @@ model CodingRun {
   @@index([failureCategory])
   @@index([queuedAt])
   @@index([rootCodingRunId])
+}
+
+/// Coding-run services (docs/coding-services.md): the catalog a repository's
+/// .wardby/services.yaml names entries from. Admin-managed over MCP
+/// (list/get_service: agents:read; create/update/delete_service:
+/// services:manage, audit-logged).
+/// Built-in rows ship with wardby, seeded by migration, and change only with a
+/// wardby release. `kind` is "sidecar" (a fresh instance in each run's pod);
+/// "external" is reserved.
+model CodingService {
+  id            String   @id @default(cuid())
+  name          String
+  version       String
+  kind          String   @default("sidecar")
+  /// Digest-pinned image reference (repo@sha256:...).
+  image         String
+  port          Int
+  /// Environment for the service container itself: throwaway per-run values, never secrets.
+  serviceEnv    Json     @default("{}")
+  /// Variables the agent's shells receive (DATABASE_URL, PG*, REDIS_URL, ...).
+  testEnv       Json     @default("{}")
+  /// { command, periodSeconds, timeoutSeconds, failureThreshold }: the sidecar's startup probe.
+  readiness     Json
+  /// { cpuMillicores, memoryMib, diskMib }: requests equal limits.
+  resources     Json
+  /// Where the service writes its data: an emptyDir in the run pod.
+  dataPath      String
+  /// Further directories the image writes to (socket directory, /tmp): each an emptyDir.
+  writablePaths Json     @default("[]")
+  builtin       Boolean  @default(false)
+  /// The admin who created it. Audit only, no FK; null for built-ins.
+  createdById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([name, version])
 }
 
 enum CodingProxySessionStatus {
