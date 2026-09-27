@@ -5,6 +5,8 @@ import { dirname } from "node:path";
 export const MAX_OUTPUT_BYTES = 64 * 1024;
 export const MAX_COMMAND_BYTES = 16 * 1024;
 export const MAX_TIMEOUT_MS = 120_000;
+/** After a timeout's SIGTERM, how long the command's process group has before SIGKILL. */
+export const KILL_GRACE_MS = 2_000;
 /** The launcher's setup for this run (src/providers/jobs/claude-tool-setup.ts). */
 export const TOOL_SETUP_ENV = "WARDBY_TOOL_SETUP";
 /** The npm shim (src/coding-worker/npm-shim.mjs), ahead of the real npm. */
@@ -90,6 +92,8 @@ export async function runCommand(command, timeoutMs, workspacePath = "/workspace
       cwd: workspacePath,
       env: { ...setup.env, ...toolEnvironment() },
       stdio: ["ignore", "pipe", "pipe"],
+      // Its own process group, so a timeout reaches grandchildren that still hold the pipes.
+      detached: true,
     });
     const chunks = [];
     let size = 0;
@@ -104,7 +108,8 @@ export async function runCommand(command, timeoutMs, workspacePath = "/workspace
     child.stderr.on("data", append);
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      signalGroup(child.pid, "SIGTERM");
+      setTimeout(() => signalGroup(child.pid, "SIGKILL"), KILL_GRACE_MS).unref();
     }, timeout);
     child.once("close", (code) => {
       clearTimeout(timer);
@@ -115,4 +120,13 @@ export async function runCommand(command, timeoutMs, workspacePath = "/workspace
       resolve({ code: 1, output: "tool execution failed" });
     });
   });
+}
+
+function signalGroup(pid, signal) {
+  if (pid === undefined) return;
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The group is already gone.
+  }
 }

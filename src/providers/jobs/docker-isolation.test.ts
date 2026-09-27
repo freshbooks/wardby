@@ -71,6 +71,7 @@ describe("Docker isolation policy", () => {
       ...spec,
       provider: "claude-code" as const,
       toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+      limits: { ...spec.limits, pids: 128 },
     };
     const agent = buildClaudeAgentCreateArgs(claude);
     const tools = buildClaudeToolRunnerCreateArgs(claude);
@@ -92,6 +93,22 @@ describe("Docker isolation policy", () => {
     expect(tools.join(" ")).not.toContain("WARDBY_RUN_CAPABILITY");
     expect(tools[tools.indexOf("--network") + 1]).toBe(isolationNames(claude.runId).network);
     expect(tools.filter((_value, index) => tools[index - 1] === "--env")).toEqual(["WARDBY_TOOL_SETUP"]);
+  });
+
+  it("gives Claude's tool runner 64 PIDs and refuses a run that would leave the agent fewer than 32", () => {
+    const claude = {
+      ...spec,
+      provider: "claude-code" as const,
+      toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+      limits: { ...spec.limits, pids: 96 },
+    };
+    const tools = buildClaudeToolRunnerCreateArgs(claude);
+    const agent = buildClaudeAgentCreateArgs(claude);
+    expect(tools[tools.indexOf("--pids-limit") + 1]).toBe("64");
+    expect(agent[agent.indexOf("--pids-limit") + 1]).toBe("32");
+    const tooFew = { ...claude, limits: { ...claude.limits, pids: 95 } };
+    expect(() => buildClaudeToolRunnerCreateArgs(tooFew)).toThrow("docker_isolation_unsupported");
+    expect(() => buildClaudeAgentCreateArgs(tooFew)).toThrow("docker_isolation_unsupported");
   });
 
   it("fails closed when mandatory host features are absent", () => {
@@ -232,6 +249,7 @@ describe("Docker isolation policy", () => {
       ...spec,
       provider: "claude-code",
       toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+      limits: { ...spec.limits, pids: 128 },
     };
     const SETUP = '{"schemaVersion":1,"env":{},"files":[]}';
     const container: DockerContainerInspection = {
@@ -265,7 +283,7 @@ describe("Docker isolation policy", () => {
         MemorySwappiness: null,
         NetworkMode: names.network,
         NanoCpus: 250_000_000,
-        PidsLimit: 16,
+        PidsLimit: 64,
         PidMode: "",
         PortBindings: {},
         Privileged: false,

@@ -83,6 +83,8 @@ describe("Docker cleanup classification", () => {
   });
 });
 
+const claudeLimits = { cpus: 1.5, memoryMb: 1024, pids: 128, diskMb: 512 };
+
 function spec(runId = "docker-run-1"): JobSpec {
   return {
     kind: "coding-agent",
@@ -341,7 +343,7 @@ class FakeDocker implements DockerCommandRunner {
         ? {
             cpus: this.job.limits.cpus - 0.25,
             memoryMb: this.job.limits.memoryMb - toolMemoryMb,
-            pids: this.job.limits.pids - 16,
+            pids: this.job.limits.pids - 64,
           }
         : this.job.limits;
     return {
@@ -430,7 +432,7 @@ class FakeDocker implements DockerCommandRunner {
         Memory: memoryMb * 1024 * 1024,
         MemorySwap: memoryMb * 1024 * 1024,
         MemorySwappiness: 0,
-        PidsLimit: 16,
+        PidsLimit: 64,
         NanoCpus: 250_000_000,
         ShmSize: 16 * 1024 * 1024,
         NetworkMode: this.plan.names.network,
@@ -596,7 +598,7 @@ describe("DockerJobLauncher", () => {
   });
 
   it("treats Claude's agent and its run-network tool runner as one cleanup unit", async () => {
-    const created = await harness("docker-claude", { provider: "claude-code", toolImage });
+    const created = await harness("docker-claude", { provider: "claude-code", toolImage, limits: claudeLimits });
     const handle = await created.launcher.launch(created.spec);
     const createdContainers = created.docker.calls
       .filter((call) => call.args[0] === "container" && call.args[1] === "create")
@@ -623,7 +625,11 @@ describe("DockerJobLauncher", () => {
   });
 
   it("fails the composite job when the Claude tool runner exits", async () => {
-    const created = await harness("docker-claude-tool-failure", { provider: "claude-code", toolImage });
+    const created = await harness("docker-claude-tool-failure", {
+      provider: "claude-code",
+      toolImage,
+      limits: claudeLimits,
+    });
     const handle = await created.launcher.launch(created.spec);
     created.docker.failTool();
     await expect(created.launcher.status(handle)).resolves.toEqual({ state: "failed" });
@@ -631,7 +637,7 @@ describe("DockerJobLauncher", () => {
   });
 
   it("never relaunches an ambiguous provisioning record", async () => {
-    const created = await harness("docker-ambiguous", { provider: "claude-code", toolImage });
+    const created = await harness("docker-ambiguous", { provider: "claude-code", toolImage, limits: claudeLimits });
     const plan = created.docker.plan;
     const specHash = createHash("sha256")
       .update(JSON.stringify({ ...created.spec, labels: { untrusted: "must-not-reach-docker" } }))

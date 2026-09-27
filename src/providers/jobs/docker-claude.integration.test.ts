@@ -106,6 +106,8 @@ function fakeProxyProgram(): string {
   return String.raw`
 const http = require('node:http');
 const text = process.env.FAKE_RESULT;
+// Through the npm shim: two Node processes plus npm must fit in the tool runner's PID limit.
+const TOOL_INPUT = { command: 'printf "%s\\n" "$npm_config_registry"; npm --version', timeout_ms: 30000 };
 let turn = 0;
 function toolSse(id, name, input) { return [
   { type: 'message_start', message: { id: 'msg_wardby_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 12, output_tokens: 0 } } },
@@ -128,7 +130,7 @@ http.createServer(async (request, response) => {
       const structured = turn > 1;
       const id = structured ? 'toolu_structured_docker' : 'toolu_wardby_docker';
       const name = structured ? 'StructuredOutput' : 'mcp__wardby_tools__run_command';
-      const input = structured ? JSON.parse(text) : { command: 'printf "%s" "$npm_config_registry"', timeout_ms: 1000 };
+      const input = structured ? JSON.parse(text) : TOOL_INPUT;
       return response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({
         id: 'msg_wardby_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5',
         content: [{ type: 'tool_use', id, name, input }], stop_reason: 'tool_use', stop_sequence: null,
@@ -136,7 +138,7 @@ http.createServer(async (request, response) => {
       }));
     }
     const payload = turn++ === 0
-      ? toolSse('toolu_wardby_docker', 'mcp__wardby_tools__run_command', { command: 'printf "%s" "$npm_config_registry"', timeout_ms: 1000 })
+      ? toolSse('toolu_wardby_docker', 'mcp__wardby_tools__run_command', TOOL_INPUT)
       : toolSse('toolu_structured_docker', 'StructuredOutput', JSON.parse(text));
     return response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' }).end(payload);
   }
@@ -179,7 +181,7 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
           task: "Return the required structured result without making changes.",
           model: "claude-sonnet-5",
           budgetUsd: 0.25,
-          deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+          deadlineAt: new Date(Date.now() + 90_000).toISOString(),
         }),
       ),
     ]);
@@ -219,8 +221,8 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
       image: agentImage,
       toolImage,
       inputArtifact: input,
-      timeoutSec: 30,
-      limits: { cpus: 1, memoryMb: 512, pids: 64, diskMb: 64 },
+      timeoutSec: 90,
+      limits: { cpus: 1, memoryMb: 512, pids: 128, diskMb: 64 },
       labels: {},
     };
     let handle: JobHandle;
@@ -244,7 +246,7 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
     expect((tool as DockerContainerInspection & { State?: { Running?: boolean } }).State?.Running).toBe(true);
 
     let status = await launcher.status(handle);
-    for (let attempt = 0; attempt < 80 && (status.state === "pending" || status.state === "running"); attempt += 1) {
+    for (let attempt = 0; attempt < 800 && (status.state === "pending" || status.state === "running"); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100));
       status = await launcher.status(handle);
     }
@@ -304,7 +306,10 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
                 Array.isArray(block.content) &&
                 block.content.some(
                   (part: { text?: unknown }) =>
-                    typeof part.text === "string" && part.text.includes("http://wardby-proxy:8787/registry/npm/"),
+                    typeof part.text === "string" &&
+                    part.text.startsWith("exit_code=0\n") &&
+                    part.text.includes("http://wardby-proxy:8787/registry/npm/\n") &&
+                    /^\d+\.\d+\.\d+$/m.test(part.text),
                 ) &&
                 JSON.stringify(block.cache_control) === JSON.stringify({ type: "ephemeral" }),
             ),
@@ -313,5 +318,5 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
     ).toBe(true);
     await launcher.remove(handle);
     await expect(launcher.status(handle)).rejects.toThrow("job_removed");
-  }, 45_000);
+  }, 120_000);
 });

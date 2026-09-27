@@ -195,7 +195,8 @@ function validateSpec(spec: JobSpec): void {
     throw isolationError();
   if (spec.provider === "claude-code") {
     if (!spec.toolImage || !isImmutableDockerImage(spec.toolImage)) throw isolationError();
-    if (spec.limits.cpus < 0.35 || spec.limits.memoryMb < 256 || spec.limits.pids < 32) throw isolationError();
+    if (spec.limits.cpus < 0.35 || spec.limits.memoryMb < 256 || spec.limits.pids < CLAUDE_MIN_PIDS)
+      throw isolationError();
   } else if (spec.toolImage !== undefined) {
     throw isolationError();
   }
@@ -403,11 +404,16 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
   ];
 }
 
+/** The tool runner's shell + npm shim (two Node processes) + npm peak near 30 PIDs; 64 leaves headroom. */
+const CLAUDE_TOOL_PIDS = 64;
+/** A Claude run must leave its agent at least 32 PIDs after the tool runner's share. */
+const CLAUDE_MIN_PIDS = CLAUDE_TOOL_PIDS + 32;
+
 export function claudeToolLimits(spec: JobSpec): { cpus: number; memoryMb: number; pids: number } {
   return {
     cpus: 0.25,
     memoryMb: Math.min(512, Math.max(128, Math.floor(spec.limits.memoryMb / 3))),
-    pids: 16,
+    pids: CLAUDE_TOOL_PIDS,
   };
 }
 
