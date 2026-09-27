@@ -14,10 +14,16 @@ export const SHIM_DIRECTORY = "/opt/wardby/bin";
 
 const RESERVED_NAMES = new Set(["HOME", "LANG", "PATH", "TMPDIR", TOOL_SETUP_ENV]);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
-const MAX_ENV_ENTRIES = 64;
-const MAX_ENV_VALUE_BYTES = 4096;
-const MAX_FILES = 8;
-const MAX_FILE_BYTES = 16 * 1024;
+/**
+ * Setup bounds; claude-tool-setup.ts builds within exactly these. Entries cover the registry's
+ * variables plus every service test variable a run can carry (16 services x 32). The whole setup
+ * travels as one environment variable, which Linux caps at 128 KiB.
+ */
+export const MAX_ENV_ENTRIES = 1024;
+export const MAX_ENV_VALUE_BYTES = 4096;
+export const MAX_FILES = 8;
+export const MAX_FILE_BYTES = 16 * 1024;
+export const MAX_SETUP_BYTES = 96 * 1024;
 const FILE_MODES = new Set([0o600, 0o644]);
 const EMPTY_SETUP = Object.freeze({ env: Object.freeze({}), files: Object.freeze([]) });
 
@@ -38,6 +44,7 @@ export function toolEnvironment() {
 export function parseToolSetup(raw, workspacePath = "/workspace") {
   if (raw === undefined || raw === "") return EMPTY_SETUP;
   const invalid = () => new Error("tool_setup_invalid");
+  if (Buffer.byteLength(raw) > MAX_SETUP_BYTES) throw invalid();
   let value;
   try {
     value = JSON.parse(raw);

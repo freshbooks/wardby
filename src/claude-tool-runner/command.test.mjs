@@ -5,7 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   KILL_GRACE_MS,
+  MAX_ENV_ENTRIES,
+  MAX_FILES,
   MAX_OUTPUT_BYTES,
+  MAX_SETUP_BYTES,
   SHIM_DIRECTORY,
   parseToolSetup,
   runCommand,
@@ -133,4 +136,34 @@ test("a timed-out command that ignores SIGTERM is killed after the grace period"
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test("accepts a setup at the entry and file caps and refuses one past them", () => {
+  const withEnv = (count) =>
+    JSON.stringify({
+      schemaVersion: 1,
+      env: Object.fromEntries(Array.from({ length: count }, (_, index) => [`V${index}`, "x"])),
+      files: [],
+    });
+  assert.equal(Object.keys(parseToolSetup(withEnv(MAX_ENV_ENTRIES)).env).length, MAX_ENV_ENTRIES);
+  assert.throws(() => parseToolSetup(withEnv(MAX_ENV_ENTRIES + 1)), /tool_setup_invalid/);
+
+  const withFiles = (count) =>
+    JSON.stringify({
+      schemaVersion: 1,
+      env: {},
+      files: Array.from({ length: count }, (_, index) => ({
+        path: `/workspace/.cache/f${index}`,
+        content: "x",
+        mode: 0o600,
+      })),
+    });
+  assert.equal(parseToolSetup(withFiles(MAX_FILES)).files.length, MAX_FILES);
+  assert.throws(() => parseToolSetup(withFiles(MAX_FILES + 1)), /tool_setup_invalid/);
+
+  const padded = (bytes) => {
+    const empty = JSON.stringify({ schemaVersion: 1, env: { PAD: "" }, files: [] });
+    return JSON.stringify({ schemaVersion: 1, env: { PAD: "x".repeat(bytes - empty.length) }, files: [] });
+  };
+  assert.throws(() => parseToolSetup(padded(MAX_SETUP_BYTES + 1)), /tool_setup_invalid/);
 });
