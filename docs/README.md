@@ -16,6 +16,9 @@
   extend the reviewed worker image contract.
 - [Installing packages in coding runs](coding-packages.md) covers the coding
   package registry: allowlists, safeguards, limits, and error codes.
+- [Services for coding runs](coding-services.md) gives coding runs fresh
+  PostgreSQL, Redis or MySQL instances declared in `.wardby/services.yaml`:
+  the catalog, per-agent permission, variables, and errors.
 - [Observability](observability.md) covers Prometheus metrics, Grafana, cloud
   collectors, retention, and production ownership.
 - [Release verification](release-verification.md) lists the automated and live

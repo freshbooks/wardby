@@ -290,6 +290,19 @@
         font-size: 12px;
         font-weight: 800;
       }
+      .proof-card.wide {
+        grid-column: 1 / -1;
+      }
+      .proof-card pre {
+        margin: 12px 0 0;
+        padding: 12px 14px;
+        border-radius: 12px;
+        background: var(--ink);
+        color: var(--white);
+        font-size: 12px;
+        line-height: 1.5;
+        overflow-x: auto;
+      }
 
       main {
         padding: 55px 0 78px;
@@ -1985,6 +1998,23 @@
           around them, and it runs in infrastructure you control.
         </p>
         <div class="proof-grid">
+          <article class="proof-card wide">
+            <h3>Real services for real tests</h3>
+            <ul>
+              <li>
+                <b>Declared in the repository:</b> name <code>postgres: "16"</code> in
+                <code>.wardby/services.yaml</code> and every coding run gets its own fresh database.
+              </li>
+              <li><b>Governed:</b> a managed catalog of digest-pinned images, allowed per agent by its owner.</li>
+              <li>
+                <b>Nothing opened up:</b> services run inside the run's pod; its sandbox and network policy stay as they
+                are.
+              </li>
+            </ul>
+            <pre><code>services:
+  postgres: "16"</code></pre>
+            <a href="https://github.com/wardby/wardby/blob/main/docs/coding-services.md">Coding services →</a>
+          </article>
           <article class="proof-card">
             <h3>Security boundaries</h3>
             <ul>

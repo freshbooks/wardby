@@ -30,6 +30,10 @@ sensitive permissions have an additional role requirement:
 Map roles only from an IdP claim that users cannot self-assign. Removing a
 role affects the next token the caller receives.
 
+When you upgrade a delegating-mode deployment, define any newly advertised
+scope, such as `services:manage`, in the provider before deploying. Clients
+that request every advertised scope otherwise fail with `invalid_scope`.
+
 Read [`docs/getting-started-identity-provider.md`](../docs/getting-started-identity-provider.md)
 for the required claims, scope list, role mapping, provider examples, and
 client registration.
