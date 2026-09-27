@@ -35,6 +35,11 @@ async function main(): Promise<void> {
   } else if (command === "down") {
     const { downCommand } = await import("./quickstart/index.js");
     await downCommand(process.argv.slice(3));
+  } else if (command === "help") {
+    // Help is bundled and offline: avoid loading the runtime environment,
+    // database client, or HTTP runtime just to search documentation.
+    const { helpCommand } = await import("./help/cli.js");
+    await helpCommand(process.argv.slice(3));
   } else {
     await import("./cli.js");
   }

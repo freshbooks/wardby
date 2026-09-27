@@ -4,6 +4,9 @@ export const CLI_USAGE = `usage:
   wardby status
   wardby logs [--tail N] [--follow]
   wardby down [--volumes]
+  wardby help [list]
+  wardby help search <terms>
+  wardby help open <article-id>
   wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--max-turns <n>] [--owner <subject>] [--public]
       (owned by --owner or LOCAL_PRINCIPAL; --public shares it with everyone at execute)
   wardby agent list
