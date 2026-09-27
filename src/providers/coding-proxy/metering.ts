@@ -103,13 +103,18 @@ const SAFE_ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
 
 /** The upstream's own error code, never its message: codes are fixed identifiers, messages can echo input. */
 function upstreamErrorCode(record: Record<string, unknown>): string {
+  return safeUpstreamErrorCode(record) ?? "unknown";
+}
+
+/** The safe error code in an upstream error body (a stream event or a rejected response's JSON), if any. */
+export function safeUpstreamErrorCode(record: Record<string, unknown>): string | undefined {
   const nested = (key: string) => {
     const value = record[key];
     return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
   };
   const candidates = [nested("error")?.code, nested("error")?.type, nested("incomplete_details")?.reason, record.code];
   const code = candidates.find((value) => typeof value === "string" && SAFE_ERROR_CODE.test(value));
-  return typeof code === "string" ? code : "unknown";
+  return typeof code === "string" ? code : undefined;
 }
 
 function sseEvent(frame: string): { name?: string; value?: Record<string, unknown> } {

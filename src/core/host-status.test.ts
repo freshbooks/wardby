@@ -148,6 +148,33 @@ describe("outcomeBody", () => {
     expect(mixed).toMatch(/^❌ A sub-run ran out of budget: `c9`\. A sub-run did not succeed: `c10` \(`failed`\)\./);
   });
 
+  it("says a sub-run could not reach the model, naming the class of provider failure but not its code", () => {
+    const quota = outcomeBody(
+      run("succeeded", "done"),
+      REPO,
+      [],
+      [{ id: "c9", status: "failed", failureCategory: "provider_quota" }],
+    );
+    expect(quota).toMatch(
+      /^❌ A sub-run could not reach the model: The model provider refused the request: its account has reached a spending or quota limit\. An operator needs to raise the limit with the provider, then retry\./,
+    );
+    expect(quota).not.toContain("did not succeed");
+    const mixed = outcomeBody(
+      run("succeeded"),
+      REPO,
+      [],
+      [
+        { id: "c9", status: "failed", failureCategory: "provider_rate_limited" },
+        { id: "c10", status: "failed", failureCategory: "provider_rate_limited" },
+        { id: "c11", status: "failed", failureCategory: "job" },
+      ],
+    );
+    expect(mixed).toMatch(
+      /^❌ A sub-run could not reach the model: The model provider is rate-limiting requests\. Try again later\. A sub-run did not succeed: `c11` \(`failed`\)\./,
+    );
+    expect(mixed.match(/rate-limiting/g)).toHaveLength(1);
+  });
+
   it("reports any other unsuccessful run by its status, never its error text", () => {
     for (const status of ["failed", "cancelled"] as const) {
       const body = outcomeBody(run(status, "secret-ish internal detail"), REPO, []);
@@ -250,6 +277,25 @@ describe("completeHostStatus", () => {
     const d = db({ row: row(), children: [child(null, "failed", "c9"), child(null, "running", "c10")] });
     await completeHostStatus(d as never, finished, { github: h });
     expect(h.editComment.mock.calls[0][1].body).toMatch(/^❌ A sub-run did not succeed: `c9` \(`failed`\)\./);
+  });
+
+  it("reads a failed sub-run's failure category to say the model provider refused it", async () => {
+    const h = host();
+    const d = db({
+      row: row(),
+      children: [{ id: "c9", status: "failed", codingRun: { result: null, failureCategory: "provider_unavailable" } }],
+    });
+    await completeHostStatus(d as never, finished, { github: h });
+    expect(d.run.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          codingRun: { select: expect.objectContaining({ result: true, failureCategory: true }) },
+        }),
+      }),
+    );
+    expect(h.editComment.mock.calls[0][1].body).toMatch(
+      /^❌ A sub-run could not reach the model: The model provider reported an outage or overload\. Try again later\./,
+    );
   });
 
   it("reports a run that ran out of budget with its amounts", async () => {

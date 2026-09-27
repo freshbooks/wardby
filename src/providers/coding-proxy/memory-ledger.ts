@@ -14,6 +14,7 @@ function cloneSession(session: ProxySession): ProxySession {
     allowedModels: [...session.allowedModels],
     deadlineAt: new Date(session.deadlineAt),
     budgetExhaustedAt: session.budgetExhaustedAt ? new Date(session.budgetExhaustedAt) : null,
+    upstreamFailure: session.upstreamFailure ?? null,
   };
 }
 
@@ -115,6 +116,15 @@ export class MemoryProxyLedger implements ProxyLedger {
 
   async budgetExhausted(sessionId: string): Promise<boolean> {
     return Boolean(this.sessions.get(sessionId)?.budgetExhaustedAt);
+  }
+
+  async recordUpstreamFailure(sessionId: string, code: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (session) session.upstreamFailure ??= code;
+  }
+
+  async upstreamFailure(sessionId: string): Promise<string | null> {
+    return this.sessions.get(sessionId)?.upstreamFailure ?? null;
   }
 
   async getRequest(requestId: string): Promise<ProxyRequest | null> {

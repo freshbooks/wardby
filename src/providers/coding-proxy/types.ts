@@ -29,6 +29,8 @@ export interface ProxySession {
   registryTokenHash?: string | null;
   /** When the ledger first refused a request of this session for budget. */
   budgetExhaustedAt?: Date | null;
+  /** The code of the first upstream failure the proxy relayed for this session. */
+  upstreamFailure?: string | null;
 }
 
 export interface ProxyRequest {
@@ -84,6 +86,10 @@ export interface ProxyLedger {
   cancelSession(sessionId: string): Promise<void>;
   /** Whether a request of this session was ever refused for budget. */
   budgetExhausted(sessionId: string): Promise<boolean>;
+  /** Records an upstream failure code on the session; only the first one is kept. */
+  recordUpstreamFailure(sessionId: string, code: string): Promise<void>;
+  /** The first upstream failure code relayed for this session, if any. */
+  upstreamFailure(sessionId: string): Promise<string | null>;
   getRequest(requestId: string): Promise<ProxyRequest | null>;
 }
 

@@ -497,6 +497,10 @@ model CodingProxySession {
   /// Set the first time the proxy refuses a request of this session for
   /// budget; lets the executor report the run as out of budget.
   budgetExhaustedAt DateTime?
+  /// The upstream error code (a fixed identifier, never a message) of the
+  /// first provider failure the proxy relayed for this session; lets the
+  /// executor say the model provider refused the run.
+  upstreamFailure   String?
 
   @@index([deadlineAt])
 }

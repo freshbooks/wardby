@@ -64,6 +64,32 @@ failure event is passed on to the worker unchanged), or a code such as
 encoding. To see the error text behind a code, turn on a
 [debug trace](#debug-trace) for the agent.
 
+**Model-provider failures.** The proxy also remembers the first failure the
+model provider reported for a run: the error code of a failed stream, or of a
+rejected request (its HTTP status as `http_<status>` when the response names no
+code). When the run's worker job then fails, the run ends `failed` with the
+error `coding_provider_<class>` and the failure category `provider_<class>`,
+where the class is:
+
+| Category                | Provider codes                                                                                                        | What the host is told                                                                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider_quota`        | codes naming a quota, spend limit, billing, funds or credit (`insufficient_quota`, `project_spend_limit_exceeded`, …) | "The model provider refused the request: its account has reached a spending or quota limit. An operator needs to raise the limit with the provider, then retry." |
+| `provider_rate_limited` | `rate_limit_exceeded` and other rate-limit codes                                                                      | "The model provider is rate-limiting requests. Try again later."                                                                                                 |
+| `provider_unavailable`  | `server_error`, `overloaded`, `overloaded_error`, `service_unavailable`, `api_error`, `http_5xx`                      | "The model provider reported an outage or overload. Try again later."                                                                                            |
+| `provider_rejected`     | anything else                                                                                                         | "The model provider rejected the request."                                                                                                                       |
+
+The host sees that sentence in the continuation status comment
+(`❌ <agent> could not run: …`) and in an @-mention's status comment
+(`❌ A sub-run could not reach the model: …`); it never sees the provider's
+code or message. `provider_quota` means the **provider account** behind the
+coding credential is out of quota or has hit its spend limit — raise the limit
+with the provider. It is not wardby's budget: a run that uses up its own
+wardby budget still ends `budget_exhausted`, and that wins when both happen.
+
+For alerting, the control plane logs one `warn` line per such run with
+`event: "coding.provider_failure"`, the `runId`, the `class`, and the raw
+`upstreamCode`.
+
 The proxy also binds a second listener, the **deny port** (`8788`,
 `CODING_PROXY_DENY_PORT`), which serves nothing: it accepts a connection,
 sends no bytes and closes it immediately
