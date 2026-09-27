@@ -84,6 +84,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       workspaceRoot,
       resolveCapability: (runId) => capabilities.get(runId),
       readyTimeoutMs: kubernetes.readyTimeoutMs,
+      enforcementExecTimeoutMs: kubernetes.enforcementExecTimeoutMs,
       preflight: async () => {
         const { proxyIp } = await runKubernetesPreflight({
           api,

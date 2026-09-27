@@ -120,6 +120,23 @@ describe("validateKubernetesSpec", () => {
     expect(() => validateKubernetesSpec({ ...spec, limits: { ...spec.limits, cpus: 16.1 } })).not.toThrow();
     expect(() => validateKubernetesSpec({ ...spec, limits: { ...spec.limits, cpus: 2.01 } })).not.toThrow();
   });
+
+  // Each rejection tags a short, fixed reason naming which check failed (never a value from the
+  // spec itself), so an operator reading the thrown message — or a `this.warn(...)` of it, see
+  // kubernetes.ts's launch() — gets more than a bare "kubernetes_isolation_unsupported" to go on.
+  it.each([
+    ["run-id", { ...spec, runId: "" }],
+    ["provider", { ...spec, provider: "unknown-provider" as unknown as JobSpec["provider"] }],
+    ["tool-image-set", { ...spec, toolImage: IMAGE }],
+    ["image-not-registry-digest", { ...spec, image: `sha256:${"b".repeat(64)}` }],
+    ["cpus-out-of-range", { ...spec, limits: { ...spec.limits, cpus: 0.0005 } }],
+    ["memory-out-of-range", { ...spec, limits: { ...spec.limits, memoryMb: 1 } }],
+    ["pids-out-of-range", { ...spec, limits: { ...spec.limits, pids: 1 } }],
+    ["disk-out-of-range", { ...spec, limits: { ...spec.limits, diskMb: 1 } }],
+    ["timeout-out-of-range", { ...spec, timeoutSec: 0 }],
+  ] satisfies Array<[string, JobSpec]>)("tags a %s rejection with its reason", (reason, invalid) => {
+    expect(() => validateKubernetesSpec(invalid)).toThrow(`${KUBERNETES_ISOLATION_ERROR}:${reason}`);
+  });
 });
 
 describe("buildRunPod", () => {

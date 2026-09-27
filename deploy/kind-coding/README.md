@@ -48,10 +48,12 @@ start`s it if it exists but is stopped, or leaves it alone if it's
 4. Applies kind's documented `local-registry-hosting` ConfigMap in
    `kube-public` ([KEP-1755](https://kind.sigs.k8s.io/docs/user/local-registry/)),
    so anything in-cluster that looks for it can find the registry.
-5. Builds and pushes the coding-worker image (`src/coding-worker/Dockerfile`)
-   and the runtime image (`deploy/Dockerfile`, `runtime` target) to the
-   registry, then resolves each one's pulled-by-digest reference.
-6. Verifies the worker image has `tar`, `head`, and `test`, which the run pod's
+5. Builds and pushes the coding-worker image (`src/coding-worker/Dockerfile`),
+   the node-python coding-worker image (`src/coding-worker/Dockerfile.node-python`
+   — used by agents whose `codingProfile.toolchain` is `"node-python"`, e.g.
+   version `"3.12"`), and the runtime image (`deploy/Dockerfile`, `runtime`
+   target) to the registry, then resolves each one's pulled-by-digest reference.
+6. Verifies both worker images have `tar`, `head`, and `test`, which the run pod's
    keeper uses to seed and collect the workspace.
 7. Applies the namespace, then creates or updates the proxy's
    `wardby-coding-proxy-env` Secret directly in the cluster from
@@ -84,7 +86,20 @@ so you can switch back:
 JOB_LAUNCHER=kubernetes
 KUBERNETES_CONTEXT=kind-wardby
 CODING_WORKER_IMAGE=localhost:5001/wardby-coding-worker@sha256:...
+CODING_WORKER_IMAGE_NODE_PYTHON_3_12=localhost:5001/wardby-coding-worker-node-python@sha256:...
+KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
 ```
+
+The last one is `kind`-specific, not a copy-paste-everywhere default: a laptop
+`kind` node's default resources (250m CPU / 128Mi memory on the keeper
+container) can make even a healthy NetworkPolicy-enforcement probe exec take
+noticeably longer than the launcher's normal 10 s bound
+(`src/providers/jobs/kubernetes.ts`'s `waitForPolicyEnforcement`), which
+otherwise fails every run with `kubernetes_exec_timeout` even though nothing
+is actually wrong. GKE Autopilot has more headroom and doesn't need it. The
+launcher derives its overall enforcement wall-clock bound from whichever exec
+timeout is configured (`enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK`,
+i.e. 180 s at this value), so raising only this one setting is enough.
 
 Then run:
 
@@ -105,6 +120,63 @@ The proxy's policy deliberately allows ingress on 8788 from coding-run pods, so
 the run pod's own egress policy is the only thing that can block it. The shared
 resources live in `manifests/base/`; `manifests/overlays/kind/` provides the
 local harness and `manifests/overlays/gke-autopilot/` provides the GKE target.
+
+## Run a real coding agent locally
+
+Preflight only proves the platform _can_ run an isolated coding pod; it never
+runs one. To actually see a coding agent do work against this cluster:
+
+1. **Migrations and the Prisma client must be current.** If you pulled new
+   migrations, run `npx prisma migrate deploy` against the local Postgres and
+   `npm run prisma:generate` before anything else — a stale client silently
+   reads/writes the wrong columns instead of failing loudly.
+2. **Set the launcher env** (`.env.local`, or exported in your shell) to
+   what `up.sh` printed:
+   ```dotenv
+   JOB_LAUNCHER=kubernetes
+   KUBERNETES_CONTEXT=kind-wardby
+   CODING_WORKER_IMAGE=localhost:5001/wardby-coding-worker@sha256:...
+   CODING_WORKER_IMAGE_NODE_PYTHON_3_12=localhost:5001/wardby-coding-worker-node-python@sha256:...
+   KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
+   ```
+   `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` is only needed if the agent you
+   trigger uses the `node-python` toolchain; a plain `node` agent only needs
+   `CODING_WORKER_IMAGE`.
+3. **coding agents can't be started with `wardby run`.** The CLI's `run`
+   command refuses `kind: "coding"` agents on purpose — a coding run needs a
+   repository, a base ref, and (for Task overrides) resource-sharing checks
+   that only MCP's `trigger_agent` performs. If `.env.local` sets
+   `MCP_TRANSPORT=http` for the long-running server, that's independent of
+   what you use to trigger a run here: MCP's stdio transport
+   (`loadMcpConfig`'s default) is a separate, short-lived process per
+   invocation, not the same one `wardby serve` runs.
+4. **Trigger it.** A committed helper, `scripts/local-trigger-agent.mjs`,
+   spawns `wardby mcp` over stdio (forcing `MCP_TRANSPORT=stdio` for that
+   child regardless of what `.env.local` says) and drives it with
+   `@modelcontextprotocol/client`'s stdio transport — no separate MCP client
+   needed:
+   ```sh
+   npm run build   # the script runs bin/wardby.js, not source
+   node scripts/local-trigger-agent.mjs --list          # see visible coding agents
+   node scripts/local-trigger-agent.mjs <agentId>        # trigger with its default task
+   node scripts/local-trigger-agent.mjs <agentId> "fix the flaky test in foo.test.ts"
+   ```
+   It calls `list_agents` to resolve/validate the id, `trigger_agent`, then
+   polls `get_run` every 5 s until the run reaches a terminal status
+   (`succeeded`, `failed`, `refused`, `lost`, `budget_exhausted`, or
+   `cancelled`), printing status transitions to stderr and a final
+   status/error/cost/PR-url summary as JSON on stdout. The spawned `wardby
+mcp` process's own stderr is forwarded, so a launcher or config error
+   (e.g. a missing env var) is visible, not swallowed by the transport.
+5. **Watching pods, don't confuse the two pod shapes.** `wardby coding
+preflight` (step 8 above) schedules a **canary** pod — worker container
+   only, no keeper — just to prove the platform and NetworkPolicy. A real
+   triggered run's pod (`wardby-run-<token>`, `kubectl get pods -n
+wardby-coding`) always has **two** containers: `keeper` (seeds the
+   workspace, runs the enforcement probes, collects the result) and `worker`
+   (runs the agent itself, gated until the keeper's seeded marker exists).
+   If you only ever see one container, you're looking at a canary from a
+   `preflight` run, not a triggered agent's run.
 
 ## What the preflight proves — and what to do if it fails
 
