@@ -718,6 +718,50 @@ describe("DockerJobLauncher", () => {
   });
 });
 
+describe("Docker launcher parity for runs without services", () => {
+  // Recorded before services existed on Docker. Never update these snapshots:
+  // a run without services must issue exactly these Docker commands.
+  const stable = (argument: string) =>
+    argument.replace(/^(io\.wardby\.(?:spec-sha256|job-id))=.*$/, "$1=<varies>");
+
+  async function parityLauncher(runId: string) {
+    const created = await harness(runId);
+    const launcher = new DockerJobLauncher({
+      stateRoot: join(created.root, "parity-state"),
+      workspaceRoot: join(created.root, "workspaces"),
+      proxyContainer: "trusted-proxy",
+      resolveCapability: async () => capability,
+      isRunActive: async () => false,
+      docker: created.docker,
+      transfer: new NoopTransfer(),
+      now: () => 1_000,
+    });
+    return { ...created, launcher };
+  }
+
+  it("launches, observes, finishes and removes with the same commands", async () => {
+    const created = await parityLauncher("docker-parity");
+    const handle = await created.launcher.launch(created.spec);
+    await created.launcher.status(handle);
+    created.docker.finish();
+    await created.launcher.status(handle);
+    await created.launcher.remove(handle);
+    expect(
+      created.docker.calls.map((call) => ({ args: call.args.map(stable), options: call.options })),
+    ).toMatchSnapshot();
+  });
+
+  it("stops and removes with the same commands", async () => {
+    const created = await parityLauncher("docker-parity-stop");
+    const handle = await created.launcher.launch(created.spec);
+    await created.launcher.stop(handle);
+    await created.launcher.remove(handle);
+    expect(
+      created.docker.calls.map((call) => ({ args: call.args.map(stable), options: call.options })),
+    ).toMatchSnapshot();
+  });
+});
+
 describe("Docker workspace validation", () => {
   it("rejects nested Git control paths, escaping symlinks, and oversized output", async () => {
     const root = await mkdtemp(join(tmpdir(), "wardby-docker-output-"));

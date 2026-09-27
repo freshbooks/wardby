@@ -298,6 +298,24 @@ describe("Docker isolation policy", () => {
   });
 });
 
+describe("Docker isolation parity for runs without services", () => {
+  const claude: JobSpec = {
+    ...spec,
+    provider: "claude-code",
+    toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+  };
+
+  // Recorded before services existed on Docker. Never update this snapshot:
+  // a run without services must issue exactly these arguments.
+  it.each([
+    ["codex", spec],
+    ["claude-code", claude],
+  ])("keeps every %s argument list unchanged", (_label, job) => {
+    const { names: _names, ...plan } = buildDockerIsolationPlan(job, "trusted-proxy");
+    expect(plan).toMatchSnapshot();
+  });
+});
+
 describe("isImmutableDockerImage", () => {
   const digest = `@sha256:${"c".repeat(64)}`;
 
