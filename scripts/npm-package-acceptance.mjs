@@ -57,6 +57,9 @@ try {
     "bin/wardby.js",
     "dist/wardby-bin.js",
     "dist/cli.js",
+    "dist/help-index.json",
+    "help/getting-started.md",
+    "docs/getting-started-gke.md",
     "prisma/schema.prisma",
     "prisma/migrate.config.mjs",
     "dist/generated/prisma/client.js",
@@ -68,7 +71,10 @@ try {
     if (!paths.has(path)) throw new Error(`packed artifact is missing ${path}`);
   }
 
-  const forbiddenPrefixes = ["docs/", "src/", "node_modules/", ".github/"];
+  // Public documentation and the help corpus are intentionally shipped for
+  // self-hosted operators. Locally maintained private plans are never a
+  // publishable artifact, even if a packlist rule changes in the future.
+  const forbiddenPrefixes = ["docs/private/", "src/", "node_modules/", ".github/"];
   for (const file of paths) {
     if (forbiddenPrefixes.some((prefix) => file.startsWith(prefix))) {
       throw new Error(`packed artifact contains internal path ${file}`);

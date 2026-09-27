@@ -77,6 +77,7 @@ import { everyoneGrantData } from "./core/grants.js";
 import { parseImportArgs } from "./import/cli-args.js";
 import { runImport } from "./import/index.js";
 import { CLI_USAGE } from "./cli-help.js";
+import { helpCommand } from "./help/cli.js";
 
 const cliLog = logger.child({ module: "cli" });
 
@@ -843,6 +844,8 @@ async function main(): Promise<void> {
       await grantsCommand(rest, prisma);
     } else if (command === "auth") {
       await authCommand(rest, prisma, process.env.AUTH_CREDENTIAL_HASH_KEY ?? "");
+    } else if (command === "help") {
+      await helpCommand(rest);
     } else if (command === "agent" && rest[0] === "create") {
       await agentCreate(rest.slice(1));
     } else if (command === "agent" && rest[0] === "list") {

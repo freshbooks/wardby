@@ -48,6 +48,7 @@ import { canonicalUrl } from "./transport/http-limits.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerBudgetGroupTools } from "./tools/budget-groups.js";
 import { registerModelTools } from "./tools/models.js";
+import { registerHelpTools } from "./tools/help.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
 import { registerSchedulingTools } from "./tools/scheduling.js";
@@ -116,6 +117,7 @@ export function registerAllTools(
   registerAgentTools(mcp);
   registerBudgetGroupTools(mcp);
   registerModelTools(mcp);
+  registerHelpTools(mcp);
   registerTriggerTool(mcp);
   registerToolAuthoringTools(mcp);
   registerSchedulingTools(mcp);
