@@ -52,7 +52,8 @@ error text: `job_coding_stream_proxy_denied` (401/403 from the proxy),
 (the worker could not connect), `job_coding_stream_agent_exited` (the agent
 process exited without an HTTP error), or `job_coding_stream_failed` when none
 of these match. A refusal because the run's budget is used up ends the run as
-out of budget instead.
+out of budget instead. To see the error text behind a code, turn on a
+[debug trace](#debug-trace) for the agent.
 
 The proxy also binds a second listener, the **deny port** (`8788`,
 `CODING_PROXY_DENY_PORT`), which serves nothing: it accepts a connection,
@@ -68,6 +69,39 @@ Docker mode a run container can reach it, since a Docker network has no
 port-level policy — that is harmless, because the listener accepts the
 connection, sends nothing and closes it. It is not a leak; it is a fact about
 reachability that the Kubernetes launcher turns into evidence.
+
+## Debug trace
+
+When a fixed code is not enough to tell why a coding agent's runs fail, an
+admin can turn on a **debug trace** for that agent for a limited time:
+
+```
+update_agent { "id": "<agent id>", "codingProfile": { "debugTraceMinutes": 30 } }
+```
+
+`debugTraceMinutes` is 1 to 1440 and needs the `agents:admin` scope (the admin
+role), as `workerImageRef` does; `null` turns the trace off early. Every change
+is written to the control-plane log as a `coding.debug_trace.set` audit line.
+`get_agent` shows the expiry as `codingProfile.debugTraceUntil`. The trace
+expires on its own: each coding run dispatched before the expiry is traced for
+its whole life, and `get_run` shows `debugTrace: true` for it. Runs dispatched
+afterwards are not.
+
+A traced run's Codex worker writes every Codex stream event, and the full text
+of a stream failure (including the agent process's own error output and cause
+chain), to its **own log**, one JSON line each under a `debugTrace` key. On
+Kubernetes that is the run pod's `worker` container log; on GKE, Cloud Logging
+keeps it after the pod is deleted. With the Docker launcher it is the worker
+container's log (`docker logs`), for as long as the container exists. Nothing from the trace goes to the database,
+GitHub, the run's error, or the control-plane log. Token-shaped values (the run
+capability, bearer tokens, API keys, GitHub tokens) are redacted, each line is
+capped at 16 KiB and each run at 2 MiB.
+
+The trace can contain prompts, model output and repository content. Turn it on
+only while diagnosing a failure, for as short a time as you can, and treat the
+pod logs of traced runs as sensitive. Tracing needs a worker driver image that
+supports it; a worker that predates it rejects a traced run's input as
+invalid.
 
 ## Container Policy
 
@@ -683,7 +717,8 @@ will pass against it.
 ### Diagnostics
 
 On a failed run, the launcher reads only the failed worker container's last
-8 log lines (bounded to 4096 bytes) through the Kubernetes API
+8 log lines (bounded to 128 KiB, room for eight full-size
+[debug trace](#debug-trace) lines) through the Kubernetes API
 (`pods/log`), and keeps only a code matching the existing
 `SAFE_WORKER_DIAGNOSTIC` pattern (imported from the Docker launcher) — the
 raw text itself is never stored, logged, or returned

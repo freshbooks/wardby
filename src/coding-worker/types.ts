@@ -1,4 +1,5 @@
 import type { CodingAgentOutput, CodingTaskInput } from "../coding/protocol.js";
+import type { DebugTracer } from "./debug-trace.js";
 
 export type WorkerProgressEvent =
   | { schemaVersion: 1; runId: string; type: "turn_started" }
@@ -48,4 +49,6 @@ export interface WorkerRunOptions {
   signal: AbortSignal;
   createClient: WorkerClientFactory;
   onProgress?: (event: WorkerProgressEvent) => void;
+  /** Set only for a run the operator asked to trace (CodingTaskInput.debugTrace). */
+  trace?: DebugTracer;
 }

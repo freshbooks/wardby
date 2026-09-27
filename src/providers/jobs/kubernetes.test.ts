@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
+import { MAX_DEBUG_TRACE_LINE_BYTES, createDebugTracer } from "../../coding-worker/debug-trace.js";
 import type { V1Pod } from "@kubernetes/client-node";
 import tar from "tar-stream";
 import { collectExclusions, tarExcludeArgs } from "../../coding/collect-exclude.js";
@@ -265,6 +266,25 @@ describe("KubernetesJobLauncher", () => {
       exitCode: 1,
       reason: "failed",
       diagnostic: "worker_execution_failed",
+    });
+  });
+
+  it("still finds the diagnostic after full-size debug-trace lines", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    const lines: string[] = [];
+    const trace = createDebugTracer({ runId: h.spec.runId, secrets: [], write: (line) => lines.push(line) });
+    for (let index = 0; index < 10; index += 1) trace.record("event", { text: "z".repeat(MAX_DEBUG_TRACE_LINE_BYTES) });
+    expect(lines.every((line) => Buffer.byteLength(line) > MAX_DEBUG_TRACE_LINE_BYTES - 64)).toBe(true);
+    h.api.logs.set(
+      `wardby-coding/${h.names.pod}/worker`,
+      `${lines.join("")}${JSON.stringify({ error: "coding_stream_agent_exited" })}\n`,
+    );
+    h.fail(1);
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "coding_stream_agent_exited",
     });
   });
 

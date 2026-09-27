@@ -9,6 +9,28 @@ import { registerAgentTools } from "./agents.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
+/** The control-plane log, captured: the debug-trace audit line is asserted on. */
+const logged = vi.hoisted(() => [] as { level: string; payload: Record<string, unknown>; message: string }[]);
+vi.mock("../../core/logger.js", () => {
+  const make = (): Record<string, unknown> => {
+    const at =
+      (level: string) =>
+      (payload: Record<string, unknown>, message?: string): void => {
+        logged.push({ level, payload, message: message ?? "" });
+      };
+    return {
+      child: () => make(),
+      trace: at("trace"),
+      debug: at("debug"),
+      info: at("info"),
+      warn: at("warn"),
+      error: at("error"),
+      fatal: at("fatal"),
+    };
+  };
+  return { logger: make() };
+});
+
 const CANONICAL_URI = "https://host/mcp";
 /** A gate whose linked identity (for every principal) has `level` on every repository. */
 function gateAt(level: HostPermission | "unlinked") {
@@ -887,6 +909,115 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  describe("debugTraceMinutes", () => {
+    const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+    async function as(scopes: string[], roles: string[]) {
+      const db = fakeDb([codingAgentSeed()]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", scopes, roles));
+      registerAgentTools(mcp);
+      return { db, client: await connectClient(mcp) };
+    }
+    const setTrace = (debugTraceMinutes: unknown) => ({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { debugTraceMinutes } },
+    });
+
+    it.each([30, null])("setting it to %j needs agents:admin, not just agents:write", async (minutes) => {
+      const { client } = await as(["agents:write"], ["admin"]);
+      const result = await client.callTool(setTrace(minutes));
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/Insufficient scope/);
+      await client.close();
+    });
+
+    it("an admin sets an expiry minutes from now, keeps the rest of the profile, and it is audited", async () => {
+      logged.length = 0;
+      const { db, client } = await as(["agents:read", "agents:write", "agents:admin"], ["admin"]);
+      const before = Date.now();
+      const result = await client.callTool(setTrace(30));
+      expect(result.isError).toBeFalsy();
+      const body = JSON.parse(text(result)) as { codingProfile: { debugTraceUntil: string; repository: string } };
+      const until = Date.parse(body.codingProfile.debugTraceUntil);
+      expect(until).toBeGreaterThanOrEqual(before + 30 * 60_000);
+      expect(until).toBeLessThanOrEqual(Date.now() + 30 * 60_000);
+      expect(body.codingProfile.repository).toBe("openai/example");
+
+      const shown = await client.callTool({ name: "get_agent", arguments: { id: "a1" } });
+      expect(JSON.parse(text(shown))).toMatchObject({
+        codingProfile: { debugTraceUntil: body.codingProfile.debugTraceUntil },
+      });
+      const stored = (await db.agent.findUnique({ where: { id: "a1" } })) as unknown as {
+        codingProfile: { debugTraceUntil: Date };
+      };
+      expect(stored.codingProfile.debugTraceUntil.getTime()).toBe(until);
+
+      expect(logged.filter((entry) => entry.payload.event === "coding.debug_trace.set")).toEqual([
+        {
+          level: "info",
+          payload: {
+            event: "coding.debug_trace.set",
+            agentId: "a1",
+            until: body.codingProfile.debugTraceUntil,
+            by: "p1",
+          },
+          message: expect.any(String),
+        },
+      ]);
+      await client.close();
+    });
+
+    it("null clears it, audited with a null expiry", async () => {
+      logged.length = 0;
+      const { client } = await as(["agents:write", "agents:admin"], ["admin"]);
+      await client.callTool(setTrace(30));
+      const result = await client.callTool(setTrace(null));
+      expect(result.isError).toBeFalsy();
+      expect(JSON.parse(text(result))).toMatchObject({ codingProfile: { debugTraceUntil: null } });
+      expect(logged.at(-1)?.payload).toEqual({ event: "coding.debug_trace.set", agentId: "a1", until: null, by: "p1" });
+      await client.close();
+    });
+
+    it("leaves the expiry alone when not given", async () => {
+      const { client } = await as(["agents:write", "agents:admin"], ["admin"]);
+      const set = JSON.parse(text(await client.callTool(setTrace(30)))) as {
+        codingProfile: { debugTraceUntil: string };
+      };
+      const result = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { baseRef: "dev" } },
+      });
+      expect(JSON.parse(text(result))).toMatchObject({
+        codingProfile: { baseRef: "dev", debugTraceUntil: set.codingProfile.debugTraceUntil },
+      });
+      await client.close();
+    });
+
+    it.each([0, 1441, 1.5, "30"])("rejects %j minutes", async (minutes) => {
+      const { client } = await as(["agents:write", "agents:admin"], ["admin"]);
+      const result = await client.callTool(setTrace(minutes));
+      expect(result.isError).toBe(true);
+      await client.close();
+    });
+
+    it("is not accepted by create_agent", async () => {
+      const { client } = await as(["agents:write", "agents:admin"], ["admin"]);
+      const result = await client.callTool({
+        name: "create_agent",
+        arguments: {
+          name: "traced",
+          systemPrompt: "x",
+          model: "gpt-5.6-luna",
+          budgetUsd: 1,
+          kind: "coding",
+          codingProfile: { repository: "openai/example", debugTraceMinutes: 30 },
+        },
+      });
+      expect(result.isError).toBe(true);
+      await client.close();
+    });
+  });
+
   it("update_agent can patch other coding-profile fields without agents:admin", async () => {
     const db = fakeDb([
       {
@@ -1039,12 +1170,16 @@ describe("agent CRUD tools", () => {
         name: "update_agent",
         arguments: { id: "a1", codingProfile: { packageAllowlist: { npm: ["react"] } } },
       },
+      debugTrace: {
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { debugTraceMinutes: 30 } },
+      },
     } as const;
 
     it.each([
-      [[], { make_owner: false, workerImageRef: false, packages: false }],
-      [["package-approver"], { make_owner: false, workerImageRef: false, packages: true }],
-      [["admin"], { make_owner: true, workerImageRef: true, packages: true }],
+      [[], { make_owner: false, workerImageRef: false, packages: false, debugTrace: false }],
+      [["package-approver"], { make_owner: false, workerImageRef: false, packages: true, debugTrace: false }],
+      [["admin"], { make_owner: true, workerImageRef: true, packages: true, debugTrace: true }],
     ] as const)("roles %j", async (roles, allowed) => {
       for (const [op, call] of Object.entries(ops) as [keyof typeof ops, (typeof ops)[keyof typeof ops]][]) {
         const client = await as([...roles]);

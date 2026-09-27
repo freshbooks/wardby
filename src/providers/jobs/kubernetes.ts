@@ -31,7 +31,11 @@ import { isIP } from "node:net";
 import type { V1ConfigMap, V1Pod } from "@kubernetes/client-node";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
-import { MAX_CODING_ARTIFACT_BYTES, parseCodingAgentOutputJson } from "../../coding/protocol.js";
+import {
+  MAX_CODING_ARTIFACT_BYTES,
+  MAX_DEBUG_TRACE_LINE_BYTES,
+  parseCodingAgentOutputJson,
+} from "../../coding/protocol.js";
 import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "./docker-isolation.js";
 import { parseWorkerDiagnosticLine, type WorkerDiagnostic } from "./docker.js";
 import { KubernetesAlreadyExistsError, KubernetesConflictError, type KubernetesApi } from "./kubernetes-api.js";
@@ -75,7 +79,10 @@ const RECORD_SCHEMA_VERSION = 1;
 const RECORD_KEY = "record.json";
 const STOP_GRACE_SECONDS = 10;
 const DIAGNOSTIC_TAIL_LINES = 8;
-const DIAGNOSTIC_LIMIT_BYTES = 4096;
+// The API cuts the tail from its FRONT at limitBytes, so this must hold every
+// tail line at full size: a debug-traced run writes lines of up to
+// MAX_DEBUG_TRACE_LINE_BYTES just before its diagnostic line.
+const DIAGNOSTIC_LIMIT_BYTES = DIAGNOSTIC_TAIL_LINES * MAX_DEBUG_TRACE_LINE_BYTES;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 const MAX_RECORD_ATTEMPTS = 5;
 const READY_POLL_MS = 250;
