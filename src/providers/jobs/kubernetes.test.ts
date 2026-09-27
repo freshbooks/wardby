@@ -415,13 +415,6 @@ describe("KubernetesJobLauncher", () => {
     expect(archiveCommand).toContain("--exclude=.venv");
   });
 
-  it("refuses Claude Code specs until Plan 2b", async () => {
-    const h = await harness();
-    await expect(h.launcher.launch({ ...h.spec, provider: "claude-code", toolImage: IMAGE })).rejects.toThrow(
-      "kubernetes_provider_unsupported",
-    );
-  });
-
   it("runs the preflight once and fails every launch after a failed preflight", async () => {
     const h = await harness();
     let calls = 0;
@@ -455,7 +448,6 @@ describe("KubernetesJobLauncher planned handles", () => {
 
   it("has no planned handle for a spec launch would refuse", async () => {
     const h = await harness();
-    expect(h.launcher.plannedHandle({ ...h.spec, provider: "claude-code", toolImage: IMAGE })).toBeUndefined();
     expect(h.launcher.plannedHandle({ ...h.spec, runId: "../escape" })).toBeUndefined();
   });
 
