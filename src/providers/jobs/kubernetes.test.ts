@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { MAX_DEBUG_TRACE_LINE_BYTES, createDebugTracer } from "../../coding-worker/debug-trace.js";
-import type { V1Pod } from "@kubernetes/client-node";
+import type { V1ContainerStatus, V1Pod } from "@kubernetes/client-node";
 import tar from "tar-stream";
 import { collectExclusions, tarExcludeArgs } from "../../coding/collect-exclude.js";
+import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
+import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { jobLauncherContract } from "./contract-suite.js";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
@@ -1429,5 +1431,101 @@ describe("hostTarArchive", () => {
     } finally {
       process.removeListener("uncaughtException", onUncaughtException);
     }
+  });
+});
+
+describe("coding-run services", () => {
+  const POSTGRES = resolvedFromDefinition(
+    BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+  );
+  const sidecarStatus = (over: Partial<V1ContainerStatus> = {}): V1ContainerStatus => ({
+    name: "service-postgres",
+    ready: false,
+    started: false,
+    image: POSTGRES.image,
+    imageID: "",
+    restartCount: 0,
+    state: { running: {} },
+    ...over,
+  });
+  /** A fake kubelet that leaves the pod in Init, storage-init done and the sidecar as given. */
+  function stuckInInit(h: Awaited<ReturnType<typeof harness>>, status: V1ContainerStatus) {
+    h.api.createPod = async (ns, body) => {
+      const created = await FakeKubernetesApi.prototype.createPod.call(h.api, ns, body);
+      h.api.put("pod", ns, {
+        ...created,
+        status: {
+          phase: "Pending",
+          initContainerStatuses: [
+            {
+              name: "storage-init",
+              ready: false,
+              image: IMAGE,
+              imageID: IMAGE,
+              restartCount: 0,
+              state: { terminated: { exitCode: 0, reason: "Completed" } },
+            },
+            status,
+          ],
+        },
+      });
+      return created;
+    };
+  }
+
+  it("says it supports services and launches a run with its sidecar in the pod", async () => {
+    const h = await harness("run-svc-ok");
+    expect(h.launcher.supportsServices).toBe(true);
+    await h.launcher.launch({ ...h.spec, services: [POSTGRES] });
+    const submitted = h.api.objects.get(`pod/wardby-coding/${h.names.pod}`) as V1Pod;
+    expect(submitted.spec!.initContainers!.map((c) => c.name)).toEqual(["storage-init", "service-postgres"]);
+  });
+
+  it.each([
+    ["its startup probe gave up and it restarted", { restartCount: 1 }],
+    ["its image can't be pulled", { state: { waiting: { reason: "ImagePullBackOff" } } }],
+    ["it exited", { state: { terminated: { exitCode: 1, reason: "Error" } } }],
+  ])("names the service when %s", async (_label, over) => {
+    const h = await harness("run-svc-bad");
+    stuckInInit(h, sidecarStatus(over));
+    await expect(h.launcher.launch({ ...h.spec, services: [POSTGRES] })).rejects.toThrow(
+      "coding_service_unready:postgres",
+    );
+  });
+
+  it("names the service still starting when the pod-start bound is reached", async () => {
+    const g = await harness("run-svc-slow");
+    let clock = 0;
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: g.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: g.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      now: () => clock,
+      sleep: async (ms) => void (clock += ms),
+      readyTimeoutMs: 1_000,
+    });
+    stuckInInit(g, sidecarStatus());
+    await expect(launcher.launch({ ...g.spec, services: [POSTGRES] })).rejects.toThrow(
+      "coding_service_unready:postgres",
+    );
+  });
+
+  it("still reports a plain start timeout when every service started but the keeper did not", async () => {
+    const g = await harness("run-svc-keeper");
+    let clock = 0;
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: g.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: g.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      now: () => clock,
+      sleep: async (ms) => void (clock += ms),
+      readyTimeoutMs: 1_000,
+    });
+    stuckInInit(g, sidecarStatus({ started: true, ready: true }));
+    await expect(launcher.launch({ ...g.spec, services: [POSTGRES] })).rejects.toThrow("kubernetes_pod_start_timeout");
   });
 });

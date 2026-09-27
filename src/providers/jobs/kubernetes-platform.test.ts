@@ -128,6 +128,10 @@ describe("podEphemeralStorageMib", () => {
   it("is the keeper's storage plus the worker's reservation", () => {
     expect(podEphemeralStorageMib(2048)).toBe(3072);
   });
+
+  it("adds a run's service disk to the pod's ephemeral storage", () => {
+    expect(podEphemeralStorageMib(2048, 1408)).toBe(4480);
+  });
 });
 
 describe("assertPlatformConfig", () => {

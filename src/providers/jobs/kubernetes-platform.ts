@@ -279,12 +279,13 @@ export function conformResources(
 }
 
 /**
- * The pod's total ephemeral storage: max(init containers) + sum(regular containers).
- * storage-init's 64 MiB never exceeds keeper + worker, so the total is the keeper's
- * storage volume plus the worker's reservation.
+ * The pod's total ephemeral storage: max(init containers) + sum(regular containers and sidecars).
+ * storage-init's 64 MiB never exceeds the rest, so the total is the keeper's storage volume, the
+ * worker's reservation, and whatever the run's service sidecars reserve (their data and scratch
+ * emptyDirs: serviceEphemeralStorageMib in kubernetes-isolation.ts).
  */
-export function podEphemeralStorageMib(diskMb: number): number {
-  return diskMb + WORKER_EPHEMERAL_MIB;
+export function podEphemeralStorageMib(diskMb: number, servicesMib = 0): number {
+  return diskMb + WORKER_EPHEMERAL_MIB + servicesMib;
 }
 
 /**

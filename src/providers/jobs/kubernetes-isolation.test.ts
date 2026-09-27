@@ -2,6 +2,8 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
 import { ObjectSerializer } from "@kubernetes/client-node/dist/serializer.js";
+import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
+import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 import {
   KUBERNETES_ISOLATION_ERROR,
@@ -831,5 +833,136 @@ describe("enforcementProbeScript", () => {
         8788: deny as "connect" | "timeout" | "error",
       }),
     ).toBe(code);
+  });
+});
+
+describe("buildRunPod with services", () => {
+  const builtin = (name: string, version: string) =>
+    resolvedFromDefinition(BUILTIN_CODING_SERVICES.find((s) => s.name === name && s.version === version)!);
+  const POSTGRES = builtin("postgres", "16");
+  const REDIS = builtin("redis", "7");
+  const withServices: JobSpec = { ...spec, services: [POSTGRES, REDIS] };
+  const p = () => buildRunPod(withServices, options);
+  const sidecar = (built: V1Pod, name: string) =>
+    built.spec!.initContainers!.find((c) => c.name === `service-${name}`)!;
+  const autopilot = { ...options, platform: "gke-autopilot" as const, runtimeClassName: "gvisor" };
+
+  it("builds exactly the pod it always has when a run has no services", () => {
+    expect(buildRunPod({ ...spec, services: undefined }, options)).toEqual(pod());
+  });
+
+  it("starts each service as a native sidecar after storage-init, before the keeper and worker", () => {
+    const built = p();
+    expect(built.spec!.initContainers!.map((c) => c.name)).toEqual([
+      "storage-init",
+      "service-postgres",
+      "service-redis",
+    ]);
+    for (const c of built.spec!.initContainers!.slice(1)) expect(c.restartPolicy).toBe("Always");
+    expect(storageInit(built).restartPolicy).toBeUndefined();
+    expect(built.spec!.containers.map((c) => c.name)).toEqual(["keeper", "worker"]);
+    expect(built.spec!.restartPolicy).toBe("Never");
+  });
+
+  it("gates everything after a service on its readiness command, as a startup probe", () => {
+    const c = sidecar(p(), "postgres");
+    expect(c.startupProbe).toEqual({
+      exec: { command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "test", "-d", "test"] },
+      periodSeconds: 2,
+      timeoutSeconds: 2,
+      failureThreshold: 30,
+      successThreshold: 1,
+    });
+    expect(c.readinessProbe).toBeUndefined();
+    expect(c.livenessProbe).toBeUndefined();
+  });
+
+  it("runs the catalog's digest-pinned image as-is, non-root, read-only, with nothing privileged", () => {
+    const c = sidecar(p(), "postgres");
+    expect(c.image).toBe(POSTGRES.image);
+    expect(c.command).toBeUndefined();
+    expect(c.args).toBeUndefined();
+    expect(c.securityContext).toEqual({
+      allowPrivilegeEscalation: false,
+      privileged: false,
+      readOnlyRootFilesystem: true,
+      runAsNonRoot: true,
+      capabilities: { drop: ["ALL"] },
+    });
+    // Pod-level: uid 10001 and RuntimeDefault seccomp cover every sidecar too.
+    expect(p().spec!.securityContext).toEqual(pod().spec!.securityContext);
+  });
+
+  it("gives a service its own environment, sorted, and the worker none of it", () => {
+    expect(sidecar(p(), "postgres").env).toEqual([
+      { name: "PGDATA", value: "/var/lib/postgresql/data/pgdata" },
+      { name: "POSTGRES_DB", value: "test" },
+      { name: "POSTGRES_PASSWORD", value: "test" },
+      { name: "POSTGRES_USER", value: "test" },
+    ]);
+    expect(sidecar(p(), "redis").env).toBeUndefined();
+    expect(worker(p()).env!.map((e) => e.name)).toEqual(["WARDBY_PROXY_URL", "WARDBY_RUN_CAPABILITY"]);
+  });
+
+  it("mounts an emptyDir at the data path and at each writable path, and none of the run's storage", () => {
+    expect(sidecar(p(), "postgres").volumeMounts).toEqual([
+      { name: "service-0-data", mountPath: "/var/lib/postgresql/data" },
+      { name: "service-0-scratch-0", mountPath: "/var/run/postgresql" },
+      { name: "service-0-scratch-1", mountPath: "/tmp" },
+    ]);
+    expect(sidecar(p(), "redis").volumeMounts).toEqual([{ name: "service-1-data", mountPath: "/data" }]);
+    expect(p().spec!.volumes!.slice(3)).toEqual([
+      { name: "service-0-data", emptyDir: { sizeLimit: "1024Mi" } },
+      { name: "service-0-scratch-0", emptyDir: { sizeLimit: "64Mi" } },
+      { name: "service-0-scratch-1", emptyDir: { sizeLimit: "64Mi" } },
+      { name: "service-1-data", emptyDir: { sizeLimit: "256Mi" } },
+    ]);
+  });
+
+  it("sizes each sidecar from its catalog entry, requests equal to limits", () => {
+    expect(sidecar(p(), "postgres").resources).toEqual({
+      requests: { cpu: "500m", memory: "512Mi" },
+      limits: { cpu: "500m", memory: "512Mi" },
+    });
+  });
+
+  it("leaves the run's NetworkPolicy unchanged: a service shares the pod's loopback", () => {
+    expect(buildRunNetworkPolicy(withServices, options.namespace)).toEqual(
+      buildRunNetworkPolicy(spec, options.namespace),
+    );
+    expect(JSON.stringify(buildRunNetworkPolicy(withServices, options.namespace))).toBe(
+      JSON.stringify(buildRunNetworkPolicy(spec, options.namespace)),
+    );
+  });
+
+  it("conforms sidecars to Autopilot and counts their disk in the pod's ephemeral storage", () => {
+    const built = buildRunPod(withServices, autopilot);
+    expect(sidecar(built, "postgres").resources).toEqual({
+      requests: { cpu: "500m", memory: "512Mi", "ephemeral-storage": "1152Mi" },
+      limits: { cpu: "500m", memory: "512Mi", "ephemeral-storage": "1152Mi" },
+    });
+    expect(sidecar(built, "redis").resources).toEqual({
+      requests: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "256Mi" },
+      limits: { cpu: "250m", memory: "256Mi", "ephemeral-storage": "256Mi" },
+    });
+    // 8192 (workspace) + 1024 (worker) + 1152 + 256 (services) = 10624 MiB > 10240.
+    expect(() => buildRunPod({ ...withServices, limits: { ...spec.limits, diskMb: 8192 } }, autopilot)).toThrow(
+      /8192 MiB workspace and its services need 10624 MiB of pod ephemeral storage/,
+    );
+    expect(() => buildRunPod({ ...spec, limits: { ...spec.limits, diskMb: 8192 } }, autopilot)).not.toThrow();
+  });
+
+  it("attests a read-back pod with sidecars, and rejects a swapped service image", () => {
+    const built = p();
+    expect(() => assertRunPodMatches(apiRoundTrip(built, "V1Pod"), built)).not.toThrow();
+    const swapped = structuredClone(built);
+    swapped.spec!.initContainers![1].image = `docker.io/library/postgres@sha256:${"f".repeat(64)}`;
+    expect(() => assertRunPodMatches(swapped, built)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("refuses a spec whose services are malformed", () => {
+    for (const services of [[{ ...POSTGRES, image: "postgres:16" }], [POSTGRES, POSTGRES], []]) {
+      expect(() => validateKubernetesSpec({ ...spec, services })).toThrow(KUBERNETES_ISOLATION_ERROR);
+    }
   });
 });

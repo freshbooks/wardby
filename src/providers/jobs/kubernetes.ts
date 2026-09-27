@@ -58,10 +58,12 @@ import {
   kubernetesRunNames,
   kubernetesRunNamesForToken,
   runLabels,
+  serviceContainerName,
   validateKubernetesSpec,
 } from "./kubernetes-isolation.js";
 import { readProxyWitness } from "./kubernetes-witness.js";
 import { safeExtract } from "./safe-extract.js";
+import { serviceUnreadyError } from "../../coding/services/wording.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
 import {
@@ -465,6 +467,8 @@ function errorWithCode(code: string, cause?: unknown): Error {
 // ---------------------------------------------------------------------------
 
 export class KubernetesJobLauncher implements WorkspaceJobLauncher {
+  /** Coding-run services run as native sidecars in the run pod (kubernetes-isolation.ts). */
+  readonly supportsServices = true;
   private readonly api: KubernetesApi;
   private readonly namespace: string;
   private readonly workspaceRoot: string;
@@ -750,7 +754,10 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     );
     await this.createIfMissing(() => this.api.createNetworkPolicy(this.namespace, policy));
     await this.createIfMissing(() => this.api.createPod(this.namespace, pod));
-    await this.waitForKeeper(names);
+    await this.waitForKeeper(
+      names,
+      (spec.services ?? []).map((service) => service.name),
+    );
 
     const [actualPod, actualPolicy] = await Promise.all([
       this.api.readPod(this.namespace, names.pod),
@@ -798,13 +805,26 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
-  private async waitForKeeper(names: RunNames): Promise<void> {
+  private async waitForKeeper(names: RunNames, serviceNames: readonly string[]): Promise<void> {
     const started = this.now();
     for (;;) {
       const pod = await this.api.readPod(this.namespace, names.pod);
       if (!pod || pod.status?.phase === "Failed") throw new Error("kubernetes_pod_start_failed");
       const statuses = pod.status?.containerStatuses ?? [];
       const initStatuses = pod.status?.initContainerStatuses ?? [];
+      const sidecar = (name: string) => initStatuses.find((status) => status.name === serviceContainerName(name));
+      // A service sidecar that restarted (its startup probe gave up), can't be pulled or created, or
+      // exited will never let the keeper start. Name the service rather than a generic start failure.
+      const failedService = serviceNames.find((name) => {
+        const status = sidecar(name);
+        return (
+          status !== undefined &&
+          ((status.restartCount ?? 0) > 0 ||
+            FATAL_WAITING_REASONS.has(status.state?.waiting?.reason ?? "") ||
+            status.state?.terminated !== undefined)
+        );
+      });
+      if (failedService !== undefined) throw serviceUnreadyError(failedService);
       const keeper = statuses.find((status) => status.name === KEEPER_CONTAINER);
       if (
         [...initStatuses, ...statuses].some((status) =>
@@ -817,7 +837,13 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
         throw new Error("kubernetes_pod_start_failed");
       }
       if (keeper?.ready === true) return;
-      if (this.now() - started >= this.readyTimeoutMs) throw new Error("kubernetes_pod_start_timeout");
+      if (this.now() - started >= this.readyTimeoutMs) {
+        // At the bound, a service that never passed its startup probe (still pulling, still starting)
+        // is why the keeper never started.
+        const waiting = serviceNames.find((name) => sidecar(name)?.started !== true);
+        if (waiting !== undefined) throw serviceUnreadyError(waiting);
+        throw new Error("kubernetes_pod_start_timeout");
+      }
       await this.sleep(READY_POLL_MS);
     }
   }
