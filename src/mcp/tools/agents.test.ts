@@ -109,6 +109,11 @@ function fakeDb(
   const groupsById = new Map(budgetGroups.map((g) => [g.id, g]));
   let counter = rows.size;
   const transactionDb = {
+    // The coding-run service catalog: the built-in names only.
+    codingService: {
+      findMany: async ({ where }: { where: { name: { in: string[] } } }) =>
+        ["postgres", "redis", "mysql"].filter((name) => where.name.in.includes(name)).map((name) => ({ name })),
+    },
     resourceGrant: fakeResourceGrants(grants),
     // make_owner's binding cleanup; these fixtures hold no such rows.
     agentSecret: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
@@ -2245,6 +2250,71 @@ describe("update_agent admin override on someone else's agent (M-3) and override
       arguments: { name: "n", systemPrompt: "x", model: "gpt-4o", budgetUsd: 1, repositoryAdminOverride: false },
     });
     expect(created.isError).toBeFalsy();
+    await client.close();
+  });
+});
+
+describe("codingProfile.services", () => {
+  const seed = () => ({
+    id: "a1",
+    name: "coder",
+    systemPrompt: "x",
+    model: "gpt-5.6-luna",
+    budgetUsd: 1,
+    maxTurns: 10,
+    schedule: null,
+    timezone: "UTC",
+    ownerId: "p1",
+    tools: [],
+    kind: "coding" as const,
+    codingProfile: {
+      provider: "codex" as const,
+      repository: "openai/example",
+      baseRef: "main",
+      defaultTask: null,
+      timeoutSec: 1800,
+      protectedPaths: ["CODEOWNERS"],
+    },
+  });
+  const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+  async function as(principalId: string) {
+    const db = fakeDb([seed()]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, principalId, ["agents:read", "agents:write"]));
+    registerAgentTools(mcp);
+    return { client: await connectClient(mcp) };
+  }
+  const allow = (services: unknown) => ({ name: "update_agent", arguments: { id: "a1", codingProfile: { services } } });
+
+  it("lets the owner allow catalog services by name, deduplicated, and shows them on get_agent", async () => {
+    const { client } = await as("p1");
+    const result = await client.callTool(allow(["postgres", "redis", "postgres"]));
+    expect(result.isError).toBeFalsy();
+    const shown = JSON.parse(text(await client.callTool({ name: "get_agent", arguments: { id: "a1" } })));
+    expect(shown.codingProfile.services).toEqual(["postgres", "redis"]);
+    await client.close();
+  });
+
+  it("refuses a name the catalog doesn't have", async () => {
+    const { client } = await as("p1");
+    const result = await client.callTool(allow(["postgress"]));
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/no service named "postgress"/);
+    await client.close();
+  });
+
+  it("refuses a malformed name", async () => {
+    const { client } = await as("p1");
+    const result = await client.callTool(allow(["Postgres"]));
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/services/);
+    await client.close();
+  });
+
+  it("is not something another principal can set", async () => {
+    const { client } = await as("p2");
+    const result = await client.callTool(allow(["postgres"]));
+    expect(result.isError).toBe(true);
     await client.close();
   });
 });

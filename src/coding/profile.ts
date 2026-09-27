@@ -5,6 +5,7 @@ import { MAX_COLLECT_EXCLUDE_PATHS, validateCollectExcludePath } from "./collect
 import { CODING_PROVIDERS } from "./provider.js";
 import { parseAllowlist, resolvePolicy } from "./registry/allowlist.js";
 import { REGISTRY_ADAPTERS } from "./registry/adapters.js";
+import { AllowedServiceNamesSchema } from "./services/catalog.js";
 
 export const MIN_CODING_TIMEOUT_SEC = 60;
 export const MAX_CODING_TIMEOUT_SEC = 7200;
@@ -136,6 +137,8 @@ const codingProfileFields = {
     .transform((paths) => [...new Set(paths)]),
   packageAllowlist: packageAllowlistSchema,
   packagePolicy: packagePolicySchema,
+  /** Coding-run services this agent's runs may start: catalog names, any version (docs/coding-services.md). */
+  services: AllowedServiceNamesSchema,
 };
 
 export const CodingProfileSchema = z
@@ -154,6 +157,7 @@ export const CodingProfileSchema = z
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.default(null),
     packageAllowlist: codingProfileFields.packageAllowlist.default({}),
     packagePolicy: codingProfileFields.packagePolicy.default({}),
+    services: codingProfileFields.services.default([]),
   })
   .strict();
 
@@ -173,6 +177,7 @@ export const CodingProfilePatchSchema = z
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.optional(),
     packageAllowlist: codingProfileFields.packageAllowlist.optional(),
     packagePolicy: codingProfileFields.packagePolicy.optional(),
+    services: codingProfileFields.services.optional(),
   })
   .strict();
 

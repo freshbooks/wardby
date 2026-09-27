@@ -201,6 +201,13 @@ const profileJsonSchema = {
       properties: { minReleaseAgeDays: { type: "integer", minimum: 0, maximum: 30 } },
       additionalProperties: false,
     },
+    services: {
+      type: "array",
+      maxItems: 16,
+      items: { type: "string" },
+      description:
+        'Coding-run services this agent\'s runs may start: catalog names such as "postgres" (any version the catalog has). A repository asks for them in .wardby/services.yaml on its base branch; a run asking for one not listed here is refused. Empty = none.',
+    },
   },
 };
 
@@ -267,7 +274,28 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     workspaceDiskMb: profile.workspaceDiskMb,
     packageAllowlist: profile.packageAllowlist,
     packagePolicy: profile.packagePolicy,
+    services: profile.services,
   });
+}
+
+/** A service name an agent is allowed must exist in the catalog (any version); typos fail here, not at a run. */
+async function requireCatalogServiceNames(
+  db: Pick<Prisma.TransactionClient, "codingService">,
+  names: readonly string[],
+): Promise<void> {
+  if (names.length === 0) return;
+  const known = new Set(
+    (await db.codingService.findMany({ where: { name: { in: [...names] } }, select: { name: true } })).map(
+      (row) => row.name,
+    ),
+  );
+  const unknown = names.filter((name) => !known.has(name));
+  if (unknown.length > 0) {
+    throw new McpError(
+      400,
+      `wardby's service catalog has no service named ${unknown.map((name) => `"${name}"`).join(", ")}; list_services shows the catalog.`,
+    );
+  }
 }
 
 export function registerAgentTools(mcp: WardbyMcpServer): void {
@@ -311,6 +339,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         requirePackageApproval(ctx);
       validateSchedule(args.schedule, args.timezone ?? "UTC");
       validateEffort(args.kind, args.model, args.effort);
+      if (args.codingProfile) await requireCatalogServiceNames(ctx.db, args.codingProfile.services);
       if (args.budgetGroupId) {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
       }
@@ -515,6 +544,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...profilePatch });
             if (!profileResult.success) throw invalidArguments("coding profile", profileResult.error);
             nextProfile = profileResult.data;
+            if (args.codingProfile?.services !== undefined) await requireCatalogServiceNames(tx, nextProfile.services);
             const nextModel = args.model ?? existing.model;
             if (!codingProviderSupportsModel(nextProfile.provider, nextModel)) {
               throw new McpError(

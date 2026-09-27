@@ -18,6 +18,7 @@ describe("CodingProfileSchema", () => {
       collectExclude: [],
       packageAllowlist: {},
       packagePolicy: {},
+      services: [],
     });
   });
 
@@ -109,5 +110,16 @@ describe("CodingProfilePatchSchema", () => {
 
   it("rejects unknown patch fields", () => {
     expect(() => CodingProfilePatchSchema.parse({ dockerSocket: "/var/run/docker.sock" })).toThrow();
+  });
+});
+
+describe("services", () => {
+  it("defaults to none, dedupes, and refuses a malformed name", () => {
+    expect(CodingProfileSchema.parse({ repository: "openai/example" }).services).toEqual([]);
+    expect(
+      CodingProfileSchema.parse({ repository: "openai/example", services: ["postgres", "redis", "postgres"] }).services,
+    ).toEqual(["postgres", "redis"]);
+    expect(CodingProfileSchema.safeParse({ repository: "openai/example", services: ["Postgres"] }).success).toBe(false);
+    expect(CodingProfilePatchSchema.parse({ services: ["redis"] })).toEqual({ services: ["redis"] });
   });
 });

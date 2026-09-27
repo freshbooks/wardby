@@ -35,6 +35,7 @@ interface FakeRunRow {
     failureCategory?: string | null;
     diagnosticId?: string | null;
     debugTrace?: boolean;
+    services?: unknown;
   } | null;
   registryFetches?: Array<{
     ecosystem: string;
@@ -624,5 +625,39 @@ describe("run observability tools", () => {
       expect((await client.callTool({ name: "list_runs", arguments: { agentId: "a1" } })).isError).toBe(true);
       await client.close();
     });
+  });
+
+  it("get_run lists a coding run's services by name and version", async () => {
+    const now = new Date();
+    const row = (id: string, services: unknown) => ({
+      id,
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual" as const,
+      turns: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      finalText: null,
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+      codingRun: { result: null, services },
+    });
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [row("r1", [{ name: "postgres", version: "16", image: "x" }]), row("r2", [])],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const withServices = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r1" } })) as never);
+    expect(withServices).toMatchObject({ services: ["postgres 16"] });
+    expect(JSON.stringify(withServices)).not.toContain('"image"');
+    const without = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never);
+    expect(without).not.toHaveProperty("services");
+    await client.close();
   });
 });
