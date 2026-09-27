@@ -21,7 +21,6 @@ import { resolveRunServices, type ServiceResolution } from "../coding/services/r
 import {
   DECLARATION_UNAVAILABLE_SENTENCE,
   LAUNCHER_UNSUPPORTED_SENTENCE,
-  SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
   invalidDeclarationSentence,
   serviceRefusal,
 } from "../coding/services/wording.js";
@@ -371,6 +370,7 @@ async function resolveDispatchServices(
   allowed: unknown,
   executor: Executor,
   request: string,
+  instructions: string | null,
 ): Promise<ServiceResolution> {
   if (outcome.kind === "refused") return { refusal: outcome.refusal };
   if (outcome.kind === "none" || outcome.services.length === 0) return { services: [] };
@@ -382,6 +382,7 @@ async function resolveDispatchServices(
     outcome.services,
     parseAllowedServiceNames(allowed),
     request,
+    instructions,
   );
 }
 
@@ -462,20 +463,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               agent.codingProfile.services,
               options.executor,
               request,
+              agent.systemPrompt,
             );
             if ("refusal" in resolved) servicesRefusal = resolved.refusal;
             else services = resolved.services;
-            if (!servicesRefusal && services.length > 0 && request) {
-              try {
-                composeCodingTask(agent.systemPrompt, request, servicesInstructionNote(services));
-              } catch {
-                // The note, not the agent's instructions or request alone, is what tipped it over.
-                servicesRefusal = serviceRefusal(
-                  "service_declaration_invalid",
-                  SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
-                );
-              }
-            }
           }
           if (!servicesRefusal) codingBudget = await reserveCodingBudget(tx, agent, now, options);
         }

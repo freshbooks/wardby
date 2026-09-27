@@ -73,4 +73,15 @@ describe("resolveRunServices", () => {
       refusal: `service_declaration_invalid: ${SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE}`,
     });
   });
+
+  it("counts the agent's own instructions with the note and the task", async () => {
+    const declared = [{ name: "postgres", version: "16" }];
+    const instructions = "x".repeat(MAX_CODING_TASK_BYTES - 200);
+    expect(await resolveRunServices(catalog(), declared, ["postgres"], "Add a joke.", instructions)).toEqual({
+      refusal: `service_declaration_invalid: ${SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE}`,
+    });
+    expect(await resolveRunServices(catalog(), declared, ["postgres"], "Add a joke.", "Run pytest.")).toHaveProperty(
+      "services",
+    );
+  });
 });

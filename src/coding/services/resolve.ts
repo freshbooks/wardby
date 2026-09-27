@@ -4,10 +4,10 @@
  * agent must be allowed its name. The first failure refuses the whole run with
  * its host sentence; otherwise every entry is snapshotted for the run.
  *
- * The task text is also checked here: the note these services would add to it
- * (servicesInstructionNote) must still leave the coding task within
- * MAX_CODING_TASK_BYTES (composeCodingTask enforces this), or the run is
- * refused rather than left to fail later with a generic size error.
+ * The task text is also checked here: the agent's instructions plus the note
+ * these services would add (servicesInstructionNote) plus the request must
+ * still fit MAX_CODING_TASK_BYTES (composeCodingTask enforces this), or the run
+ * is refused rather than left to fail later with a generic size error.
  */
 import { composeCodingTask } from "../protocol.js";
 import {
@@ -35,17 +35,17 @@ export type ServiceResolution = { services: ResolvedCodingService[] } | { refusa
 const keyOf = (service: { name: string; version: string }): string => `${service.name}\u0000${service.version}`;
 
 /**
- * `task` is the run's request text (before the agent's own instructions are
- * prepended) — what dispatch already has in hand before it calls
- * composeCodingTask. Task 8 passes it so this can refuse a services note that
- * alone pushes the task over the byte limit, rather than surfacing that as a
- * generic composeCodingTask error at dispatch.
+ * `task` is the run's request text and `instructions` the agent's standing
+ * instructions — exactly what dispatch passes to composeCodingTask — so a
+ * services note that pushes the composed task over the byte limit is refused
+ * here rather than surfacing as a generic composeCodingTask error at dispatch.
  */
 export async function resolveRunServices(
   catalog: CodingServiceCatalogReader,
   declared: readonly DeclaredService[],
   allowed: readonly string[],
   task: string,
+  instructions?: string | null,
 ): Promise<ServiceResolution> {
   if (declared.length === 0) return { services: [] };
   const rows = await catalog.findMany({ where: { OR: declared.map(({ name, version }) => ({ name, version })) } });
@@ -65,7 +65,7 @@ export async function resolveRunServices(
   const note = servicesInstructionNote(services);
   if (note !== undefined) {
     try {
-      composeCodingTask(undefined, task, note);
+      composeCodingTask(instructions, task, note);
     } catch {
       return { refusal: serviceRefusal("service_declaration_invalid", SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE) };
     }
