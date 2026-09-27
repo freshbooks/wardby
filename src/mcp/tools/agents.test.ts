@@ -1179,6 +1179,7 @@ describe("agent CRUD tools", () => {
     it.each([
       [[], { make_owner: false, workerImageRef: false, packages: false, debugTrace: false }],
       [["package-approver"], { make_owner: false, workerImageRef: false, packages: true, debugTrace: false }],
+      [["service-manager"], { make_owner: false, workerImageRef: false, packages: false, debugTrace: false }],
       [["admin"], { make_owner: true, workerImageRef: true, packages: true, debugTrace: true }],
     ] as const)("roles %j", async (roles, allowed) => {
       for (const [op, call] of Object.entries(ops) as [keyof typeof ops, (typeof ops)[keyof typeof ops]][]) {

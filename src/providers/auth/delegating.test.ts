@@ -124,6 +124,11 @@ describe("parseRoleMap (AUTH_ROLE_MAP)", () => {
     const map = parseRoleMap(" wardby-admin = admin , wardby-packages=package-approver,, ");
     expect(Object.fromEntries(map)).toEqual({ "wardby-admin": ["admin"], "wardby-packages": ["package-approver"] });
   });
+  it("maps an IdP value to the service-manager role", () => {
+    expect(Object.fromEntries(parseRoleMap("wardby-services=service-manager"))).toEqual({
+      "wardby-services": ["service-manager"],
+    });
+  });
   it("lets one IdP value map to several roles, and splits on the last '='", () => {
     const map = parseRoleMap("ops=admin,ops=package-approver,cn=a=b=admin");
     expect(map.get("ops")).toEqual(["admin", "package-approver"]);

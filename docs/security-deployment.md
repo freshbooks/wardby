@@ -49,6 +49,7 @@ node dist/cli.js auth user create --subject operator-identifier --role admin
 node dist/cli.js auth user list
 node dist/cli.js auth user grant --subject user-identifier --role package-approver
 node dist/cli.js auth user grant --subject user-identifier --revoke-role package-approver
+node dist/cli.js auth user grant --subject user-identifier --role service-manager
 node dist/cli.js auth key create --subject user-identifier
 node dist/cli.js auth key list --subject user-identifier
 node dist/cli.js auth key revoke PUBLIC-KEY-ID
@@ -79,11 +80,12 @@ Scopes and roles do different jobs:
 
 | Role               | Grants                                                          |
 | ------------------ | --------------------------------------------------------------- |
-| `admin`            | `agents:admin` and `packages:approve`                           |
+| `admin`            | `agents:admin`, `packages:approve` and `services:manage`        |
 | `package-approver` | `packages:approve`                                              |
+| `service-manager`  | `services:manage`                                               |
 | (none)             | nothing privileged; every other scope works as the token allows |
 
-Four operations are privileged:
+Five operations are privileged:
 
 - `make_owner`, which reassigns any agent's owner, including another
   principal's private agent (see [Sharing agents](#sharing-agents) for what
@@ -92,18 +94,23 @@ Four operations are privileged:
 - approving coding agents' package allowlists or policy;
 - approving a repository for an agent without checking GitHub access
   (`adminOverride` on `link_repository`, `repositoryAdminOverride` on
-  `create_agent`/`update_agent`; see [Repository access](#repository-access)).
+  `create_agent`/`update_agent`; see [Repository access](#repository-access));
+- creating, updating or deleting coding-run service catalog entries
+  (`create_service`, `update_service`, `delete_service`; reading the catalog
+  is `agents:read`, see [coding-services.md](coding-services.md)).
 
 Each needs **both** its scope on the token **and** a role that grants that
 permission:
 
 - `make_owner`, `workerImageRef`, and repository approval need `agents:admin`.
 - Package approval needs `packages:approve`, or `agents:admin`.
+- Service catalog changes need `services:manage`.
 
 In practice:
 
-- an `admin` can do all four;
+- an `admin` can do all five;
 - a `package-approver` can approve packages only;
+- a `service-manager` can change the service catalog only;
 - a member can do none of them.
 
 Callers who fail the check get `403`:

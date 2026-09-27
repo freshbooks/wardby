@@ -67,17 +67,19 @@ describe("supported scopes", () => {
       for (const scope of scopes) expect(SCOPES_SUPPORTED, `${name} needs ${scope}`).toContain(scope);
   });
 
-  it("treats exactly agents:admin and packages:approve as privileged", () => {
-    expect([...PRIVILEGED_SCOPES].sort()).toEqual(["agents:admin", "packages:approve"]);
+  it("treats exactly agents:admin, packages:approve and services:manage as privileged", () => {
+    expect([...PRIVILEGED_SCOPES].sort()).toEqual(["agents:admin", "packages:approve", "services:manage"]);
     for (const scope of PRIVILEGED_SCOPES) expect(SCOPES_SUPPORTED).toContain(scope);
   });
 
-  it("built-in roles: admin grants both permissions, package-approver only packages:approve", () => {
-    expect([...ROLE_NAMES].sort()).toEqual(["admin", "package-approver"]);
-    expect([...ROLE_PERMISSIONS.admin].sort()).toEqual(["agents:admin", "packages:approve"]);
+  it("built-in roles: admin grants every permission, package-approver and service-manager one each", () => {
+    expect([...ROLE_NAMES].sort()).toEqual(["admin", "package-approver", "service-manager"]);
+    expect([...ROLE_PERMISSIONS.admin].sort()).toEqual(["agents:admin", "packages:approve", "services:manage"]);
     expect(ROLE_PERMISSIONS["package-approver"]).toEqual(["packages:approve"]);
+    expect(ROLE_PERMISSIONS["service-manager"]).toEqual(["services:manage"]);
     for (const perms of Object.values(ROLE_PERMISSIONS)) for (const p of perms) expect(PRIVILEGED_SCOPES).toContain(p);
     expect([...permissionsOf(["bogus", "package-approver"])]).toEqual(["packages:approve"]);
+    expect([...permissionsOf(["service-manager"])]).toEqual(["services:manage"]);
     expect(permissionsOf(null).size).toBe(0);
   });
 });
@@ -143,6 +145,25 @@ describe("privileged operations need the scope AND a role granting it", () => {
 
   it("non-privileged scopes don't depend on roles", () => {
     expect(denial(() => requireScope(ctx(["agents:write"], []), URI, "agents:write"))).toBeUndefined();
+  });
+
+  it("service-manager and admin may manage the service catalog; nobody else, and never without the scope", () => {
+    const manage = (scopes: string[], roles?: string[]) =>
+      denial(() => requireScope(ctx(scopes, roles), URI, "services:manage"));
+    expect(manage(["services:manage"], ["service-manager"])).toBeUndefined();
+    expect(manage(["services:manage"], ["admin"])).toBeUndefined();
+    expect(manage(["services:manage"], ["package-approver"])?.message).toMatch(/requires a role that grants it/);
+    expect(manage(["services:manage"], [])?.message).toMatch(/requires a role that grants it/);
+    expect(manage(["agents:admin"], ["admin"])?.message).toMatch(
+      /Insufficient scope; this operation requires: services:manage$/,
+    );
+    // A service-manager is not an admin and not a package approver.
+    expect(
+      denial(() => requireScope(ctx(["agents:admin"], ["service-manager"]), URI, "agents:admin"))?.message,
+    ).toMatch(/requires a role that grants it/);
+    expect(
+      denial(() => requireAnyScope(ctx(["packages:approve"], ["service-manager"]), URI, ...PACKAGES))?.message,
+    ).toMatch(/requires a role that grants it/);
   });
 });
 
