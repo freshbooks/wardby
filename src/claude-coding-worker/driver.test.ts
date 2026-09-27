@@ -130,4 +130,32 @@ describe("runClaudeCodingWorker", () => {
       }),
     ).rejects.toThrow("coding_output_run_mismatch");
   });
+
+  it("lets Claude Code retry a failed model request; every retry is metered by the proxy", async () => {
+    let captured: ClaudeQueryOptions | undefined;
+    await runClaudeCodingWorker({
+      input,
+      proxyBaseUrl: "http://wardby-proxy:8787",
+      capability: `rrp_${"c".repeat(32)}`,
+      signal: new AbortController().signal,
+      createQuery: (options) => {
+        captured = options;
+        return (async function* () {
+          yield {
+            type: "result",
+            subtype: "success",
+            result: JSON.stringify({
+              schemaVersion: 1,
+              runId: input.runId,
+              outcome: "no_changes",
+              summary: "ok",
+              tests: [],
+            }),
+          };
+        })();
+      },
+    });
+    expect(captured?.environment.CLAUDE_CODE_MAX_RETRIES).toBe("3");
+    expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).toContain("npm and pip installs");
+  });
 });
