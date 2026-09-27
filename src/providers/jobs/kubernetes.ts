@@ -845,7 +845,13 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
         );
       });
       if (failedService !== undefined) throw serviceUnreadyError(failedService);
-      if (toolRunner && toolRunnerFailed(initStatuses)) throw new Error("kubernetes_tool_runner_failed");
+      const toolStatus = initStatuses.find((status) => status.name === TOOL_RUNNER_CONTAINER);
+      if (
+        toolRunner &&
+        (toolRunnerFailed(initStatuses) || FATAL_WAITING_REASONS.has(toolStatus?.state?.waiting?.reason ?? ""))
+      ) {
+        throw new Error("kubernetes_tool_runner_failed");
+      }
       const keeper = statuses.find((status) => status.name === KEEPER_CONTAINER);
       if (
         [...initStatuses, ...statuses].some((status) =>
@@ -859,7 +865,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       }
       if (keeper?.ready === true) return;
       if (this.now() - started >= this.readyTimeoutMs) {
-        if (toolRunner && initStatuses.find((status) => status.name === TOOL_RUNNER_CONTAINER)?.started !== true) {
+        if (toolRunner && toolStatus?.started !== true) {
           throw new Error("kubernetes_tool_runner_unready");
         }
         // At the bound, a service that never passed its startup probe (still pulling, still starting)

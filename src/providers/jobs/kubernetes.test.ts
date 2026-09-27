@@ -520,8 +520,24 @@ describe("Claude Code", () => {
   it.each([
     ["it restarted", { restartCount: 1 }],
     ["it exited", { state: { terminated: { exitCode: 1, reason: "Error" } } }],
+    ["its image can't be pulled", { started: false, ready: false, state: { waiting: { reason: "ImagePullBackOff" } } }],
   ])("fails the launch by name when the tool runner %s before the keeper started", async (_label, over) => {
+    // A fake clock, not the default harness launcher's fixed-`now` real-timer one: against code that
+    // doesn't detect this, a pod stuck like this would otherwise never reach the ready-timeout bound,
+    // so the launch would hang (spin forever on readPod/sleep) instead of failing. The fake clock makes
+    // a missing detection fail at the bound rather than hang the test.
     const h = await harness("run-claude-bad-start");
+    let clock = 0;
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      now: () => clock,
+      sleep: async (ms) => void (clock += ms),
+      readyTimeoutMs: 1_000,
+    });
     h.api.createPod = async (ns, body) => {
       const created = await FakeKubernetesApi.prototype.createPod.call(h.api, ns, body);
       h.api.put("pod", ns, {
@@ -530,7 +546,7 @@ describe("Claude Code", () => {
       });
       return created;
     };
-    await expect(h.launcher.launch(claudeOf(h.spec))).rejects.toThrow("kubernetes_tool_runner_failed");
+    await expect(launcher.launch(claudeOf(h.spec))).rejects.toThrow("kubernetes_tool_runner_failed");
   });
 
   it("names the tool runner when it never started by the pod-start bound", async () => {
