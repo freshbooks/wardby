@@ -11,7 +11,7 @@ import {
   normalizeGitHubRepository,
   normalizeGitRef,
 } from "../../coding/protocol.js";
-import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess } from "./github.js";
+import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess, type RepositoryFileInput } from "./github.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -618,6 +618,17 @@ export class GitVcsProvider implements VcsProvider {
     } catch {
       // Best-effort observability only -- must never affect the real run.
     }
+  }
+
+  async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {
+    const github = this.options.github;
+    if (!github.readFileAtRef) throw new Error("vcs_read_file_unsupported");
+    return github.readFileAtRef({
+      repository: normalizeGitHubRepository(input.repository),
+      ref: normalizeGitRef(input.ref),
+      path: validateChangedPath(input.path),
+      maxBytes: input.maxBytes,
+    });
   }
 
   private validateInput(

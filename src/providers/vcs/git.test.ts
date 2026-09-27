@@ -628,6 +628,43 @@ describe("GitVcsProvider", () => {
       "vcs_workspace_handle_invalid",
     );
   });
+
+  it("reads a repository file through its GitHub access, validating the input first", async () => {
+    const { provider, github } = await harness();
+    const asked: unknown[] = [];
+    (github as FakeGitHub & { readFileAtRef?: (input: unknown) => Promise<string | null> }).readFileAtRef = async (
+      input,
+    ) => {
+      asked.push(input);
+      return "services: {}\n";
+    };
+    await expect(
+      provider.readRepositoryFile({
+        repository: "OpenAI/Example",
+        ref: "refs/heads/main",
+        path: ".wardby/services.yaml",
+        maxBytes: 8192,
+      }),
+    ).resolves.toBe("services: {}\n");
+    expect(asked).toEqual([
+      { repository: "openai/example", ref: "main", path: ".wardby/services.yaml", maxBytes: 8192 },
+    ]);
+    await expect(
+      provider.readRepositoryFile({ repository: REPOSITORY, ref: "main", path: "../x", maxBytes: 8192 }),
+    ).rejects.toThrow("vcs_changed_path_invalid");
+  });
+
+  it("says it cannot read files when its GitHub access has no file read", async () => {
+    const { provider } = await harness();
+    await expect(
+      provider.readRepositoryFile({
+        repository: REPOSITORY,
+        ref: "main",
+        path: ".wardby/services.yaml",
+        maxBytes: 8192,
+      }),
+    ).rejects.toThrow("vcs_read_file_unsupported");
+  });
 });
 
 describe("Git process boundary", () => {

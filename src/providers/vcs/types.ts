@@ -1,3 +1,5 @@
+import type { RepositoryFileInput } from "./github.js";
+
 export interface VcsPrepareInput {
   runId: string;
   repository: string;
@@ -123,6 +125,14 @@ export interface VcsProvider {
     outcome: ContinuationOutcome,
     details?: ContinuationFinishedDetails,
   ): Promise<void>;
+  /**
+   * The raw text of one repository file at a ref, read through the host's API
+   * without a clone, or null when it does not exist. Dispatch reads a coding
+   * run's .wardby/services.yaml from its base branch with it
+   * (docs/coding-services.md). Optional, mirroring notifyContinuationStarted: a
+   * provider (or test double) without it gives runs no services.
+   */
+  readRepositoryFile?(input: RepositoryFileInput): Promise<string | null>;
 }
 
 export type ContinuationOutcome = "succeeded" | "failed" | "budget_exhausted";

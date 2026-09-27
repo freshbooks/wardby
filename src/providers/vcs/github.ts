@@ -89,6 +89,18 @@ export interface ContinuationCheckRunCompleteInput extends ContinuationCheckRunI
   outcome: "succeeded" | "failed";
 }
 
+/** One file at one ref, read through the API without a clone. */
+export interface RepositoryFileInput {
+  repository: string;
+  ref: string;
+  /** Repository-relative POSIX path. */
+  path: string;
+  /** Refused above this many bytes. */
+  maxBytes: number;
+}
+
+const SAFE_FILE_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+
 export interface GitHubRepositoryAccess {
   withRepositoryToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T>;
   createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult>;
@@ -100,6 +112,12 @@ export interface GitHubRepositoryAccess {
   createContinuationCheckRun(input: ContinuationCheckRunInput): Promise<void>;
   /** Completes the check run if one exists for this run+commit; a no-op otherwise (never creates). */
   completeContinuationCheckRun(input: ContinuationCheckRunCompleteInput): Promise<void>;
+  /**
+   * The raw text of one file at a ref, or null when it does not exist (a
+   * Contents: read token). Optional so test doubles and non-GitHub providers
+   * can omit it: coding-run services then read no declaration.
+   */
+  readFileAtRef?(input: RepositoryFileInput): Promise<string | null>;
 }
 
 type Fetch = typeof globalThis.fetch;
@@ -317,6 +335,58 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     } finally {
       await this.revokeToken(token).catch(() => undefined);
     }
+  }
+
+  /**
+   * One file's raw text at a ref, without a clone (a Contents: read token).
+   * Requests the raw media type; GitHub honors it for an ordinary file but
+   * falls back to a JSON metadata response for anything else the raw type
+   * doesn't apply to -- a directory listing (a JSON array) or a symlink /
+   * submodule (a JSON object whose `type` isn't "file"). Either of those, or
+   * a 404, means there's no file text to return.
+   */
+  async readFileAtRef(input: RepositoryFileInput): Promise<string | null> {
+    if (!SAFE_FILE_PATH.test(input.path) || input.path.split("/").some((part) => part === "." || part === "..")) {
+      throw new Error("github_file_path_invalid");
+    }
+    const repository = normalizeGitHubRepository(input.repository);
+    const ref = normalizeGitRef(input.ref);
+    const [owner, name] = repository.split("/");
+    const path = input.path.split("/").map(encodeURIComponent).join("/");
+    return this.withScopedToken(repository, { contents: "read" }, async (token) => {
+      const response = await this.requestJson(
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/contents/${path}?ref=${encodeURIComponent(ref)}`,
+        token,
+        { headers: { accept: "application/vnd.github.raw+json" } },
+        [200, 404],
+      );
+      if (response.status === 404) return null;
+      const declared = Number(response.headers.get("content-length") ?? Number.NaN);
+      if (Number.isFinite(declared) && declared > input.maxBytes) throw new Error("github_file_too_large");
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > input.maxBytes) throw new Error("github_file_too_large");
+      let text: string;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw new Error("github_file_not_utf8");
+      }
+      // Not raw content check: try to read the body as GitHub's own
+      // metadata shape rather than trusting the content-type header, since
+      // the raw media type itself is "application/vnd.github.raw+json" --
+      // a substring check for "json" would misfire on every real file.
+      let metadata: unknown;
+      try {
+        metadata = JSON.parse(text);
+      } catch {
+        return text;
+      }
+      if (Array.isArray(metadata)) throw new Error("github_file_not_a_file");
+      if (metadata && typeof metadata === "object" && "type" in metadata && metadata.type !== "file") {
+        throw new Error("github_file_not_a_file");
+      }
+      return text;
+    });
   }
 
   private identity?: Promise<{ id: number; slug: string }>;
