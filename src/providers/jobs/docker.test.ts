@@ -1100,6 +1100,69 @@ describe("Docker launcher with services", () => {
     expect(created).toBeInstanceOf(Error);
     expect((created as Error).message).toBe("docker_isolation_unsupported");
   });
+
+  it("removes services and the network keeper with the run's other resources, in namespace order", async () => {
+    const created = await servicesHarness("docker-services-remove");
+    const handle = await created.launcher.launch(created.spec);
+    created.docker.finish();
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "succeeded" });
+    await created.launcher.remove(handle);
+    const names = created.docker.plan.names;
+    const service = dockerServiceContainerName(created.spec.runId, "postgres");
+    expect(commands(created.docker, "container", "rm").map((args) => args.slice(2))).toEqual([
+      ["--force", names.workerContainer],
+      ["--force", "--volumes", service],
+      ["--force", names.networkKeeperContainer],
+      ["--force", names.keeperContainer],
+    ]);
+    expect(created.docker.removed).toEqual(new Set([service, names.networkKeeperContainer]));
+  });
+
+  it("removes the services of a launch that failed readiness", async () => {
+    const created = await servicesHarness("docker-services-unready-cleanup");
+    created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    expect(created.docker.removed).toEqual(
+      new Set([
+        dockerServiceContainerName(created.spec.runId, "postgres"),
+        created.docker.plan.names.networkKeeperContainer,
+      ]),
+    );
+  });
+
+  it("stops the services when the run is stopped", async () => {
+    const created = await servicesHarness("docker-services-stop");
+    const handle = await created.launcher.launch(created.spec);
+    await created.launcher.stop(handle);
+    const service = dockerServiceContainerName(created.spec.runId, "postgres");
+    expect(commands(created.docker, "container", "stop").map((args) => args.at(-1))).toEqual([
+      created.docker.plan.names.workerContainer,
+      service,
+    ]);
+    expect(created.docker.running.has(service)).toBe(false);
+  });
+
+  it("sweeps an expired run's services when the launcher restarts", async () => {
+    const created = await servicesHarness("docker-services-sweep");
+    const handle = await created.launcher.launch(created.spec);
+    const restarted = new DockerJobLauncher({
+      stateRoot: join(created.root, "state"),
+      workspaceRoot: join(created.root, "workspaces"),
+      proxyContainer: "trusted-proxy",
+      resolveCapability: async () => capability,
+      isRunActive: async () => false,
+      docker: created.docker,
+      transfer: new NoopTransfer(),
+      now: () => Date.now() + 24 * 60 * 60 * 1_000,
+    });
+    await expect(restarted.status(handle)).rejects.toThrow("job_removed");
+    expect(created.docker.removed).toEqual(
+      new Set([
+        dockerServiceContainerName(created.spec.runId, "postgres"),
+        created.docker.plan.names.networkKeeperContainer,
+      ]),
+    );
+  });
 });
 
 describe("NodeDockerCommandRunner timeouts", () => {

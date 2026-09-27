@@ -45,6 +45,7 @@ import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   assertServiceContainerInspection,
   buildDockerServicePlan,
+  dockerServiceContainerNames,
   type DockerServiceContainer,
 } from "./docker-services.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
@@ -1001,25 +1002,25 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
 
   private async stopRecord(record: DockerJobRecord, timedOut: boolean): Promise<void> {
     if (isTerminal(record)) return;
-    try {
-      await this.run(["container", "stop", "--time", "10", record.handle.id]);
-    } catch (error) {
-      if (!(error instanceof DockerCommandError && error.notFound))
-        throw new Error("docker_stop_failed", { cause: error });
-    }
+    await this.stopContainer(record.handle.id);
     if (record.spec.provider === "claude-code") {
-      const tool = buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.toolContainer;
-      try {
-        await this.run(["container", "stop", "--time", "10", tool]);
-      } catch (error) {
-        if (!(error instanceof DockerCommandError && error.notFound))
-          throw new Error("docker_stop_failed", { cause: error });
-      }
+      await this.stopContainer(buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.toolContainer);
     }
+    // Services stop with the run; they (and the network keeper) are removed with its other resources.
+    for (const service of dockerServiceContainerNames(record.spec)) await this.stopContainer(service);
     record.phase = timedOut ? "failed" : "stopped";
     record.result = timedOut ? { exitCode: 124, reason: "timed_out" } : resultFor("stopped");
     await this.writeRecord(record);
     this.clearDeadline(record);
+  }
+
+  private async stopContainer(name: string): Promise<void> {
+    try {
+      await this.run(["container", "stop", "--time", "10", name]);
+    } catch (error) {
+      if (!(error instanceof DockerCommandError && error.notFound))
+        throw new Error("docker_stop_failed", { cause: error });
+    }
   }
 
   private async sweepExpired(record: DockerJobRecord): Promise<void> {
@@ -1039,17 +1040,29 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     const labels = resourceLabels(record);
     await this.removeContainerIfAttested(plan.names.workerContainer, labels);
     if (plan.toolCreateArgs) await this.removeContainerIfAttested(plan.names.toolContainer, labels);
+    // Services, then the network keeper: nothing may still share its namespace when it goes.
+    // --volumes: an image VOLUME the attestation rejected must not outlive its container.
+    for (const service of dockerServiceContainerNames(record.spec)) {
+      await this.removeContainerIfAttested(service, labels, true);
+    }
+    if (plan.networkKeeperCreateArgs) {
+      await this.removeContainerIfAttested(plan.names.networkKeeperContainer, labels);
+    }
     await this.runIgnoreMissing(["network", "disconnect", plan.names.network, this.options.proxyContainer]);
     await this.removeContainerIfAttested(plan.names.keeperContainer, labels);
     await this.removeNetworkIfAttested(plan.names.network, labels);
     await this.removeVolumeIfAttested(plan.names.storageVolume, labels);
   }
 
-  private async removeContainerIfAttested(name: string, labels: Record<string, string>): Promise<void> {
+  private async removeContainerIfAttested(
+    name: string,
+    labels: Record<string, string>,
+    anonymousVolumes = false,
+  ): Promise<void> {
     try {
       const inspected = await this.inspect<DockerContainerInspection>(["container", "inspect", name]);
       if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
-      await this.runIgnoreMissing(["container", "rm", "--force", name]);
+      await this.runIgnoreMissing(["container", "rm", "--force", ...(anonymousVolumes ? ["--volumes"] : []), name]);
     } catch (error) {
       if (!(error instanceof DockerCommandError && error.notFound)) throw error;
     }
