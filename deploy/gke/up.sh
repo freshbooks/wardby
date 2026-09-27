@@ -84,13 +84,15 @@ iam_substitutions() {
 }
 # Belt and suspenders against the substitution list above going stale: every
 # rendered manifest must be free of the wardby-*-gsa-email / *-database-url /
-# instance-connection-name / migrate-job / database-cidr placeholders before
-# it is applied. wardby-migrator and wardby-migrate (bare) are real resource
-# names and must survive -- the patterns below only match the longer
-# placeholder strings.
+# instance-connection-name / migrate-job / database-cidr / *-image placeholders
+# before it is applied. wardby-migrator and wardby-migrate (bare) are real
+# resource names and must survive -- the patterns below only match the longer
+# placeholder strings. The image pattern is anchored on the "value: " prefix
+# every worker-image env var placeholder is rendered with, so it can never
+# match a real registry path (which never starts with "wardby-").
 assert_no_placeholders() {
   local leftover
-  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version' || true)"
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*' || true)"
   if [[ -n "$leftover" ]]; then
     echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
     echo "$leftover" | sort -u >&2
