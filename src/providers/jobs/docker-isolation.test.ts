@@ -90,7 +90,8 @@ describe("Docker isolation policy", () => {
     expect(toolMounts.join(" ")).not.toContain(WORKER_PATHS.output);
     expect(agent).toContain("WARDBY_RUN_CAPABILITY");
     expect(tools.join(" ")).not.toContain("WARDBY_RUN_CAPABILITY");
-    expect(tools).toContain("none");
+    expect(tools[tools.indexOf("--network") + 1]).toBe(isolationNames(claude.runId).network);
+    expect(tools.filter((_value, index) => tools[index - 1] === "--env")).toEqual(["WARDBY_TOOL_SETUP"]);
   });
 
   it("fails closed when mandatory host features are absent", () => {
@@ -232,11 +233,12 @@ describe("Docker isolation policy", () => {
       provider: "claude-code",
       toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
     };
+    const SETUP = '{"schemaVersion":1,"env":{},"files":[]}';
     const container: DockerContainerInspection = {
       Config: {
         User: "10001:10001",
         Image: claude.toolImage,
-        Env: [],
+        Env: [`WARDBY_TOOL_SETUP=${SETUP}`],
         Labels: {
           "io.wardby.managed": "true",
           "io.wardby.component": "coding-worker",
@@ -261,7 +263,7 @@ describe("Docker isolation policy", () => {
         Memory: Math.floor(claude.limits.memoryMb / 3) * 1024 * 1024,
         MemorySwap: Math.floor(claude.limits.memoryMb / 3) * 1024 * 1024,
         MemorySwappiness: null,
-        NetworkMode: "none",
+        NetworkMode: names.network,
         NanoCpus: 250_000_000,
         PidsLimit: 16,
         PidMode: "",
@@ -292,9 +294,20 @@ describe("Docker isolation policy", () => {
         { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.workspace, RW: true },
         { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.tool, RW: true },
       ],
-      NetworkSettings: { Networks: { none: {} }, Ports: {} },
+      NetworkSettings: { Networks: { [names.network]: {} }, Ports: {} },
     };
-    expect(() => assertClaudeToolRunnerContainerInspection(container, claude)).not.toThrow();
+    expect(() => assertClaudeToolRunnerContainerInspection(container, claude, SETUP)).not.toThrow();
+    for (const tampered of [
+      { ...container, Config: { ...container.Config!, Env: [] } },
+      {
+        ...container,
+        Config: { ...container.Config!, Env: [`WARDBY_TOOL_SETUP=${SETUP}`, "WARDBY_RUN_CAPABILITY=rrp_x"] },
+      },
+      { ...container, HostConfig: { ...container.HostConfig!, NetworkMode: "bridge" } },
+      { ...container, NetworkSettings: { Networks: { [names.network]: {}, bridge: {} }, Ports: {} } },
+    ]) {
+      expect(() => assertClaudeToolRunnerContainerInspection(tampered, claude, SETUP)).toThrow();
+    }
   });
 });
 

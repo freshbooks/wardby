@@ -11,6 +11,7 @@ import {
   isolationNames,
   type DockerContainerInspection,
 } from "./docker-isolation.js";
+import { claudeToolSetup } from "./claude-tool-setup.js";
 import type { JobHandle, JobSpec } from "./types.js";
 
 const execute = promisify(execFile);
@@ -127,7 +128,7 @@ http.createServer(async (request, response) => {
       const structured = turn > 1;
       const id = structured ? 'toolu_structured_docker' : 'toolu_wardby_docker';
       const name = structured ? 'StructuredOutput' : 'mcp__wardby_tools__run_command';
-      const input = structured ? JSON.parse(text) : { command: 'git status --short', timeout_ms: 1000 };
+      const input = structured ? JSON.parse(text) : { command: 'printf "%s" "$npm_config_registry"', timeout_ms: 1000 };
       return response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({
         id: 'msg_wardby_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5',
         content: [{ type: 'tool_use', id, name, input }], stop_reason: 'tool_use', stop_sequence: null,
@@ -135,7 +136,7 @@ http.createServer(async (request, response) => {
       }));
     }
     const payload = turn++ === 0
-      ? toolSse('toolu_wardby_docker', 'mcp__wardby_tools__run_command', { command: 'git status --short', timeout_ms: 1000 })
+      ? toolSse('toolu_wardby_docker', 'mcp__wardby_tools__run_command', { command: 'printf "%s" "$npm_config_registry"', timeout_ms: 1000 })
       : toolSse('toolu_structured_docker', 'StructuredOutput', JSON.parse(text));
     return response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' }).end(payload);
   }
@@ -239,7 +240,7 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
       ),
     ]);
     assertClaudeAgentContainerInspection(agent, spec, capability);
-    assertClaudeToolRunnerContainerInspection(tool, spec);
+    assertClaudeToolRunnerContainerInspection(tool, spec, claudeToolSetup(spec, capability));
     expect((tool as DockerContainerInspection & { State?: { Running?: boolean } }).State?.Running).toBe(true);
 
     let status = await launcher.status(handle);
@@ -300,6 +301,11 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
               (block) =>
                 block.type === "tool_result" &&
                 block.tool_use_id === "toolu_wardby_docker" &&
+                Array.isArray(block.content) &&
+                block.content.some(
+                  (part: { text?: unknown }) =>
+                    typeof part.text === "string" && part.text.includes("http://wardby-proxy:8787/registry/npm/"),
+                ) &&
                 JSON.stringify(block.cache_control) === JSON.stringify({ type: "ephemeral" }),
             ),
         ),

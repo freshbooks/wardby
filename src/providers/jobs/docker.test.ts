@@ -18,6 +18,7 @@ import {
   parseWorkerDiagnosticLine,
 } from "./docker.js";
 import { buildDockerIsolationPlan, WORKER_PATHS } from "./docker-isolation.js";
+import { claudeToolSetup } from "./claude-tool-setup.js";
 import type { JobHandle, JobResult, JobSpec } from "./types.js";
 
 const image = `registry.example/wardby-worker@sha256:${"a".repeat(64)}`;
@@ -414,7 +415,7 @@ class FakeDocker implements DockerCommandRunner {
       Config: {
         User: "10001:10001",
         Image: this.job.toolImage,
-        Env: [],
+        Env: [`WARDBY_TOOL_SETUP=${claudeToolSetup(this.job, capability)}`],
         Labels: this.resourceLabels.get(this.plan.names.toolContainer),
       },
       HostConfig: {
@@ -432,7 +433,7 @@ class FakeDocker implements DockerCommandRunner {
         PidsLimit: 16,
         NanoCpus: 250_000_000,
         ShmSize: 16 * 1024 * 1024,
-        NetworkMode: "none",
+        NetworkMode: this.plan.names.network,
         PidMode: "",
         RestartPolicy: { Name: "no" },
         LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
@@ -461,7 +462,7 @@ class FakeDocker implements DockerCommandRunner {
         Destination,
         RW,
       })),
-      NetworkSettings: { Networks: { none: {} }, Ports: {} },
+      NetworkSettings: { Networks: { [this.plan.names.network]: {} }, Ports: {} },
       State: {
         Running: this.toolState.running,
         Status: this.toolState.status,
@@ -594,7 +595,7 @@ describe("DockerJobLauncher", () => {
     expect(await launcher.collect(handle)).toEqual({ exitCode: 124, reason: "timed_out" });
   });
 
-  it("treats Claude's agent and no-network tool runner as one cleanup unit", async () => {
+  it("treats Claude's agent and its run-network tool runner as one cleanup unit", async () => {
     const created = await harness("docker-claude", { provider: "claude-code", toolImage });
     const handle = await created.launcher.launch(created.spec);
     const createdContainers = created.docker.calls
@@ -606,6 +607,14 @@ describe("DockerJobLauncher", () => {
       created.docker.plan.names.workerContainer,
     ]);
     expect(JSON.stringify(created.docker.calls)).not.toContain(`WARDBY_RUN_CAPABILITY=${capability}`);
+    const toolCreate = created.docker.calls.find(
+      (call) =>
+        call.args[0] === "container" &&
+        call.args[1] === "create" &&
+        call.args.includes(created.docker.plan.names.toolContainer),
+    )!;
+    expect(Object.keys(toolCreate.options?.env ?? {})).toEqual(["WARDBY_TOOL_SETUP"]);
+    expect(JSON.parse(toolCreate.options!.env!.WARDBY_TOOL_SETUP).schemaVersion).toBe(1);
     await expect(created.launcher.status(handle)).resolves.toEqual({ state: "running" });
     created.docker.finish();
     await expect(created.launcher.collect(handle)).resolves.toMatchObject({ reason: "completed" });
