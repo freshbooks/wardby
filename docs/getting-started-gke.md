@@ -30,8 +30,9 @@ use `deploy/gke` and the `gke-autopilot` Kubernetes overlay described here.
   the control-plane pod being preempted or rescheduled. See "Durable executor"
   below.
 
-Claude Code's two-container executor is currently Docker-only; the Kubernetes
-launcher accepts Codex coding workers.
+The Kubernetes launcher runs both Codex and Claude Code coding workers; see
+[Coding worker isolation](coding-worker-isolation.md#pod-layout) for the
+Claude Code pod's extra tool-runner sidecar and its image requirements.
 
 ## 1. Prerequisites
 

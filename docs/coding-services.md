@@ -28,7 +28,10 @@ so its runs are unaffected by this and start normally on either launcher.
    start until every service reports ready.
 4. The agent's shells receive each service's variables (such as
    `DATABASE_URL`), and its instructions gain a short note listing the services,
-   their variables, and that they start empty.
+   their variables, and that they start empty. Claude Code runs work the same
+   way: since its tool runner is what actually runs shell commands in the
+   repository, the tool runner is what waits for every service and reaches
+   them on `127.0.0.1` with the same variables.
 5. When the run ends, its pod is deleted, and each service and its data go
    with it.
 

@@ -69,6 +69,13 @@ The image commands create local tags. Resolve every enabled image with
 `sha256:...` ID in `.env.local`; do not use the mutable tag at runtime. Add the
 following values, replacing image IDs and GitHub values:
 
+This local, immutable-`sha256:` ID form of `CODING_CLAUDE_WORKER_IMAGE` and
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE` is only accepted by the Docker launcher.
+`JOB_LAUNCHER=kubernetes` needs both images pushed to a registry and set as
+`repo@sha256:<64 hex>` registry digests instead — the control plane refuses
+to start otherwise — which `deploy/gke/up.sh` and `deploy/kind-coding/up.sh`
+build, push, and pin for you.
+
 ```dotenv
 # Leave this as local until every value below is set and reviewed.
 JOB_LAUNCHER=local
