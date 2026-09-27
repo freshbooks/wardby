@@ -3,9 +3,12 @@ import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import { MAX_CODING_TASK_BYTES, normalizeGitHubRepository, normalizeGitRef } from "./protocol.js";
 import { MAX_COLLECT_EXCLUDE_PATHS, validateCollectExcludePath } from "./collect-exclude.js";
 import { CODING_PROVIDERS } from "./provider.js";
+import { WARDBY_PROTECTED_PATHS, isWellFormedProtectedPath, protectsSomePath } from "./protected-paths.js";
 import { parseAllowlist, resolvePolicy } from "./registry/allowlist.js";
 import { REGISTRY_ADAPTERS } from "./registry/adapters.js";
 import { AllowedServiceNamesSchema } from "./services/catalog.js";
+
+export { PROTECTED_PATH_EXCEPTION } from "./protected-paths.js";
 
 export const MIN_CODING_TIMEOUT_SEC = 60;
 export const MAX_CODING_TIMEOUT_SEC = 7200;
@@ -15,6 +18,8 @@ export const DEFAULT_PROTECTED_PATHS = [
   ".github/CODEOWNERS",
   "CODEOWNERS",
   "docs/CODEOWNERS",
+  // Enforced for every run anyway (providers/vcs/git.ts protectedPathMatcher); listed so new agents show it.
+  ...WARDBY_PROTECTED_PATHS,
 ] as const;
 
 const MAX_PROTECTED_PATH_BYTES = 512;
@@ -62,12 +67,8 @@ const protectedPathSchema = z
   .refine((value) => value.length > 0 && byteLength(value) <= MAX_PROTECTED_PATH_BYTES, "must be a bounded path")
   .refine((value) => !INVALID_SINGLE_LINE_CONTROL.test(value), "must not contain control characters")
   .refine(
-    (value) => !value.startsWith("/") && !value.startsWith("./") && !value.includes("\\"),
-    "must be a repository-relative POSIX path",
-  )
-  .refine(
-    (value) => !value.split("/").some((part) => part === "" || part === "." || part === ".."),
-    "must not contain empty or traversal components",
+    isWellFormedProtectedPath,
+    "must be a repository-relative POSIX path without empty or traversal components, optionally with one leading ! for an exception",
   );
 
 const collectExcludePathSchema = z.string().transform((value, ctx) => {
@@ -130,6 +131,7 @@ const codingProfileFields = {
     .array(protectedPathSchema)
     .min(1)
     .max(MAX_PROTECTED_PATHS)
+    .refine(protectsSomePath, "must protect at least one path; entries starting with ! are only exceptions")
     .transform((paths) => [...new Set(paths)]),
   collectExclude: z
     .array(collectExcludePathSchema)

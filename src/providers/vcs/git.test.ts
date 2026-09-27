@@ -15,6 +15,7 @@ import {
   GitCommandError,
   GitVcsProvider,
   NodeGitCommandRunner,
+  protectedPathMatcher,
   redactGitOutput,
   type GitCommandOptions,
   type GitCommandResult,
@@ -679,6 +680,77 @@ describe("GitVcsProvider", () => {
         maxBytes: 8192,
       }),
     ).rejects.toThrow("vcs_read_file_unsupported");
+  });
+
+  it("lets an exception carve a path out of a protected pattern, whatever the order", async () => {
+    const { provider, git, input } = await harness();
+    const prepared = await provider.prepareWorkspace({
+      ...input,
+      protectedPaths: ["!.wardby/services.yaml", ".wardby/**", "CODEOWNERS"],
+    });
+    await mkdir(resolve(prepared.workspacePath, ".wardby"), { recursive: true });
+    await writeFile(resolve(prepared.workspacePath, ".wardby", "services.yaml"), 'services:\n  redis: "7"\n');
+    git.changedPaths = [".wardby/services.yaml"];
+    await expect(provider.finalizeChanges(prepared)).resolves.toMatchObject({ outcome: "pull_request_opened" });
+  });
+
+  it("still protects everything else the pattern covers", async () => {
+    const { provider, git, input } = await harness();
+    const prepared = await provider.prepareWorkspace({
+      ...input,
+      protectedPaths: [".wardby/**", "!.wardby/services.yaml"],
+    });
+    git.changedPaths = [".wardby/services.yaml", ".wardby/other.yaml"];
+    await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_protected_path:.wardby/other.yaml");
+  });
+
+  it("refuses a protected-path list made only of exceptions", async () => {
+    const { provider, input } = await harness();
+    await expect(provider.prepareWorkspace({ ...input, protectedPaths: ["!.wardby/services.yaml"] })).rejects.toThrow(
+      "vcs_protected_paths_invalid",
+    );
+  });
+
+  it("protects .wardby/ for an agent whose stored list predates the baseline, except the declaration", async () => {
+    // The harness's list is [".github/workflows/**", "CODEOWNERS"]: no .wardby entry at all.
+    const { provider, git, input } = await harness();
+    const prepared = await provider.prepareWorkspace(input);
+    git.changedPaths = [".wardby/notes.md"];
+    await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_protected_path:.wardby/notes.md");
+
+    const again = await harness();
+    const preparedAgain = await again.provider.prepareWorkspace(again.input);
+    await mkdir(resolve(preparedAgain.workspacePath, ".wardby"), { recursive: true });
+    await writeFile(resolve(preparedAgain.workspacePath, ".wardby", "services.yaml"), 'services:\n  postgres: "16"\n');
+    again.git.changedPaths = [".wardby/services.yaml"];
+    await expect(again.provider.finalizeChanges(preparedAgain)).resolves.toMatchObject({
+      outcome: "pull_request_opened",
+    });
+  });
+});
+
+describe("protectedPathMatcher", () => {
+  it("protects matches of any pattern unless an exception matches", () => {
+    const isProtected = protectedPathMatcher([".github/workflows/**", ".wardby/**", "!.wardby/services.yaml"]);
+    expect(isProtected(".github/workflows/ci.yml")).toBe(true);
+    expect(isProtected(".wardby/services.yaml")).toBe(false);
+    expect(isProtected(".wardby/nested/services.yaml")).toBe(true);
+    expect(isProtected("src/index.ts")).toBe(false);
+  });
+
+  it("reads a leading ! as an exception, not a literal file name", () => {
+    expect(protectedPathMatcher(["**", "!README.md"])("README.md")).toBe(false);
+    expect(protectedPathMatcher(["**", "!README.md"])("!README.md")).toBe(true);
+  });
+
+  it("always adds the .wardby/ baseline and its services.yaml exception, whatever the agent's list says", () => {
+    const legacy = protectedPathMatcher(["CODEOWNERS"]);
+    expect(legacy(".wardby/notes.md")).toBe(true);
+    expect(legacy(".wardby/nested/x.yaml")).toBe(true);
+    expect(legacy(".wardby/services.yaml")).toBe(false);
+    // Even an agent that names the declaration itself cannot stop a builder proposing it.
+    expect(protectedPathMatcher(["CODEOWNERS", ".wardby/services.yaml"])(".wardby/services.yaml")).toBe(false);
+    expect(protectedPathMatcher(["CODEOWNERS"])("src/index.ts")).toBe(false);
   });
 });
 

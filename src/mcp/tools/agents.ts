@@ -179,7 +179,14 @@ const profileJsonSchema = {
     defaultTask: { type: ["string", "null"] },
     allowWebhookTaskOverride: { type: "boolean" },
     timeoutSec: { type: "integer", minimum: 60, maximum: 7200 },
-    protectedPaths: { type: "array", minItems: 1, maxItems: 128, items: { type: "string" } },
+    protectedPaths: {
+      type: "array",
+      minItems: 1,
+      maxItems: 128,
+      items: { type: "string" },
+      description:
+        'Glob patterns (*, **, ?) a run may not change. A leading ! makes an exception: ["docs/**", "!docs/changelog.md"] protects docs/ except the changelog. Every run also protects .wardby/** except .wardby/services.yaml, whatever this list says.',
+    },
     collectExclude: { type: "array", maxItems: 64, items: { type: "string" } },
     toolchain: { type: "string", enum: ["node", "node-python"] },
     toolchainVersion: { type: ["string", "null"] },

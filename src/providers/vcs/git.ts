@@ -3,6 +3,13 @@ import { lstat, mkdir, opendir, readFile, readlink, realpath, rm } from "node:fs
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExcludePathspecs, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
+import {
+  WARDBY_PROTECTED_PATHS,
+  isProtectedPathException,
+  isWellFormedProtectedPath,
+  protectedPathBody,
+  protectsSomePath,
+} from "../../coding/protected-paths.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import type { Writable } from "node:stream";
 import {
@@ -195,16 +202,10 @@ export interface GitVcsProviderOptions {
   cloneUrlForRepository?: (repository: string) => string;
 }
 
+/** Validates one protectedPaths entry; a leading "!" makes it an exception (see protectedPathMatcher). */
 function validateProtectedPath(value: string): string {
   const path = value.trim();
-  if (
-    !path ||
-    Buffer.byteLength(path, "utf8") > 512 ||
-    path.startsWith("/") ||
-    path.startsWith("./") ||
-    path.includes("\\") ||
-    path.split("/").some((part) => !part || part === "." || part === "..")
-  ) {
+  if (Buffer.byteLength(path, "utf8") > 512 || !isWellFormedProtectedPath(path)) {
     throw new Error("vcs_protected_path_invalid");
   }
   return path;
@@ -228,6 +229,24 @@ function globRegex(pattern: string): RegExp {
     }
   }
   return new RegExp(`${source}$`);
+}
+
+/**
+ * Whether a changed path is protected: it matches one of `patterns` or the
+ * WARDBY_PROTECTED_PATHS baseline, and none of the exceptions (entries with a
+ * leading "!"). An exception always wins, whatever the order, so
+ * [".wardby/**", "!.wardby/services.yaml"] protects everything under .wardby/
+ * except the service declaration, which a builder may propose (it takes effect
+ * only after merge; docs/coding-services.md). The baseline is added here, at
+ * enforcement, rather than stored, so every existing agent and in-flight run
+ * gets it.
+ */
+export function protectedPathMatcher(patterns: readonly string[]): (path: string) => boolean {
+  const all = [...patterns, ...WARDBY_PROTECTED_PATHS];
+  const exceptions = all.filter(isProtectedPathException).map((pattern) => globRegex(protectedPathBody(pattern)));
+  const protectedPatterns = all.filter((pattern) => !isProtectedPathException(pattern)).map(globRegex);
+  return (path) =>
+    protectedPatterns.some((matcher) => matcher.test(path)) && !exceptions.some((matcher) => matcher.test(path));
 }
 
 function validateChangedPath(path: string): string {
@@ -448,8 +467,7 @@ export class GitVcsProvider implements VcsProvider {
       ).stdout,
     );
     if (changed.length > this.maxChangedFiles) throw new Error("vcs_changed_file_limit");
-    const protectedMatchers = prepared.protectedPaths.map((path) => ({ path, matcher: globRegex(path) }));
-    const protectedChange = changed.find((path) => protectedMatchers.some(({ matcher }) => matcher.test(path)));
+    const protectedChange = changed.find(protectedPathMatcher(prepared.protectedPaths));
     if (protectedChange) throw new Error(`vcs_protected_path:${protectedChange}`);
 
     let diff: string;
@@ -657,6 +675,7 @@ export class GitVcsProvider implements VcsProvider {
     }
     const protectedPaths = [...new Set(input.protectedPaths.map(validateProtectedPath))];
     if (protectedPaths.length === 0 || protectedPaths.length > 128) throw new Error("vcs_protected_paths_invalid");
+    if (!protectsSomePath(protectedPaths)) throw new Error("vcs_protected_paths_invalid");
     const collectExclude = [...normalizeCollectExclusions(input.collectExclude ?? []).paths];
     return { runId: input.runId, repository, baseRef, headRef, protectedPaths, collectExclude, continuation };
   }
