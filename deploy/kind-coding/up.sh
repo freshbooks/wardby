@@ -122,21 +122,28 @@ data:
     help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
 EOF
 
-echo "==> 5/${TOTAL_STEPS} build and push the worker, node-python worker, and runtime images"
+echo "==> 5/${TOTAL_STEPS} build and push the worker, node-python worker, runtime, and Claude images"
 docker build -f src/coding-worker/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev" .
 docker build -f src/coding-worker/Dockerfile.node-python -t "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev" .
 docker build -f deploy/Dockerfile --target runtime -t "localhost:${REGISTRY_PORT}/wardby-runtime:dev" .
+docker build -f src/claude-coding-worker/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev" .
+docker build -f src/claude-tool-runner/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev" .
 docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-runtime:dev"
+docker push "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev"
+docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev"
 WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev")"
 WORKER_NODE_PYTHON_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev")"
 RUNTIME_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-runtime:dev")"
+CLAUDE_WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev")"
+CLAUDE_TOOL_RUNNER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev")"
 
 echo "==> 6/${TOTAL_STEPS} verify the worker images have tar, head, and test"
 # Both worker images (plain node, and the node-python toolchain agents on CODING_WORKER_IMAGE_NODE_PYTHON_3_12
-# use) need this: the run pod's keeper seeds and collects the workspace through them.
-for image_digest in "$WORKER_DIGEST" "$WORKER_NODE_PYTHON_DIGEST"; do
+# use) need this: the run pod's keeper seeds and collects the workspace through them. The Claude worker
+# image's keeper needs the same.
+for image_digest in "$WORKER_DIGEST" "$WORKER_NODE_PYTHON_DIGEST" "$CLAUDE_WORKER_DIGEST"; do
   if ! docker run --rm --entrypoint sh "$image_digest" -c 'command -v tar && command -v head && command -v test' >/dev/null; then
     echo "up.sh: worker image $image_digest is missing tar, head, or test; Task 5's seeding and collection depend on them." >&2
     exit 1
@@ -203,6 +210,8 @@ JOB_LAUNCHER=kubernetes
 KUBERNETES_CONTEXT=${KUBE_CONTEXT}
 CODING_WORKER_IMAGE=${WORKER_DIGEST}
 CODING_WORKER_IMAGE_NODE_PYTHON_3_12=${WORKER_NODE_PYTHON_DIGEST}
+CODING_CLAUDE_WORKER_IMAGE=${CLAUDE_WORKER_DIGEST}
+CODING_CLAUDE_TOOL_RUNNER_IMAGE=${CLAUDE_TOOL_RUNNER_DIGEST}
 
 # The keeper's NetworkPolicy-enforcement probe exec routinely takes longer than the
 # launcher's 10 s default under kind's default node resources (250m CPU / 128Mi); 60 s
