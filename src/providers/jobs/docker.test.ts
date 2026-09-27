@@ -721,8 +721,7 @@ describe("DockerJobLauncher", () => {
 describe("Docker launcher parity for runs without services", () => {
   // Recorded before services existed on Docker. Never update these snapshots:
   // a run without services must issue exactly these Docker commands.
-  const stable = (argument: string) =>
-    argument.replace(/^(io\.wardby\.(?:spec-sha256|job-id))=.*$/, "$1=<varies>");
+  const stable = (argument: string) => argument.replace(/^(io\.wardby\.(?:spec-sha256|job-id))=.*$/, "$1=<varies>");
 
   async function parityLauncher(runId: string) {
     const created = await harness(runId);

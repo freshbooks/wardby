@@ -5,6 +5,15 @@ export const CODING_WORKER_UID = 10001;
 export const CODING_WORKER_GID = 10001;
 // The keeper needs headroom for runc's short-lived exec process plus Node's threads.
 const KEEPER_PIDS_LIMIT = 32;
+/**
+ * The network keeper (a run with services only): owns the run's network namespace so each
+ * service and the worker can share it with `--network container:`, as a pod's containers do.
+ */
+export const NETWORK_KEEPER_PIDS_LIMIT = 32;
+export const NETWORK_KEEPER_MEMORY_MB = 64;
+/** Idles until stopped, on the worker image's own `node` (every worker image ships it for the storage keeper). */
+export const NETWORK_KEEPER_SCRIPT =
+  "process.once('SIGTERM', () => process.exit(0)); setInterval(() => {}, 2147483647);";
 export const CODING_PROXY_ALIAS = "wardby-proxy";
 export const CODING_PROXY_PORT = 8787;
 /**
@@ -43,6 +52,7 @@ export interface DockerIsolationNames {
   keeperContainer: string;
   workerContainer: string;
   toolContainer: string;
+  networkKeeperContainer: string;
 }
 
 export interface DockerIsolationPlan {
@@ -54,6 +64,8 @@ export interface DockerIsolationPlan {
   keeperCreateArgs: string[];
   workerCreateArgs: string[];
   toolCreateArgs?: string[];
+  /** Present only for a run with services (docs/coding-services.md). */
+  networkKeeperCreateArgs?: string[];
   proxyNetworkConnectArgs: string[];
 }
 
@@ -91,6 +103,7 @@ export interface DockerVolumeInspection {
 }
 
 export interface DockerContainerInspection {
+  Id?: string;
   Config?: {
     Env?: string[];
     User?: string;
@@ -194,6 +207,11 @@ function validateSpec(spec: JobSpec): void {
   } else if (spec.toolImage !== undefined) {
     throw isolationError();
   }
+  if (spec.services !== undefined) {
+    // Claude's repository commands run in the no-network tool runner, which can never reach a
+    // service; docker-services.ts re-validates every entry against the catalog schema.
+    if (spec.provider === "claude-code" || spec.services.length === 0) throw isolationError();
+  }
   assertFiniteRange(spec.limits.cpus, 0.1, 32);
   assertIntegerRange(spec.limits.memoryMb, 128, 65_536);
   assertIntegerRange(spec.limits.pids, 16, 4_096);
@@ -215,20 +233,35 @@ function validateDockerObject(value: string): void {
   if (!DOCKER_OBJECT.test(value)) throw isolationError();
 }
 
-export function isolationNames(runId: string): DockerIsolationNames {
+/** The opaque per-run token in every Docker object name; never the run ID itself. */
+export function isolationToken(runId: string): string {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(runId)) throw isolationError();
-  const token = runHash(runId).slice(0, 20);
+  return runHash(runId).slice(0, 20);
+}
+
+export function isolationNames(runId: string): DockerIsolationNames {
+  const token = isolationToken(runId);
   return {
     network: `wardby-net-${token}`,
     storageVolume: `wardby-storage-${token}`,
     keeperContainer: `wardby-keeper-${token}`,
     workerContainer: `wardby-worker-${token}`,
     toolContainer: `wardby-tools-${token}`,
+    networkKeeperContainer: `wardby-netns-${token}`,
   };
 }
 
 function labels(runId: string): string[] {
   return ["--label", LABEL_MANAGED, "--label", LABEL_COMPONENT, "--label", `io.wardby.run-sha256=${runHash(runId)}`];
+}
+
+/** The fixed isolation labels every run object carries (docker-services.ts builds with them). */
+export function isolationLabelArgs(runId: string): string[] {
+  return labels(runId);
+}
+
+export function hasIsolationLabels(labels: Record<string, string> | undefined, runId: string): boolean {
+  return hasResourceLabels(labels, runId);
 }
 
 function storageMountOptions(spec: JobSpec): string {
@@ -327,6 +360,66 @@ export function buildKeeperCreateArgs(spec: JobSpec): string[] {
   ];
 }
 
+export function buildNetworkKeeperCreateArgs(spec: JobSpec): string[] {
+  validateSpec(spec);
+  if (spec.services === undefined) throw isolationError();
+  const names = isolationNames(spec.runId);
+  return [
+    "container",
+    "create",
+    "--name",
+    names.networkKeeperContainer,
+    "--pull",
+    "never",
+    "--user",
+    `${CODING_WORKER_UID}:${CODING_WORKER_GID}`,
+    "--network",
+    names.network,
+    "--read-only",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges=true",
+    "--security-opt",
+    "seccomp=builtin",
+    "--init",
+    "--cgroupns",
+    "private",
+    "--ipc",
+    "none",
+    "--cpus",
+    "0.1",
+    "--memory",
+    `${NETWORK_KEEPER_MEMORY_MB}m`,
+    "--memory-swap",
+    `${NETWORK_KEEPER_MEMORY_MB}m`,
+    "--memory-swappiness",
+    "0",
+    "--pids-limit",
+    String(NETWORK_KEEPER_PIDS_LIMIT),
+    "--restart",
+    "no",
+    "--log-driver",
+    "local",
+    "--log-opt",
+    "max-size=1m",
+    "--log-opt",
+    "max-file=2",
+    ...labels(spec.runId),
+    "--entrypoint",
+    "node",
+    spec.image,
+    "-e",
+    NETWORK_KEEPER_SCRIPT,
+  ];
+}
+
+/** The worker's network: the run network, or the network keeper's namespace for a run with services. */
+function workerNetworkMode(spec: JobSpec): string {
+  const names = isolationNames(spec.runId);
+  return spec.services === undefined ? names.network : `container:${names.networkKeeperContainer}`;
+}
+
 export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PORT): string[] {
   validateSpec(spec);
   assertIntegerRange(proxyPort, 1, 65_535);
@@ -342,7 +435,7 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
     "--user",
     `${CODING_WORKER_UID}:${CODING_WORKER_GID}`,
     "--network",
-    names.network,
+    workerNetworkMode(spec),
     "--read-only",
     "--cap-drop",
     "ALL",
@@ -573,6 +666,7 @@ export function buildDockerIsolationPlan(spec: JobSpec, proxyContainer: string):
     keeperCreateArgs: buildKeeperCreateArgs(spec),
     workerCreateArgs: spec.provider === "claude-code" ? buildClaudeAgentCreateArgs(spec) : buildWorkerCreateArgs(spec),
     ...(spec.provider === "claude-code" ? { toolCreateArgs: buildClaudeToolRunnerCreateArgs(spec) } : {}),
+    ...(spec.services !== undefined ? { networkKeeperCreateArgs: buildNetworkKeeperCreateArgs(spec) } : {}),
     proxyNetworkConnectArgs: buildProxyNetworkConnectArgs(spec.runId, proxyContainer),
   };
 }
@@ -675,6 +769,61 @@ export function assertKeeperContainerInspection(container: DockerContainerInspec
   }
 }
 
+export function assertNetworkKeeperContainerInspection(container: DockerContainerInspection, spec: JobSpec): void {
+  validateSpec(spec);
+  if (spec.services === undefined) throw isolationError();
+  const names = isolationNames(spec.runId);
+  const host = container.HostConfig;
+  const security = host?.SecurityOpt ?? [];
+  if (
+    container.Config?.User !== `${CODING_WORKER_UID}:${CODING_WORKER_GID}` ||
+    container.Config?.Image !== spec.image ||
+    !hasResourceLabels(container.Config.Labels, spec.runId) ||
+    host?.NetworkMode !== names.network ||
+    host.ReadonlyRootfs !== true ||
+    host.Privileged !== false ||
+    (host.Binds?.length ?? 0) !== 0 ||
+    (host.CapAdd?.length ?? 0) !== 0 ||
+    !host.CapDrop?.includes("ALL") ||
+    !security.includes("no-new-privileges=true") ||
+    !security.includes("seccomp=builtin") ||
+    host.PidsLimit !== NETWORK_KEEPER_PIDS_LIMIT ||
+    host.Memory !== NETWORK_KEEPER_MEMORY_MB * 1024 * 1024 ||
+    host.RestartPolicy?.Name !== "no" ||
+    (host.Dns?.length ?? 0) !== 0 ||
+    (host.ExtraHosts?.length ?? 0) !== 0 ||
+    Object.keys(host.PortBindings ?? {}).length !== 0 ||
+    (host.Mounts?.length ?? 0) !== 0 ||
+    (container.Mounts?.length ?? 0) !== 0 ||
+    Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== names.network
+  ) {
+    throw isolationError();
+  }
+}
+
+/**
+ * A worker without services is on the run network only. With services it is in the network
+ * keeper's namespace: Docker reports `container:<name>` before start and `container:<id>` after,
+ * and lists no networks of its own.
+ */
+function workerNetworkAttested(
+  container: DockerContainerInspection,
+  spec: JobSpec,
+  networkKeeperId: string | undefined,
+): boolean {
+  const names = isolationNames(spec.runId);
+  const mode = container.HostConfig?.NetworkMode;
+  const networks = Object.keys(container.NetworkSettings?.Networks ?? {});
+  if (spec.services === undefined) {
+    return mode === names.network && networks.length === 1 && networks[0] === names.network;
+  }
+  const shared = [
+    `container:${names.networkKeeperContainer}`,
+    ...(networkKeeperId ? [`container:${networkKeeperId}`] : []),
+  ];
+  return mode !== undefined && shared.includes(mode) && networks.length === 0;
+}
+
 export function assertProxyContainerInspection(container: DockerContainerInspection, runId: string): void {
   const internalNetwork = isolationNames(runId).network;
   const networks = container.NetworkSettings?.Networks ?? {};
@@ -736,11 +885,11 @@ export function assertWorkerContainerInspection(
   container: DockerContainerInspection,
   spec: JobSpec,
   expectedCapability: string,
+  networkKeeperId?: string,
 ): void {
   validateSpec(spec);
   const names = isolationNames(spec.runId);
   const host = container.HostConfig;
-  const networks = Object.keys(container.NetworkSettings?.Networks ?? {});
   const security = host?.SecurityOpt ?? [];
   const wardbyEnvironment = (container.Config?.Env ?? []).filter((value) => value.startsWith("WARDBY_"));
   if (
@@ -760,7 +909,7 @@ export function assertWorkerContainerInspection(
     host.PidsLimit !== spec.limits.pids ||
     host.NanoCpus !== Math.round(spec.limits.cpus * 1_000_000_000) ||
     host.ShmSize !== 16 * 1024 * 1024 ||
-    host.NetworkMode !== names.network ||
+    !workerNetworkAttested(container, spec, networkKeeperId) ||
     host.PidMode !== "" ||
     host.RestartPolicy?.Name !== "no" ||
     host.LogConfig?.Type !== "local" ||
@@ -777,9 +926,7 @@ export function assertWorkerContainerInspection(
     (host.GroupAdd?.length ?? 0) !== 0 ||
     Object.keys(host.PortBindings ?? {}).length !== 0 ||
     host.PublishAllPorts !== false ||
-    Object.keys(container.NetworkSettings?.Ports ?? {}).length !== 0 ||
-    networks.length !== 1 ||
-    networks[0] !== names.network
+    Object.keys(container.NetworkSettings?.Ports ?? {}).length !== 0
   ) {
     throw isolationError();
   }
