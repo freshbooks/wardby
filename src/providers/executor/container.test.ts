@@ -1426,6 +1426,22 @@ describe("failure diagnostics", () => {
     });
   });
 
+  it.each(["docker_tool_runner_not_ready", "kubernetes_tool_runner_failed", "kubernetes_tool_runner_unready"])(
+    "files a Claude tool runner that failed to start (%s) under the same category on both launchers",
+    async (message) => {
+      const created = await harness();
+      created.jobs.launchError = new Error(message);
+
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("failed");
+      expect(created.observer.events.find((event) => event.stage === "terminal")).toMatchObject({
+        outcome: "failed",
+        failureCategory: "job",
+      });
+    },
+  );
+
   it("logs which output-schema fields a failed worker rejected, next to the diagnostic id", async () => {
     const created = await harness();
     created.jobs.statusValue = { state: "failed" };

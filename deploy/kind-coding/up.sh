@@ -149,6 +149,11 @@ for image_digest in "$WORKER_DIGEST" "$WORKER_NODE_PYTHON_DIGEST" "$CLAUDE_WORKE
     exit 1
   fi
 done
+# Claude's tool runner answers the pod's startup probe with `test -S`.
+if ! docker run --rm --entrypoint sh "$CLAUDE_TOOL_RUNNER_DIGEST" -c 'command -v test' >/dev/null; then
+  echo "up.sh: the Claude tool runner image $CLAUDE_TOOL_RUNNER_DIGEST is missing test." >&2
+  exit 1
+fi
 
 echo "==> 7/${TOTAL_STEPS} apply the namespace and the proxy's env Secret"
 kubectl --context "$KUBE_CONTEXT" apply -f "${MANIFEST_DIR}/manifests/base/namespace.yaml"

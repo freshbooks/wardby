@@ -1322,6 +1322,9 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   [SERVICE_UNREADY_ERROR, SERVICE_UNREADY_CATEGORY],
   // Services on a launcher that can't start them: refused at dispatch, failed here as a backstop.
   ["coding_services_unsupported", "preflight"],
+  // Claude Code's tool runner failed to start or never became ready: the same category on both launchers.
+  ["docker_tool_runner_", "job"],
+  ["kubernetes_tool_runner_", "job"],
   // Checked first: the host could not be asked (after one retry), not a lost permission.
   ["repo_access_check_unavailable", "repo_access_unavailable"],
   ["repo_access_", "repo_access"],
