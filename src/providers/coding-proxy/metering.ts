@@ -66,6 +66,8 @@ export function fingerprintRequest(body: string): string {
 export interface TerminalUsage {
   terminal: boolean;
   usage?: ProxyUsage;
+  /** Set when the upstream ended the response as failed or incomplete: its error code. */
+  failure?: string;
 }
 
 export function terminalUsageFromSseFrame(frame: string): TerminalUsage {
@@ -83,11 +85,31 @@ export function terminalUsageFromSseFrame(frame: string): TerminalUsage {
   }
   if (!event || typeof event !== "object") return { terminal: false };
   const record = event as Record<string, unknown>;
-  if (record.type !== "response.completed" && record.type !== "response.failed") return { terminal: false };
+  // A stream-level error event (quota, rate limit, server error) ends the response with no usage.
+  if (record.type === "error") return { terminal: true, failure: upstreamErrorCode(record) };
+  const failed = record.type === "response.failed" || record.type === "response.incomplete";
+  if (record.type !== "response.completed" && !failed) return { terminal: false };
   const response = record.response;
   if (!response || typeof response !== "object") throw new Error("invalid_upstream_terminal_event");
   const usage = (response as Record<string, unknown>).usage;
-  return { terminal: true, usage: usage == null ? undefined : parseAuthoritativeUsage(usage) };
+  return {
+    terminal: true,
+    usage: usage == null ? undefined : parseAuthoritativeUsage(usage),
+    ...(failed ? { failure: upstreamErrorCode(response as Record<string, unknown>) } : {}),
+  };
+}
+
+const SAFE_ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/** The upstream's own error code, never its message: codes are fixed identifiers, messages can echo input. */
+function upstreamErrorCode(record: Record<string, unknown>): string {
+  const nested = (key: string) => {
+    const value = record[key];
+    return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+  };
+  const candidates = [nested("error")?.code, nested("error")?.type, nested("incomplete_details")?.reason, record.code];
+  const code = candidates.find((value) => typeof value === "string" && SAFE_ERROR_CODE.test(value));
+  return typeof code === "string" ? code : "unknown";
 }
 
 function sseEvent(frame: string): { name?: string; value?: Record<string, unknown> } {

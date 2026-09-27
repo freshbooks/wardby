@@ -5,6 +5,7 @@ import { loadMetricsConfig } from "../observability/config.js";
 import { WardbyMetrics } from "../observability/metrics.js";
 import { startMetricsServer, type MetricsServerHandle } from "../observability/metrics-server.js";
 import { startConfiguredCodingProxy } from "../providers/coding-proxy/runtime.js";
+import { logProxyAudit } from "../providers/coding-proxy/server.js";
 
 const proxyLog = logger.child({ module: "coding-proxy-runtime" });
 
@@ -30,7 +31,10 @@ async function main(): Promise<void> {
   const server = await startConfiguredCodingProxy({
     db: prisma,
     registryDb: registryPrisma,
-    audit: metrics.observeProxyAudit,
+    audit: (event) => {
+      metrics.observeProxyAudit(event);
+      logProxyAudit(event);
+    },
     onRequest: (event) => metrics.observeProxyRequest(event),
   });
   let metricsServer: MetricsServerHandle | undefined;

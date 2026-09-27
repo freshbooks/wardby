@@ -58,7 +58,7 @@ describe("coding proxy metering", () => {
   it("treats a failed terminal event without usage as unresolved", () => {
     expect(
       terminalUsageFromSseFrame('event: response.failed\ndata: {"type":"response.failed","response":{"usage":null}}'),
-    ).toEqual({ terminal: true, usage: undefined });
+    ).toEqual({ terminal: true, usage: undefined, failure: "unknown" });
   });
 
   it("maps Anthropic cache accounting without charging cache reads as fresh input", () => {
@@ -100,5 +100,26 @@ describe("coding proxy metering", () => {
     expect(() =>
       new AnthropicSseUsageTracker().consume('event: message_start\ndata: {"type":"message_delta","usage":{}}'),
     ).toThrow("invalid_upstream_sse");
+  });
+
+  it("ends the stream on an upstream failure event and keeps only its error code", () => {
+    const frame = (data: string) => `event: x\ndata: ${data}`;
+    expect(
+      terminalUsageFromSseFrame(frame('{"type":"error","code":"insufficient_quota","message":"private"}')),
+    ).toEqual({
+      terminal: true,
+      failure: "insufficient_quota",
+    });
+    expect(
+      terminalUsageFromSseFrame(
+        frame(
+          '{"type":"response.incomplete","response":{"usage":null,"incomplete_details":{"reason":"max_output_tokens"}}}',
+        ),
+      ),
+    ).toMatchObject({ terminal: true, failure: "max_output_tokens" });
+    expect(terminalUsageFromSseFrame(frame('{"type":"error","error":{"code":"has spaces and <html>"}}'))).toEqual({
+      terminal: true,
+      failure: "unknown",
+    });
   });
 });

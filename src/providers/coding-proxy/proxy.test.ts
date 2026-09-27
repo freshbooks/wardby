@@ -379,15 +379,57 @@ describe("CodingProxy", () => {
     expect((await h.ledger.getRequest(reservedRequestId(h.events)))?.status).toBe("uncertain");
   });
 
-  it("retains the reservation when terminal usage is absent or malformed", async () => {
+  it("forwards an upstream failure without usage, holds the reservation, and records the upstream's error code", async () => {
+    const frame =
+      'event: response.failed\ndata: {"type":"response.failed","response":{"usage":null,"error":{"code":"insufficient_quota","message":"private text"}}}';
+    const h = await harness({
+      fetch: async () => new Response(`${frame}\n\n`, { headers: { "content-type": "text/event-stream" } }),
+    });
+    const sink = await execute(h, "failed-terminal", new TestSink(), requestBody(true));
+    // The client sees the upstream's own failure event and a cleanly ended stream, not a cut connection.
+    expect(sink.destroyed).toBe(false);
+    expect(sink.ended).toBe(true);
+    expect(sink.text()).toContain("response.failed");
+    expect((await h.ledger.getRequest(reservedRequestId(h.events)))?.status).toBe("uncertain");
+    const uncertain = h.events.find((event) => event.type === "request.uncertain");
+    expect(uncertain).toMatchObject({ reason: "upstream_failed:insufficient_quota", contentType: "text/event-stream" });
+    expect(JSON.stringify(h.events)).not.toContain("private text");
+  });
+
+  it("still rejects a terminal event whose usage is malformed, recording why", async () => {
     const h = await harness({
       fetch: async () =>
-        new Response('event: response.failed\ndata: {"type":"response.failed","response":{"usage":null}}\n\n'),
+        new Response('event: response.completed\ndata: {"type":"response.completed","response":{"usage":null}}\n\n'),
     });
-    await expect(execute(h, "failed-terminal", new TestSink(), requestBody(true))).rejects.toBeInstanceOf(
+    await expect(execute(h, "malformed-terminal", new TestSink(), requestBody(true))).rejects.toBeInstanceOf(
       CodingProxyError,
     );
     expect((await h.ledger.getRequest(reservedRequestId(h.events)))?.status).toBe("uncertain");
+    expect(h.events.find((event) => event.type === "request.uncertain")).toMatchObject({
+      reason: "terminal_usage_missing",
+    });
+  });
+
+  it("records why a stream was cut, with the upstream's content type and encoding", async () => {
+    const h = await harness({
+      fetch: async () =>
+        new Response('event: response.output_text.delta\ndata: {"delta":"x"}\n\n', {
+          headers: { "content-type": "text/event-stream", "content-encoding": "zstd" },
+        }),
+    });
+    await expect(execute(h, "cut", new TestSink(), requestBody(true))).rejects.toMatchObject({ status: 502 });
+    expect(h.events.find((event) => event.type === "request.uncertain")).toMatchObject({
+      reason: "terminal_usage_missing",
+      contentType: "text/event-stream",
+      contentEncoding: "zstd",
+    });
+  });
+
+  it("asks the upstream for an uncompressed response", async () => {
+    const h = await harness();
+    await execute(h, "identity");
+    const init = h.fetch.mock.calls[0][1] as RequestInit;
+    expect(new Headers(init.headers).get("accept-encoding")).toBe("identity");
   });
 });
 
