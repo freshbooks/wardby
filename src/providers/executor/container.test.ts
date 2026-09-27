@@ -267,6 +267,7 @@ class FakeVcs implements VcsProvider {
     agentName?: string;
     budgetSentence?: string;
     serviceSentence?: string;
+    protectedPathSentence?: string;
   }> = [];
 
   constructor(
@@ -324,6 +325,7 @@ class FakeVcs implements VcsProvider {
       ...(details?.budgetSentence ? { budgetSentence: details.budgetSentence } : {}),
       ...(details?.providerSentence ? { providerSentence: details.providerSentence } : {}),
       ...(details?.serviceSentence ? { serviceSentence: details.serviceSentence } : {}),
+      ...(details?.protectedPathSentence ? { protectedPathSentence: details.protectedPathSentence } : {}),
     });
     this.events.push(`notifyFinished:${outcome}`);
   }
@@ -795,6 +797,62 @@ describe("ContainerExecutor", () => {
       expect(created.store.terminations[0]).toMatchObject({ error: "coding_budget_exhausted" });
       expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ outcome: "budget_exhausted" });
       expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("providerSentence");
+    });
+
+    it("fails a run whose changes touched a protected path as protected_path, naming it on the host", async () => {
+      const created = await harness();
+      created.vcs.finalizeChanges = async () => {
+        throw new Error("vcs_protected_path:CODEOWNERS");
+      };
+      await created.executor.start("run-1");
+
+      expect(created.store.terminations).toEqual([
+        {
+          status: "failed",
+          error: expect.stringMatching(/^coding_failure_protected_path:coding_diag_/),
+          audit: { failureCategory: "protected_path", diagnosticId: expect.stringMatching(/^coding_diag_/) },
+        },
+      ]);
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        {
+          outcome: "failed",
+          agentName: "knock-knock-implement",
+          protectedPathSentence:
+            "its changes include `CODEOWNERS`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change.",
+        },
+      ]);
+    });
+
+    it("reports budget exhaustion over a protected-path failure when the session has both", async () => {
+      const created = await harness();
+      created.sessions.exhausted.add("session-1");
+      created.vcs.finalizeChanges = async () => {
+        throw new Error("vcs_protected_path:CODEOWNERS");
+      };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ outcome: "budget_exhausted" });
+      expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("protectedPathSentence");
+    });
+
+    it("words a terminal protected_path run the same way when it is cleaned up later, without naming the file", async () => {
+      const created = await harness({ status: "failed", failureCategory: "protected_path" });
+      await created.vcs.prepareWorkspace({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+        protectedPaths: ["CODEOWNERS"],
+      });
+      await created.executor.stop("run-1", "requested");
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        expect.objectContaining({
+          outcome: "failed",
+          protectedPathSentence:
+            "its changes include a file this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change.",
+        }),
+      ]);
     });
 
     it("does not blame the provider for a failure after the job itself succeeded", async () => {
@@ -1407,6 +1465,8 @@ describe("failure diagnostics", () => {
     ["github_api_unavailable", "github"],
     ["vcs_head_ref_conflict", "workspace"],
     ["git_push_failed", "workspace"],
+    ["vcs_protected_path:CODEOWNERS", "protected_path"],
+    ["vcs_protected_path_invalid", "workspace"],
   ])("categorizes a post-push %s failure by its prefix, as %s", async (message, category) => {
     // A GitHub API failure after the push used to be reported as
     // "workspace": the category substring-matched "git" in "github_".

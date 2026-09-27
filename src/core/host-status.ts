@@ -15,6 +15,7 @@ import {
   serviceRefusalSentence,
   serviceUnreadySentence,
 } from "../coding/services/wording.js";
+import { PROTECTED_PATH_CATEGORY, PROTECTED_PATH_HOST_LINE } from "../coding/protected-path-wording.js";
 import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
@@ -131,12 +132,20 @@ export function outcomeBody(
         : c.status === "failed" && c.failureCategory === SERVICE_UNREADY_CATEGORY
           ? serviceUnreadySentence(c.services ?? [])
           : null;
+    // No path reaches this comment (see coding/protected-path-wording.ts), only the category.
+    const protectedPathOf = (c: FailedChild): boolean =>
+      c.status === "failed" && c.failureCategory === PROTECTED_PATH_CATEGORY;
     const providerClasses = new Set(
       failedChildren.map(providerClassOf).filter((c): c is ProviderFailureClass => c !== null),
     );
     const serviceSentences = new Set(failedChildren.map(serviceSentenceOf).filter((s): s is string => s !== null));
+    const protectedPathFailed = failedChildren.some(protectedPathOf);
     const other = failedChildren.filter(
-      (c) => c.status !== "budget_exhausted" && providerClassOf(c) === null && serviceSentenceOf(c) === null,
+      (c) =>
+        c.status !== "budget_exhausted" &&
+        providerClassOf(c) === null &&
+        serviceSentenceOf(c) === null &&
+        !protectedPathOf(c),
     );
     const lines: string[] = [];
     if (outOfBudget.length > 0) {
@@ -150,6 +159,7 @@ export function outcomeBody(
     for (const sentence of serviceSentences) {
       lines.push(`A sub-run could not start: ${sentence}`);
     }
+    if (protectedPathFailed) lines.push(PROTECTED_PATH_HOST_LINE);
     if (other.length > 0) {
       lines.push(`A sub-run did not succeed: ${other.map((c) => `\`${c.id}\` (\`${c.status}\`)`).join(", ")}.`);
     }

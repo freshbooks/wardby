@@ -208,18 +208,22 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 
 ## Errors
 
-| Problem                                      | When     | Run                                        | What the requester sees                                                                                                   |
-| -------------------------------------------- | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `services.yaml` is invalid                   | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                  |
-| The file couldn't be read                    | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."               |
-| A name and version the catalog doesn't have  | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                               |
-| A service the agent isn't allowed            | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."   |
-| Services on a launcher that can't start them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes job launcher." |
-| A service never became ready                 | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                    |
+| Problem                                      | When     | Run                                        | What the requester sees                                                                                                                                                               |
+| -------------------------------------------- | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `services.yaml` is invalid                   | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                                                                              |
+| The file couldn't be read                    | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                           |
+| A name and version the catalog doesn't have  | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                           |
+| A service the agent isn't allowed            | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
+| Services on a launcher that can't start them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes job launcher."                                                             |
+| A service never became ready                 | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
+| The run's changes touched a protected path   | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
 
 A refused run's `error` (from `get_run`) is the code followed by that sentence.
 The sentence reaches the requester on the run's status comment and, for a
-coding run started by another agent, in that agent's tool result.
+coding run started by another agent, in that agent's tool result. A
+`protected_path` failure is not a service error -- see
+[Run changed a protected path](../help/errors/protected-path.md) -- but is
+listed here because it uses the same category/sentence mechanism.
 
 A service is "not ready" when its readiness command keeps failing past its
 failure threshold (the sidecar restarts), its image can't be pulled or started,

@@ -12,6 +12,11 @@ import {
   serviceUnreadyName,
   serviceUnreadySentence,
 } from "../../coding/services/wording.js";
+import {
+  PROTECTED_PATH_CATEGORY,
+  protectedPathFromError,
+  protectedPathSentence,
+} from "../../coding/protected-path-wording.js";
 import { budgetSentence } from "../../core/budget-wording.js";
 import {
   classifyProviderFailure,
@@ -679,12 +684,14 @@ export class ContainerExecutor implements Executor {
       if (handle) await this.options.jobs.remove(handle).catch(() => undefined);
       // A service sidecar that never became ready (kubernetes.ts waitForKeeper) is named on the host.
       const unreadyService = outOfBudget ? null : serviceUnreadyName(error);
+      const protectedPath = outOfBudget ? null : protectedPathFromError(error);
       if (workspace) {
         await this.options.vcs.cleanup(workspace).catch(() => undefined);
         await this.options.vcs.notifyContinuationFinished?.(workspace, outOfBudget ? "budget_exhausted" : "failed", {
           agentName: run.agentName,
           ...(outOfBudget ? { budgetSentence: this.budgetSentence(run) } : {}),
           ...(unreadyService ? { serviceSentence: serviceUnreadySentence([unreadyService]) } : {}),
+          ...(protectedPath ? { protectedPathSentence: protectedPathSentence(protectedPath) } : {}),
         });
       }
       this.emit({ stage: "cleanup", runId, jobId: handle?.id, cleanupSucceeded: true });
@@ -811,6 +818,8 @@ export class ContainerExecutor implements Executor {
     // Set when a failed job's session relayed a model-provider failure; names it on the host.
     // Only a failed job: a transient provider error the worker retried past did not end the run.
     let providerClass: ProviderFailureClass | undefined;
+    // Set when finalizeChanges refused the collected diff for touching a protected path; names it on the host.
+    let protectedPath: string | undefined;
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -905,6 +914,7 @@ export class ContainerExecutor implements Executor {
         const failure = this.failure(error);
         await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
         this.terminal(run, "failed", failure.audit);
+        protectedPath = protectedPathFromError(error) ?? undefined;
       }
     } finally {
       await this.options.jobs.remove(handle).catch(() => undefined);
@@ -918,6 +928,9 @@ export class ContainerExecutor implements Executor {
           agentName: run.agentName,
           ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
           ...(outcome === "failed" && providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
+          ...(outcome === "failed" && protectedPath
+            ? { protectedPathSentence: protectedPathSentence(protectedPath) }
+            : {}),
         });
       }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
@@ -1159,11 +1172,15 @@ export class ContainerExecutor implements Executor {
         run.status === "failed" && run.failureCategory === SERVICE_UNREADY_CATEGORY
           ? storedServiceNames(run.services)
           : null;
+      // No path survives to the stored run (only the category does -- see
+      // protected-path-wording.ts), so this can only ever use the pathless sentence.
+      const protectedPathFailed = run.status === "failed" && run.failureCategory === PROTECTED_PATH_CATEGORY;
       await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
         agentName: run.agentName,
         ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
         ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
         ...(unreadyServices ? { serviceSentence: serviceUnreadySentence(unreadyServices) } : {}),
+        ...(protectedPathFailed ? { protectedPathSentence: protectedPathSentence(null) } : {}),
       });
     }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
@@ -1329,6 +1346,9 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   ["repo_access_check_unavailable", "repo_access_unavailable"],
   ["repo_access_", "repo_access"],
   ["github_", "github"],
+  // Checked before the generic "vcs_" fallback: the collected diff touched a
+  // path this agent may not edit, not a generic workspace/git failure.
+  ["vcs_protected_path:", PROTECTED_PATH_CATEGORY],
   ["vcs_", "workspace"],
   ["git_", "workspace"],
 ];
