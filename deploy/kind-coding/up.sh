@@ -122,19 +122,26 @@ data:
     help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
 EOF
 
-echo "==> 5/${TOTAL_STEPS} build and push the worker and runtime images"
+echo "==> 5/${TOTAL_STEPS} build and push the worker, node-python worker, and runtime images"
 docker build -f src/coding-worker/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev" .
+docker build -f src/coding-worker/Dockerfile.node-python -t "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev" .
 docker build -f deploy/Dockerfile --target runtime -t "localhost:${REGISTRY_PORT}/wardby-runtime:dev" .
 docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev"
+docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-runtime:dev"
 WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev")"
+WORKER_NODE_PYTHON_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev")"
 RUNTIME_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-runtime:dev")"
 
-echo "==> 6/${TOTAL_STEPS} verify the worker image has tar, head, and test"
-if ! docker run --rm --entrypoint sh "$WORKER_DIGEST" -c 'command -v tar && command -v head && command -v test' >/dev/null; then
-  echo "up.sh: worker image $WORKER_DIGEST is missing tar, head, or test; Task 5's seeding and collection depend on them." >&2
-  exit 1
-fi
+echo "==> 6/${TOTAL_STEPS} verify the worker images have tar, head, and test"
+# Both worker images (plain node, and the node-python toolchain agents on CODING_WORKER_IMAGE_NODE_PYTHON_3_12
+# use) need this: the run pod's keeper seeds and collects the workspace through them.
+for image_digest in "$WORKER_DIGEST" "$WORKER_NODE_PYTHON_DIGEST"; do
+  if ! docker run --rm --entrypoint sh "$image_digest" -c 'command -v tar && command -v head && command -v test' >/dev/null; then
+    echo "up.sh: worker image $image_digest is missing tar, head, or test; Task 5's seeding and collection depend on them." >&2
+    exit 1
+  fi
+done
 
 echo "==> 7/${TOTAL_STEPS} apply the namespace and the proxy's env Secret"
 kubectl --context "$KUBE_CONTEXT" apply -f "${MANIFEST_DIR}/manifests/base/namespace.yaml"
@@ -195,6 +202,12 @@ not deleted):
 JOB_LAUNCHER=kubernetes
 KUBERNETES_CONTEXT=${KUBE_CONTEXT}
 CODING_WORKER_IMAGE=${WORKER_DIGEST}
+CODING_WORKER_IMAGE_NODE_PYTHON_3_12=${WORKER_NODE_PYTHON_DIGEST}
+
+# The keeper's NetworkPolicy-enforcement probe exec routinely takes longer than the
+# launcher's 10 s default under kind's default node resources (250m CPU / 128Mi); 60 s
+# was enough in a live run. GKE Autopilot has more headroom and does not need this.
+KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
 
 Then run:
 

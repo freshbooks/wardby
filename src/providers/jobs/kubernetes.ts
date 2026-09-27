@@ -91,8 +91,17 @@ const DEFAULT_ENFORCEMENT_TIMEOUT_MS = 30_000;
 const ENFORCEMENT_POLL_MS = 500;
 /** Consecutive proven probes required (8787 reachable, 8788 blocked): one dropped SYN must not open the gate. */
 const ENFORCEMENT_BLOCKED_STREAK = 3;
-/** Bound for one enforcement probe exec (the probe makes two sequential connects, so it gives up after at most 6 s). */
-const ENFORCEMENT_EXEC_TIMEOUT_MS = 10_000;
+/**
+ * Default bound for one enforcement probe exec (the probe makes two sequential connects, so it
+ * gives up after at most 6 s of its own connect timeouts). Overridable per KubernetesJobConfig's
+ * `enforcementExecTimeoutMs` (KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS) — a resource-constrained
+ * keeper (e.g. a laptop `kind` cluster's default 250m CPU / 128Mi limit) can take noticeably
+ * longer than this to run even a healthy probe to completion. DEFAULT_ENFORCEMENT_TIMEOUT_MS
+ * above is exactly this default times ENFORCEMENT_BLOCKED_STREAK, which is not a coincidence: see
+ * the constructor, which derives the effective overall bound the same way from whichever exec
+ * timeout is actually configured, so the two never drift apart.
+ */
+const DEFAULT_ENFORCEMENT_EXEC_TIMEOUT_MS = 10_000;
 
 /**
  * What the gate reports at its bound, by the last probe's exit code. Each names a different place
@@ -249,8 +258,19 @@ export interface KubernetesJobLauncherOptions {
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   readyTimeoutMs?: number; // default 120_000
-  /** How long to wait for the run's NetworkPolicy to be enforced before seeding. Default 30_000. */
+  /**
+   * How long to wait for the run's NetworkPolicy to be enforced before seeding. Default 30_000,
+   * but never *less* than `enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK`: see the
+   * constructor. An explicit override here is a floor raise, not an escape hatch — the gate still
+   * needs room for a full streak of probes at whatever the effective exec timeout is.
+   */
   enforcementTimeoutMs?: number;
+  /**
+   * Bound for a single enforcement probe exec. Default 10_000 (DEFAULT_ENFORCEMENT_EXEC_TIMEOUT_MS).
+   * Raise this on a resource-constrained cluster (e.g. `kind` on a laptop) where a healthy probe
+   * can legitimately take longer than 10 s to run inside the keeper's CPU/memory limits.
+   */
+  enforcementExecTimeoutMs?: number;
   createArchive?: (directory: string) => { stream: Readable; done: Promise<number> }; // default: host `tar`
   onWarning?: (message: string) => void;
 }
@@ -454,6 +474,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   private readonly createArchive: (directory: string) => { stream: Readable; done: Promise<number> };
   private readonly warn: (message: string) => void;
   private readonly enforcementTimeoutMs: number;
+  private readonly enforcementExecTimeoutMs: number;
   private preflightResult?: Promise<KubernetesClusterInfo>;
 
   constructor(private readonly options: KubernetesJobLauncherOptions) {
@@ -464,7 +485,17 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)));
     this.readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
-    this.enforcementTimeoutMs = options.enforcementTimeoutMs ?? DEFAULT_ENFORCEMENT_TIMEOUT_MS;
+    this.enforcementExecTimeoutMs = options.enforcementExecTimeoutMs ?? DEFAULT_ENFORCEMENT_EXEC_TIMEOUT_MS;
+    // Never less than a full blocked-streak's worth of worst-case probes: a longer configured exec
+    // timeout that left this unchanged could make the wall-clock bound expire before the loop ever
+    // has a chance to observe ENFORCEMENT_BLOCKED_STREAK consecutive probes, which would turn "the
+    // keeper is just slow" into an indistinguishable "the policy is not enforced" false negative.
+    // DEFAULT_ENFORCEMENT_TIMEOUT_MS (30_000) already equals the default exec timeout times the
+    // streak (10_000 * 3), so this is a no-op unless a longer exec timeout is actually configured.
+    this.enforcementTimeoutMs = Math.max(
+      options.enforcementTimeoutMs ?? DEFAULT_ENFORCEMENT_TIMEOUT_MS,
+      this.enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK,
+    );
     this.createArchive = options.createArchive ?? hostTarArchive;
     this.warn = options.onWarning ?? ((message) => kubernetesLog.warn(message));
   }
@@ -485,7 +516,17 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {
-    validateKubernetesSpec(spec);
+    try {
+      validateKubernetesSpec(spec);
+    } catch (error) {
+      // The thrown error already carries the real reason (e.g.
+      // "kubernetes_isolation_unsupported:image-not-registry-digest") and is rethrown unchanged;
+      // this only makes that reason visible to an operator watching logs before the caller (which
+      // may only surface the top-level error code) does anything with it. Nothing here is derived
+      // from spec content beyond that fixed reason tag — no image reference, no limit value.
+      if (error instanceof Error) this.warn(`kubernetes_spec_rejected: ${error.message}`);
+      throw error;
+    }
     await this.runPreflight();
     const names = kubernetesRunNames(spec.runId);
     const handle: JobHandle = { backend: BACKEND, id: `${this.namespace}/${names.token}` };
@@ -663,7 +704,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       // `exitCode` is this iteration's probe, and the bound below is only ever reached from here —
       // so the verdict is always the *last* probe's, never a remembered earlier one.
       const exitCode = await this.api.exec(this.namespace, names.pod, KEEPER_CONTAINER, command, {
-        timeoutMs: ENFORCEMENT_EXEC_TIMEOUT_MS,
+        timeoutMs: this.enforcementExecTimeoutMs,
       });
       blocked = exitCode === 0 ? blocked + 1 : 0;
       if (blocked >= ENFORCEMENT_BLOCKED_STREAK) return;

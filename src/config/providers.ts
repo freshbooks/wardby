@@ -231,6 +231,16 @@ export interface KubernetesJobConfig {
    */
   preflightTimeoutMs?: number;
   readyTimeoutMs?: number;
+  /**
+   * Bound for a single NetworkPolicy-enforcement probe exec (the keeper running two sequential
+   * connects). Defaults to the launcher's own 10 s, which a resource-constrained keeper (e.g. a
+   * laptop `kind` cluster's default 250m CPU / 128Mi limit) can exceed even though the probe
+   * itself is healthy — observed live: raising this to 60_000 was enough on `kind`. GKE Autopilot
+   * is unaffected by leaving this unset. The launcher derives its overall enforcement wall-clock
+   * bound from whichever value is effective here (see KubernetesJobLauncher), so raising this
+   * alone is sufficient — no separate overall-timeout knob needs to move in lockstep.
+   */
+  enforcementExecTimeoutMs?: number;
 }
 
 export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): KubernetesJobConfig {
@@ -271,8 +281,18 @@ export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): K
     1_000,
     900_000,
   );
+  // Ceiling of 2 minutes: this bounds a single probe exec, not the overall gate (which the
+  // launcher derives from it), so it never needs to be anywhere near the 15-minute cluster
+  // timeouts above.
+  const enforcementExecTimeoutMs = optionalBoundedInteger(
+    env.KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS,
+    "KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS",
+    1_000,
+    120_000,
+  );
   if (preflightTimeoutMs !== undefined) config.preflightTimeoutMs = preflightTimeoutMs;
   if (readyTimeoutMs !== undefined) config.readyTimeoutMs = readyTimeoutMs;
+  if (enforcementExecTimeoutMs !== undefined) config.enforcementExecTimeoutMs = enforcementExecTimeoutMs;
   return config;
 }
 

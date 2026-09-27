@@ -313,6 +313,25 @@ describe("loadKubernetesJobConfig", () => {
       "KUBERNETES_READY_TIMEOUT_MS must be an integer between 1000 and 900000.",
     );
   });
+
+  it("leaves the enforcement probe exec timeout unset by default", () => {
+    expect(loadKubernetesJobConfig({}).enforcementExecTimeoutMs).toBeUndefined();
+  });
+
+  it("reads KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS as a bounded integer", () => {
+    expect(loadKubernetesJobConfig({ KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS: "60000" }).enforcementExecTimeoutMs).toBe(
+      60_000,
+    );
+  });
+
+  it.each(["0", "500", "120001", "not-a-number"])(
+    "rejects an out-of-range KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=%j",
+    (value) => {
+      expect(() => loadKubernetesJobConfig({ KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS: value })).toThrow(
+        "KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS must be an integer between 1000 and 120000.",
+      );
+    },
+  );
 });
 
 describe("loadGitHubEventConfig", () => {

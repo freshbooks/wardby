@@ -95,8 +95,17 @@ const STORAGE_INIT_SCRIPT = [
   "}",
 ].join("\n");
 
-function isolationError(): Error {
-  return new Error(KUBERNETES_ISOLATION_ERROR);
+/**
+ * `reason` is a short, fixed code naming which check failed (never a value from the spec itself,
+ * so nothing operator-supplied — an image reference, a limit — ever ends up in the message). It's
+ * appended the same way kubernetes-preflight.ts's `failure(check, cause)` tags a canary failure:
+ * callers that only match on the bare `KUBERNETES_ISOLATION_ERROR` prefix (a substring match, e.g.
+ * `toThrow(KUBERNETES_ISOLATION_ERROR)` or `error.message.startsWith(...)`) are unaffected, while
+ * an operator reading the message (or a `this.warn(...)` of it — see kubernetes.ts's `launch()`)
+ * gets more than a bare code to go on.
+ */
+function isolationError(reason?: string): Error {
+  return new Error(reason === undefined ? KUBERNETES_ISOLATION_ERROR : `${KUBERNETES_ISOLATION_ERROR}:${reason}`);
 }
 
 function sha256(value: string): string {
@@ -155,21 +164,17 @@ function isWholeMillicores(cpus: number): boolean {
 }
 
 export function validateKubernetesSpec(spec: JobSpec): void {
-  if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw isolationError();
+  if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw isolationError("run-id");
   if (spec.provider === "claude-code") throw new Error(KUBERNETES_PROVIDER_UNSUPPORTED);
-  if (spec.provider !== undefined && spec.provider !== "codex") throw isolationError();
-  if (spec.toolImage !== undefined || !isRegistryDigest(spec.image)) throw isolationError();
+  if (spec.provider !== undefined && spec.provider !== "codex") throw isolationError("provider");
+  if (spec.toolImage !== undefined) throw isolationError("tool-image-set");
+  if (!isRegistryDigest(spec.image)) throw isolationError("image-not-registry-digest");
   const { cpus, memoryMb, pids, diskMb } = spec.limits;
-  if (
-    !inRange(cpus, 0.1, 32, false) ||
-    !isWholeMillicores(cpus) ||
-    !inRange(memoryMb, 128, 65_536, true) ||
-    !inRange(pids, 16, 4_096, true) ||
-    !inRange(diskMb, 64, 32_768, true) ||
-    !inRange(spec.timeoutSec, 1, 86_400, true)
-  ) {
-    throw isolationError();
-  }
+  if (!inRange(cpus, 0.1, 32, false) || !isWholeMillicores(cpus)) throw isolationError("cpus-out-of-range");
+  if (!inRange(memoryMb, 128, 65_536, true)) throw isolationError("memory-out-of-range");
+  if (!inRange(pids, 16, 4_096, true)) throw isolationError("pids-out-of-range");
+  if (!inRange(diskMb, 64, 32_768, true)) throw isolationError("disk-out-of-range");
+  if (!inRange(spec.timeoutSec, 1, 86_400, true)) throw isolationError("timeout-out-of-range");
 }
 
 function containerSecurity() {
