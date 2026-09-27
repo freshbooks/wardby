@@ -396,6 +396,44 @@ describe("CodingProxy", () => {
     expect(JSON.stringify(h.events)).not.toContain("private text");
   });
 
+  it("records the first relayed upstream failure's code on the session, for the executor", async () => {
+    const failing = (code: string) =>
+      new Response(
+        `event: error\ndata: ${JSON.stringify({ type: "error", error: { code, message: "private text" } })}\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    const codes = ["project_spend_limit_exceeded", "rate_limit_exceeded"];
+    const h = await harness({ fetch: async () => failing(codes.shift()!) });
+    const hash = capabilityHash(h.session.capability);
+    expect(await h.proxy.upstreamFailure(h.session.id)).toBeNull();
+    await execute(h, "first-failure", new TestSink(), requestBody(true));
+    await execute(h, "second-failure", new TestSink(), requestBody(true));
+    expect(await h.proxy.upstreamFailure(h.session.id)).toBe("project_spend_limit_exceeded");
+    expect((await h.ledger.findSessionByCapabilityHash(hash))?.upstreamFailure).toBe("project_spend_limit_exceeded");
+    expect(await h.proxy.upstreamFailure("no-such-session")).toBeNull();
+  });
+
+  it("records a rejected upstream's error code, or its status when the body names none", async () => {
+    const quota = await harness({
+      fetch: async () =>
+        Response.json({ error: { code: "insufficient_quota", message: "private text" } }, { status: 429 }),
+    });
+    const sink = await execute(quota, "rejected-quota");
+    expect(sink.status).toBe(429);
+    expect(sink.text()).not.toContain("private text");
+    expect(await quota.proxy.upstreamFailure(quota.session.id)).toBe("insufficient_quota");
+
+    const outage = await harness({ fetch: async () => new Response("<html>bad gateway</html>", { status: 503 }) });
+    await execute(outage, "rejected-outage");
+    expect(await outage.proxy.upstreamFailure(outage.session.id)).toBe("http_503");
+
+    const unsafe = await harness({
+      fetch: async () => Response.json({ error: { code: "has spaces in it", type: "no good!" } }, { status: 400 }),
+    });
+    await execute(unsafe, "rejected-unsafe");
+    expect(await unsafe.proxy.upstreamFailure(unsafe.session.id)).toBe("http_400");
+  });
+
   it("still rejects a terminal event whose usage is malformed, recording why", async () => {
     const h = await harness({
       fetch: async () =>

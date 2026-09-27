@@ -10,6 +10,7 @@ import {
   parseAnthropicAuthoritativeUsage,
   parseAuthoritativeUsage,
   pricingSnapshot,
+  safeUpstreamErrorCode,
   terminalUsageFromSseFrame,
 } from "./metering.js";
 import { createPinnedProxyFetch } from "./secure-fetch.js";
@@ -36,6 +37,8 @@ export const CLAUDE_CODE_ANTHROPIC_BETAS = [
   "thinking-token-count-2026-05-13",
 ] as const;
 const MAX_UPSTREAM_JSON_BYTES = 16 * 1024 * 1024;
+/** A rejected upstream's error body is read only this far, for its error code. */
+const MAX_UPSTREAM_ERROR_BYTES = 64 * 1024;
 const REQUEST_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
 const APPROVED_ANTHROPIC_BETAS = new Set<string>(CLAUDE_CODE_ANTHROPIC_BETAS);
 const WARDBY_COMMAND_TOOL = "mcp__wardby_tools__run_command";
@@ -539,6 +542,11 @@ export class CodingProxy {
     return this.ledger.budgetExhausted(sessionId);
   }
 
+  /** The code of the first upstream failure relayed for this session's run, if any. */
+  upstreamFailure(sessionId: string): Promise<string | null> {
+    return this.ledger.upstreamFailure(sessionId);
+  }
+
   async execute(input: ExecuteProxyRequest, sink: ProxyResponseSink): Promise<void> {
     const session = await this.authenticate(input.bearer);
     if (session.protocol !== input.protocol) {
@@ -663,7 +671,10 @@ export class CodingProxy {
     }
 
     if (!upstream.ok) {
+      // Read while the deadline still bounds the body; the body itself is never relayed.
+      const code = (await rejectedUpstreamErrorCode(upstream)) ?? `http_${upstream.status}`;
       cleanupActive();
+      await this.recordUpstreamFailure(session, code);
       await this.ledger.release(request.id, upstream.status);
       this.audit({
         type: "request.released",
@@ -797,6 +808,7 @@ export class CodingProxy {
           if (!terminal.failure) throw new Error("terminal_usage_missing");
           // The upstream failed the response and reported no usage. Pass its failure on so the
           // client sees the real error instead of a cut connection; the reservation stays held.
+          await this.recordUpstreamFailure(session, terminal.failure);
           if (!completed) {
             await this.markUncertain(
               session,
@@ -821,6 +833,11 @@ export class CodingProxy {
     if (connected.value) sink.end();
   }
 
+  /** Best effort: the executor reads it to name the failure; it must never break the relay. */
+  private async recordUpstreamFailure(session: ProxySession, code: string): Promise<void> {
+    await this.ledger.recordUpstreamFailure(session.id, code).catch(() => undefined);
+  }
+
   private async markUncertain(
     session: ProxySession,
     request: ProxyRequest,
@@ -830,6 +847,17 @@ export class CodingProxy {
   ): Promise<void> {
     await this.ledger.markUncertain(request.id, status);
     this.audit({ type: "request.uncertain", runId: session.runId, requestId: request.id, status, reason, ...headers });
+  }
+}
+
+/** The safe error code in a rejected upstream's JSON body, or undefined when it names none or cannot be read. */
+async function rejectedUpstreamErrorCode(upstream: Response): Promise<string | undefined> {
+  try {
+    const bytes = await readBoundedBody(upstream.body, MAX_UPSTREAM_ERROR_BYTES);
+    const value: unknown = JSON.parse(Buffer.from(bytes).toString("utf8"));
+    return value && typeof value === "object" ? safeUpstreamErrorCode(value as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
   }
 }
 

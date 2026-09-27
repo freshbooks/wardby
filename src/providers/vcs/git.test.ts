@@ -582,6 +582,21 @@ describe("GitVcsProvider", () => {
         expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
       });
 
+      it("says the run could not run when the model provider refused it, and fails the check run", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "failed", {
+          agentName: "builder",
+          providerSentence: "The model provider rejected the request.",
+        });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "❌ builder (wardby run run-2) could not run: The model provider rejected the request.",
+        );
+        expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
+      });
+
       it("is a no-op for a fresh (non-continuation) workspace", async () => {
         const { provider, github, input } = await harness();
         const prepared = await provider.prepareWorkspace(input);

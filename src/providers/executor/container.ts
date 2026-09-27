@@ -5,6 +5,12 @@ import type { PrismaClient } from "#prisma";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
 import { budgetSentence } from "../../core/budget-wording.js";
+import {
+  classifyProviderFailure,
+  providerClassOfCategory,
+  providerSentence,
+  type ProviderFailureClass,
+} from "../../core/provider-wording.js";
 import { logger } from "../../core/logger.js";
 import { requiredLevel, type RepoAccessGate } from "../../core/repo-access.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
@@ -85,6 +91,8 @@ export interface ContainerRunSnapshot {
   workspaceDiskMb: number | null;
   /** Admin-requested debug trace, fixed at dispatch (CodingRun.debugTrace). */
   debugTrace?: boolean;
+  /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
+  failureCategory?: string | null;
   /** The agent's CURRENT coding-profile repository (null if the profile is gone); may differ from `repository`. */
   profileRepository: string | null;
   /** How the profile's repository was authorized (CodingAgentProfile.repositoryAuthorizedVia). */
@@ -165,6 +173,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       workerImage: row.codingRun.workerImage,
       workspaceDiskMb: row.codingRun.workspaceDiskMb,
       debugTrace: row.codingRun.debugTrace,
+      failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
       repositoryAuthorizedVia: row.agent.codingProfile?.repositoryAuthorizedVia ?? null,
     };
@@ -333,6 +342,8 @@ export interface CodingSessionController {
   cancelSession(sessionId: string): Promise<void>;
   /** Whether the proxy refused a request of this session for budget. */
   budgetExhausted?(sessionId: string): Promise<boolean>;
+  /** The code of the first model-provider failure the proxy relayed for this session, if any. */
+  upstreamFailure?(sessionId: string): Promise<string | null>;
 }
 
 /** Plain capabilities live only for the short provisioning window. */
@@ -769,6 +780,9 @@ export class ContainerExecutor implements Executor {
     // "failed" and is only flipped right before a success or out-of-budget return.
     let outcome: ContinuationOutcome = "failed";
     let finishedSummary: string | undefined;
+    // Set when a failed job's session relayed a model-provider failure; names it on the host.
+    // Only a failed job: a transient provider error the worker retried past did not end the run.
+    let providerClass: ProviderFailureClass | undefined;
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -784,7 +798,11 @@ export class ContainerExecutor implements Executor {
           return;
         }
         const status = jobState === "lost" ? "lost" : "failed";
-        const failure = this.failure(`job_${reason}`, { issues: collected?.diagnosticIssues });
+        const provider = status === "failed" ? await this.providerFailure(sessionId) : null;
+        const failure = provider
+          ? this.providerFailureOf(run, provider, `job_${reason}`, { issues: collected?.diagnosticIssues })
+          : this.failure(`job_${reason}`, { issues: collected?.diagnosticIssues });
+        providerClass = provider?.class;
         await this.options.store.terminate(run.runId, status, failure.error, failure.audit);
         this.terminal(run, status, failure.audit);
         return;
@@ -870,6 +888,7 @@ export class ContainerExecutor implements Executor {
           summary: finishedSummary,
           agentName: run.agentName,
           ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
+          ...(outcome === "failed" && providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
         });
       }
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
@@ -1082,9 +1101,11 @@ export class ContainerExecutor implements Executor {
       // find-or-create.
       const outcome: ContinuationOutcome =
         run.status === "succeeded" ? "succeeded" : run.status === "budget_exhausted" ? "budget_exhausted" : "failed";
+      const providerClass = run.status === "failed" ? providerClassOfCategory(run.failureCategory) : null;
       await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
         agentName: run.agentName,
         ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
+        ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
       });
     }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
@@ -1095,6 +1116,38 @@ export class ContainerExecutor implements Executor {
   private async outOfBudget(sessionId: string | null | undefined): Promise<boolean> {
     if (!sessionId || !this.options.sessions.budgetExhausted) return false;
     return this.options.sessions.budgetExhausted(sessionId).catch(() => false);
+  }
+
+  /** The model-provider failure the proxy relayed for this run's session, classified. Never throws. */
+  private async providerFailure(
+    sessionId: string | null | undefined,
+  ): Promise<{ class: ProviderFailureClass; code: string } | null> {
+    if (!sessionId || !this.options.sessions.upstreamFailure) return null;
+    const code = await this.options.sessions.upstreamFailure(sessionId).catch(() => null);
+    return code ? { class: classifyProviderFailure(code), code } : null;
+  }
+
+  /**
+   * A failure the model provider's refusal caused. The persisted error names
+   * the class only; the raw upstream code (a fixed identifier, never a message)
+   * goes to one operator line an alert can key on, and the failure itself is
+   * still logged under its diagnostic id.
+   */
+  private providerFailureOf(
+    run: ContainerRunSnapshot,
+    provider: { class: ProviderFailureClass; code: string },
+    error: unknown,
+    options: { issues?: string[] } = {},
+  ): { error: string; audit: CodingFailureAudit } {
+    const logged = this.failure(error, options);
+    containerLog.warn(
+      { event: "coding.provider_failure", runId: run.runId, class: provider.class, upstreamCode: provider.code },
+      "the model provider refused this coding run's requests",
+    );
+    return {
+      error: `coding_provider_${provider.class}`,
+      audit: { failureCategory: `provider_${provider.class}`, diagnosticId: logged.audit.diagnosticId },
+    };
   }
 
   /** The host-safe sentence for a run that ran out of budget. */

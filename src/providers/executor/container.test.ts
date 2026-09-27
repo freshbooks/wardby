@@ -317,6 +317,7 @@ class FakeVcs implements VcsProvider {
       summary: details?.summary,
       agentName: details?.agentName,
       ...(details?.budgetSentence ? { budgetSentence: details.budgetSentence } : {}),
+      ...(details?.providerSentence ? { providerSentence: details.providerSentence } : {}),
     });
     this.events.push(`notifyFinished:${outcome}`);
   }
@@ -337,6 +338,8 @@ class FakeSessions implements CodingSessionController {
   cancels = 0;
   /** Sessions the proxy refused a request of for budget. */
   exhausted = new Set<string>();
+  /** The first upstream failure code the proxy relayed, per session. */
+  upstreamFailures = new Map<string, string>();
   lastInput?: Parameters<CodingSessionController["createSession"]>[0];
 
   constructor(
@@ -363,6 +366,9 @@ class FakeSessions implements CodingSessionController {
   }
   async budgetExhausted(sessionId: string): Promise<boolean> {
     return this.exhausted.has(sessionId);
+  }
+  async upstreamFailure(sessionId: string): Promise<string | null> {
+    return this.upstreamFailures.get(sessionId) ?? null;
   }
 }
 
@@ -626,6 +632,78 @@ describe("ContainerExecutor", () => {
       expect(created.vcs.notifyFinishedCalls).toEqual([{ outcome: "failed", agentName: "knock-knock-implement" }]);
     });
 
+    it.each([
+      ["project_spend_limit_exceeded", "quota", "The model provider refused the request: its account has reached"],
+      ["rate_limit_exceeded", "rate_limited", "The model provider is rate-limiting requests."],
+      ["server_error", "unavailable", "The model provider reported an outage or overload."],
+      ["invalid_prompt", "rejected", "The model provider rejected the request."],
+    ])("ends a failed job whose session relayed %s as a provider_%s failure", async (code, providerClass, sentence) => {
+      const created = await harness();
+      created.sessions.upstreamFailures.set("session-1", code);
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_agent_exited" };
+      logged.length = 0;
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.terminations).toEqual([
+        {
+          status: "failed",
+          error: `coding_provider_${providerClass}`,
+          audit: { failureCategory: `provider_${providerClass}`, diagnosticId: expect.stringMatching(/^coding_diag_/) },
+        },
+      ]);
+      expect(created.observer.events.find((event) => event.stage === "terminal")).toMatchObject({
+        outcome: "failed",
+        failureCategory: `provider_${providerClass}`,
+      });
+      // One operator line to alert on, with the raw code; the diagnostic line is still there too.
+      expect(logged.filter((entry) => entry.payload.event === "coding.provider_failure")).toEqual([
+        {
+          level: "warn",
+          payload: { event: "coding.provider_failure", runId: "run-1", class: providerClass, upstreamCode: code },
+          message: expect.any(String),
+        },
+      ]);
+      expect(logged.some((entry) => String(entry.payload.reason).includes("job_coding_stream_agent_exited"))).toBe(
+        true,
+      );
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        {
+          outcome: "failed",
+          agentName: "knock-knock-implement",
+          providerSentence: expect.stringContaining(sentence),
+        },
+      ]);
+      expect(JSON.stringify(created.vcs.notifyFinishedCalls)).not.toContain(code);
+    });
+
+    it("reports budget exhaustion over a provider failure when the session has both", async () => {
+      const created = await harness();
+      created.sessions.exhausted.add("session-1");
+      created.sessions.upstreamFailures.set("session-1", "project_spend_limit_exceeded");
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.terminations[0]).toMatchObject({ error: "coding_budget_exhausted" });
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ outcome: "budget_exhausted" });
+      expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("providerSentence");
+    });
+
+    it("does not blame the provider for a failure after the job itself succeeded", async () => {
+      const created = await harness();
+      // A transient provider error the worker retried past.
+      created.sessions.upstreamFailures.set("session-1", "rate_limit_exceeded");
+      created.jobs.result = { exitCode: 0, reason: "completed" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("failed");
+      expect((created.store.terminations[0] as { error: string }).error).toMatch(/^coding_failure_/);
+      expect(created.vcs.notifyFinishedCalls[0]).not.toHaveProperty("providerSentence");
+    });
+
     it("ends a run whose result could not be finalized as budget_exhausted when its session was refused", async () => {
       const created = await harness();
       created.sessions.exhausted.add("session-1");
@@ -653,6 +731,27 @@ describe("ContainerExecutor", () => {
       expect(created.store.run.status).toBe("refused");
       expect(created.vcs.notifyStartedCalls).toBe(0);
       expect(created.vcs.notifyFinishedCalls).toHaveLength(0);
+    });
+
+    it("re-notifies an already-failed provider-refused run with the provider sentence", async () => {
+      const created = await harness({ status: "failed", failureCategory: "provider_quota" });
+      await created.vcs.prepareWorkspace({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+        protectedPaths: ["CODEOWNERS"],
+      });
+
+      await created.executor.stop("run-1", "requested");
+
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        {
+          outcome: "failed",
+          agentName: "knock-knock-implement",
+          providerSentence: expect.stringContaining("spending or quota limit"),
+        },
+      ]);
     });
 
     it("notifies finished with 'failed' when stopped mid-run", async () => {

@@ -603,7 +603,9 @@ export class GitVcsProvider implements VcsProvider {
           ? `✅ ${label} finished.${summarySuffix}`
           : outcome === "budget_exhausted"
             ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
-            : `❌ ${label} failed.${summarySuffix}`;
+            : details?.providerSentence
+              ? `❌ ${label} could not run: ${details.providerSentence}${summarySuffix}`
+              : `❌ ${label} failed.${summarySuffix}`;
       await Promise.allSettled([
         this.options.github.updateContinuationStatusComment({ ...identity, body }),
         this.options.github.completeContinuationCheckRun({

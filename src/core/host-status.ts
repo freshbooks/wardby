@@ -12,6 +12,7 @@ import type { Prisma, PrismaClient, Run } from "#prisma";
 import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
+import { providerClassOfCategory, providerSentence, type ProviderFailureClass } from "./provider-wording.js";
 
 const log = logger.child({ module: "host-status" });
 
@@ -34,6 +35,8 @@ export interface PullRequestOutcome {
 export interface FailedChild {
   id: string;
   status: string;
+  /** The coding sub-run's failure category; `provider_<class>` names a model-provider refusal. */
+  failureCategory?: string | null;
 }
 
 const runLine = (runId: string): string => `<sub>wardby run \`${runId}\`</sub>`;
@@ -109,10 +112,19 @@ export function outcomeBody(
   if (failedChildren.length > 0) {
     // The agent itself finished, but the work it handed off did not.
     const outOfBudget = failedChildren.filter((c) => c.status === "budget_exhausted");
-    const other = failedChildren.filter((c) => c.status !== "budget_exhausted");
+    const providerClassOf = (c: FailedChild) =>
+      c.status === "failed" ? providerClassOfCategory(c.failureCategory) : null;
+    const providerClasses = new Set(
+      failedChildren.map(providerClassOf).filter((c): c is ProviderFailureClass => c !== null),
+    );
+    const other = failedChildren.filter((c) => c.status !== "budget_exhausted" && providerClassOf(c) === null);
     const lines: string[] = [];
     if (outOfBudget.length > 0) {
       lines.push(`A sub-run ran out of budget: ${outOfBudget.map((c) => `\`${c.id}\``).join(", ")}.`);
+    }
+    // The class only, never the provider's code: the sentence says who has to act.
+    for (const providerClass of providerClasses) {
+      lines.push(`A sub-run could not reach the model: ${providerSentence(providerClass)}`);
     }
     if (other.length > 0) {
       lines.push(`A sub-run did not succeed: ${other.map((c) => `\`${c.id}\` (\`${c.status}\`)`).join(", ")}.`);
@@ -146,7 +158,7 @@ export async function completeHostStatus(
     if (!host) return;
     const children = await db.run.findMany({
       where: { parentRunId: run.id },
-      select: { id: true, status: true, codingRun: { select: { result: true } } },
+      select: { id: true, status: true, codingRun: { select: { result: true, failureCategory: true } } },
       orderBy: { startedAt: "asc" },
     });
     const pullRequests = children
@@ -154,7 +166,7 @@ export async function completeHostStatus(
       .filter((pr): pr is PullRequestOutcome => pr !== null);
     const failedChildren = children
       .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
-      .map((c) => ({ id: c.id, status: c.status }));
+      .map((c) => ({ id: c.id, status: c.status, failureCategory: c.codingRun?.failureCategory ?? null }));
     const budgetSentence =
       run.status === "budget_exhausted" || run.status === "refused"
         ? await loadBudgetSentence(db, run.id, run.status)

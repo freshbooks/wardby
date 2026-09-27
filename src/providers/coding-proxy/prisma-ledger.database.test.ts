@@ -53,8 +53,17 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     expect(await ledger.findSessionByCapabilityHash(`hash-${suffix}`)).toMatchObject({
       protocol: "openai-responses",
       budgetExhaustedAt: null,
+      upstreamFailure: null,
     });
     expect(await ledger.budgetExhausted(sessionId)).toBe(false);
+    expect(await ledger.upstreamFailure(sessionId)).toBeNull();
+    await ledger.recordUpstreamFailure(sessionId, "project_spend_limit_exceeded");
+    await new PrismaProxyLedger(db).recordUpstreamFailure(sessionId, "server_error");
+    expect(await ledger.upstreamFailure(sessionId)).toBe("project_spend_limit_exceeded");
+    expect((await ledger.findSessionByCapabilityHash(`hash-${suffix}`))?.upstreamFailure).toBe(
+      "project_spend_limit_exceeded",
+    );
+    expect(await ledger.upstreamFailure(`missing-${suffix}`)).toBeNull();
     const request = (id: string) => ({
       id: `${id}-${suffix}`,
       sessionId,

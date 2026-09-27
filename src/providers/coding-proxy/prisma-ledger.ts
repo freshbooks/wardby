@@ -42,6 +42,7 @@ interface SessionRow {
   status: string;
   registryTokenHash: string | null;
   budgetExhaustedAt?: Date | null;
+  upstreamFailure?: string | null;
 }
 
 interface RequestRow {
@@ -82,6 +83,7 @@ function sessionFromRow(row: SessionRow): ProxySession {
     status: row.status as ProxySessionStatus,
     registryTokenHash: row.registryTokenHash,
     budgetExhaustedAt: row.budgetExhaustedAt ?? null,
+    upstreamFailure: row.upstreamFailure ?? null,
   };
 }
 
@@ -147,7 +149,7 @@ export class PrismaProxyLedger implements ProxyLedger {
   async findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "budgetExhaustedAt"
+             "budgetExhaustedAt", "upstreamFailure"
       FROM "CodingProxySession" WHERE "capabilityHash" = ${capabilityHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : null;
@@ -300,6 +302,20 @@ export class PrismaProxyLedger implements ProxyLedger {
       SELECT "id" FROM "CodingProxySession" WHERE "id" = ${sessionId} AND "budgetExhaustedAt" IS NOT NULL
     `;
     return rows.length > 0;
+  }
+
+  async recordUpstreamFailure(sessionId: string, code: string): Promise<void> {
+    await this.db.$executeRaw`
+      UPDATE "CodingProxySession" SET "upstreamFailure" = ${code}, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE "id" = ${sessionId} AND "upstreamFailure" IS NULL
+    `;
+  }
+
+  async upstreamFailure(sessionId: string): Promise<string | null> {
+    const rows = await this.db.$queryRaw<{ upstreamFailure: string | null }[]>`
+      SELECT "upstreamFailure" FROM "CodingProxySession" WHERE "id" = ${sessionId}
+    `;
+    return rows[0]?.upstreamFailure ?? null;
   }
 
   getRequest(requestId: string): Promise<ProxyRequest | null> {

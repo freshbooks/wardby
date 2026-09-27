@@ -116,6 +116,7 @@ export interface VcsProvider {
    * actually happened instead of a caller having to go find out.
    * `budget_exhausted` is a failure that ran out of budget;
    * `details.budgetSentence` then says how (see core/budget-wording.ts).
+   * A `failed` run the model provider refused carries `details.providerSentence`.
    */
   notifyContinuationFinished?(
     workspace: PreparedWorkspace,
@@ -131,4 +132,6 @@ export interface ContinuationFinishedDetails {
   agentName?: string;
   /** Host-safe sentence naming the run's budget; used with `budget_exhausted`. */
   budgetSentence?: string;
+  /** Host-safe sentence naming a model-provider refusal (see core/provider-wording.ts); used with `failed`. */
+  providerSentence?: string;
 }
