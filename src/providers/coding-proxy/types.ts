@@ -108,6 +108,9 @@ export interface ProxyAuditEvent {
   cachedInputTokens?: number;
   cacheWriteTokens?: number;
   reasoningTokens?: number;
+  /** For a failed stream: the upstream response's content type and encoding headers, for diagnosis. */
+  contentType?: string;
+  contentEncoding?: string;
 }
 
 export type ProxyAuditSink = (event: ProxyAuditEvent) => void;

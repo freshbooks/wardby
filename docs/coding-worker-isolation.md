@@ -52,7 +52,16 @@ error text: `job_coding_stream_proxy_denied` (401/403 from the proxy),
 (the worker could not connect), `job_coding_stream_agent_exited` (the agent
 process exited without an HTTP error), or `job_coding_stream_failed` when none
 of these match. A refusal because the run's budget is used up ends the run as
-out of budget instead. To see the error text behind a code, turn on a
+out of budget instead.
+
+The proxy side of the same request is in the coding proxy's log as
+`audit.*` events (`audit.request.reserved`, `audit.response.completed`,
+`audit.request.uncertain`, …), with ids, models, amounts and fixed reason
+codes only. When the proxy has to end a stream early, `audit.request.uncertain`
+says why: `upstream_failed:<code>` when the model API reported a failure (the
+failure event is passed on to the worker unchanged), or a code such as
+`terminal_usage_missing`, with the upstream response's content type and
+encoding. To see the error text behind a code, turn on a
 [debug trace](#debug-trace) for the agent.
 
 The proxy also binds a second listener, the **deny port** (`8788`,

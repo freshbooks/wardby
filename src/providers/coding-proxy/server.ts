@@ -4,12 +4,23 @@ import { pipeline, Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../mcp/transport/http-limits.js";
 import { logger } from "../../core/logger.js";
+import type { ProxyAuditEvent } from "./types.js";
 import { CodingProxyError, PROXY_MAX_BODY_BYTES, type CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import { RegistryError } from "../../coding/registry/types.js";
 import { MAX_PLAN_BODY_BYTES, type RegistryResponse, type RegistryService } from "./registry/service.js";
 import type { ProxyProtocol } from "./types.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
+
+/**
+ * Writes a proxy audit event to the operator log. The events carry ids,
+ * models, amounts, statuses and fixed reason codes only, never request or
+ * response content. `sink` defaults to the proxy's own logger.
+ */
+export function logProxyAudit(event: ProxyAuditEvent, sink: Pick<typeof proxyLog, "info"> = proxyLog): void {
+  const { type, ...fields } = event;
+  sink.info({ ...fields, event: `audit.${type}` }, "coding proxy audit");
+}
 
 export interface CodingProxyServerConfig {
   host: string;

@@ -633,6 +633,8 @@ export class CodingProxy {
       const headers: Record<string, string> = {
         "content-type": "application/json",
         accept: parsed.stream ? "text/event-stream" : "application/json",
+        // The pinned fetch never decompresses, and the response is relayed as-is.
+        "accept-encoding": "identity",
       };
       if (session.protocol === "anthropic-messages") {
         headers["x-api-key"] = key;
@@ -680,7 +682,7 @@ export class CodingProxy {
       if (parsed.stream) await this.forwardStream(session, request, upstream, sink);
       else await this.forwardJson(session, request, upstream, sink);
     } catch (error) {
-      await this.markUncertain(session, request, upstream.status, "invalid_or_incomplete_upstream_response");
+      await this.markUncertain(session, request, upstream.status, failureReason(error), responseHeadersOf(upstream));
       sink.destroy();
       throw error instanceof CodingProxyError ? error : new CodingProxyError(502, "invalid_upstream_response");
     } finally {
@@ -774,6 +776,7 @@ export class CodingProxy {
     let buffer = "";
     let receivedBytes = 0;
     let completed = false;
+    let failedWithoutUsage = false;
     const anthropicUsage = session.protocol === "anthropic-messages" ? new AnthropicSseUsageTracker() : undefined;
     const body = upstream.body as unknown as AsyncIterable<Uint8Array>;
     for await (const chunk of body) {
@@ -790,14 +793,30 @@ export class CodingProxy {
           await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
           continue;
         }
-        if (!terminal.usage) throw new Error("terminal_usage_missing");
+        if (!terminal.usage) {
+          if (!terminal.failure) throw new Error("terminal_usage_missing");
+          // The upstream failed the response and reported no usage. Pass its failure on so the
+          // client sees the real error instead of a cut connection; the reservation stays held.
+          if (!completed) {
+            await this.markUncertain(
+              session,
+              request,
+              upstream.status,
+              `upstream_failed:${terminal.failure}`,
+              responseHeadersOf(upstream),
+            );
+          }
+          failedWithoutUsage = true;
+          await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+          continue;
+        }
         await this.complete(session, request, terminal.usage, upstream.status);
         completed = true;
         await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
       }
     }
     buffer = (buffer + decoder.decode()).replaceAll("\r\n", "\n");
-    if (!completed) throw new Error("terminal_usage_missing");
+    if (!completed && !failedWithoutUsage) throw new Error("terminal_usage_missing");
     if (buffer) await safeWrite(sink, Buffer.from(buffer), connected);
     if (connected.value) sink.end();
   }
@@ -807,8 +826,24 @@ export class CodingProxy {
     request: ProxyRequest,
     status: number | undefined,
     reason: string,
+    headers: { contentType?: string; contentEncoding?: string } = {},
   ): Promise<void> {
     await this.ledger.markUncertain(request.id, status);
-    this.audit({ type: "request.uncertain", runId: session.runId, requestId: request.id, status, reason });
+    this.audit({ type: "request.uncertain", runId: session.runId, requestId: request.id, status, reason, ...headers });
   }
+}
+
+/** The fixed code a relay failed with, or a generic one: error messages are not recorded. */
+function failureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return /^[a-z_]{1,64}$/.test(message) ? message : "stream_read_failed";
+}
+
+/** The upstream's content type and encoding, trimmed to a short printable value, for the audit record. */
+function responseHeadersOf(upstream: Response): { contentType?: string; contentEncoding?: string } {
+  const clean = (value: string | null) =>
+    value ? value.replace(/[^\x20-\x7e]/g, "").slice(0, 100) || undefined : undefined;
+  const contentType = clean(upstream.headers.get("content-type"));
+  const contentEncoding = clean(upstream.headers.get("content-encoding"));
+  return { ...(contentType ? { contentType } : {}), ...(contentEncoding ? { contentEncoding } : {}) };
 }

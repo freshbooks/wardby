@@ -460,3 +460,24 @@ describe("coding proxy registry routing", () => {
     });
   });
 });
+
+describe("logProxyAudit", () => {
+  it("logs the event under an audit.<type> name with its fields", async () => {
+    const { logProxyAudit } = await import("./server.js");
+    const info = vi.fn();
+    logProxyAudit(
+      { type: "request.uncertain", runId: "r1", requestId: "q1", status: 200, reason: "upstream_failed:server_error" },
+      { info },
+    );
+    expect(info).toHaveBeenCalledWith(
+      {
+        runId: "r1",
+        requestId: "q1",
+        status: 200,
+        reason: "upstream_failed:server_error",
+        event: "audit.request.uncertain",
+      },
+      "coding proxy audit",
+    );
+  });
+});
