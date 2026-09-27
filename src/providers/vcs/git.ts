@@ -231,22 +231,33 @@ function globRegex(pattern: string): RegExp {
   return new RegExp(`${source}$`);
 }
 
+/** The fixed baseline, split once: its literal exceptions and its protected globs. */
+const WARDBY_UNPROTECTED = new Set(WARDBY_PROTECTED_PATHS.filter(isProtectedPathException).map(protectedPathBody));
+const WARDBY_PROTECTED = WARDBY_PROTECTED_PATHS.filter((pattern) => !isProtectedPathException(pattern)).map((pattern) =>
+  globRegex(pattern),
+);
+
 /**
- * Whether a changed path is protected: it matches one of `patterns` or the
- * WARDBY_PROTECTED_PATHS baseline, and none of the exceptions (entries with a
- * leading "!"). An exception always wins, whatever the order, so
- * [".wardby/**", "!.wardby/services.yaml"] protects everything under .wardby/
- * except the service declaration, which a builder may propose (it takes effect
- * only after merge; docs/coding-services.md). The baseline is added here, at
- * enforcement, rather than stored, so every existing agent and in-flight run
- * gets it.
+ * Whether a changed path is protected, in this order: the WARDBY_PROTECTED_PATHS
+ * baseline's exception (.wardby/services.yaml, which a builder may propose; it
+ * takes effect only after merge, docs/coding-services.md) is never protected;
+ * anything else under the baseline (.wardby/**) always is, whatever the agent's
+ * exceptions say; any other path is protected when it matches one of the
+ * agent's `patterns` and is not one of its exceptions (entries with a leading
+ * "!", each a literal path, so order does not matter). The baseline is applied
+ * here, at enforcement, rather than stored, so every existing agent and
+ * in-flight run gets it.
  */
 export function protectedPathMatcher(patterns: readonly string[]): (path: string) => boolean {
-  const all = [...patterns, ...WARDBY_PROTECTED_PATHS];
-  const exceptions = all.filter(isProtectedPathException).map((pattern) => globRegex(protectedPathBody(pattern)));
-  const protectedPatterns = all.filter((pattern) => !isProtectedPathException(pattern)).map(globRegex);
-  return (path) =>
-    protectedPatterns.some((matcher) => matcher.test(path)) && !exceptions.some((matcher) => matcher.test(path));
+  const exceptions = new Set(patterns.filter(isProtectedPathException).map(protectedPathBody));
+  const protectedPatterns = patterns
+    .filter((pattern) => !isProtectedPathException(pattern))
+    .map((pattern) => globRegex(pattern));
+  return (path) => {
+    if (WARDBY_UNPROTECTED.has(path)) return false;
+    if (WARDBY_PROTECTED.some((matcher) => matcher.test(path))) return true;
+    return protectedPatterns.some((matcher) => matcher.test(path)) && !exceptions.has(path);
+  };
 }
 
 function validateChangedPath(path: string): string {

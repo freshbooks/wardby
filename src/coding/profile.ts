@@ -8,8 +8,6 @@ import { parseAllowlist, resolvePolicy } from "./registry/allowlist.js";
 import { REGISTRY_ADAPTERS } from "./registry/adapters.js";
 import { AllowedServiceNamesSchema } from "./services/catalog.js";
 
-export { PROTECTED_PATH_EXCEPTION } from "./protected-paths.js";
-
 export const MIN_CODING_TIMEOUT_SEC = 60;
 export const MAX_CODING_TIMEOUT_SEC = 7200;
 export const MAX_PROTECTED_PATHS = 128;
@@ -68,7 +66,7 @@ const protectedPathSchema = z
   .refine((value) => !INVALID_SINGLE_LINE_CONTROL.test(value), "must not contain control characters")
   .refine(
     isWellFormedProtectedPath,
-    "must be a repository-relative POSIX path without empty or traversal components, optionally with one leading ! for an exception",
+    "must be a repository-relative POSIX path without empty or traversal components, or ! and a literal file path (no wildcards) for an exception",
   );
 
 const collectExcludePathSchema = z.string().transform((value, ctx) => {

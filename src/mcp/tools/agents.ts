@@ -185,7 +185,7 @@ const profileJsonSchema = {
       maxItems: 128,
       items: { type: "string" },
       description:
-        'Glob patterns (*, **, ?) a run may not change. A leading ! makes an exception: ["docs/**", "!docs/changelog.md"] protects docs/ except the changelog. Every run also protects .wardby/** except .wardby/services.yaml, whatever this list says.',
+        'Glob patterns (*, **, ?) a run may not change. A leading ! makes an exception, a literal file path without wildcards: ["docs/**", "!docs/changelog.md"] protects docs/ except the changelog. Every run also protects .wardby/** except .wardby/services.yaml, whatever this list says; exceptions cannot unprotect .wardby/.',
     },
     collectExclude: { type: "array", maxItems: 64, items: { type: "string" } },
     toolchain: { type: "string", enum: ["node", "node-python"] },

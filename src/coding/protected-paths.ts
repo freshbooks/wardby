@@ -5,12 +5,18 @@
  * (it takes effect only after a person merges it, since dispatch reads it from
  * the base branch). Part of DEFAULT_PROTECTED_PATHS so new agents show it, and
  * always added by protectedPathMatcher (providers/vcs/git.ts) so agents created
- * before it existed get it too. An exception always wins, so no agent's list
- * can take the declaration exception away.
+ * before it existed get it too. The matcher applies it ahead of the agent's own
+ * list: the declaration is never protected, and nothing else under .wardby/ can
+ * be unprotected by an agent's exceptions.
  */
 export const WARDBY_PROTECTED_PATHS = [".wardby/**", "!.wardby/services.yaml"] as const;
 
-/** A leading "!" makes a protectedPaths entry an exception (providers/vcs/git.ts protectedPathMatcher). */
+/**
+ * A leading "!" makes a protectedPaths entry an exception (providers/vcs/git.ts
+ * protectedPathMatcher): one literal file path carved out of the agent's own
+ * patterns. Exceptions take no wildcards, so "!**" or "!.github/**" cannot
+ * switch a whole protected tree off.
+ */
 export const PROTECTED_PATH_EXCEPTION = "!";
 
 export function isProtectedPathException(path: string): boolean {
@@ -22,16 +28,21 @@ export function protectedPathBody(path: string): string {
   return isProtectedPathException(path) ? path.slice(PROTECTED_PATH_EXCEPTION.length) : path;
 }
 
+/** Glob metacharacters an exception may not contain: it names one literal file. */
+const EXCEPTION_GLOB_CHARACTERS = /[*?[\]{}]/;
+
 /**
  * Whether a trimmed protectedPaths entry has a valid shape: a repository-relative
- * POSIX glob with no empty or traversal components, optionally behind one leading
- * "!". Length and control-character bounds are the caller's.
+ * POSIX glob with no empty or traversal components, or, behind one leading "!",
+ * such a path with no glob metacharacters. Length and control-character bounds
+ * are the caller's.
  */
 export function isWellFormedProtectedPath(path: string): boolean {
   const body = protectedPathBody(path);
   return (
     body.length > 0 &&
     !isProtectedPathException(body) &&
+    !(isProtectedPathException(path) && EXCEPTION_GLOB_CHARACTERS.test(body)) &&
     !body.startsWith("/") &&
     !body.startsWith("./") &&
     !body.includes("\\") &&

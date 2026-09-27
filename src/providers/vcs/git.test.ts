@@ -754,6 +754,51 @@ describe("protectedPathMatcher", () => {
   });
 });
 
+describe("protectedPathMatcher baseline precedence", () => {
+  it("keeps .wardby/ protected for every list, whatever the agent's exceptions", () => {
+    for (const patterns of [
+      ["CODEOWNERS"],
+      ["CODEOWNERS", "!.wardby/notes.md"],
+      [".wardby/**", "!.wardby/notes.md"],
+      ["**", "!README.md"],
+    ]) {
+      expect(protectedPathMatcher(patterns)(".wardby/notes.md")).toBe(true);
+    }
+  });
+
+  it("leaves .wardby/services.yaml unprotected even when an agent pattern covers it", () => {
+    expect(protectedPathMatcher([".wardby/**"])(".wardby/services.yaml")).toBe(false);
+    expect(protectedPathMatcher(["**"])(".wardby/services.yaml")).toBe(false);
+    expect(protectedPathMatcher([".wardby/services.yaml"])(".wardby/services.yaml")).toBe(false);
+  });
+
+  it("applies a literal agent exception only to that exact path", () => {
+    const isProtected = protectedPathMatcher(["docs/**", "!docs/CODEOWNERS"]);
+    expect(isProtected("docs/CODEOWNERS")).toBe(false);
+    expect(isProtected("docs/other.md")).toBe(true);
+    expect(isProtected("docs/CODEOWNERS/x")).toBe(true);
+  });
+
+  it("behaves as before for lists without exceptions", () => {
+    const isProtected = protectedPathMatcher([".github/workflows/**", "CODEOWNERS", "src/*.ts"]);
+    expect(isProtected(".github/workflows/ci.yml")).toBe(true);
+    expect(isProtected("CODEOWNERS")).toBe(true);
+    expect(isProtected("src/index.ts")).toBe(true);
+    expect(isProtected("src/nested/index.ts")).toBe(false);
+    expect(isProtected("README.md")).toBe(false);
+  });
+
+  it.each([["!**"], ["!.wardby/*"], ["!.wardby/**"], ["!*"], ["!.github/**"], ["!docs/CODEOWNER?"]])(
+    "refuses the wildcard exception %s when preparing a workspace",
+    async (exception) => {
+      const { provider, input } = await harness();
+      await expect(
+        provider.prepareWorkspace({ ...input, protectedPaths: [".github/workflows/**", "CODEOWNERS", exception] }),
+      ).rejects.toThrow("vcs_protected_path_invalid");
+    },
+  );
+});
+
 describe("Git process boundary", () => {
   it("redacts raw, encoded, and token-shaped secrets", () => {
     const encoded = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");

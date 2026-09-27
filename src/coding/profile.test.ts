@@ -154,7 +154,20 @@ describe("protectedPaths exceptions", () => {
     ["a double exception", ["CODEOWNERS", "!!x"]],
     ["an absolute exception", ["CODEOWNERS", "!/etc/passwd"]],
     ["a traversing exception", ["CODEOWNERS", "!../x"]],
+    ["a wildcard exception", ["CODEOWNERS", "!**"]],
+    ["a wildcard exception under .wardby/", ["CODEOWNERS", "!.wardby/*"]],
+    ["a recursive exception under .wardby/", ["CODEOWNERS", "!.wardby/**"]],
+    ["a top-level wildcard exception", ["CODEOWNERS", "!*"]],
+    ["a wildcard exception over a protected tree", [".github/workflows/**", "!.github/**"]],
+    ["a single-character wildcard exception", ["CODEOWNERS", "!docs/CODEOWNER?"]],
   ])("refuses %s", (_label, protectedPaths) => {
     expect(CodingProfileSchema.safeParse({ repository: "openai/example", protectedPaths }).success).toBe(false);
+  });
+
+  it("accepts a literal exception to a wildcard pattern", () => {
+    expect(
+      CodingProfileSchema.parse({ repository: "openai/example", protectedPaths: ["docs/**", "!docs/CODEOWNERS"] })
+        .protectedPaths,
+    ).toEqual(["docs/**", "!docs/CODEOWNERS"]);
   });
 });
