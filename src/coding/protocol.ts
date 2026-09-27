@@ -9,6 +9,19 @@ export const MAX_CODING_TEST_COMMAND_BYTES = 2 * 1024;
 export const MAX_TAG_BYTES = 32;
 
 /**
+ * Coding-run services (docs/coding-services.md): the catalog name and version
+ * grammar, shared by the repository's .wardby/services.yaml, the catalog, and
+ * the worker input.
+ */
+export const CODING_SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+export const CODING_SERVICE_VERSION = /^[0-9A-Za-z][0-9A-Za-z._-]{0,19}$/;
+export const MAX_CODING_SERVICES = 5;
+/** A variable a service hands the agent's shells (DATABASE_URL, PGHOST, REDIS_URL, ...). */
+export const CODING_SERVICE_ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
+export const MAX_CODING_SERVICE_ENV = 16;
+export const MAX_CODING_SERVICE_ENV_VALUE_BYTES = 1024;
+
+/**
  * A worker's output-schema failure, reduced to where and how it failed, never
  * what the model wrote: `<path>:<zod issue code>`, where the path is dot-joined
  * schema keys and array indices (`$` for the root). Unrecognized keys the model
@@ -39,6 +52,82 @@ function boundedText(maxBytes: number, singleLine = false) {
     .refine((value) => !invalidControl.test(value), "must not contain control characters")
     .refine((value) => value.trim().length > 0, "must not be blank");
 }
+
+/**
+ * Names the worker owns: its shell basics, anything that would redirect a
+ * process's loader or network proxy, and the registry proxy's and Wardby's own
+ * settings. No service may set one, whatever its catalog entry says.
+ */
+const RESERVED_SERVICE_ENV_NAMES = new Set([
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "PATH",
+  "SHELL",
+  "TMPDIR",
+  "USER",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "ALL_PROXY",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+]);
+const RESERVED_SERVICE_ENV_PREFIXES = [
+  "WARDBY_",
+  "CODEX_",
+  "OPENAI_",
+  "ANTHROPIC_",
+  "PIP_",
+  "NPM_CONFIG_",
+  "UV_",
+  "GIT_",
+];
+
+export function isReservedServiceEnvName(name: string): boolean {
+  return (
+    RESERVED_SERVICE_ENV_NAMES.has(name) || RESERVED_SERVICE_ENV_PREFIXES.some((prefix) => name.startsWith(prefix))
+  );
+}
+
+const serviceEnvValueSchema = z
+  .string()
+  .refine(
+    (value) => byteLength(value) <= MAX_CODING_SERVICE_ENV_VALUE_BYTES,
+    `must be at most ${MAX_CODING_SERVICE_ENV_VALUE_BYTES} UTF-8 bytes`,
+  )
+  .refine((value) => !INVALID_SINGLE_LINE_CONTROL.test(value), "must not contain control characters");
+
+/** The variables one service hands the agent's shells: upper-case names wardby does not reserve. */
+export const CodingServiceTestEnvSchema = z.record(z.string(), serviceEnvValueSchema).superRefine((env, ctx) => {
+  const names = Object.keys(env);
+  if (names.length > MAX_CODING_SERVICE_ENV) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `must have at most ${MAX_CODING_SERVICE_ENV} variables` });
+  }
+  for (const name of names) {
+    if (!CODING_SERVICE_ENV_NAME.test(name) || isReservedServiceEnvName(name)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [name],
+        message: "must be an upper-case variable name wardby does not reserve",
+      });
+    }
+  }
+});
+
+const workerServiceSchema = z
+  .object({
+    name: z.string().regex(CODING_SERVICE_NAME),
+    version: z.string().regex(CODING_SERVICE_VERSION),
+    testEnv: CodingServiceTestEnvSchema,
+  })
+  .strict();
 
 function repositoryParts(value: string): [owner: string, repository: string] {
   if (byteLength(value) > MAX_REPOSITORY_INPUT_BYTES || INVALID_SINGLE_LINE_CONTROL.test(value)) {
@@ -243,6 +332,14 @@ export const CodingTaskInputSchema = z
      * untraced run is unchanged for workers that predate it.
      */
     debugTrace: z.boolean().optional(),
+    /**
+     * Coding-run services started next to this run (docs/coding-services.md):
+     * each one's catalog name and version, and the variables the agent's shells
+     * receive. Absent means none; the control plane writes the key only when a
+     * run has services, so every other input is unchanged for workers that
+     * predate it.
+     */
+    services: z.array(workerServiceSchema).min(1).max(MAX_CODING_SERVICES).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -253,6 +350,10 @@ export const CodingTaskInputSchema = z
         path: ["headRef"],
         message: "must match wardby/run-<runId> (or wardby/run-<continuationOf.runId>)",
       });
+    }
+    const names = (value.services ?? []).map((service) => service.name);
+    if (new Set(names).size !== names.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["services"], message: "must name each service once" });
     }
   });
 

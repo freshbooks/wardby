@@ -134,6 +134,71 @@ describe("runCodingWorker", () => {
     expect(await readFile(join(workspace, ".cache", "npm", "npmrc"), "utf8")).toContain("_authToken=rrg_");
   });
 
+  it("hands the run's service variables to the agent's shells, never over its own", async () => {
+    const workspace = await tempWorkspace();
+    const capture: { config?: WorkerClientConfig } = {};
+    const output = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "None.",
+      tests: [],
+    });
+    await runCodingWorker({
+      input: {
+        ...input,
+        services: [
+          {
+            name: "postgres",
+            version: "16",
+            testEnv: { DATABASE_URL: "postgres://test:test@127.0.0.1:5432/test", PGHOST: "127.0.0.1", PATH: "/evil" },
+          },
+          {
+            name: "mysql",
+            version: "8",
+            testEnv: { DATABASE_URL: "mysql://test:test@127.0.0.1:3306/test", MYSQL_HOST: "127.0.0.1" },
+          },
+        ],
+      },
+      workspace,
+      proxyBaseUrl: "http://proxy:8080",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createClient: clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], capture),
+    });
+
+    const env = capture.config!.environment;
+    // The first service listed wins a shared name; the worker's own PATH always wins.
+    expect(env).toMatchObject({
+      DATABASE_URL: "postgres://test:test@127.0.0.1:5432/test",
+      PGHOST: "127.0.0.1",
+      MYSQL_HOST: "127.0.0.1",
+      PATH: "/opt/wardby/bin:/usr/local/bin:/usr/bin:/bin",
+      HOME: "/home/wardby",
+    });
+  });
+
+  it("gives a run without services no service variables", async () => {
+    const workspace = await tempWorkspace();
+    const capture: { config?: WorkerClientConfig } = {};
+    const output = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "None.",
+      tests: [],
+    });
+    await runCodingWorker({
+      input,
+      workspace,
+      proxyBaseUrl: "http://proxy:8080",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createClient: clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], capture),
+    });
+    expect(capture.config!.environment).not.toHaveProperty("DATABASE_URL");
+  });
+
   it("rewrites proxy tarball URLs in collected npm lockfiles back to the public registry", async () => {
     const workspace = await tempWorkspace();
     const proxied = `{\n  "resolved": "http://proxy:8080/registry/npm/-/tarball/%40react-aria%2Flive-announcer/3.5.1"\n}\n`;
