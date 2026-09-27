@@ -4,7 +4,6 @@ COPY src/claude-tool-runner/package.json src/claude-tool-runner/package-lock.jso
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
 RUN npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
@@ -12,6 +11,15 @@ WORKDIR /opt/wardby/claude-tool-runner
 COPY --from=dependencies /runner/node_modules ./node_modules
 COPY src/claude-tool-runner/main.mjs ./main.mjs
 COPY src/claude-tool-runner/command.mjs ./command.mjs
+# The npm shim (src/coding-worker/npm-shim.mjs): verifies a project's lockfile with the registry
+# proxy before an install, then runs the real npm. Commands run under `sh -l`, whose /etc/profile
+# resets PATH, so profile.d puts the shim back in front.
+COPY src/coding-worker/npm-shim.mjs /opt/wardby/bin/npm-shim.mjs
+RUN chmod 0755 /opt/wardby/bin/npm-shim.mjs \
+    && ln -s npm-shim.mjs /opt/wardby/bin/npm \
+    && printf '%s\n' 'case ":$PATH:" in *:/opt/wardby/bin:*) ;; *) PATH="/opt/wardby/bin:$PATH" ;; esac' > /etc/profile.d/wardby-shims.sh \
+    && PATH="/opt/wardby/bin:$PATH" npm --version \
+    && test "$(sh -lc 'command -v npm')" = /opt/wardby/bin/npm
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \

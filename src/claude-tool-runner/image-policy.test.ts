@@ -12,5 +12,8 @@ describe("Claude tool runner image policy", () => {
     expect(dockerfile).not.toContain("ANTHROPIC_API_KEY");
     expect(lockfile).not.toContain("@anthropic-ai/");
     expect(dockerfile).toContain("USER 10001:10001");
+    expect(dockerfile).toContain("COPY src/coding-worker/npm-shim.mjs /opt/wardby/bin/npm-shim.mjs");
+    expect(dockerfile).toContain("/etc/profile.d/wardby-shims.sh");
+    expect(dockerfile.match(/AS runtime/g)).toHaveLength(1);
   });
 });
