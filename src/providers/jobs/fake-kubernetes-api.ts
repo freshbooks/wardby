@@ -15,6 +15,7 @@ export interface FakeExecCall {
   command: string[];
   stdin?: Readable;
   stdout?: Writable;
+  timeoutMs: number;
 }
 
 type Kind = "configmap" | "secret" | "pod" | "networkpolicy" | "service" | "endpoints";
@@ -143,15 +144,24 @@ export class FakeKubernetesApi implements KubernetesApi {
   }
   async exec(namespace: string, pod: string, container: string, command: string[], options: KubernetesExecOptions) {
     // Like the real API: exec into a missing pod or an unknown container fails instead of succeeding
-    // silently, so no test can pass on behaviour a cluster would reject. (The adapter's timeoutMs is
-    // not modelled: tests drive slow execs through onExec directly.)
+    // silently, so no test can pass on behaviour a cluster would reject. (The adapter does not
+    // actually enforce timeoutMs itself: tests drive slow execs through onExec directly. The value
+    // is still recorded on the call, so a test can assert which timeout the caller configured.)
     const target = this.read<V1Pod>("pod", namespace, pod);
     if (!target) throw new KubernetesNotFoundError(this.key("pod", namespace, pod));
     const containers = [...(target.spec?.containers ?? []), ...(target.spec?.initContainers ?? [])];
     if (!containers.some((entry) => entry.name === container)) {
       throw new KubernetesNotFoundError(`${this.key("pod", namespace, pod)}/${container}`);
     }
-    const call: FakeExecCall = { namespace, pod, container, command, stdin: options.stdin, stdout: options.stdout };
+    const call: FakeExecCall = {
+      namespace,
+      pod,
+      container,
+      command,
+      stdin: options.stdin,
+      stdout: options.stdout,
+      timeoutMs: options.timeoutMs,
+    };
     this.execCalls.push(call);
     return this.onExec(call);
   }
