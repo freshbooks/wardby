@@ -133,12 +133,9 @@ function scriptedTurn(call: number, body: Record<string, unknown>): string {
   return sse(id, [finalMessage(`msg_${call}`)]);
 }
 
-describe.skipIf(!codexBinaryInstalled())("pinned Codex CLI against the coding proxy allowlist", () => {
-  const cleanup: Array<() => Promise<void>> = [];
-  afterEach(async () => {
-    for (const task of cleanup.splice(0).reverse()) await task();
-  });
-
+// Needs no Codex binary, so it runs everywhere: a Codex bump without a
+// re-recorded request fixture fails here even where the rest is skipped.
+describe("pinned Codex version", () => {
   it("tests the Codex version the worker image pins", () => {
     const worker = require("./package.json") as { dependencies: Record<string, string> };
     const pinned = worker.dependencies["@openai/codex-sdk"];
@@ -147,6 +144,13 @@ describe.skipIf(!codexBinaryInstalled())("pinned Codex CLI against the coding pr
     expect((require("@openai/codex/package.json") as { version: string }).version).toBe(pinned);
     // The recorded request fixture is named for the version it was captured from.
     expect(require.resolve(`../providers/coding-proxy/fixtures/codex-${pinned}-responses-requests.json`)).toBeTruthy();
+  });
+});
+
+describe.skipIf(!codexBinaryInstalled())("pinned Codex CLI against the coding proxy allowlist", () => {
+  const cleanup: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    for (const task of cleanup.splice(0).reverse()) await task();
   });
 
   it.each(["gpt-5.6-terra", "gpt-4.1"])(

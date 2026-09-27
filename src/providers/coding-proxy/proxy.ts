@@ -149,10 +149,25 @@ const OPENAI_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "h
 const OPENAI_REASONING_SUMMARIES = new Set(["auto", "concise", "detailed", "none"]);
 const OPENAI_REASONING_CONTEXTS = new Set(["all_turns", "current_turn"]);
 const OPENAI_INCLUDES = new Set(["reasoning.encrypted_content"]);
-// Unset and "auto"/"default" are standard processing unless the OpenAI project
-// itself is configured otherwise; "priority", "flex" and "scale" are billed at
-// rates the pricing table does not track.
-const OPENAI_SERVICE_TIERS = new Set(["auto", "default"]);
+// Only unset (Codex never sends one) or an explicit "default". "auto" defers to
+// the OpenAI project's own tier setting, which may be priority or scale; those
+// and "flex" are billed at rates the pricing table does not track.
+const OPENAI_SERVICE_TIERS = new Set(["default"]);
+// The client_metadata keys the pinned Codex sends (recorded fixture). Several
+// are x-codex-*/x-openai-* keys whose server-side meaning is undocumented, so a
+// new key fails closed like every other unknown field.
+const OPENAI_CLIENT_METADATA_KEYS = new Set([
+  "parent_turn_id",
+  "root_turn_id",
+  "session_id",
+  "thread_id",
+  "turn_id",
+  "x-codex-installation-id",
+  "x-codex-parent-thread-id",
+  "x-codex-turn-metadata",
+  "x-codex-window-id",
+  "x-openai-subagent",
+]);
 const OPENAI_TOOL_CHOICES = new Set(["auto", "none", "required"]);
 const OPENAI_VERBOSITIES = new Set(["low", "medium", "high"]);
 const OPENAI_IMAGE_DETAILS = new Set(["auto", "low", "high", "original"]);
@@ -170,7 +185,6 @@ const OPENAI_INLINE_IMAGE = /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-
 const MAX_OPENAI_ITEMS = 10_000;
 const MAX_OPENAI_TOOLS = 512;
 const MAX_OPENAI_ID_LENGTH = 512;
-const MAX_OPENAI_METADATA_ENTRIES = 64;
 const MAX_OPENAI_METADATA_VALUE_LENGTH = 16 * 1024;
 
 function openAiCode(prefix: string, value: unknown): string {
@@ -403,10 +417,10 @@ function validateOpenAiText(value: unknown): void {
 
 function validateOpenAiClientMetadata(value: unknown): void {
   const metadata = openAiRecord(value);
-  const entries = Object.entries(metadata);
-  if (entries.length > MAX_OPENAI_METADATA_ENTRIES) throw new CodingProxyError(400, "invalid_openai_request");
-  for (const [key, entry] of entries) {
-    if (key.length > 128) throw new CodingProxyError(400, "invalid_openai_request");
+  for (const [key, entry] of Object.entries(metadata)) {
+    if (!OPENAI_CLIENT_METADATA_KEYS.has(key)) {
+      throw new CodingProxyError(400, openAiCode("openai_client_metadata_key_not_allowed", key));
+    }
     openAiString(entry, MAX_OPENAI_METADATA_VALUE_LENGTH);
   }
 }
@@ -769,9 +783,16 @@ function parseRequest(protocol: ProxyProtocol, rawBody: string, anthropicBeta: s
   if (protocol !== "anthropic-messages" && anthropicBeta !== undefined) {
     throw new CodingProxyError(400, "invalid_anthropic_beta");
   }
-  return protocol === "anthropic-messages"
-    ? parseAnthropicRequest(rawBody, anthropicBeta)
-    : parseOpenAiRequest(rawBody);
+  try {
+    return protocol === "anthropic-messages"
+      ? parseAnthropicRequest(rawBody, anthropicBeta)
+      : parseOpenAiRequest(rawBody);
+  } catch (error) {
+    // JSON nested deeply enough (inside a free-form tool schema, say) overflows
+    // the stack when re-encoded. It is the client's request, not a proxy fault.
+    if (error instanceof RangeError) throw new CodingProxyError(400, "request_nesting_too_deep");
+    throw error;
+  }
 }
 
 function safeRequestKey(value: string | undefined, fingerprint: string): string {
@@ -896,7 +917,18 @@ export class CodingProxy {
       this.audit({ type: "request.rejected", runId: session.runId, reason: "protocol_mismatch" });
       throw new CodingProxyError(403, "protocol_mismatch");
     }
-    const parsed = parseRequest(input.protocol, input.rawBody, input.anthropicBeta);
+    let parsed: ParsedRequest;
+    try {
+      parsed = parseRequest(input.protocol, input.rawBody, input.anthropicBeta);
+    } catch (error) {
+      // The session is already authenticated and no credential has been
+      // resolved; record the refusal against the run so a smuggling attempt
+      // is attributable, then refuse.
+      if (error instanceof CodingProxyError) {
+        this.audit({ type: "request.rejected", runId: session.runId, status: error.status, reason: error.code });
+      }
+      throw error;
+    }
     if (!session.allowedModels.includes(parsed.model)) {
       this.audit({ type: "request.rejected", runId: session.runId, model: parsed.model, reason: "model_not_allowed" });
       throw new CodingProxyError(403, "model_not_allowed");

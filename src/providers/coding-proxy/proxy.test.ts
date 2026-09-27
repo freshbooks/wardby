@@ -850,6 +850,7 @@ describe("CodingProxy OpenAI Responses allowlist", () => {
     ["odd key name", { "we!rd key": 1 }, "openai_request_key_not_allowed:other"],
     ["priority tier", { service_tier: "priority" }, "service_tier_not_allowed"],
     ["flex tier", { service_tier: "flex" }, "service_tier_not_allowed"],
+    ["auto tier (defers to the project's tier)", { service_tier: "auto" }, "service_tier_not_allowed"],
     ["background", { background: true }, "background_not_allowed"],
     ["web search tool", { tools: [{ type: "web_search" }] }, "openai_tool_not_allowed:web_search"],
     [
@@ -907,7 +908,12 @@ describe("CodingProxy OpenAI Responses allowlist", () => {
       "openai_reasoning_not_allowed",
     ],
     ["text format json_object", { text: { format: { type: "json_object" } } }, "openai_text_not_allowed"],
-    ["client metadata object value", { client_metadata: { a: { b: 1 } } }, "invalid_openai_request"],
+    ["client metadata object value", { client_metadata: { session_id: { b: 1 } } }, "invalid_openai_request"],
+    [
+      "unknown client metadata key",
+      { client_metadata: { session_id: "s", "x-openai-priority": "1" } },
+      "openai_client_metadata_key_not_allowed:x-openai-priority",
+    ],
   ])("rejects %s before credential resolution", async (_name, change, code) => {
     const resolve = vi.fn(async () => "secret");
     const h = await harness({ credentials: { resolve } });
@@ -1028,6 +1034,37 @@ describe("CodingProxy OpenAI Responses allowlist", () => {
     await expect(
       execute(h, `openai-reject-input-${_name}`, new TestSink(), JSON.stringify(withInput(item))),
     ).rejects.toMatchObject({ status: 400, code });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+  it("records an allowlist refusal against the run in the audit log", async () => {
+    const h = await harness();
+    const body = codexBody({ tools: [{ type: "mcp", server_label: "x", server_url: "https://attacker.example/mcp" }] });
+
+    await expect(execute(h, "audited-refusal", new TestSink(), JSON.stringify(body))).rejects.toMatchObject({
+      code: "openai_tool_not_allowed:mcp",
+    });
+    expect(h.events).toContainEqual({
+      type: "request.rejected",
+      runId: h.session.runId,
+      status: 400,
+      reason: "openai_tool_not_allowed:mcp",
+    });
+    expect(JSON.stringify(h.events)).not.toContain("attacker.example");
+  });
+
+  it("refuses JSON nested too deeply to re-encode with a 400, not an internal error", async () => {
+    const resolve = vi.fn(async () => "secret");
+    const h = await harness({ credentials: { resolve } });
+    const depth = 200_000;
+    const parameters = `{"type":"object","x":${"[".repeat(depth)}${"]".repeat(depth)}}`;
+    const tools = `[{"type":"function","name":"f","parameters":${parameters}}]`;
+    const raw = JSON.stringify(codexBody({ tools: "__TOOLS__" })).replace('"__TOOLS__"', tools);
+
+    await expect(execute(h, "deeply-nested", new TestSink(), raw)).rejects.toMatchObject({
+      status: 400,
+      code: "request_nesting_too_deep",
+    });
     expect(resolve).not.toHaveBeenCalled();
     expect(h.fetch).not.toHaveBeenCalled();
   });

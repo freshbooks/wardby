@@ -99,7 +99,10 @@ makes OpenAI's servers contact any host, and hosted-tool fees and non-default
 service tiers are billed outside the metered tokens. Code in a Codex worker can
 read the run capability, so the proxy validates every request body against an
 allowlist before it resolves a credential, and refuses anything else with a
-`400` (`src/providers/coding-proxy/proxy.ts`).
+`400` (`src/providers/coding-proxy/proxy.ts`). Each refusal is also written to
+the proxy audit log as `request.rejected` with the run id and the refusal
+code, so a smuggling attempt is attributable to its run. JSON nested too
+deeply to process is refused with `request_nesting_too_deep`.
 
 - **Anthropic Messages** (`parseAnthropicRequest`): a fixed set of keys,
   text/`tool_use`/`tool_result`/thinking blocks, exactly the two Wardby tool
@@ -137,7 +140,10 @@ allowlist before it resolves a credential, and refuses anything else with a
   - Pinned values: `include` only `reasoning.encrypted_content`; `reasoning`
     only `effort`, `summary` and `context` with known values; `text` only
     `verbosity` and a `text` or `json_schema` format; `service_tier` only
-    unset, `auto` or `default` (`service_tier_not_allowed`). The proxy still
+    unset or `default` (`service_tier_not_allowed`; `auto` is refused because
+    it defers to the OpenAI project's own tier, which may be priority);
+    `client_metadata` only the string-valued keys Codex sends
+    (`openai_client_metadata_key_not_allowed:<key>`). The proxy still
     forces `store: false` and `background: false` and adds a
     `max_output_tokens` ceiling when Codex omits it.
 
