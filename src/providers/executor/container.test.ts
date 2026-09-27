@@ -1637,6 +1637,7 @@ describe("normalizeCollectedLockfiles", () => {
 
   it("rewrites registry-proxy URLs in a Claude run's collected lockfiles", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-collect-"));
+    roots.push(workspace);
     await writeFile(join(workspace, "package-lock.json"), lock(PROXIED));
     expect(await normalizeCollectedLockfiles("claude-code", workspace)).toEqual(["package-lock.json"]);
     expect(await readFile(join(workspace, "package-lock.json"), "utf8")).not.toContain("wardby-proxy");
@@ -1644,6 +1645,7 @@ describe("normalizeCollectedLockfiles", () => {
 
   it("leaves a Codex run's workspace to its driver", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "wardby-codex-collect-"));
+    roots.push(workspace);
     await writeFile(join(workspace, "package-lock.json"), lock(PROXIED));
     expect(await normalizeCollectedLockfiles("codex", workspace)).toEqual([]);
     expect(await readFile(join(workspace, "package-lock.json"), "utf8")).toContain("wardby-proxy");
