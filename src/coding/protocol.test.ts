@@ -3,6 +3,7 @@ import {
   CODING_PROTOCOL_VERSION,
   CodingAgentOutputSchema,
   CodingRunResultSchema,
+  isReservedServiceEnvName,
   normalizeCodingTag,
   CodingTaskInputSchema,
   MAX_CODING_ARTIFACT_BYTES,
@@ -124,6 +125,53 @@ describe("CodingTaskInputSchema", () => {
     expect(() => CodingTaskInputSchema.parse({ ...input, task: "x".repeat(MAX_CODING_TASK_BYTES + 1) })).toThrow();
     expect(() => CodingTaskInputSchema.parse({ ...input, task: "safe\u0000hidden" })).toThrow();
     expect(() => CodingTaskInputSchema.parse({ ...input, task: "😀".repeat(MAX_CODING_TASK_BYTES / 2) })).toThrow();
+  });
+
+  it("accepts an optional services list, absent meaning none", () => {
+    expect(CodingTaskInputSchema.parse(input)).not.toHaveProperty("services");
+    const services = [
+      { name: "postgres", version: "16", testEnv: { DATABASE_URL: "postgres://test:test@127.0.0.1:5432/test" } },
+      { name: "redis", version: "7", testEnv: {} },
+    ];
+    expect(CodingTaskInputSchema.parse({ ...input, services })).toMatchObject({ services });
+  });
+
+  it.each([
+    ["an unknown key", [{ name: "postgres", version: "16", testEnv: {}, image: "postgres:16" }]],
+    ["an upper-case name", [{ name: "Postgres", version: "16", testEnv: {} }]],
+    ["a version with a space", [{ name: "postgres", version: "16 beta", testEnv: {} }]],
+    ["a reserved variable", [{ name: "postgres", version: "16", testEnv: { PATH: "/tmp" } }]],
+    ["a variable under a reserved prefix", [{ name: "postgres", version: "16", testEnv: { WARDBY_PROXY_URL: "x" } }]],
+    ["a lower-case variable", [{ name: "postgres", version: "16", testEnv: { database_url: "x" } }]],
+    ["a multi-line value", [{ name: "postgres", version: "16", testEnv: { DATABASE_URL: "a\nb" } }]],
+    [
+      "the same service twice",
+      [
+        { name: "postgres", version: "16", testEnv: {} },
+        { name: "postgres", version: "15", testEnv: {} },
+      ],
+    ],
+    ["an empty list", []],
+    ["six services", Array.from({ length: 6 }, (_, i) => ({ name: `svc${i}`, version: "1", testEnv: {} }))],
+  ])("rejects services with %s", (_label, services) => {
+    expect(() => CodingTaskInputSchema.parse({ ...input, services })).toThrow();
+  });
+
+  it("reserves the worker's own variable names for it", () => {
+    for (const name of [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "NODE_OPTIONS",
+      "HTTPS_PROXY",
+      "PIP_INDEX_URL",
+      "WARDBY_RUN_CAPABILITY",
+    ]) {
+      expect(isReservedServiceEnvName(name)).toBe(true);
+    }
+    for (const name of ["DATABASE_URL", "PGHOST", "REDIS_URL", "MYSQL_HOST"]) {
+      expect(isReservedServiceEnvName(name)).toBe(false);
+    }
   });
 });
 

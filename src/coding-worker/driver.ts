@@ -1,6 +1,11 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { CODING_PROTOCOL_VERSION, parseCodingAgentOutputJson, type CodingAgentOutput } from "../coding/protocol.js";
+import {
+  CODING_PROTOCOL_VERSION,
+  parseCodingAgentOutputJson,
+  type CodingAgentOutput,
+  type CodingTaskInput,
+} from "../coding/protocol.js";
 import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
 import { registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { describeError } from "./debug-trace.js";
@@ -100,6 +105,23 @@ function workerEnvironment(): Record<string, string> {
   };
 }
 
+/**
+ * The variables a run's services hand the agent's shells
+ * (CodingTaskInput.services, docs/coding-services.md). Where two services set
+ * the same variable, the first one listed wins. The worker's own variables are
+ * spread after these, so they always win (the protocol reserves their names
+ * anyway).
+ */
+export function serviceEnvironment(services: CodingTaskInput["services"]): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const service of services ?? []) {
+    for (const [name, value] of Object.entries(service.testEnv)) {
+      if (!(name in env)) env[name] = value;
+    }
+  }
+  return env;
+}
+
 export async function runCodingWorker(options: WorkerRunOptions): Promise<CodingAgentOutput> {
   const registry = registryWorkerSetup({
     proxyBaseUrl: options.proxyBaseUrl,
@@ -114,7 +136,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     proxyBaseUrl: options.proxyBaseUrl,
     capability: options.capability,
     developerInstructions: WORKER_SECURITY_INSTRUCTIONS,
-    environment: { ...workerEnvironment(), ...registry.env },
+    environment: { ...serviceEnvironment(options.input.services), ...workerEnvironment(), ...registry.env },
   });
   const thread = client.startThread({
     model: options.input.model,
