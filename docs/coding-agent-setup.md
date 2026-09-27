@@ -4,7 +4,9 @@ This setup starts a dedicated, trusted coding proxy while keeping the coding
 worker untrusted and network-isolated. The proxy has the selected provider
 credential and database access. A worker receives only a one-run capability
 and can reach only the proxy on its internal Docker network. Claude Code uses
-a second, networkless tool-runner container for repository access.
+a second, credential-free tool-runner container for repository access; it
+shares the run's network (so its package installs reach the proxy's
+registry) but never holds the run capability.
 
 ## Prerequisites
 
@@ -84,6 +86,13 @@ CODING_ANTHROPIC_CREDENTIAL_REF=env:ANTHROPIC_API_KEY
 GITHUB_APP_ID=replace-with-app-id
 GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
 ```
+
+This local, immutable-`sha256:` ID form of `CODING_CLAUDE_WORKER_IMAGE` and
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE` is only accepted by the Docker launcher.
+`JOB_LAUNCHER=kubernetes` needs both images pushed to a registry and set as
+`repo@sha256:<64 hex>` registry digests instead — the control plane refuses
+to start otherwise — which `deploy/gke/up.sh` and `deploy/kind-coding/up.sh`
+build, push, and pin for you.
 
 Once the GitHub App values are set and the target repository has been reviewed,
 change `JOB_LAUNCHER=docker` and run:

@@ -18,6 +18,7 @@ import {
   parseWorkerDiagnosticLine,
 } from "./docker.js";
 import { buildDockerIsolationPlan, WORKER_PATHS } from "./docker-isolation.js";
+import { claudeToolSetup } from "./claude-tool-setup.js";
 import type { JobHandle, JobResult, JobSpec } from "./types.js";
 
 const image = `registry.example/wardby-worker@sha256:${"a".repeat(64)}`;
@@ -81,6 +82,8 @@ describe("Docker cleanup classification", () => {
     expect(isMissingDockerResource("Error response from daemon: network wardby-net-run not found")).toBe(true);
   });
 });
+
+const claudeLimits = { cpus: 1.5, memoryMb: 1024, pids: 128, diskMb: 512 };
 
 function spec(runId = "docker-run-1"): JobSpec {
   return {
@@ -340,7 +343,7 @@ class FakeDocker implements DockerCommandRunner {
         ? {
             cpus: this.job.limits.cpus - 0.25,
             memoryMb: this.job.limits.memoryMb - toolMemoryMb,
-            pids: this.job.limits.pids - 16,
+            pids: this.job.limits.pids - 64,
           }
         : this.job.limits;
     return {
@@ -414,7 +417,7 @@ class FakeDocker implements DockerCommandRunner {
       Config: {
         User: "10001:10001",
         Image: this.job.toolImage,
-        Env: [],
+        Env: [`WARDBY_TOOL_SETUP=${claudeToolSetup(this.job, capability)}`],
         Labels: this.resourceLabels.get(this.plan.names.toolContainer),
       },
       HostConfig: {
@@ -429,10 +432,10 @@ class FakeDocker implements DockerCommandRunner {
         Memory: memoryMb * 1024 * 1024,
         MemorySwap: memoryMb * 1024 * 1024,
         MemorySwappiness: 0,
-        PidsLimit: 16,
+        PidsLimit: 64,
         NanoCpus: 250_000_000,
         ShmSize: 16 * 1024 * 1024,
-        NetworkMode: "none",
+        NetworkMode: this.plan.names.network,
         PidMode: "",
         RestartPolicy: { Name: "no" },
         LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
@@ -461,7 +464,7 @@ class FakeDocker implements DockerCommandRunner {
         Destination,
         RW,
       })),
-      NetworkSettings: { Networks: { none: {} }, Ports: {} },
+      NetworkSettings: { Networks: { [this.plan.names.network]: {} }, Ports: {} },
       State: {
         Running: this.toolState.running,
         Status: this.toolState.status,
@@ -594,8 +597,8 @@ describe("DockerJobLauncher", () => {
     expect(await launcher.collect(handle)).toEqual({ exitCode: 124, reason: "timed_out" });
   });
 
-  it("treats Claude's agent and no-network tool runner as one cleanup unit", async () => {
-    const created = await harness("docker-claude", { provider: "claude-code", toolImage });
+  it("treats Claude's agent and its run-network tool runner as one cleanup unit", async () => {
+    const created = await harness("docker-claude", { provider: "claude-code", toolImage, limits: claudeLimits });
     const handle = await created.launcher.launch(created.spec);
     const createdContainers = created.docker.calls
       .filter((call) => call.args[0] === "container" && call.args[1] === "create")
@@ -606,6 +609,14 @@ describe("DockerJobLauncher", () => {
       created.docker.plan.names.workerContainer,
     ]);
     expect(JSON.stringify(created.docker.calls)).not.toContain(`WARDBY_RUN_CAPABILITY=${capability}`);
+    const toolCreate = created.docker.calls.find(
+      (call) =>
+        call.args[0] === "container" &&
+        call.args[1] === "create" &&
+        call.args.includes(created.docker.plan.names.toolContainer),
+    )!;
+    expect(Object.keys(toolCreate.options?.env ?? {})).toEqual(["WARDBY_TOOL_SETUP"]);
+    expect(JSON.parse(toolCreate.options!.env!.WARDBY_TOOL_SETUP).schemaVersion).toBe(1);
     await expect(created.launcher.status(handle)).resolves.toEqual({ state: "running" });
     created.docker.finish();
     await expect(created.launcher.collect(handle)).resolves.toMatchObject({ reason: "completed" });
@@ -614,7 +625,11 @@ describe("DockerJobLauncher", () => {
   });
 
   it("fails the composite job when the Claude tool runner exits", async () => {
-    const created = await harness("docker-claude-tool-failure", { provider: "claude-code", toolImage });
+    const created = await harness("docker-claude-tool-failure", {
+      provider: "claude-code",
+      toolImage,
+      limits: claudeLimits,
+    });
     const handle = await created.launcher.launch(created.spec);
     created.docker.failTool();
     await expect(created.launcher.status(handle)).resolves.toEqual({ state: "failed" });
@@ -622,7 +637,7 @@ describe("DockerJobLauncher", () => {
   });
 
   it("never relaunches an ambiguous provisioning record", async () => {
-    const created = await harness("docker-ambiguous", { provider: "claude-code", toolImage });
+    const created = await harness("docker-ambiguous", { provider: "claude-code", toolImage, limits: claudeLimits });
     const plan = created.docker.plan;
     const specHash = createHash("sha256")
       .update(JSON.stringify({ ...created.spec, labels: { untrusted: "must-not-reach-docker" } }))

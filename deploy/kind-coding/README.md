@@ -51,10 +51,14 @@ start`s it if it exists but is stopped, or leaves it alone if it's
 5. Builds and pushes the coding-worker image (`src/coding-worker/Dockerfile`),
    the node-python coding-worker image (`src/coding-worker/Dockerfile.node-python`
    — used by agents whose `codingProfile.toolchain` is `"node-python"`, e.g.
-   version `"3.12"`), and the runtime image (`deploy/Dockerfile`, `runtime`
-   target) to the registry, then resolves each one's pulled-by-digest reference.
-6. Verifies both worker images have `tar`, `head`, and `test`, which the run pod's
-   keeper uses to seed and collect the workspace.
+   version `"3.12"`), the runtime image (`deploy/Dockerfile`, `runtime`
+   target), and the Claude agent and tool-runner images
+   (`src/claude-coding-worker/Dockerfile`, `src/claude-tool-runner/Dockerfile`
+   — used by agents whose provider is `"claude-code"`) to the registry, then
+   resolves each one's pulled-by-digest reference.
+6. Verifies the coding-worker, node-python coding-worker, and Claude worker
+   images have `tar`, `head`, and `test`, which the run pod's keeper uses to
+   seed and collect the workspace.
 7. Applies the namespace, then creates or updates the proxy's
    `wardby-coding-proxy-env` Secret directly in the cluster from
    `.env.local`'s `DATABASE_URL`, `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY`.
@@ -87,6 +91,8 @@ JOB_LAUNCHER=kubernetes
 KUBERNETES_CONTEXT=kind-wardby
 CODING_WORKER_IMAGE=localhost:5001/wardby-coding-worker@sha256:...
 CODING_WORKER_IMAGE_NODE_PYTHON_3_12=localhost:5001/wardby-coding-worker-node-python@sha256:...
+CODING_CLAUDE_WORKER_IMAGE=localhost:5001/wardby-claude-coding-worker@sha256:...
+CODING_CLAUDE_TOOL_RUNNER_IMAGE=localhost:5001/wardby-claude-tool-runner@sha256:...
 KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
 ```
 
@@ -137,11 +143,15 @@ runs one. To actually see a coding agent do work against this cluster:
    KUBERNETES_CONTEXT=kind-wardby
    CODING_WORKER_IMAGE=localhost:5001/wardby-coding-worker@sha256:...
    CODING_WORKER_IMAGE_NODE_PYTHON_3_12=localhost:5001/wardby-coding-worker-node-python@sha256:...
+   CODING_CLAUDE_WORKER_IMAGE=localhost:5001/wardby-claude-coding-worker@sha256:...
+   CODING_CLAUDE_TOOL_RUNNER_IMAGE=localhost:5001/wardby-claude-tool-runner@sha256:...
    KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
    ```
    `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` is only needed if the agent you
    trigger uses the `node-python` toolchain; a plain `node` agent only needs
-   `CODING_WORKER_IMAGE`.
+   `CODING_WORKER_IMAGE`. `CODING_CLAUDE_WORKER_IMAGE` and
+   `CODING_CLAUDE_TOOL_RUNNER_IMAGE` are only needed to trigger an agent whose
+   provider is `claude-code`.
 3. **coding agents can't be started with `wardby run`.** The CLI's `run`
    command refuses `kind: "coding"` agents on purpose — a coding run needs a
    repository, a base ref, and (for Task overrides) resource-sharing checks

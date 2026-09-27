@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,7 @@ import {
   ContainerExecutor,
   RunCapabilityVault,
   describeFailure,
+  normalizeCollectedLockfiles,
   type CodingSessionController,
   type ContainerExecutionStore,
   type ContainerExecutorOptions,
@@ -1485,6 +1486,22 @@ describe("failure diagnostics", () => {
     });
   });
 
+  it.each(["docker_tool_runner_not_ready", "kubernetes_tool_runner_failed", "kubernetes_tool_runner_unready"])(
+    "files a Claude tool runner that failed to start (%s) under the same category on both launchers",
+    async (message) => {
+      const created = await harness();
+      created.jobs.launchError = new Error(message);
+
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("failed");
+      expect(created.observer.events.find((event) => event.stage === "terminal")).toMatchObject({
+        outcome: "failed",
+        failureCategory: "job",
+      });
+    },
+  );
+
   it("logs which output-schema fields a failed worker rejected, next to the diagnostic id", async () => {
     const created = await harness();
     created.jobs.statusValue = { state: "failed" };
@@ -1686,5 +1703,27 @@ describe("ContainerExecutor in-flight repository re-checks (M-1, M-2)", () => {
     expect(asked).toHaveLength(1);
     expect(created.store.run.status).toBe("refused");
     expect((created.store.terminations[0] as { error: string }).error).toMatch(/^coding_failure_repo_access:/);
+  });
+});
+
+describe("normalizeCollectedLockfiles", () => {
+  const lock = (resolved: string) =>
+    `{\n  "packages": {\n    "node_modules/pkg": {\n      "resolved": "${resolved}"\n    }\n  }\n}\n`;
+  const PROXIED = "http://wardby-proxy:8787/registry/npm/-/tarball/pkg/1.0.0";
+
+  it("rewrites registry-proxy URLs in a Claude run's collected lockfiles", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-collect-"));
+    roots.push(workspace);
+    await writeFile(join(workspace, "package-lock.json"), lock(PROXIED));
+    expect(await normalizeCollectedLockfiles("claude-code", workspace)).toEqual(["package-lock.json"]);
+    expect(await readFile(join(workspace, "package-lock.json"), "utf8")).not.toContain("wardby-proxy");
+  });
+
+  it("leaves a Codex run's workspace to its driver", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "wardby-codex-collect-"));
+    roots.push(workspace);
+    await writeFile(join(workspace, "package-lock.json"), lock(PROXIED));
+    expect(await normalizeCollectedLockfiles("codex", workspace)).toEqual([]);
+    expect(await readFile(join(workspace, "package-lock.json"), "utf8")).toContain("wardby-proxy");
   });
 });

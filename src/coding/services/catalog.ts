@@ -20,7 +20,7 @@ import {
 export const CODING_SERVICE_KINDS = ["sidecar"] as const;
 /** How many service names one agent may be allowed. */
 export const MAX_AGENT_SERVICES = 16;
-const MAX_SERVICE_ENV = 32;
+export const MAX_SERVICE_ENV = 32;
 const MAX_WRITABLE_PATHS = 4;
 const MAX_PATH_BYTES = 255;
 const SERVICE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;

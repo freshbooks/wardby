@@ -725,6 +725,31 @@ describe("CodingProxy Anthropic Messages", () => {
     });
     expect(await h.ledger.getRequest(reservedRequestId(h.events))).toMatchObject({ status: "uncertain" });
   });
+
+  it("records a rejected Anthropic request's error type for the executor", async () => {
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () =>
+        Response.json({ type: "error", error: { type: "rate_limit_error", message: "private text" } }, { status: 429 }),
+    });
+    const sink = await execute(h, "anthropic-429", new TestSink(), await fixture("anthropic-sdk-request.json"));
+    expect(sink.status).toBe(429);
+    expect(sink.text()).not.toContain("private text");
+    expect(await h.proxy.upstreamFailure(h.session.id)).toBe("rate_limit_error");
+  });
+
+  it("records an Anthropic stream's error event for the executor", async () => {
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () =>
+        new Response(
+          `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "private text" } })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    await execute(h, "anthropic-overloaded", new TestSink(), await fixture("anthropic-sdk-request.json"));
+    expect(await h.proxy.upstreamFailure(h.session.id)).toBe("overloaded_error");
+  });
 });
 
 interface CodexFixture {

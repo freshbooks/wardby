@@ -7,7 +7,6 @@ import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 import {
   KUBERNETES_ISOLATION_ERROR,
-  KUBERNETES_PROVIDER_UNSUPPORTED,
   STORAGE_INIT_CONTAINER,
   STORAGE_ROOT,
   assertRunNetworkPolicyMatches,
@@ -108,11 +107,6 @@ describe("validateKubernetesSpec", () => {
       KUBERNETES_ISOLATION_ERROR,
     );
   });
-  it("rejects Claude Code until Plan 2b", () => {
-    expect(() => validateKubernetesSpec({ ...spec, provider: "claude-code", toolImage: IMAGE })).toThrow(
-      KUBERNETES_PROVIDER_UNSUPPORTED,
-    );
-  });
   it("rejects a cpus value that isn't a whole number of millicores", () => {
     expect(() => validateKubernetesSpec({ ...spec, limits: { ...spec.limits, cpus: 0.0005 } })).toThrow(
       KUBERNETES_ISOLATION_ERROR,
@@ -130,6 +124,19 @@ describe("validateKubernetesSpec", () => {
     ["run-id", { ...spec, runId: "" }],
     ["provider", { ...spec, provider: "unknown-provider" as unknown as JobSpec["provider"] }],
     ["tool-image-set", { ...spec, toolImage: IMAGE }],
+    ["tool-image-not-registry-digest", { ...spec, provider: "claude-code" as const }],
+    [
+      "tool-image-not-registry-digest",
+      { ...spec, provider: "claude-code" as const, toolImage: `sha256:${"b".repeat(64)}` },
+    ],
+    [
+      "claude-limits-too-small",
+      { ...spec, provider: "claude-code" as const, toolImage: IMAGE, limits: { ...spec.limits, cpus: 0.25 } },
+    ],
+    [
+      "claude-limits-too-small",
+      { ...spec, provider: "claude-code" as const, toolImage: IMAGE, limits: { ...spec.limits, memoryMb: 200 } },
+    ],
     ["image-not-registry-digest", { ...spec, image: `sha256:${"b".repeat(64)}` }],
     ["cpus-out-of-range", { ...spec, limits: { ...spec.limits, cpus: 0.0005 } }],
     ["memory-out-of-range", { ...spec, limits: { ...spec.limits, memoryMb: 1 } }],
@@ -964,5 +971,130 @@ describe("buildRunPod with services", () => {
     for (const services of [[{ ...POSTGRES, image: "postgres:16" }], [POSTGRES, POSTGRES], []]) {
       expect(() => validateKubernetesSpec({ ...spec, services })).toThrow(KUBERNETES_ISOLATION_ERROR);
     }
+  });
+});
+
+describe("buildRunPod for Claude Code", () => {
+  const TOOL_IMAGE = `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`;
+  const claude: JobSpec = { ...spec, provider: "claude-code", toolImage: TOOL_IMAGE };
+  const p = () => buildRunPod(claude, options);
+  const tools = (built: V1Pod) => built.spec!.initContainers!.find((c) => c.name === "tool-runner")!;
+  const names = kubernetesRunNames(claude.runId);
+
+  it("accepts a Claude spec with a registry-digest tool image", () => {
+    expect(() => validateKubernetesSpec(claude)).not.toThrow();
+  });
+
+  it("starts the tool runner as a native sidecar after storage-init; keeper and worker stay the main containers", () => {
+    const built = p();
+    expect(built.spec!.initContainers!.map((c) => c.name)).toEqual(["storage-init", "tool-runner"]);
+    expect(tools(built).restartPolicy).toBe("Always");
+    expect(built.spec!.containers.map((c) => c.name)).toEqual(["keeper", "worker"]);
+  });
+
+  it("holds the keeper and worker until the tool runner's socket exists", () => {
+    expect(tools(p()).startupProbe).toEqual({
+      exec: { command: ["test", "-S", "/run/wardby/tool/runner.sock"] },
+      periodSeconds: 1,
+      timeoutSeconds: 1,
+      failureThreshold: 60,
+      successThreshold: 1,
+    });
+  });
+
+  it("runs Claude's entrypoint in the worker, which holds the capability but never mounts the workspace", () => {
+    const w = worker(p());
+    expect(w.image).toBe(IMAGE);
+    expect(w.command![2]).toContain('import("/opt/wardby/claude-coding-worker/main.js")');
+    expect(w.env!.map((e) => e.name)).toEqual(["WARDBY_PROXY_URL", "WARDBY_RUN_CAPABILITY"]);
+    expect(w.volumeMounts).toEqual([
+      { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+      { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
+      { name: "storage", mountPath: "/run/wardby/tool", subPath: "tool" },
+      { name: "tmp", mountPath: "/tmp" },
+      { name: "home", mountPath: "/home/wardby" },
+    ]);
+  });
+
+  it("gives the tool runner the workspace, the socket, and its setup from the run's Secret, never the capability", () => {
+    const t = tools(p());
+    expect(t.image).toBe(TOOL_IMAGE);
+    expect(t.command).toEqual(["node", "/opt/wardby/claude-tool-runner/main.mjs"]);
+    expect(t.env).toEqual([
+      { name: "WARDBY_TOOL_SETUP", valueFrom: { secretKeyRef: { name: names.secret, key: "tool-setup" } } },
+    ]);
+    expect(t.volumeMounts).toEqual([
+      { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+      { name: "storage", mountPath: "/run/wardby/tool", subPath: "tool" },
+      { name: "tool-tmp", mountPath: "/tmp" },
+      { name: "tool-home", mountPath: "/home/wardby" },
+    ]);
+    expect(t.securityContext).toEqual({
+      allowPrivilegeEscalation: false,
+      privileged: false,
+      readOnlyRootFilesystem: true,
+      runAsNonRoot: true,
+      capabilities: { drop: ["ALL"] },
+    });
+  });
+
+  it("gives the tool runner its own scratch, never the worker's /tmp or home", () => {
+    expect(p().spec!.volumes!.slice(3)).toEqual([
+      { name: "tool-tmp", emptyDir: { medium: "Memory", sizeLimit: "64Mi" } },
+      { name: "tool-home", emptyDir: { medium: "Memory", sizeLimit: "64Mi" } },
+    ]);
+  });
+
+  it("splits the run's CPU and memory like Docker, and the worker's disk reservation between the two", () => {
+    expect(tools(p()).resources).toEqual({
+      requests: { cpu: "250m", memory: "512Mi" },
+      limits: { cpu: "250m", memory: "512Mi" },
+    });
+    expect(worker(p()).resources).toEqual({
+      requests: { cpu: "750m", memory: "1536Mi" },
+      limits: { cpu: "750m", memory: "1536Mi" },
+    });
+    const autopilot = buildRunPod(claude, { ...options, platform: "gke-autopilot", runtimeClassName: "gvisor" });
+    const tool = tools(autopilot).resources!.requests!["ephemeral-storage"];
+    const agent = worker(autopilot).resources!.requests!["ephemeral-storage"];
+    expect([tool, agent]).toEqual(["256Mi", "768Mi"]);
+  });
+
+  it("creates the socket directory before any subPath mount", () => {
+    expect(storageInit(p()).command![2]).toContain('"tool"');
+  });
+
+  it("puts the tool runner before any service sidecar", () => {
+    const POSTGRES = resolvedFromDefinition(
+      BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+    );
+    const built = buildRunPod({ ...claude, services: [POSTGRES] }, options);
+    expect(built.spec!.initContainers!.map((c) => c.name)).toEqual(["storage-init", "tool-runner", "service-postgres"]);
+  });
+
+  it("leaves the run's NetworkPolicy unchanged: the pod has one egress rule, to the proxy", () => {
+    expect(buildRunNetworkPolicy(claude, options.namespace)).toEqual(buildRunNetworkPolicy(spec, options.namespace));
+  });
+
+  it("leaves the Codex pod exactly as it was", () => {
+    expect(storageInit(pod()).command![2]).not.toContain('"tool"');
+    expect(worker(pod()).command![2]).toContain('import("/opt/wardby/coding-worker/main.js")');
+    expect(pod().spec!.initContainers!.map((c) => c.name)).toEqual(["storage-init"]);
+  });
+
+  it("attests a read-back Claude pod, and rejects a swapped tool image", () => {
+    const built = p();
+    expect(() => assertRunPodMatches(apiRoundTrip(built, "V1Pod"), built)).not.toThrow();
+    const swapped = structuredClone(built);
+    swapped.spec!.initContainers![1].image = `localhost:5001/other@sha256:${"f".repeat(64)}`;
+    expect(() => assertRunPodMatches(swapped, built)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("stores the tool setup next to the capability for a Claude run only", () => {
+    expect(buildCapabilitySecret(claude, "wardby-coding", "rrp_x", '{"schemaVersion":1}').stringData).toEqual({
+      capability: "rrp_x",
+      "tool-setup": '{"schemaVersion":1}',
+    });
+    expect(buildCapabilitySecret(spec, "wardby-coding", "rrp_x").stringData).toEqual({ capability: "rrp_x" });
   });
 });

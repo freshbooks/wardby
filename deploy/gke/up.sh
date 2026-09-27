@@ -84,13 +84,15 @@ iam_substitutions() {
 }
 # Belt and suspenders against the substitution list above going stale: every
 # rendered manifest must be free of the wardby-*-gsa-email / *-database-url /
-# instance-connection-name / migrate-job / database-cidr placeholders before
-# it is applied. wardby-migrator and wardby-migrate (bare) are real resource
-# names and must survive -- the patterns below only match the longer
-# placeholder strings.
+# instance-connection-name / migrate-job / database-cidr / *-image placeholders
+# before it is applied. wardby-migrator and wardby-migrate (bare) are real
+# resource names and must survive -- the patterns below only match the longer
+# placeholder strings. The image pattern is anchored on the "value: " prefix
+# every worker-image env var placeholder is rendered with, so it can never
+# match a real registry path (which never starts with "wardby-").
 assert_no_placeholders() {
   local leftover
-  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version' || true)"
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*' || true)"
   if [[ -n "$leftover" ]]; then
     echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
     echo "$leftover" | sort -u >&2
@@ -119,7 +121,9 @@ docker build --platform linux/amd64 --target runtime -t "${REGISTRY}/runtime:lat
 docker build --platform linux/amd64 --target migration -t "${REGISTRY}/migration:latest" -f deploy/Dockerfile . >/dev/null
 docker build --platform linux/amd64 -t "${REGISTRY}/coding-worker:latest" -f src/coding-worker/Dockerfile . >/dev/null
 docker build --platform linux/amd64 -t "${REGISTRY}/coding-worker-node-python:latest" -f src/coding-worker/Dockerfile.node-python . >/dev/null
-for img in runtime migration coding-worker coding-worker-node-python; do docker push "${REGISTRY}/${img}:latest" >/dev/null; done
+docker build --platform linux/amd64 -t "${REGISTRY}/claude-coding-worker:latest" -f src/claude-coding-worker/Dockerfile . >/dev/null
+docker build --platform linux/amd64 -t "${REGISTRY}/claude-tool-runner:latest" -f src/claude-tool-runner/Dockerfile . >/dev/null
+for img in runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner; do docker push "${REGISTRY}/${img}:latest" >/dev/null; done
 
 # Digests, not tags. The launcher refuses a tag, and a digest is the only
 # reference that still means the same bytes tomorrow.
@@ -128,11 +132,14 @@ RUNTIME_IMAGE="$(digest_of runtime)"
 MIGRATION_IMAGE="$(digest_of migration)"
 WORKER_IMAGE="$(digest_of coding-worker)"
 WORKER_IMAGE_NODE_PYTHON="$(digest_of coding-worker-node-python)"
+CLAUDE_WORKER_IMAGE="$(digest_of claude-coding-worker)"
+CLAUDE_TOOL_RUNNER_IMAGE="$(digest_of claude-tool-runner)"
 
 echo "==> 4/${TOTAL_STEPS} verify the worker images have tar, head and test"
 # Seeding and collection shell out to these. Without them every launch hangs
-# until its deadline, with nothing naming the cause.
-for image in "$WORKER_IMAGE" "$WORKER_IMAGE_NODE_PYTHON"; do
+# until its deadline, with nothing naming the cause. The keeper of a Claude
+# run runs from the Claude worker image, so it needs the same check.
+for image in "$WORKER_IMAGE" "$WORKER_IMAGE_NODE_PYTHON" "$CLAUDE_WORKER_IMAGE"; do
   if ! docker run --rm --platform linux/amd64 --entrypoint sh "$image" -c 'command -v tar && command -v head && command -v test' >/dev/null; then
     echo "up.sh: worker image ${image} is missing tar, head or test." >&2
     exit 1
@@ -141,6 +148,11 @@ done
 # The node-python image exists to run a Python project's own checks.
 if ! docker run --rm --platform linux/amd64 --entrypoint sh "$WORKER_IMAGE_NODE_PYTHON" -c 'python --version && python -m pytest --version && python -m ruff --version' >/dev/null; then
   echo "up.sh: the node-python worker image is missing python, pytest or ruff." >&2
+  exit 1
+fi
+# Claude's tool runner answers the pod's startup probe with `test -S`.
+if ! docker run --rm --platform linux/amd64 --entrypoint sh "$CLAUDE_TOOL_RUNNER_IMAGE" -c 'command -v test' >/dev/null; then
+  echo "up.sh: the Claude tool runner image is missing test." >&2
   exit 1
 fi
 
@@ -307,6 +319,8 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
+        -e "s|value: wardby-claude-tool-runner-image$|value: ${CLAUDE_TOOL_RUNNER_IMAGE}|" \
+        -e "s|value: wardby-claude-coding-worker-image$|value: ${CLAUDE_WORKER_IMAGE}|" \
         -e "s|value: wardby-coding-worker-image$|value: ${WORKER_IMAGE}|" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
         -e "s|wardby-control-plane-hostname|${HOSTNAME}|g" \

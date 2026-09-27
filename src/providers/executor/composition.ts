@@ -69,6 +69,13 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     if (!isRegistryDigest(config.workerImage)) {
       throw new Error("CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.");
     }
+    for (const image of [config.claudeWorkerImage, config.claudeToolRunnerImage]) {
+      if (image !== undefined && !isRegistryDigest(image)) {
+        throw new Error(
+          "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be registry digests (repo@sha256:...) when JOB_LAUNCHER=kubernetes.",
+        );
+      }
+    }
     const kubernetes = loadKubernetesJobConfig(env);
     // The preflight only runs on the first launch; a configuration that cannot work should
     // fail the process at start-up, not the first coding run an hour later.
