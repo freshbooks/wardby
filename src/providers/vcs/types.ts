@@ -144,4 +144,6 @@ export interface ContinuationFinishedDetails {
   budgetSentence?: string;
   /** Host-safe sentence naming a model-provider refusal (see core/provider-wording.ts); used with `failed`. */
   providerSentence?: string;
+  /** Host-safe sentence naming a coding-run service that never became ready (coding/services/wording.ts); used with `failed`. */
+  serviceSentence?: string;
 }

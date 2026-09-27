@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
+import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
+import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
 import { ReviewHostError, type HostPermission } from "../review-host/types.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../jobs/types.js";
@@ -196,6 +198,7 @@ class FakeJobs implements WorkspaceJobLauncher {
   /** Runs at the start of launch(), so a test can observe what was already persisted. */
   onLaunch?: () => void;
   launches = 0;
+  supportsServices = true;
   materializations = 0;
   removals = 0;
   stops = 0;
@@ -262,6 +265,7 @@ class FakeVcs implements VcsProvider {
     summary?: string;
     agentName?: string;
     budgetSentence?: string;
+    serviceSentence?: string;
   }> = [];
 
   constructor(
@@ -318,6 +322,7 @@ class FakeVcs implements VcsProvider {
       agentName: details?.agentName,
       ...(details?.budgetSentence ? { budgetSentence: details.budgetSentence } : {}),
       ...(details?.providerSentence ? { providerSentence: details.providerSentence } : {}),
+      ...(details?.serviceSentence ? { serviceSentence: details.serviceSentence } : {}),
     });
     this.events.push(`notifyFinished:${outcome}`);
   }
@@ -422,6 +427,105 @@ beforeEach(() => {
 });
 
 describe("ContainerExecutor", () => {
+  describe("coding-run services", () => {
+    const POSTGRES = resolvedFromDefinition(
+      BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+    );
+
+    async function launched(overrides: Partial<ContainerRunSnapshot>) {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { created, input: input! };
+    }
+
+    it("hands the launcher the run's services and the worker only their names, versions and variables", async () => {
+      const { created, input } = await launched({ services: [POSTGRES] });
+      expect(created.jobs.specs[0]?.services).toEqual([POSTGRES]);
+      expect(input.services).toEqual([{ name: "postgres", version: "16", testEnv: POSTGRES.testEnv }]);
+    });
+
+    it("leaves a run without services exactly as it was: no key in the spec or the input", async () => {
+      const { created, input } = await launched({ services: [] });
+      expect(created.jobs.specs[0]).not.toHaveProperty("services");
+      expect(input).not.toHaveProperty("services");
+    });
+
+    it("fails a run with services on a launcher that can't start them", async () => {
+      const created = await harness({ services: [POSTGRES] });
+      created.jobs.supportsServices = false;
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(0);
+      expect(created.store.terminations).toEqual([
+        expect.objectContaining({ status: "failed", audit: expect.objectContaining({ failureCategory: "preflight" }) }),
+      ]);
+    });
+
+    it("fails a run whose service never became ready as service_unready, naming it on the host", async () => {
+      const created = await harness({ services: [POSTGRES] });
+      created.jobs.launchError = new Error("coding_service_unready:postgres");
+      await created.executor.start("run-1");
+      expect(created.store.terminations).toEqual([
+        {
+          status: "failed",
+          error: expect.stringMatching(/^coding_failure_service_unready:coding_diag_/),
+          audit: { failureCategory: "service_unready", diagnosticId: expect.stringMatching(/^coding_diag_/) },
+        },
+      ]);
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        {
+          outcome: "failed",
+          agentName: "knock-knock-implement",
+          serviceSentence: "The `postgres` service didn't become ready, so the run couldn't start.",
+        },
+      ]);
+    });
+
+    it("words a terminal service_unready run the same way when it is cleaned up later", async () => {
+      const created = await harness({ status: "failed", failureCategory: "service_unready", services: [POSTGRES] });
+      await created.vcs.prepareWorkspace({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+        protectedPaths: ["CODEOWNERS"],
+      });
+      await created.executor.stop("run-1", "requested");
+      expect(created.vcs.notifyFinishedCalls).toEqual([
+        expect.objectContaining({
+          outcome: "failed",
+          serviceSentence: "The `postgres` service didn't become ready, so the run couldn't start.",
+        }),
+      ]);
+    });
+
+    it("reads the repository's declaration from the base ref through the VCS provider", async () => {
+      const created = await harness();
+      const asked: unknown[] = [];
+      (created.vcs as FakeVcs & Pick<VcsProvider, "readRepositoryFile">).readRepositoryFile = async (input) => {
+        asked.push(input);
+        return 'services:\n  postgres: "16"\n';
+      };
+      await expect(
+        created.executor.readCodingServiceDeclaration({ repository: "openai/example", baseRef: "release" }),
+      ).resolves.toBe('services:\n  postgres: "16"\n');
+      expect(asked).toEqual([
+        { repository: "openai/example", ref: "release", path: ".wardby/services.yaml", maxBytes: 8192 },
+      ]);
+      expect(created.executor.supportsCodingServices()).toBe(true);
+    });
+
+    it("reads no declaration when its VCS provider can't read files", async () => {
+      const created = await harness();
+      await expect(
+        created.executor.readCodingServiceDeclaration({ repository: "openai/example", baseRef: "main" }),
+      ).resolves.toBeNull();
+    });
+  });
+
   it("calls onSlotReleased once after a run reaches a terminal status, never for a queued run", async () => {
     let releases = 0;
     const onSlotReleased = () => {

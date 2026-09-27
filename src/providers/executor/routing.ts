@@ -56,6 +56,15 @@ export class RoutingExecutor implements Executor {
     if (!this.coding.resolveCodingWorkerImage) throw new Error("coding_execution_not_configured");
     return this.coding.resolveCodingWorkerImage(selector);
   }
+
+  async readCodingServiceDeclaration(input: { repository: string; baseRef: string }): Promise<string | null> {
+    if (!this.coding.readCodingServiceDeclaration) return null;
+    return this.coding.readCodingServiceDeclaration(input);
+  }
+
+  supportsCodingServices(): boolean {
+    return this.coding.supportsCodingServices?.() === true;
+  }
 }
 
 export class PrismaExecutionKindResolver implements ExecutionKindResolver {

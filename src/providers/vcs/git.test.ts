@@ -597,6 +597,21 @@ describe("GitVcsProvider", () => {
         expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
       });
 
+      it("says the run could not start when a service never became ready", async () => {
+        const { provider, github } = await harness();
+        const prepared = await provider.prepareWorkspace(continuationInput());
+
+        await provider.notifyContinuationFinished(prepared, "failed", {
+          agentName: "builder",
+          serviceSentence: "The `postgres` service didn't become ready, so the run couldn't start.",
+        });
+
+        expect(github.statusCommentCalls[0].input.body).toBe(
+          "❌ builder (wardby run run-2) could not start: The `postgres` service didn't become ready, so the run couldn't start.",
+        );
+        expect(github.checkRunCalls[0].input).toMatchObject({ outcome: "failed" });
+      });
+
       it("is a no-op for a fresh (non-continuation) workspace", async () => {
         const { provider, github, input } = await harness();
         const prepared = await provider.prepareWorkspace(input);

@@ -47,5 +47,14 @@ export interface Executor {
    * the LLM pricing tables' unknown-model throw.
    */
   resolveCodingWorkerImage?(selector: CodingImageSelector): string;
+  /**
+   * Coding-run services (docs/coding-services.md): the raw text of the
+   * repository's .wardby/services.yaml at `baseRef`, or null when it has none.
+   * Called by dispatch before its transaction (it is a network call). An
+   * executor without it gives coding runs no services.
+   */
+  readCodingServiceDeclaration?(input: { repository: string; baseRef: string }): Promise<string | null>;
+  /** Whether this executor's job launcher can start coding-run services (the Kubernetes launcher). */
+  supportsCodingServices?(): boolean;
 }
 import type { CodingProvider } from "../../coding/provider.js";
