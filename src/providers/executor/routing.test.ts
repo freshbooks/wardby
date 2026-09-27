@@ -114,4 +114,24 @@ describe("RoutingExecutor", () => {
       }),
     ).toThrow(/coding_execution_not_configured/);
   });
+
+  it("delegates the coding-service declaration read and launcher support to the coding sub-executor", async () => {
+    const native = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const coding = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      readCodingServiceDeclaration: vi.fn(async () => "services: {}\n"),
+      supportsCodingServices: vi.fn(() => true),
+    };
+    const executor = new RoutingExecutor({ kindForRun: async () => "coding" }, native, coding);
+    await expect(executor.readCodingServiceDeclaration({ repository: "o/r", baseRef: "main" })).resolves.toBe(
+      "services: {}\n",
+    );
+    expect(coding.readCodingServiceDeclaration).toHaveBeenCalledWith({ repository: "o/r", baseRef: "main" });
+    expect(executor.supportsCodingServices()).toBe(true);
+
+    const bare = new RoutingExecutor({ kindForRun: async () => "coding" }, native, native);
+    await expect(bare.readCodingServiceDeclaration({ repository: "o/r", baseRef: "main" })).resolves.toBeNull();
+    expect(bare.supportsCodingServices()).toBe(false);
+  });
 });

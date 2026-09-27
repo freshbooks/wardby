@@ -175,6 +175,54 @@ describe("outcomeBody", () => {
     expect(mixed.match(/rate-limiting/g)).toHaveLength(1);
   });
 
+  it("says a coding sub-run could not start because of its services, in the host sentence only", () => {
+    const refused = outcomeBody(
+      run("succeeded", "done"),
+      REPO,
+      [],
+      [
+        {
+          id: "c9",
+          status: "refused",
+          error:
+            "service_not_allowed: This repository asks for `redis`, which this agent isn't allowed to use. An admin or the agent's owner can allow it.",
+        },
+      ],
+    );
+    expect(refused).toMatch(
+      /^❌ A sub-run could not start: This repository asks for `redis`, which this agent isn't allowed to use\. An admin or the agent's owner can allow it\./,
+    );
+    expect(refused).not.toContain("service_not_allowed");
+    expect(refused).not.toContain("did not succeed");
+
+    const unready = outcomeBody(
+      run("succeeded"),
+      REPO,
+      [],
+      [{ id: "c9", status: "failed", failureCategory: "service_unready", services: ["postgres"] }],
+    );
+    expect(unready).toMatch(
+      /^❌ A sub-run could not start: The `postgres` service didn't become ready, so the run couldn't start\./,
+    );
+  });
+
+  it("still reports a sub-run refused for budget by its status", () => {
+    const body = outcomeBody(
+      run("succeeded"),
+      REPO,
+      [],
+      [
+        {
+          id: "c9",
+          status: "refused",
+          error: "run_tree_exhausted: the run tree's shared budget is spent; the run was not started.",
+        },
+      ],
+    );
+    expect(body).toMatch(/A sub-run did not succeed: `c9` \(`refused`\)\./);
+    expect(body).not.toContain("run_tree_exhausted");
+  });
+
   it("reports any other unsuccessful run by its status, never its error text", () => {
     for (const status of ["failed", "cancelled"] as const) {
       const body = outcomeBody(run(status, "secret-ish internal detail"), REPO, []);
@@ -296,6 +344,35 @@ describe("completeHostStatus", () => {
     expect(h.editComment.mock.calls[0][1].body).toMatch(
       /^❌ A sub-run could not reach the model: The model provider reported an outage or overload\. Try again later\./,
     );
+  });
+
+  it("reads each child's error and services, so a service refusal can be named", async () => {
+    const d = db({
+      row: row(),
+      children: [
+        {
+          id: "c1",
+          status: "failed",
+          error: "coding_failure_service_unready:coding_diag_1",
+          codingRun: {
+            result: null,
+            failureCategory: "service_unready",
+            services: [{ name: "postgres", version: "16" }],
+          },
+        },
+      ],
+    });
+    const h = host();
+    await completeHostStatus(d as never, { id: "r1", status: "succeeded", finalText: "done" }, { github: h });
+    expect(d.run.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          error: true,
+          codingRun: { select: expect.objectContaining({ failureCategory: true, services: true }) },
+        }),
+      }),
+    );
+    expect(h.editComment.mock.calls[0][1].body).toMatch(/The `postgres` service didn't become ready/);
   });
 
   it("reports a run that ran out of budget with its amounts", async () => {

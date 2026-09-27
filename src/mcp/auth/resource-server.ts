@@ -22,6 +22,9 @@ export const SCOPES_SUPPORTED = [
   "budget_groups:write",
   // Approve coding agents' package allowlists (see docs/coding-packages.md).
   "packages:approve",
+  // Create, update and delete coding-run service catalog entries (see docs/coding-services.md).
+  // Reading the catalog is agents:read.
+  "services:manage",
   // Reassigns an agent's owner regardless of who currently owns it (or
   // whether it's public) — a step above agents:write, which only ever lets
   // a caller act on agents they already own or that are unowned.
@@ -34,20 +37,23 @@ export const SCOPES_SUPPORTED = [
  * Scopes whose operations reach beyond the caller's own (or public)
  * resources — they double as the permission names roles grant:
  * agents:admin reassigns ANY agent's owner (make_owner) and sets a BYO
- * workerImageRef; packages:approve widens coding agents' package allowlists.
+ * workerImageRef; packages:approve widens coding agents' package allowlists;
+ * services:manage changes the coding-run service catalog, which decides what
+ * runs next to every coding run that names an entry.
  * A token scope only DELEGATES — it never authorizes on its own:
  * requireScope/requireAnyScope honour one only when one of the caller's
  * roles (McpRequestContext.roles, resolved live per request) grants it.
  */
-export const PRIVILEGED_SCOPES: readonly string[] = ["agents:admin", "packages:approve"];
+export const PRIVILEGED_SCOPES: readonly string[] = ["agents:admin", "packages:approve", "services:manage"];
 
 /**
  * The built-in roles and the permissions (privileged scope names) each
  * grants. No roles = member: every non-privileged scope, nothing privileged.
  */
 export const ROLE_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
-  admin: ["agents:admin", "packages:approve"],
+  admin: ["agents:admin", "packages:approve", "services:manage"],
   "package-approver": ["packages:approve"],
+  "service-manager": ["services:manage"],
 };
 export const ROLE_NAMES: readonly string[] = Object.keys(ROLE_PERMISSIONS);
 

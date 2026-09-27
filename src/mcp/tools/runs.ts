@@ -3,6 +3,7 @@ import { McpError } from "../errors.js";
 import { agentAccess, requireAgentAccess } from "../auth/access.js";
 import { publicCodingRunResult } from "../../coding/protocol.js";
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
+import { storedServiceLabels } from "../../coding/services/catalog.js";
 import { textResult } from "./text-result.js";
 
 /**
@@ -67,7 +68,14 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       }
       const codingRun = await ctx.db.codingRun.findUnique({
         where: { runId: run.id },
-        select: { result: true, queuedAt: true, failureCategory: true, diagnosticId: true, debugTrace: true },
+        select: {
+          result: true,
+          queuedAt: true,
+          failureCategory: true,
+          diagnosticId: true,
+          debugTrace: true,
+          services: true,
+        },
       });
       const codingResult = publicCodingRunResult(codingRun?.result);
       // A pending coding run with queuedAt is waiting for a concurrency slot
@@ -94,6 +102,8 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       // designed to be safe to show the agent's owner (schema.prisma).
       const failureCategory = codingRun?.failureCategory ?? undefined;
       const diagnosticId = codingRun?.diagnosticId ?? undefined;
+      // Which services the run started with ("postgres 16"); never their images or environments.
+      const services = codingRun ? storedServiceLabels(codingRun.services) : [];
       return textResult({
         ...run,
         ...(codingResult ? { codingResult } : {}),
@@ -102,6 +112,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ...(codingQueuedAt ? { codingQueuedAt } : {}),
         // An admin turned on the debug trace: the worker's full trace is in its pod log.
         ...(codingRun?.debugTrace ? { debugTrace: true } : {}),
+        ...(services.length > 0 ? { services } : {}),
         ...(codingRun ? { packages, packageRefusals, packagePlan } : {}),
       });
     },

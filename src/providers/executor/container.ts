@@ -4,6 +4,14 @@ import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
+import { parseStoredServices, storedServiceNames, workerServices } from "../../coding/services/catalog.js";
+import { MAX_SERVICE_DECLARATION_BYTES, SERVICE_DECLARATION_PATH } from "../../coding/services/declaration.js";
+import {
+  SERVICE_UNREADY_CATEGORY,
+  SERVICE_UNREADY_ERROR,
+  serviceUnreadyName,
+  serviceUnreadySentence,
+} from "../../coding/services/wording.js";
 import { budgetSentence } from "../../core/budget-wording.js";
 import {
   classifyProviderFailure,
@@ -91,6 +99,8 @@ export interface ContainerRunSnapshot {
   workspaceDiskMb: number | null;
   /** Admin-requested debug trace, fixed at dispatch (CodingRun.debugTrace). */
   debugTrace?: boolean;
+  /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
+  services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
   failureCategory?: string | null;
   /** The agent's CURRENT coding-profile repository (null if the profile is gone); may differ from `repository`. */
@@ -173,6 +183,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       workerImage: row.codingRun.workerImage,
       workspaceDiskMb: row.codingRun.workspaceDiskMb,
       debugTrace: row.codingRun.debugTrace,
+      services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
       repositoryAuthorizedVia: row.agent.codingProfile?.repositoryAuthorizedVia ?? null,
@@ -652,11 +663,14 @@ export class ContainerExecutor implements Executor {
       await this.options.store.terminate(runId, status, failure.error, failure.audit);
       this.terminal(run, status, failure.audit);
       if (handle) await this.options.jobs.remove(handle).catch(() => undefined);
+      // A service sidecar that never became ready (kubernetes.ts waitForKeeper) is named on the host.
+      const unreadyService = outOfBudget ? null : serviceUnreadyName(error);
       if (workspace) {
         await this.options.vcs.cleanup(workspace).catch(() => undefined);
         await this.options.vcs.notifyContinuationFinished?.(workspace, outOfBudget ? "budget_exhausted" : "failed", {
           agentName: run.agentName,
           ...(outOfBudget ? { budgetSentence: this.budgetSentence(run) } : {}),
+          ...(unreadyService ? { serviceSentence: serviceUnreadySentence([unreadyService]) } : {}),
         });
       }
       this.emit({ stage: "cleanup", runId, jobId: handle?.id, cleanupSucceeded: true });
@@ -973,6 +987,21 @@ export class ContainerExecutor implements Executor {
     return image;
   }
 
+  /** Coding-run services: the repository's declaration at its base ref (Executor.readCodingServiceDeclaration). */
+  async readCodingServiceDeclaration(input: { repository: string; baseRef: string }): Promise<string | null> {
+    if (!this.options.vcs.readRepositoryFile) return null;
+    return this.options.vcs.readRepositoryFile({
+      repository: input.repository,
+      ref: input.baseRef,
+      path: SERVICE_DECLARATION_PATH,
+      maxBytes: MAX_SERVICE_DECLARATION_BYTES,
+    });
+  }
+
+  supportsCodingServices(): boolean {
+    return this.options.jobs.supportsServices === true;
+  }
+
   private async requireCurrent(runId: string): Promise<ContainerRunSnapshot> {
     const current = await this.options.store.load(runId);
     if (!current) throw new Error("coding_run_not_found");
@@ -987,6 +1016,11 @@ export class ContainerExecutor implements Executor {
     if (run.workspaceDiskMb && run.workspaceDiskMb > this.options.maxDiskMb) {
       throw new Error("coding_workspace_disk_exceeds_limit");
     }
+    const services = parseStoredServices(run.services);
+    // Dispatch refuses services this deployment can't start; this is the backstop.
+    if (services.length > 0 && this.options.jobs.supportsServices !== true) {
+      throw new Error("coding_services_unsupported_launcher");
+    }
     return {
       kind: "coding-agent",
       runId: run.runId,
@@ -998,6 +1032,7 @@ export class ContainerExecutor implements Executor {
       limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },
       labels: {},
       collectExclude: normalizeCollectExclusions(run.collectExclude),
+      ...(services.length > 0 ? { services } : {}),
     };
   }
 
@@ -1016,6 +1051,7 @@ export class ContainerExecutor implements Executor {
     if ((await realpath(directory)) !== directory) throw new Error("coding_artifact_path_invalid");
     const destination = join(directory, "input.json");
     const temporary = join(directory, `.input-${randomUUID()}.tmp`);
+    const services = parseStoredServices(run.services);
     const input = CodingTaskInputSchema.parse({
       schemaVersion: CODING_PROTOCOL_VERSION,
       runId: run.runId,
@@ -1029,6 +1065,8 @@ export class ContainerExecutor implements Executor {
       continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
       // Only when true: an untraced run's input stays exactly what older workers expect.
       ...(run.debugTrace ? { debugTrace: true } : {}),
+      // Only when there are some: every other run's input stays exactly what older workers expect.
+      ...(services.length > 0 ? { services: workerServices(services) } : {}),
     });
     // The run directory is 0700; world-readable mode only crosses Docker's UID boundary.
     await writeFile(temporary, JSON.stringify(input), { flag: "wx", mode: 0o444 });
@@ -1102,10 +1140,15 @@ export class ContainerExecutor implements Executor {
       const outcome: ContinuationOutcome =
         run.status === "succeeded" ? "succeeded" : run.status === "budget_exhausted" ? "budget_exhausted" : "failed";
       const providerClass = run.status === "failed" ? providerClassOfCategory(run.failureCategory) : null;
+      const unreadyServices =
+        run.status === "failed" && run.failureCategory === SERVICE_UNREADY_CATEGORY
+          ? storedServiceNames(run.services)
+          : null;
       await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
         agentName: run.agentName,
         ...(outcome === "budget_exhausted" ? { budgetSentence: this.budgetSentence(run) } : {}),
         ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
+        ...(unreadyServices ? { serviceSentence: serviceUnreadySentence(unreadyServices) } : {}),
       });
     }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
@@ -1260,6 +1303,10 @@ function safeError(error: unknown): string {
  * "workspace" because "github" contains "git".
  */
 const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
+  // A service sidecar never became ready (src/providers/jobs/kubernetes.ts).
+  [SERVICE_UNREADY_ERROR, SERVICE_UNREADY_CATEGORY],
+  // Services on a launcher that can't start them: refused at dispatch, failed here as a backstop.
+  ["coding_services_unsupported", "preflight"],
   // Checked first: the host could not be asked (after one retry), not a lost permission.
   ["repo_access_check_unavailable", "repo_access_unavailable"],
   ["repo_access_", "repo_access"],

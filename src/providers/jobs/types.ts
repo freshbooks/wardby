@@ -12,6 +12,7 @@ export interface JobResourceLimits {
 }
 
 import type { CollectExclusions } from "../../coding/collect-exclude.js";
+import type { ResolvedCodingService } from "../../coding/services/catalog.js";
 
 export interface JobSpec {
   kind: "coding-agent";
@@ -27,6 +28,14 @@ export interface JobSpec {
   labels: Record<string, string>;
   /** Workspace paths never collected; absent on legacy specs, which get the built-in names. */
   collectExclude?: CollectExclusions;
+  /**
+   * Coding-run services (docs/coding-services.md): catalog snapshots resolved
+   * at dispatch, started next to the worker. Their images and environments come
+   * from the admin-managed catalog, never from repository content. Absent for
+   * a run without services (never an empty list), so such a spec, and its hash,
+   * is unchanged.
+   */
+  services?: ResolvedCodingService[];
 }
 
 /** Opaque provider reference. Callers persist both fields exactly as given. */
@@ -82,4 +91,6 @@ export interface JobLauncher {
 /** A launcher that can safely copy a terminal worker workspace back to trusted storage. */
 export interface WorkspaceJobLauncher extends JobLauncher {
   materializeWorkspace: (handle: JobHandle, destination: string) => Promise<void>;
+  /** Whether this launcher starts JobSpec.services (the Kubernetes launcher does; Docker does not). */
+  readonly supportsServices?: boolean;
 }

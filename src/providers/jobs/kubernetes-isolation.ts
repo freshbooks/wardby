@@ -15,6 +15,7 @@ import type {
   V1Toleration,
   V1Volume,
 } from "@kubernetes/client-node";
+import { StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 import {
   CODING_PROXY_ALIAS,
@@ -46,6 +47,20 @@ export const POD_DEADLINE_GRACE_SECONDS = 300;
 export const KEEPER_CONTAINER = "keeper";
 export const STORAGE_INIT_CONTAINER = "storage-init";
 export const WORKER_CONTAINER = "worker";
+/** Every service sidecar's container name starts with this (service-postgres, service-redis, ...). */
+export const SERVICE_CONTAINER_PREFIX = "service-";
+/** Disk-backed scratch for each of a service's writablePaths (a socket directory, /tmp). */
+export const SERVICE_SCRATCH_MIB = 64;
+
+export function serviceContainerName(name: string): string {
+  return `${SERVICE_CONTAINER_PREFIX}${name}`;
+}
+
+/** What a service sidecar reserves of the pod's ephemeral storage: its data volume plus its scratch volumes. */
+export function serviceEphemeralStorageMib(service: ResolvedCodingService): number {
+  return service.resources.diskMib + SERVICE_SCRATCH_MIB * service.writablePaths.length;
+}
+
 export const STORAGE_ROOT = "/run/wardby/storage";
 export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
 export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy" } as const;
@@ -169,6 +184,17 @@ export function validateKubernetesSpec(spec: JobSpec): void {
   if (spec.provider !== undefined && spec.provider !== "codex") throw isolationError("provider");
   if (spec.toolImage !== undefined) throw isolationError("tool-image-set");
   if (!isRegistryDigest(spec.image)) throw isolationError("image-not-registry-digest");
+  if (spec.services !== undefined) {
+    // Re-validated here, not trusted from dispatch: every image a digest, every path and probe in bounds.
+    const names = spec.services.map((service) => service.name);
+    if (
+      spec.services.length === 0 ||
+      new Set(names).size !== names.length ||
+      !StoredCodingServicesSchema.safeParse(spec.services).success
+    ) {
+      throw isolationError("services-invalid");
+    }
+  }
   const { cpus, memoryMb, pids, diskMb } = spec.limits;
   if (!inRange(cpus, 0.1, 32, false) || !isWholeMillicores(cpus)) throw isolationError("cpus-out-of-range");
   if (!inRange(memoryMb, 128, 65_536, true)) throw isolationError("memory-out-of-range");
@@ -185,6 +211,68 @@ function containerSecurity() {
     runAsNonRoot: true,
     capabilities: { drop: ["ALL"] },
   };
+}
+
+/**
+ * The emptyDirs behind one service's mounts: its data path, then each writable path. The only place
+ * their names are built, so the sidecar's volumeMounts and the pod's volumes can never disagree.
+ */
+function serviceStorage(
+  service: ResolvedCodingService,
+  index: number,
+): Array<{ name: string; mountPath: string; sizeMib: number }> {
+  return [
+    { name: `service-${index}-data`, mountPath: service.dataPath, sizeMib: service.resources.diskMib },
+    ...service.writablePaths.map((path, scratch) => ({
+      name: `service-${index}-scratch-${scratch}`,
+      mountPath: path,
+      sizeMib: SERVICE_SCRATCH_MIB,
+    })),
+  ];
+}
+
+/**
+ * One coding-run service as a native sidecar (docs/coding-services.md): an init container with
+ * restartPolicy Always, so the kubelet starts it before the keeper and worker and holds them until
+ * its startup probe (the catalog's readiness command) passes. It runs the catalog's image with its
+ * own entrypoint, under the same security context as every other container, with an emptyDir at its
+ * data path and at each writable path. Same pod, same network namespace: the worker reaches it on
+ * 127.0.0.1, and the run's NetworkPolicy needs no change.
+ */
+function serviceSidecar(
+  service: ResolvedCodingService,
+  index: number,
+  profile: KubernetesPlatformProfile,
+): V1Container {
+  const env = Object.entries(service.serviceEnv)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => ({ name, value }));
+  return {
+    name: serviceContainerName(service.name),
+    image: service.image,
+    restartPolicy: "Always",
+    ...(env.length > 0 ? { env } : {}),
+    securityContext: containerSecurity(),
+    resources: conformResources(profile, {
+      cpuMillicores: service.resources.cpuMillicores,
+      memoryMib: service.resources.memoryMib,
+      ephemeralStorageMib: serviceEphemeralStorageMib(service),
+    }),
+    startupProbe: {
+      exec: { command: [...service.readiness.command] },
+      periodSeconds: service.readiness.periodSeconds,
+      timeoutSeconds: service.readiness.timeoutSeconds,
+      failureThreshold: service.readiness.failureThreshold,
+      successThreshold: 1,
+    },
+    volumeMounts: serviceStorage(service, index).map(({ name, mountPath }) => ({ name, mountPath })),
+  };
+}
+
+function serviceVolumes(services: readonly ResolvedCodingService[]): V1Volume[] {
+  return services.flatMap((service, index) =>
+    serviceStorage(service, index).map(({ name, sizeMib }) => ({ name, emptyDir: { sizeLimit: `${sizeMib}Mi` } })),
+  );
 }
 
 export interface RunPodOptions {
@@ -212,11 +300,15 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   // conformResources range-checks one container at a time; only this function sees every container,
   // so the SUMMED pod total is checked here — before submission, so an over-large workspace fails
   // closed rather than being rewritten by the platform (which attestation would then reject anyway).
+  const services = spec.services ?? [];
   const ceiling = profile.resources.ephemeralStorageCeilingMib;
-  const podEphemeral = podEphemeralStorageMib(spec.limits.diskMb);
+  const podEphemeral = podEphemeralStorageMib(
+    spec.limits.diskMb,
+    services.reduce((total, service) => total + serviceEphemeralStorageMib(service), 0),
+  );
   if (ceiling !== undefined && podEphemeral > ceiling) {
     throw new KubernetesPlatformError(
-      `a ${spec.limits.diskMb} MiB workspace needs ${podEphemeral} MiB of pod ephemeral storage, over the ${describeMib(ceiling)} ceiling of platform ${profile.name}`,
+      `a ${spec.limits.diskMb} MiB workspace${services.length > 0 ? " and its services" : ""} need${services.length > 0 ? "" : "s"} ${podEphemeral} MiB of pod ephemeral storage, over the ${describeMib(ceiling)} ceiling of platform ${profile.name}`,
     );
   }
   const names = kubernetesRunNames(spec.runId);
@@ -310,8 +402,11 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         { name: "storage", emptyDir: { sizeLimit: `${spec.limits.diskMb}Mi` } },
         { name: "tmp", emptyDir: { medium: "Memory", sizeLimit: `${scratchMb}Mi` } },
         { name: "home", emptyDir: { medium: "Memory", sizeLimit: `${scratchMb}Mi` } },
+        ...serviceVolumes(services),
       ],
-      initContainers: [storageInit],
+      // storage-init first (it must finish before any subPath mount), then each service sidecar in
+      // declaration order; the keeper and worker start only once every sidecar's startup probe passed.
+      initContainers: [storageInit, ...services.map((service, index) => serviceSidecar(service, index, profile))],
       containers: [keeper, worker],
     },
   };

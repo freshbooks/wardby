@@ -395,9 +395,10 @@ server answers `415`, because it checks the content type before the token.
 
 Create the first self-hosted login credential. It is printed once.
 `--role admin` makes this operator account an admin. Only admins can use all
-the privileged operations: `make_owner`, BYO `workerImageRef`, and package
-approval. A `package-approver` can approve packages only. Users created
-without `--role` have no roles. See
+the privileged operations: `make_owner`, BYO `workerImageRef`, package
+approval, and service catalog changes. A `package-approver` can approve
+packages only, and a `service-manager` can change the service catalog only.
+Users created without `--role` have no roles. See
 [roles and privileged operations](security-deployment.md#roles-and-privileged-operations).
 
 ```sh
@@ -528,6 +529,17 @@ it, set `replicas: 0` in
 
 A PriorityClass's value and preemption policy cannot be changed in place:
 delete the class and re-run `up.sh` to change them.
+
+### Coding-run services
+
+A coding run whose agent allows [services](coding-services.md) waits for each
+service's sidecar to become ready before its pod starts the coding agent, up
+to `KUBERNETES_READY_TIMEOUT_MS` (default 120000, i.e. 120 seconds) on the
+control plane. Pulling a service's image adds to that wait, so the first run
+that schedules onto a fresh node — one that has never pulled the image before
+— can need more of the bound than a run on a node that already has it
+cached. Raise `KUBERNETES_READY_TIMEOUT_MS` if you see runs fail
+`service_unready` only on new nodes.
 
 ### Roll back
 

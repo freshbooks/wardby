@@ -466,6 +466,21 @@ One pod per run, built by the canonical, deny-by-default policy in
   is required because otherwise a real-cluster run fails
   `kubernetes_pod_start_timeout`. `keeper.js` itself is unchanged — Docker still
   shares it, and Docker's bind-mount-free volume never had this problem.
+- **Service sidecars** (only for a run with services, see
+  [coding-services.md](coding-services.md)): one init container per service,
+  `service-<name>`, with `restartPolicy: Always` and a `startupProbe` from its
+  catalog entry — this native-sidecar shape (an init container that keeps
+  running) needs Kubernetes 1.29 or later — after `storage-init` and before
+  `keeper` and `worker`, so
+  neither starts until every service is ready. Each runs its catalog image,
+  pinned by digest, with the same security context as every other container
+  (uid 10001, read-only root filesystem, no privilege escalation, all
+  capabilities dropped), `emptyDir` volumes at its data and writable paths, and
+  requests equal to limits. It shares the pod's network namespace, so the worker
+  reaches it on `127.0.0.1` and the run's NetworkPolicy is unchanged: a service
+  can reach nothing the worker cannot. The worker never receives a service's own
+  environment, only the catalog's `testEnv`. Attestation compares sidecars like
+  every other container.
 - **`keeper`**: trusted, holds the one `storage` volume (an `emptyDir` sized
   `spec.limits.diskMb` MiB, **disk-backed**, not `medium: Memory`) open for
   the pod's life; the seam streams the workspace and input artifact in and
@@ -893,6 +908,7 @@ values. The list is kept only when every entry matches
 | `kubernetes_seed_failed`                                                     | Streaming the workspace or input artifact into the keeper failed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `kubernetes_workspace_archive_failed` / `kubernetes_result_artifact_invalid` | Collection (workspace or output artifact) failed or was invalid.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `coding_workspace_disk_exceeds_limit`                                        | The run's `workspaceDiskMb` exceeds `CODING_MAX_DISK_MB`; surfaces on the run record as `coding_failure_workspace:<id>`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `coding_service_unready:<name>`                                              | A service sidecar restarted after its startup probe gave up, could not be pulled or started, or had not started when `readyTimeoutMs` ran out. The run fails with category `service_unready`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 ### Local harness
 

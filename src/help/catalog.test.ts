@@ -1,8 +1,10 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildHelpCatalog } from "./catalog.js";
+import { SERVICE_REFUSAL_CODES, SERVICE_UNREADY_CATEGORY } from "../coding/services/wording.js";
 
 const roots: string[] = [];
 
@@ -66,5 +68,17 @@ describe("buildHelpCatalog", () => {
         "---\nid: getting-started\ntitle: Getting started\nsummary: Start Wardby safely.\naudience: operator\ntags: [setup]\n---\n# Heading\n",
     });
     await expect(buildHelpCatalog(missingField)).rejects.toThrow('missing frontmatter field "appliesTo"');
+  });
+
+  it("builds the checked-in corpus with a page for coding services and each of their errors", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const ids = new Set(catalog.pages.map((entry) => entry.id));
+
+    expect(ids).toContain("coding-services");
+    for (const code of [...SERVICE_REFUSAL_CODES, SERVICE_UNREADY_CATEGORY]) {
+      const id = `errors/${code.replaceAll("_", "-")}`;
+      expect(ids, id).toContain(id);
+      expect(catalog.pages.find((entry) => entry.id === id)?.markdown).toContain(`\`${code}`);
+    }
   });
 });

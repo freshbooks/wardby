@@ -75,6 +75,16 @@ point one at an arbitrary image without the step-up scope. The scope alone
 isn't enough: the caller must also hold the admin role (see
 [roles and privileged operations](security-deployment.md#roles-and-privileged-operations)).
 
+## Running services with a BYO image
+
+An agent whose `codingProfile.services` allows a service ([coding
+services](coding-services.md)) needs a worker image built on **driver v11 or
+later**. The driver validates the run input it receives with a strict schema:
+a worker built on an older driver base doesn't recognize the input's
+`services` field and rejects the run outright, rather than silently starting
+without them. Rebuild your image on a current `driver-vN` digest (see "The
+driver image" above) before allowing any service on an agent that uses it.
+
 ## What this doesn't cover
 
 wardby does not re-validate the contents of your built image beyond the

@@ -65,11 +65,12 @@ Create these scopes in the provider:
 | `webhooks:write`      | Create and manage webhook triggers.                               |
 | `budget_groups:write` | Create and manage shared budget groups.                           |
 | `packages:approve`    | Approve coding agents' package allowlists.                        |
+| `services:manage`     | Create, update and delete coding-run service catalog entries.     |
 | `agents:admin`        | Reassign agent ownership, BYO worker images; admins only.         |
 | `memory:write`        | Set and delete agent memory entries.                              |
 
 MCP clients discover this list from Wardby's protected-resource metadata and
-may request every advertised scope. Define all eleven in the provider even when
+may request every advertised scope. Define all twelve in the provider even when
 policy grants a particular client or user only a subset. Ensure granted scopes
 are emitted in the access token's `scope` or `scp` claim; defining them only in
 the provider UI is not sufficient.
@@ -78,22 +79,26 @@ the provider UI is not sufficient.
 existing deployment, define it in the provider too. Otherwise, clients that
 request every advertised scope may fail with `invalid_scope`.
 
+`services:manage` was added after `memory:write`. When you upgrade an existing
+deployment, define it in the provider too, for the same reason.
+
 ### Wardby roles
 
-A scope only delegates. `agents:admin` and `packages:approve` take effect only
-for a caller who also holds a Wardby role that grants them:
+A scope only delegates. `agents:admin`, `packages:approve` and `services:manage`
+take effect only for a caller who also holds a Wardby role that grants them:
 
-| Wardby role        | Grants                                                                     |
-| ------------------ | -------------------------------------------------------------------------- |
-| `admin`            | `agents:admin` (`make_owner`, BYO `workerImageRef`) and `packages:approve` |
-| `package-approver` | `packages:approve` (package allowlist and policy approval)                 |
+| Wardby role        | Grants                                                                                        |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| `admin`            | `agents:admin` (`make_owner`, BYO `workerImageRef`), `packages:approve` and `services:manage` |
+| `package-approver` | `packages:approve` (package allowlist and policy approval)                                    |
+| `service-manager`  | `services:manage` (coding-run service catalog changes)                                        |
 
 The roles come from a claim in the caller's **access token**, which you map to
 Wardby roles:
 
 ```dotenv
 AUTH_ROLE_CLAIM=groups   # claim name or dotted path
-AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver
+AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager
 ```
 
 Wardby looks up `AUTH_ROLE_CLAIM` in two steps:
@@ -141,21 +146,21 @@ their next token.
 
 Provider examples:
 
-- **Okta** (custom authorization server): create two groups, `wardby-admin` and
-  `wardby-packages`. Add a `groups` claim to the access token, filtered to
-  those groups. Set `AUTH_ROLE_CLAIM=groups` and
-  `AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver`.
+- **Okta** (custom authorization server): create three groups, `wardby-admin`,
+  `wardby-packages` and `wardby-services`. Add a `groups` claim to the access
+  token, filtered to those groups. Set `AUTH_ROLE_CLAIM=groups` and
+  `AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager`.
   Optionally, add access policy rules so only those groups can obtain
-  `agents:admin` and `packages:approve`.
-- **FusionAuth:** create two application roles, `admin` and
-  `package-approver`. They appear in the access token's top-level `roles` claim.
-  Set `AUTH_ROLE_CLAIM=roles` and
-  `AUTH_ROLE_MAP=admin=admin,package-approver=package-approver`.
-- **Keycloak:** create realm roles such as `wardby-admin` and
-  `wardby-packages`. Realm roles appear under `realm_access.roles`. Set
+  `agents:admin`, `packages:approve` and `services:manage`.
+- **FusionAuth:** create three application roles, `admin`,
+  `package-approver` and `service-manager`. They appear in the access token's
+  top-level `roles` claim. Set `AUTH_ROLE_CLAIM=roles` and
+  `AUTH_ROLE_MAP=admin=admin,package-approver=package-approver,service-manager=service-manager`.
+- **Keycloak:** create realm roles such as `wardby-admin`, `wardby-packages`
+  and `wardby-services`. Realm roles appear under `realm_access.roles`. Set
   `AUTH_ROLE_CLAIM=realm_access.roles` and
-  `AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver`. For
-  client roles, use `resource_access.<client-id>.roles`. The
+  `AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager`.
+  For client roles, use `resource_access.<client-id>.roles`. The
   [local Keycloak harness](../deploy/keycloak-test/README.md) sets this up.
 - **Auth0:** add the user's roles to the access token as a namespaced custom
   claim from an Action, such as `https://wardby.example/roles`. Set
@@ -201,7 +206,7 @@ AUTH_JWKS_URI=https://identity.example.com/your-tenant/.well-known/jwks.json
 AUTH_AUDIENCE=https://wardby.example.com/mcp
 # Optional: Wardby roles (see "Wardby roles" above).
 AUTH_ROLE_CLAIM=groups
-AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver
+AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager
 ```
 
 Copy `AUTH_ISSUER` exactly from the token's `iss` claim or the provider's

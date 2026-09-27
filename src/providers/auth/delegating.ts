@@ -26,7 +26,7 @@ export interface DelegatingAuthConfig {
   roleClaim?: string;
   /**
    * AUTH_ROLE_MAP: comma-separated `idpValue=wardbyRole` pairs, e.g.
-   * `wardby-admin=admin,wardby-packages=package-approver`.
+   * `wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager`.
    */
   roleMap?: string;
 }

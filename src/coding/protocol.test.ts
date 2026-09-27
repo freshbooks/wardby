@@ -3,6 +3,7 @@ import {
   CODING_PROTOCOL_VERSION,
   CodingAgentOutputSchema,
   CodingRunResultSchema,
+  composeCodingTask,
   isReservedServiceEnvName,
   normalizeCodingTag,
   CodingTaskInputSchema,
@@ -456,5 +457,20 @@ describe("redactTokenShapedValues", () => {
       `checked out ${sha} from https://github.com/o/r`,
     );
     expect(redactTokenShapedValues("npm test failed: 3 of 12 assertions")).toBe("npm test failed: 3 of 12 assertions");
+  });
+});
+
+describe("composeCodingTask", () => {
+  it("puts a generated note after the agent's own instructions, ahead of the request", () => {
+    expect(composeCodingTask("Run pytest.", "Add a joke.", "Services for this run: ...")).toBe(
+      "Standing instructions for this coding agent:\nRun pytest.\n\nServices for this run: ...\n\nRequest:\nAdd a joke.",
+    );
+  });
+
+  it("uses the note alone when the agent has no instructions, and leaves a plain task unchanged", () => {
+    expect(composeCodingTask(null, "Add a joke.", "Services for this run: ...")).toBe(
+      "Standing instructions for this coding agent:\nServices for this run: ...\n\nRequest:\nAdd a joke.",
+    );
+    expect(composeCodingTask("  ", "Add a joke.")).toBe("Add a joke.");
   });
 });

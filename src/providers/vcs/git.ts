@@ -3,6 +3,13 @@ import { lstat, mkdir, opendir, readFile, readlink, realpath, rm } from "node:fs
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitExcludePathspecs, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
+import {
+  WARDBY_PROTECTED_PATHS,
+  isProtectedPathException,
+  isWellFormedProtectedPath,
+  protectedPathBody,
+  protectsSomePath,
+} from "../../coding/protected-paths.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import type { Writable } from "node:stream";
 import {
@@ -11,7 +18,7 @@ import {
   normalizeGitHubRepository,
   normalizeGitRef,
 } from "../../coding/protocol.js";
-import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess } from "./github.js";
+import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess, type RepositoryFileInput } from "./github.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -195,16 +202,10 @@ export interface GitVcsProviderOptions {
   cloneUrlForRepository?: (repository: string) => string;
 }
 
+/** Validates one protectedPaths entry; a leading "!" makes it an exception (see protectedPathMatcher). */
 function validateProtectedPath(value: string): string {
   const path = value.trim();
-  if (
-    !path ||
-    Buffer.byteLength(path, "utf8") > 512 ||
-    path.startsWith("/") ||
-    path.startsWith("./") ||
-    path.includes("\\") ||
-    path.split("/").some((part) => !part || part === "." || part === "..")
-  ) {
+  if (Buffer.byteLength(path, "utf8") > 512 || !isWellFormedProtectedPath(path)) {
     throw new Error("vcs_protected_path_invalid");
   }
   return path;
@@ -228,6 +229,35 @@ function globRegex(pattern: string): RegExp {
     }
   }
   return new RegExp(`${source}$`);
+}
+
+/** The fixed baseline, split once: its literal exceptions and its protected globs. */
+const WARDBY_UNPROTECTED = new Set(WARDBY_PROTECTED_PATHS.filter(isProtectedPathException).map(protectedPathBody));
+const WARDBY_PROTECTED = WARDBY_PROTECTED_PATHS.filter((pattern) => !isProtectedPathException(pattern)).map((pattern) =>
+  globRegex(pattern),
+);
+
+/**
+ * Whether a changed path is protected, in this order: the WARDBY_PROTECTED_PATHS
+ * baseline's exception (.wardby/services.yaml, which a builder may propose; it
+ * takes effect only after merge, docs/coding-services.md) is never protected;
+ * anything else under the baseline (.wardby/**) always is, whatever the agent's
+ * exceptions say; any other path is protected when it matches one of the
+ * agent's `patterns` and is not one of its exceptions (entries with a leading
+ * "!", each a literal path, so order does not matter). The baseline is applied
+ * here, at enforcement, rather than stored, so every existing agent and
+ * in-flight run gets it.
+ */
+export function protectedPathMatcher(patterns: readonly string[]): (path: string) => boolean {
+  const exceptions = new Set(patterns.filter(isProtectedPathException).map(protectedPathBody));
+  const protectedPatterns = patterns
+    .filter((pattern) => !isProtectedPathException(pattern))
+    .map((pattern) => globRegex(pattern));
+  return (path) => {
+    if (WARDBY_UNPROTECTED.has(path)) return false;
+    if (WARDBY_PROTECTED.some((matcher) => matcher.test(path))) return true;
+    return protectedPatterns.some((matcher) => matcher.test(path)) && !exceptions.has(path);
+  };
 }
 
 function validateChangedPath(path: string): string {
@@ -448,8 +478,7 @@ export class GitVcsProvider implements VcsProvider {
       ).stdout,
     );
     if (changed.length > this.maxChangedFiles) throw new Error("vcs_changed_file_limit");
-    const protectedMatchers = prepared.protectedPaths.map((path) => ({ path, matcher: globRegex(path) }));
-    const protectedChange = changed.find((path) => protectedMatchers.some(({ matcher }) => matcher.test(path)));
+    const protectedChange = changed.find(protectedPathMatcher(prepared.protectedPaths));
     if (protectedChange) throw new Error(`vcs_protected_path:${protectedChange}`);
 
     let diff: string;
@@ -603,9 +632,11 @@ export class GitVcsProvider implements VcsProvider {
           ? `✅ ${label} finished.${summarySuffix}`
           : outcome === "budget_exhausted"
             ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
-            : details?.providerSentence
-              ? `❌ ${label} could not run: ${details.providerSentence}${summarySuffix}`
-              : `❌ ${label} failed.${summarySuffix}`;
+            : details?.serviceSentence
+              ? `❌ ${label} could not start: ${details.serviceSentence}${summarySuffix}`
+              : details?.providerSentence
+                ? `❌ ${label} could not run: ${details.providerSentence}${summarySuffix}`
+                : `❌ ${label} failed.${summarySuffix}`;
       await Promise.allSettled([
         this.options.github.updateContinuationStatusComment({ ...identity, body }),
         this.options.github.completeContinuationCheckRun({
@@ -618,6 +649,17 @@ export class GitVcsProvider implements VcsProvider {
     } catch {
       // Best-effort observability only -- must never affect the real run.
     }
+  }
+
+  async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {
+    const github = this.options.github;
+    if (!github.readFileAtRef) throw new Error("vcs_read_file_unsupported");
+    return github.readFileAtRef({
+      repository: normalizeGitHubRepository(input.repository),
+      ref: normalizeGitRef(input.ref),
+      path: validateChangedPath(input.path),
+      maxBytes: input.maxBytes,
+    });
   }
 
   private validateInput(
@@ -644,6 +686,7 @@ export class GitVcsProvider implements VcsProvider {
     }
     const protectedPaths = [...new Set(input.protectedPaths.map(validateProtectedPath))];
     if (protectedPaths.length === 0 || protectedPaths.length > 128) throw new Error("vcs_protected_paths_invalid");
+    if (!protectsSomePath(protectedPaths)) throw new Error("vcs_protected_paths_invalid");
     const collectExclude = [...normalizeCollectExclusions(input.collectExclude ?? []).paths];
     return { runId: input.runId, repository, baseRef, headRef, protectedPaths, collectExclude, continuation };
   }

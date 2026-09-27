@@ -45,6 +45,10 @@ describe("protectedResourceMetadata", () => {
   it("supports packages:approve", () => {
     expect(SCOPES_SUPPORTED).toContain("packages:approve");
   });
+
+  it("supports services:manage", () => {
+    expect(SCOPES_SUPPORTED).toContain("services:manage");
+  });
 });
 
 describe("authenticate", () => {

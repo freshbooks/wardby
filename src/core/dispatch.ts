@@ -4,10 +4,26 @@ import {
   CODING_PROTOCOL_VERSION,
   CodingTaskInputSchema,
   normalizeGitHubRepository,
+  normalizeGitRef,
   publicCodingRunResult,
   composeCodingTask,
 } from "../coding/protocol.js";
 import { assertCodingProviderModel } from "../coding/provider.js";
+import { parseAllowedServiceNames, workerServices, type ResolvedCodingService } from "../coding/services/catalog.js";
+import {
+  MAX_SERVICE_DECLARATION_BYTES,
+  ServiceDeclarationError,
+  parseServiceDeclaration,
+  type DeclaredService,
+} from "../coding/services/declaration.js";
+import { servicesInstructionNote } from "../coding/services/note.js";
+import { resolveRunServices, type ServiceResolution } from "../coding/services/resolve.js";
+import {
+  DECLARATION_UNAVAILABLE_SENTENCE,
+  LAUNCHER_UNSUPPORTED_SENTENCE,
+  invalidDeclarationSentence,
+  serviceRefusal,
+} from "../coding/services/wording.js";
 import { effectiveBudgetForRun, MIN_RESERVATION_USD, type BudgetConstraint } from "./budget-groups.js";
 import { logger } from "./logger.js";
 
@@ -25,6 +41,7 @@ export type DispatchTx = Pick<
   | "runHostCheck"
   | "runHostStatus"
   | "codingRun"
+  | "codingService"
   | "task"
   | "webhook"
   | "budgetGroup"
@@ -229,6 +246,146 @@ function retryDelayMs(attempt: number): number {
   return Math.floor(ceiling / 2 + Math.random() * (ceiling / 2));
 }
 
+/** The branch a coding run works on: its base, and for a continuation, the root's head and id. */
+interface CodingBranch {
+  baseRef: string;
+  headRef?: string;
+  continuationOf?: { runId: string };
+  rootCodingRunId?: string;
+}
+
+/**
+ * Resolves a coding run's branch: an override, else a continuation root's
+ * (verified to be in the same repository and to have opened a pull request),
+ * else the profile's base.
+ */
+async function resolveCodingBranch(
+  reader: Pick<DispatchTx, "codingRun">,
+  options: DispatchRunOptions,
+  profile: { repository: string; baseRef: string },
+): Promise<CodingBranch> {
+  if (options.continuesCodingRunId === undefined) return { baseRef: options.codingBaseRef ?? profile.baseRef };
+  if (options.codingBaseRef !== undefined) {
+    throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
+  }
+  const candidate = await reader.codingRun.findUnique({ where: { runId: options.continuesCodingRunId } });
+  if (!candidate) throw new Error("Cannot continue an unknown coding run.");
+  const root = candidate.rootCodingRunId
+    ? await reader.codingRun.findUnique({ where: { runId: candidate.rootCodingRunId } })
+    : candidate;
+  if (!root) throw new Error("Cannot continue an unknown coding run.");
+  if (normalizeGitHubRepository(root.repository) !== normalizeGitHubRepository(profile.repository)) {
+    throw new Error("Cannot continue a coding run from a different repository.");
+  }
+  const rootResult = publicCodingRunResult(root.result);
+  if (rootResult?.outcome !== "pull_request_opened" && rootResult?.outcome !== "pull_request_updated") {
+    throw new Error("Cannot continue a coding run that never opened a pull request.");
+  }
+  return {
+    baseRef: root.baseRef,
+    headRef: root.headRef,
+    continuationOf: { runId: root.runId },
+    rootCodingRunId: root.runId,
+  };
+}
+
+/** What dispatch learned about a coding run's .wardby/services.yaml before its transaction. */
+type DeclarationOutcome =
+  { kind: "none" } | { kind: "declared"; services: DeclaredService[] } | { kind: "refused"; refusal: string };
+
+interface ServiceDeclarationRead {
+  /** The profile the branch was resolved from; the transaction refuses a profile that changed since. */
+  repository: string;
+  profileBaseRef: string;
+  branch: CodingBranch;
+  outcome: DeclarationOutcome;
+}
+
+/** Read failures that are the file's fault rather than the host's: reported as an invalid declaration. */
+const UNREADABLE_DECLARATION: Readonly<Record<string, string>> = {
+  github_file_too_large: `it is larger than ${MAX_SERVICE_DECLARATION_BYTES} bytes`,
+  github_file_not_a_file: "it is not a file",
+  github_file_not_utf8: "it is not UTF-8 text",
+};
+
+/**
+ * Coding-run services (docs/coding-services.md): resolves the run's branch and
+ * reads the repository's declaration from its base, then parses it. A network
+ * call, so it runs before the Serializable transaction, which reuses the
+ * branch and resolves the services against the catalog and the agent.
+ */
+async function readServiceDeclaration(
+  options: DispatchRunOptions,
+  profile: { repository: string; baseRef: string },
+): Promise<ServiceDeclarationRead> {
+  const branch = await resolveCodingBranch(options.db, options, profile);
+  const read = { repository: profile.repository, profileBaseRef: profile.baseRef, branch };
+  const executor = options.executor;
+  if (!executor.readCodingServiceDeclaration) return { ...read, outcome: { kind: "none" } };
+  let text: string | null;
+  try {
+    text = await executor.readCodingServiceDeclaration({
+      repository: profile.repository,
+      baseRef: normalizeGitRef(branch.baseRef),
+    });
+  } catch (err) {
+    const reason = UNREADABLE_DECLARATION[err instanceof Error ? err.message : ""];
+    if (reason) {
+      return {
+        ...read,
+        outcome: {
+          kind: "refused",
+          refusal: serviceRefusal("service_declaration_invalid", invalidDeclarationSentence(reason)),
+        },
+      };
+    }
+    dispatchLog.warn({ err, agentId: options.agentId }, "could not read the repository's service declaration");
+    return {
+      ...read,
+      outcome: {
+        kind: "refused",
+        refusal: serviceRefusal("service_declaration_unavailable", DECLARATION_UNAVAILABLE_SENTENCE),
+      },
+    };
+  }
+  if (text === null) return { ...read, outcome: { kind: "none" } };
+  try {
+    return { ...read, outcome: { kind: "declared", services: parseServiceDeclaration(text) } };
+  } catch (err) {
+    if (!(err instanceof ServiceDeclarationError)) throw err;
+    return {
+      ...read,
+      outcome: {
+        kind: "refused",
+        refusal: serviceRefusal("service_declaration_invalid", invalidDeclarationSentence(err.reason)),
+      },
+    };
+  }
+}
+
+/** Inside the transaction: the run's services, or the refusal that stops it. */
+async function resolveDispatchServices(
+  tx: DispatchTx,
+  outcome: DeclarationOutcome,
+  allowed: unknown,
+  executor: Executor,
+  request: string,
+  instructions: string | null,
+): Promise<ServiceResolution> {
+  if (outcome.kind === "refused") return { refusal: outcome.refusal };
+  if (outcome.kind === "none" || outcome.services.length === 0) return { services: [] };
+  if (executor.supportsCodingServices?.() !== true) {
+    return { refusal: serviceRefusal("service_launcher_unsupported", LAUNCHER_UNSUPPORTED_SENTENCE) };
+  }
+  return resolveRunServices(
+    { findMany: (args) => tx.codingService.findMany(args) },
+    outcome.services,
+    parseAllowedServiceNames(allowed),
+    request,
+    instructions,
+  );
+}
+
 /**
  * Persists every detached run input in one transaction, then invokes the
  * executor only after commit. A null result means the caller's transactional
@@ -237,14 +394,27 @@ function retryDelayMs(attempt: number): number {
 export async function dispatchRun(options: DispatchRunOptions): Promise<DispatchRunResult | null> {
   const now = options.now ?? new Date();
   // Read outside the transaction only to decide whether to take the group
-  // dispatch lock before the transaction's first read; everything the run is
+  // dispatch lock before the transaction's first read, and whether to read the
+  // repository's service declaration (a network call); everything the run is
   // built from is re-read inside. If the agent changes in between, the
   // Serializable transaction still refuses a conflicting commit.
   const preview = await options.db.agent.findUnique({
     where: { id: options.agentId },
-    select: { kind: true, budgetGroupId: true },
+    select: {
+      kind: true,
+      budgetGroupId: true,
+      codingProfile: { select: { repository: true, baseRef: true, services: true } },
+    },
   });
   const lockGroups = preview?.kind === "coding" && preview.budgetGroupId != null;
+  // Only an agent allowed some service reads the repository's declaration; any
+  // other coding agent never calls the host for it and gets no services.
+  const declarationRead =
+    preview?.kind === "coding" &&
+    preview.codingProfile &&
+    parseAllowedServiceNames(preview.codingProfile.services).length > 0
+      ? await readServiceDeclaration(options, preview.codingProfile)
+      : undefined;
   const persistOnce = () =>
     options.db.$transaction(
       async (tx) => {
@@ -267,16 +437,40 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           throw new Error("taskOverride can only be supplied for a native agent.");
         }
 
-        // A coding run's budget is reserved here, at dispatch (E-01): the
-        // container only ever checks the run's own reservation. A native run
-        // computes its effective budget in executeRun's load step instead.
+        // A coding run's services are resolved, and its budget reserved, here,
+        // at dispatch (E-01): the container only ever checks the run's own
+        // reservation. A native run computes its effective budget in
+        // executeRun's load step instead.
         let codingBudget: { budgetUsd: number; refusal?: string } | undefined;
+        let services: ResolvedCodingService[] = [];
+        let servicesRefusal: string | undefined;
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
           assertCodingProviderModel(agent.codingProfile.provider, agent.model);
-          codingBudget = await reserveCodingBudget(tx, agent, now, options);
+          if (declarationRead) {
+            if (
+              declarationRead.repository !== agent.codingProfile.repository ||
+              declarationRead.profileBaseRef !== agent.codingProfile.baseRef
+            ) {
+              // The declaration was read for a profile that changed before this transaction.
+              throw new Error("The coding agent's repository or base branch changed during dispatch; try again.");
+            }
+            // A missing request fails below, with its own error.
+            const request = options.codingTask ?? agent.codingProfile.defaultTask ?? "";
+            const resolved = await resolveDispatchServices(
+              tx,
+              declarationRead.outcome,
+              agent.codingProfile.services,
+              options.executor,
+              request,
+              agent.systemPrompt,
+            );
+            if ("refusal" in resolved) servicesRefusal = resolved.refusal;
+            else services = resolved.services;
+          }
+          if (!servicesRefusal) codingBudget = await reserveCodingBudget(tx, agent, now, options);
         }
-        const refusal = codingBudget?.refusal;
+        const refusal = servicesRefusal ?? codingBudget?.refusal;
 
         const run = await tx.run.create({
           data: {
@@ -300,38 +494,15 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           assertCodingProviderModel(agent.codingProfile.provider, agent.model);
           const request = options.codingTask ?? agent.codingProfile.defaultTask;
           if (!request) throw new Error(`Coding agent "${agent.id}" requires a task.`);
-          // The worker sees only the task text, so the agent's own instructions ride in it.
-          const task = composeCodingTask(agent.systemPrompt, request);
+          // The worker sees only the task text, so the agent's own instructions, and the
+          // services note, ride in it.
+          const task = composeCodingTask(agent.systemPrompt, request, servicesInstructionNote(services));
           const budgetUsd = codingBudget.budgetUsd;
 
-          let baseRef = options.codingBaseRef ?? agent.codingProfile.baseRef;
-          let headRef = `wardby/run-${run.id}`;
-          let continuationOf: { runId: string } | undefined;
-          let rootCodingRunId: string | undefined;
-          if (options.continuesCodingRunId !== undefined) {
-            if (options.codingBaseRef !== undefined) {
-              throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
-            }
-            const candidate = await tx.codingRun.findUnique({ where: { runId: options.continuesCodingRunId } });
-            if (!candidate) throw new Error("Cannot continue an unknown coding run.");
-            const root = candidate.rootCodingRunId
-              ? await tx.codingRun.findUnique({ where: { runId: candidate.rootCodingRunId } })
-              : candidate;
-            if (!root) throw new Error("Cannot continue an unknown coding run.");
-            if (
-              normalizeGitHubRepository(root.repository) !== normalizeGitHubRepository(agent.codingProfile.repository)
-            ) {
-              throw new Error("Cannot continue a coding run from a different repository.");
-            }
-            const rootResult = publicCodingRunResult(root.result);
-            if (rootResult?.outcome !== "pull_request_opened" && rootResult?.outcome !== "pull_request_updated") {
-              throw new Error("Cannot continue a coding run that never opened a pull request.");
-            }
-            baseRef = root.baseRef;
-            headRef = root.headRef;
-            continuationOf = { runId: root.runId };
-            rootCodingRunId = root.runId;
-          }
+          // Resolved once: before the transaction when the declaration was read from it.
+          const branch = declarationRead?.branch ?? (await resolveCodingBranch(tx, options, agent.codingProfile));
+          const { baseRef, continuationOf, rootCodingRunId } = branch;
+          const headRef = branch.headRef ?? `wardby/run-${run.id}`;
 
           const input = CodingTaskInputSchema.parse({
             schemaVersion: CODING_PROTOCOL_VERSION,
@@ -344,6 +515,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             budgetUsd,
             deadlineAt: new Date(now.getTime() + agent.codingProfile.timeoutSec * 1000).toISOString(),
             continuationOf,
+            ...(services.length > 0 ? { services: workerServices(services) } : {}),
           });
           const workerImage = options.executor.resolveCodingWorkerImage?.({
             provider: agent.codingProfile.provider,
@@ -373,6 +545,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               debugTrace:
                 agent.codingProfile.debugTraceUntil != null &&
                 now.getTime() < agent.codingProfile.debugTraceUntil.getTime(),
+              services,
             },
           });
         } else if (
@@ -415,7 +588,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   if (persisted.run.status === "refused") {
     dispatchLog.warn(
       { runId: persisted.run.id, agentId: options.agentId, reason: persisted.run.error },
-      "coding run refused at dispatch: its budget constraint has nothing left",
+      "coding run refused at dispatch",
     );
     return persisted;
   }

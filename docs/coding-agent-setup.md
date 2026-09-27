@@ -26,6 +26,9 @@ The GitHub App installation is the only step that cannot be created from this
 repository. It is intentionally scoped to the test repository because a coding
 run can push a branch and create a draft pull request.
 
+Coding runs on the Kubernetes launcher can also have services such as a
+PostgreSQL database next to them; see [coding-services.md](coding-services.md).
+
 ## Repository authorization
 
 A coding agent's `codingProfile.repository` must be authorized for the agent's

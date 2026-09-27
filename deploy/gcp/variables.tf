@@ -137,7 +137,7 @@ variable "auth_jwks_uri" {
 }
 
 variable "auth_role_claim" {
-  description = "Delegating mode only: the access-token claim carrying your IdP's roles/groups, mapped to wardby roles through auth_role_map (AUTH_ROLE_CLAIM). An exact top-level claim name is tried first (e.g. \"groups\", \"roles\", or a namespaced \"https://…/roles\"), else a dotted path (e.g. \"realm_access.roles\"). Leave empty (with auth_role_map) and no caller has a wardby role, so make_owner, BYO workerImageRef and package approval are refused. See docs/getting-started-identity-provider.md, \"Wardby roles\"."
+  description = "Delegating mode only: the access-token claim carrying your IdP's roles/groups, mapped to wardby roles through auth_role_map (AUTH_ROLE_CLAIM). An exact top-level claim name is tried first (e.g. \"groups\", \"roles\", or a namespaced \"https://…/roles\"), else a dotted path (e.g. \"realm_access.roles\"). Leave empty (with auth_role_map) and no caller has a wardby role, so make_owner, BYO workerImageRef, package approval and service catalog changes are refused. See docs/getting-started-identity-provider.md, \"Wardby roles\"."
   type        = string
   default     = ""
   validation {
@@ -151,7 +151,7 @@ variable "auth_role_claim" {
 }
 
 variable "auth_role_map" {
-  description = "Delegating mode only: comma-separated idpValue=wardbyRole pairs (AUTH_ROLE_MAP), e.g. \"wardby-admin=admin,wardby-packages=package-approver\". wardby roles: admin (make_owner, BYO workerImageRef, package approval) and package-approver (package approval). Matching is exact and case-sensitive; map only IdP values users cannot assign themselves. An unknown wardby role fails the app's startup."
+  description = "Delegating mode only: comma-separated idpValue=wardbyRole pairs (AUTH_ROLE_MAP), e.g. \"wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager\". wardby roles: admin (make_owner, BYO workerImageRef, package approval, service catalog changes), package-approver (package approval) and service-manager (service catalog changes). Matching is exact and case-sensitive; map only IdP values users cannot assign themselves. An unknown wardby role fails the app's startup."
   type        = string
   default     = ""
 }

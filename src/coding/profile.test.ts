@@ -18,6 +18,7 @@ describe("CodingProfileSchema", () => {
       collectExclude: [],
       packageAllowlist: {},
       packagePolicy: {},
+      services: [],
     });
   });
 
@@ -109,5 +110,64 @@ describe("CodingProfilePatchSchema", () => {
 
   it("rejects unknown patch fields", () => {
     expect(() => CodingProfilePatchSchema.parse({ dockerSocket: "/var/run/docker.sock" })).toThrow();
+  });
+});
+
+describe("services", () => {
+  it("defaults to none, dedupes, and refuses a malformed name", () => {
+    expect(CodingProfileSchema.parse({ repository: "openai/example" }).services).toEqual([]);
+    expect(
+      CodingProfileSchema.parse({ repository: "openai/example", services: ["postgres", "redis", "postgres"] }).services,
+    ).toEqual(["postgres", "redis"]);
+    expect(CodingProfileSchema.safeParse({ repository: "openai/example", services: ["Postgres"] }).success).toBe(false);
+    expect(CodingProfilePatchSchema.parse({ services: ["redis"] })).toEqual({ services: ["redis"] });
+  });
+});
+
+describe("protectedPaths exceptions", () => {
+  it("defaults to protecting .wardby/ except the service declaration", () => {
+    expect(DEFAULT_PROTECTED_PATHS).toEqual([
+      ".github/workflows/**",
+      ".github/CODEOWNERS",
+      "CODEOWNERS",
+      "docs/CODEOWNERS",
+      ".wardby/**",
+      "!.wardby/services.yaml",
+    ]);
+    expect(CodingProfileSchema.parse({ repository: "openai/example" }).protectedPaths).toEqual([
+      ...DEFAULT_PROTECTED_PATHS,
+    ]);
+  });
+
+  it("accepts a leading ! as an exception next to real patterns", () => {
+    expect(
+      CodingProfileSchema.parse({
+        repository: "openai/example",
+        protectedPaths: [".wardby/**", " !.wardby/services.yaml "],
+      }).protectedPaths,
+    ).toEqual([".wardby/**", "!.wardby/services.yaml"]);
+  });
+
+  it.each([
+    ["only exceptions", ["!.wardby/services.yaml"]],
+    ["an exception with nothing after it", ["CODEOWNERS", "!"]],
+    ["a double exception", ["CODEOWNERS", "!!x"]],
+    ["an absolute exception", ["CODEOWNERS", "!/etc/passwd"]],
+    ["a traversing exception", ["CODEOWNERS", "!../x"]],
+    ["a wildcard exception", ["CODEOWNERS", "!**"]],
+    ["a wildcard exception under .wardby/", ["CODEOWNERS", "!.wardby/*"]],
+    ["a recursive exception under .wardby/", ["CODEOWNERS", "!.wardby/**"]],
+    ["a top-level wildcard exception", ["CODEOWNERS", "!*"]],
+    ["a wildcard exception over a protected tree", [".github/workflows/**", "!.github/**"]],
+    ["a single-character wildcard exception", ["CODEOWNERS", "!docs/CODEOWNER?"]],
+  ])("refuses %s", (_label, protectedPaths) => {
+    expect(CodingProfileSchema.safeParse({ repository: "openai/example", protectedPaths }).success).toBe(false);
+  });
+
+  it("accepts a literal exception to a wildcard pattern", () => {
+    expect(
+      CodingProfileSchema.parse({ repository: "openai/example", protectedPaths: ["docs/**", "!docs/CODEOWNERS"] })
+        .protectedPaths,
+    ).toEqual(["docs/**", "!docs/CODEOWNERS"]);
   });
 });

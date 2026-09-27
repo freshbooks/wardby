@@ -9,6 +9,12 @@
  * comment. Best effort throughout: nothing here throws.
  */
 import type { Prisma, PrismaClient, Run } from "#prisma";
+import { storedServiceNames } from "../coding/services/catalog.js";
+import {
+  SERVICE_UNREADY_CATEGORY,
+  serviceRefusalSentence,
+  serviceUnreadySentence,
+} from "../coding/services/wording.js";
 import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
@@ -37,6 +43,10 @@ export interface FailedChild {
   status: string;
   /** The coding sub-run's failure category; `provider_<class>` names a model-provider refusal. */
   failureCategory?: string | null;
+  /** The sub-run's Run.error; read only for a service refusal's host sentence (coding/services/wording.ts). */
+  error?: string | null;
+  /** The service names on the coding sub-run (CodingRun.services), for one that never became ready. */
+  services?: string[];
 }
 
 const runLine = (runId: string): string => `<sub>wardby run \`${runId}\`</sub>`;
@@ -114,10 +124,20 @@ export function outcomeBody(
     const outOfBudget = failedChildren.filter((c) => c.status === "budget_exhausted");
     const providerClassOf = (c: FailedChild) =>
       c.status === "failed" ? providerClassOfCategory(c.failureCategory) : null;
+    // A coding sub-run its services stopped: refused at dispatch, or a sidecar never became ready.
+    const serviceSentenceOf = (c: FailedChild): string | null =>
+      c.status === "refused"
+        ? serviceRefusalSentence(c.error)
+        : c.status === "failed" && c.failureCategory === SERVICE_UNREADY_CATEGORY
+          ? serviceUnreadySentence(c.services ?? [])
+          : null;
     const providerClasses = new Set(
       failedChildren.map(providerClassOf).filter((c): c is ProviderFailureClass => c !== null),
     );
-    const other = failedChildren.filter((c) => c.status !== "budget_exhausted" && providerClassOf(c) === null);
+    const serviceSentences = new Set(failedChildren.map(serviceSentenceOf).filter((s): s is string => s !== null));
+    const other = failedChildren.filter(
+      (c) => c.status !== "budget_exhausted" && providerClassOf(c) === null && serviceSentenceOf(c) === null,
+    );
     const lines: string[] = [];
     if (outOfBudget.length > 0) {
       lines.push(`A sub-run ran out of budget: ${outOfBudget.map((c) => `\`${c.id}\``).join(", ")}.`);
@@ -125,6 +145,10 @@ export function outcomeBody(
     // The class only, never the provider's code: the sentence says who has to act.
     for (const providerClass of providerClasses) {
       lines.push(`A sub-run could not reach the model: ${providerSentence(providerClass)}`);
+    }
+    // The fixed sentence only, never the Run.error code in front of it.
+    for (const sentence of serviceSentences) {
+      lines.push(`A sub-run could not start: ${sentence}`);
     }
     if (other.length > 0) {
       lines.push(`A sub-run did not succeed: ${other.map((c) => `\`${c.id}\` (\`${c.status}\`)`).join(", ")}.`);
@@ -158,7 +182,12 @@ export async function completeHostStatus(
     if (!host) return;
     const children = await db.run.findMany({
       where: { parentRunId: run.id },
-      select: { id: true, status: true, codingRun: { select: { result: true, failureCategory: true } } },
+      select: {
+        id: true,
+        status: true,
+        error: true,
+        codingRun: { select: { result: true, failureCategory: true, services: true } },
+      },
       orderBy: { startedAt: "asc" },
     });
     const pullRequests = children
@@ -166,7 +195,13 @@ export async function completeHostStatus(
       .filter((pr): pr is PullRequestOutcome => pr !== null);
     const failedChildren = children
       .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
-      .map((c) => ({ id: c.id, status: c.status, failureCategory: c.codingRun?.failureCategory ?? null }));
+      .map((c) => ({
+        id: c.id,
+        status: c.status,
+        failureCategory: c.codingRun?.failureCategory ?? null,
+        error: c.error ?? null,
+        services: storedServiceNames(c.codingRun?.services),
+      }));
     const budgetSentence =
       run.status === "budget_exhausted" || run.status === "refused"
         ? await loadBudgetSentence(db, run.id, run.status)
