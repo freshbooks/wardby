@@ -71,7 +71,6 @@ export default tseslint.config(
       "src/coding/protocol.ts",
       "src/coding/collect-exclude.ts",
       "src/coding/services/catalog.ts",
-      "src/coding/services/declaration.ts",
     ],
     rules: { "no-control-regex": "off" },
   },
