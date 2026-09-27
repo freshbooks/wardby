@@ -53,6 +53,7 @@ import {
   type RepositoryLink,
 } from "./review-host-tools.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
+import { serviceRefusalSentence } from "../coding/services/wording.js";
 import { RUN_TASK_TAG, splitTaskOverride, wrapUntrusted } from "./untrusted-content.js";
 import { completeHostStatus } from "./host-status.js";
 import { trackRun } from "./in-flight-runs.js";
@@ -236,6 +237,30 @@ export interface WaitForCodingChildOptions {
   maxPollMs?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * What a coding sub-agent's run tells the parent run's model. A run refused
+ * over its services carries the host sentence (never the raw Run.error), so
+ * the parent can pass it on — for a mention, that is the requester.
+ */
+export function codingChildResult(run: {
+  status: string;
+  finalText: string | null;
+  costUsd: unknown;
+  tokensIn: number;
+  tokensOut: number;
+  error: string | null;
+}): string {
+  const refusal = run.status === "refused" ? serviceRefusalSentence(run.error) : null;
+  return JSON.stringify({
+    status: run.status,
+    finalText: run.finalText,
+    costUsd: Number(run.costUsd),
+    tokensIn: run.tokensIn,
+    tokensOut: run.tokensOut,
+    ...(refusal ? { refusal } : {}),
+  });
 }
 
 /**
@@ -715,14 +740,7 @@ async function executeTrackedRun(
               message: "This run was cancelled while waiting for the coding sub-agent; the sub-agent was stopped.",
             });
           }
-          const childResult = waited.run;
-          return JSON.stringify({
-            status: childResult.status,
-            finalText: childResult.finalText,
-            costUsd: Number(childResult.costUsd),
-            tokensIn: childResult.tokensIn,
-            tokensOut: childResult.tokensOut,
-          });
+          return codingChildResult(waited.run);
         }
 
         const taskOverride = args.datastoreRef
