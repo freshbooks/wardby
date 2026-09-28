@@ -28,16 +28,17 @@ limit runs out.
    `dataPath` or one of its `writablePaths`. Probe over TCP on `127.0.0.1`
    rather than a Unix socket.
 3. Each entry's readiness settings (`periodSeconds`, `timeoutSeconds`,
-   `failureThreshold`) apply within an overall start-up limit, 120 seconds by
-   default on both launchers, whatever the entry's threshold allows. On
-   Kubernetes that limit is the pod-start timeout
-   (`KUBERNETES_READY_TIMEOUT_MS`, default 120000) and includes image pulls; if
-   first pulls on new nodes are slow, raise it or mirror the image into a
-   nearby registry. On Docker the limit covers every service of the run
-   together (they start one at a time), and never runs past the run's own
-   timeout; image pulls are not counted in it but may take up to 5 minutes
-   each. The Docker launcher pulls without registry credentials, so pull a
-   private or rate-limited image on the Docker host beforehand.
+   `failureThreshold`) apply within an overall start-up limit, whatever the
+   entry's own threshold would otherwise allow. On Kubernetes that limit is
+   the pod-start timeout (`KUBERNETES_READY_TIMEOUT_MS`, default 120000, an
+   operator setting) and includes image pulls; if first pulls on new nodes
+   are slow, raise it or mirror the image into a nearby registry. On Docker
+   the limit is a fixed 120 seconds covering every service of the run
+   together (they start one at a time), never runs past the run's own
+   timeout, and has no setting to raise it; image pulls are not counted in it
+   but may take up to 5 minutes each. The Docker launcher pulls without
+   registry credentials, so pull a private or rate-limited image on the
+   Docker host beforehand.
 4. Trigger a new run once the cause is fixed.
 
 When this run is a sub-run another agent dispatched (for example a router
