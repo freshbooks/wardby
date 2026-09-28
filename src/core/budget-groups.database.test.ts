@@ -220,13 +220,17 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
     const g = await group("zombie", 5);
     const native = await nativeAgent("zombie-native", 5, g);
     const coder = await codingAgent("zombie-coder", 5, g);
-    // Ctrl-C'd an hour ago: still "running", no beat since.
-    const stale = new Date(Date.now() - 60 * 60 * 1000);
+    // Ctrl-C'd an hour ago: still "running", no beat since. The clock is pinned to midday UTC so
+    // "an hour ago" is always inside the group's daily window; with the real clock, between 00:00 and
+    // 01:00 UTC the zombie would fall into yesterday and not count at all.
+    const today = new Date();
+    const now = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 12));
+    const stale = new Date(now.getTime() - 60 * 60 * 1000);
     const zombie = await db.run.create({
       data: { agentId: native, status: "running", costUsd: 0.5, startedAt: stale, heartbeatAt: stale },
     });
 
-    const result = await dispatchRun({ db, executor, agentId: coder });
+    const result = await dispatchRun({ db, executor, agentId: coder, now });
 
     // Only the zombie's real $0.50 counts, not its $4.50 unspent hold.
     expect(await reservedUsd(result!.run.id)).toBeCloseTo(4.5, 6);
