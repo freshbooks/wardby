@@ -17,6 +17,11 @@ export const NETWORK_KEEPER_SCRIPT =
 export const CODING_PROXY_ALIAS = "wardby-proxy";
 export const CODING_PROXY_PORT = 8787;
 /**
+ * The one variable Claude's tool runner receives: its package-registry and service settings as JSON
+ * (claude-tool-setup.ts). Never the run capability.
+ */
+export const CLAUDE_TOOL_SETUP_ENV = "WARDBY_TOOL_SETUP";
+/**
  * The proxy's deny port. Nothing is served here (see coding-proxy/deny-port.ts);
  * it is the enforcement witness — the one destination a run's NetworkPolicy must
  * refuse while permitting CODING_PROXY_PORT on the same pod.
@@ -203,7 +208,8 @@ function validateSpec(spec: JobSpec): void {
     throw isolationError();
   if (spec.provider === "claude-code") {
     if (!spec.toolImage || !isImmutableDockerImage(spec.toolImage)) throw isolationError();
-    if (spec.limits.cpus < 0.35 || spec.limits.memoryMb < 256 || spec.limits.pids < 32) throw isolationError();
+    if (spec.limits.cpus < 0.35 || spec.limits.memoryMb < 256 || spec.limits.pids < CLAUDE_MIN_PIDS)
+      throw isolationError();
   } else if (spec.toolImage !== undefined) {
     throw isolationError();
   }
@@ -491,11 +497,16 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
   ];
 }
 
-function claudeToolLimits(spec: JobSpec): { cpus: number; memoryMb: number; pids: number } {
+/** The tool runner's shell + npm shim (two Node processes) + npm peak near 30 PIDs; 64 leaves headroom. */
+const CLAUDE_TOOL_PIDS = 64;
+/** A Claude run must leave its agent at least 32 PIDs after the tool runner's share. */
+const CLAUDE_MIN_PIDS = CLAUDE_TOOL_PIDS + 32;
+
+export function claudeToolLimits(spec: JobSpec): { cpus: number; memoryMb: number; pids: number } {
   return {
     cpus: 0.25,
     memoryMb: Math.min(512, Math.max(128, Math.floor(spec.limits.memoryMb / 3))),
-    pids: 16,
+    pids: CLAUDE_TOOL_PIDS,
   };
 }
 
@@ -582,7 +593,11 @@ export function buildClaudeAgentCreateArgs(spec: JobSpec, proxyPort = CODING_PRO
   ];
 }
 
-/** The tool runner receives only the checkout and socket; it never joins the proxy network. */
+/**
+ * The tool runner receives only the checkout and its own storage subpath; it shares the run's
+ * proxy network with the agent (one room) but holds no capability, so the proxy grants it only
+ * registry access via its own WARDBY_TOOL_SETUP value.
+ */
 export function buildClaudeToolRunnerCreateArgs(spec: JobSpec): string[] {
   validateSpec(spec);
   if (spec.provider !== "claude-code" || !spec.toolImage) throw isolationError();
@@ -598,8 +613,10 @@ export function buildClaudeToolRunnerCreateArgs(spec: JobSpec): string[] {
     "never",
     "--user",
     `${CODING_WORKER_UID}:${CODING_WORKER_GID}`,
+    // One room (docs/coding-worker-isolation.md): the run's proxy network, like the agent, so npm and
+    // pip reach the registry. It holds no capability, so the proxy refuses it anything else.
     "--network",
-    "none",
+    names.network,
     "--read-only",
     "--cap-drop",
     "ALL",
@@ -632,6 +649,9 @@ export function buildClaudeToolRunnerCreateArgs(spec: JobSpec): string[] {
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.workspace},volume-subpath=workspace,volume-nocopy`,
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.tool},volume-subpath=tool,volume-nocopy`,
+    // By name only: the value (claude-tool-setup.ts) is in the docker CLI's environment, never argv.
+    "--env",
+    CLAUDE_TOOL_SETUP_ENV,
     "--restart",
     "no",
     "--stop-signal",
@@ -1043,13 +1063,19 @@ export function assertClaudeAgentContainerInspection(
   if (Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== names.network) throw isolationError();
 }
 
-export function assertClaudeToolRunnerContainerInspection(container: DockerContainerInspection, spec: JobSpec): void {
+export function assertClaudeToolRunnerContainerInspection(
+  container: DockerContainerInspection,
+  spec: JobSpec,
+  expectedSetup: string,
+): void {
   validateSpec(spec);
   if (spec.provider !== "claude-code" || !spec.toolImage) throw isolationError();
   const names = isolationNames(spec.runId);
-  assertClaudeContainerBaseline(container, spec.toolImage, "none", spec, claudeToolLimits(spec));
-  if ((container.Config?.Env ?? []).some((value) => value.startsWith("WARDBY_"))) throw isolationError();
-  if (Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== "none") throw isolationError();
+  assertClaudeContainerBaseline(container, spec.toolImage, names.network, spec, claudeToolLimits(spec));
+  const environment = (container.Config?.Env ?? []).filter((value) => value.startsWith("WARDBY_"));
+  if (environment.length !== 1 || environment[0] !== `${CLAUDE_TOOL_SETUP_ENV}=${expectedSetup}`)
+    throw isolationError();
+  if (Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== names.network) throw isolationError();
   assertExactMountSet(container, names, [
     { path: WORKER_PATHS.workspace, writable: true, subpath: "workspace" },
     { path: WORKER_PATHS.tool, writable: true, subpath: "tool" },

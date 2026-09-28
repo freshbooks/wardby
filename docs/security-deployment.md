@@ -570,8 +570,8 @@ behavior differs from the reviewed profile.
 Before production deployment, review the
 [current Kubernetes limitations](coding-worker-isolation.md#known-limitations).
 Per-run record ConfigMaps currently require operator-managed garbage collection,
-Claude Code is not supported by the Kubernetes launcher, and the real-cluster
-suite does not yet cover every Docker containment scenario.
+and the real-cluster suite does not yet cover every Docker containment
+scenario.
 
 ## Coding package registry
 

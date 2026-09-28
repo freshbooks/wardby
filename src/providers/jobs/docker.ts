@@ -38,6 +38,7 @@ import {
   assertStorageVolumeInspection,
   assertWorkerContainerInspection,
   buildDockerIsolationPlan,
+  CLAUDE_TOOL_SETUP_ENV,
   type DockerContainerInspection,
   type DockerHostInfo,
 } from "./docker-isolation.js";
@@ -48,6 +49,7 @@ import {
   dockerServiceContainerNames,
   type DockerServiceContainer,
 } from "./docker-services.js";
+import { claudeToolSetup } from "./claude-tool-setup.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
 
@@ -159,7 +161,7 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
   async run(args: readonly string[], options: DockerCommandOptions = {}): Promise<DockerCommandResult> {
     if (args.some((argument) => argument.includes("\0"))) throw new Error("docker_argument_invalid");
     const extraEnv = options.env ?? {};
-    if (Object.keys(extraEnv).some((key) => key !== "WARDBY_RUN_CAPABILITY"))
+    if (Object.keys(extraEnv).some((key) => key !== "WARDBY_RUN_CAPABILITY" && key !== CLAUDE_TOOL_SETUP_ENV))
       throw new Error("docker_environment_invalid");
     const env: NodeJS.ProcessEnv = {
       PATH: this.path,
@@ -817,16 +819,18 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     await this.run(plan.proxyNetworkConnectArgs);
     const proxy = await this.inspect<DockerContainerInspection>(["container", "inspect", this.options.proxyContainer]);
     assertProxyContainerInspection(proxy, record.runId);
+    const toolSetup = record.spec.provider === "claude-code" ? claudeToolSetup(record.spec, capability) : undefined;
     if (plan.toolCreateArgs) {
       await this.createAndAssert(
         appendLabels(plan.toolCreateArgs, labels),
         ["container", "inspect", plan.names.toolContainer],
         (value) => {
-          assertClaudeToolRunnerContainerInspection(value as DockerContainerInspection, record.spec);
+          assertClaudeToolRunnerContainerInspection(value as DockerContainerInspection, record.spec, toolSetup!);
           if (!labelsMatch((value as DockerContainerInspection).Config?.Labels, labels)) {
             throw new Error("docker_resource_attestation_failed");
           }
         },
+        { env: { WARDBY_TOOL_SETUP: toolSetup! } },
       );
       await this.startContainer(plan.names.toolContainer);
       await this.waitForToolRunner(plan.names.toolContainer);
@@ -983,7 +987,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
         "inspect",
         buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.toolContainer,
       ]);
-      assertClaudeToolRunnerContainerInspection(tool, record.spec);
+      assertClaudeToolRunnerContainerInspection(tool, record.spec, claudeToolSetup(record.spec, capability));
       if (tool.State?.Running !== true || tool.State?.Status !== "running") {
         record.phase = "failed";
         record.result = { exitCode: 1, reason: "failed", diagnostic: "worker_tool_runner_failed" };

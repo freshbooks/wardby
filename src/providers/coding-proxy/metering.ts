@@ -150,6 +150,9 @@ export class AnthropicSseUsageTracker {
     const { value } = sseEvent(frame);
     if (!value) return { terminal: false };
     switch (value.type) {
+      // A stream-level error event (quota, rate limit, server error) ends the response with no usage.
+      case "error":
+        return { terminal: true, failure: upstreamErrorCode(value) };
       case "message_start": {
         if (this.startUsage || !value.message || typeof value.message !== "object") {
           throw new Error("invalid_upstream_sse");

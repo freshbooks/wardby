@@ -33,7 +33,11 @@ launcher.
    coding agent does not start until every service reports ready.
 4. The agent's shells receive each service's variables (such as
    `DATABASE_URL`), and its instructions gain a short note listing the services,
-   their variables, and that they start empty.
+   their variables, and that they start empty. On Kubernetes, Claude Code runs
+   work the same way: its tool runner, which actually runs shell commands in
+   the repository, reaches every service on `127.0.0.1` with the same
+   variables. The tool runner itself starts before the service sidecars; the
+   keeper and the agent are what wait for every service to be ready.
 5. When the run ends, its pod (Kubernetes) or its containers (Docker) are
    deleted, and each service and its data go with them.
 

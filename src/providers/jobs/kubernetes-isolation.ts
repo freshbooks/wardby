@@ -18,18 +18,21 @@ import type {
 import { StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 import {
+  CLAUDE_TOOL_SETUP_ENV,
   CODING_PROXY_ALIAS,
   CODING_PROXY_DENY_PORT,
   CODING_PROXY_PORT,
   CODING_WORKER_GID,
   CODING_WORKER_UID,
   WORKER_STOP_GRACE_SECONDS,
+  claudeToolLimits,
   isRepositoryDigest,
 } from "./docker-isolation.js";
 import {
   GVISOR_RUNTIME_CLASS,
   KubernetesPlatformError,
   STORAGE_INIT_EPHEMERAL_MIB,
+  TOOL_RUNNER_EPHEMERAL_MIB,
   WORKER_EPHEMERAL_MIB,
   conformResources,
   describeMib,
@@ -41,12 +44,19 @@ import {
 } from "./kubernetes-platform.js";
 
 export const KUBERNETES_ISOLATION_ERROR = "kubernetes_isolation_unsupported";
-export const KUBERNETES_PROVIDER_UNSUPPORTED = "kubernetes_provider_unsupported";
 /** Extra seconds past timeoutSec before Kubernetes kills the pod (keeper included). */
 export const POD_DEADLINE_GRACE_SECONDS = 300;
 export const KEEPER_CONTAINER = "keeper";
 export const STORAGE_INIT_CONTAINER = "storage-init";
 export const WORKER_CONTAINER = "worker";
+/** Claude's credential-free command runner: a native sidecar in the run pod. */
+export const TOOL_RUNNER_CONTAINER = "tool-runner";
+/** The run Secret's key holding the tool runner's setup (claude-tool-setup.ts). */
+export const TOOL_SETUP_SECRET_KEY = "tool-setup";
+/** Where the tool runner listens and the agent's relay connects (claude-tool-runner/main.mjs). */
+export const TOOL_SOCKET_PATH = "/run/wardby/tool/runner.sock";
+const CODEX_ENTRYPOINT = "/opt/wardby/coding-worker/main.js";
+const CLAUDE_ENTRYPOINT = "/opt/wardby/claude-coding-worker/main.js";
 /** Every service sidecar's container name starts with this (service-postgres, service-redis, ...). */
 export const SERVICE_CONTAINER_PREFIX = "service-";
 /** Disk-backed scratch for each of a service's writablePaths (a socket directory, /tmp). */
@@ -83,32 +93,39 @@ export const ENFORCEMENT_PROBE_DENY_REFUSED = 5;
 const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
 const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
 
-/** The worker waits for the launcher's seeded marker, then runs the image's normal entrypoint. */
-const WORKER_GATE = [
-  'const fs = require("node:fs");',
-  'const marker = "/run/wardby/input/.seeded";',
-  "(function wait() {",
-  "  if (fs.existsSync(marker)) {",
-  '    import("/opt/wardby/coding-worker/main.js").catch(() => { process.exitCode = 1; });',
-  "  } else {",
-  "    setTimeout(wait, 250);",
-  "  }",
-  "})();",
-].join("\n");
+/** The worker waits for the launcher's seeded marker, then runs its provider's entrypoint. */
+function workerGate(entrypoint: string): string {
+  return [
+    'const fs = require("node:fs");',
+    'const marker = "/run/wardby/input/.seeded";',
+    "(function wait() {",
+    "  if (fs.existsSync(marker)) {",
+    `    import(${JSON.stringify(entrypoint)}).catch(() => { process.exitCode = 1; });`,
+    "  } else {",
+    "    setTimeout(wait, 250);",
+    "  }",
+    "})();",
+  ].join("\n");
+}
 
 /**
  * Creates the worker's subPath mount sources, owned by the run uid, before any regular container
  * starts. Otherwise the kubelet creates them root-owned while setting up the worker's subPath mounts,
  * and the keeper (uid 10001, no capabilities) can't chmod them. Idempotent; no shell.
  */
-const STORAGE_INIT_SCRIPT = [
-  'const fs = require("node:fs");',
-  'for (const name of ["workspace", "input", "output"]) {',
-  `  const path = ${JSON.stringify(STORAGE_ROOT)} + "/" + name;`,
-  "  fs.mkdirSync(path, { recursive: true, mode: 0o700 });",
-  "  fs.chmodSync(path, 0o700);",
-  "}",
-].join("\n");
+function storageInitScript(directories: readonly string[]): string {
+  return [
+    'const fs = require("node:fs");',
+    `for (const name of ${JSON.stringify(directories).replaceAll(",", ", ")}) {`,
+    `  const path = ${JSON.stringify(STORAGE_ROOT)} + "/" + name;`,
+    "  fs.mkdirSync(path, { recursive: true, mode: 0o700 });",
+    "  fs.chmodSync(path, 0o700);",
+    "}",
+  ].join("\n");
+}
+const CODEX_STORAGE_DIRECTORIES = ["workspace", "input", "output"] as const;
+/** Claude adds the socket directory both of its containers mount. */
+const CLAUDE_STORAGE_DIRECTORIES = [...CODEX_STORAGE_DIRECTORIES, "tool"] as const;
 
 /**
  * `reason` is a short, fixed code naming which check failed (never a value from the spec itself,
@@ -180,9 +197,18 @@ function isWholeMillicores(cpus: number): boolean {
 
 export function validateKubernetesSpec(spec: JobSpec): void {
   if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw isolationError("run-id");
-  if (spec.provider === "claude-code") throw new Error(KUBERNETES_PROVIDER_UNSUPPORTED);
-  if (spec.provider !== undefined && spec.provider !== "codex") throw isolationError("provider");
-  if (spec.toolImage !== undefined) throw isolationError("tool-image-set");
+  if (spec.provider !== undefined && spec.provider !== "codex" && spec.provider !== "claude-code") {
+    throw isolationError("provider");
+  }
+  if (spec.provider === "claude-code") {
+    if (spec.toolImage === undefined || !isRegistryDigest(spec.toolImage)) {
+      throw isolationError("tool-image-not-registry-digest");
+    }
+    // Docker's floor for the same split (docker-isolation.ts validateSpec): the tool runner takes 0.25 CPU and ≥128 MiB.
+    if (spec.limits.cpus < 0.35 || spec.limits.memoryMb < 256) throw isolationError("claude-limits-too-small");
+  } else if (spec.toolImage !== undefined) {
+    throw isolationError("tool-image-set");
+  }
   if (!isRegistryDigest(spec.image)) throw isolationError("image-not-registry-digest");
   if (spec.services !== undefined) {
     // Re-validated here, not trusted from dispatch: every image a digest, every path and probe in bounds.
@@ -315,10 +341,13 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   const scratchMb = Math.max(16, Math.min(64, Math.floor(spec.limits.memoryMb / 8)));
   const sidecarCpuMillicores = 250;
   const sidecarMemoryMib = 128;
+  const claude = spec.provider === "claude-code";
+  const tool = claudeToolLimits(spec);
+  const toolScratchMb = Math.max(16, Math.min(64, Math.floor(tool.memoryMb / 8)));
   const storageInit: V1Container = {
     name: STORAGE_INIT_CONTAINER,
     image: spec.image,
-    command: ["node", "-e", STORAGE_INIT_SCRIPT],
+    command: ["node", "-e", storageInitScript(claude ? CLAUDE_STORAGE_DIRECTORIES : CODEX_STORAGE_DIRECTORIES)],
     securityContext: containerSecurity(),
     resources: conformResources(profile, {
       cpuMillicores: sidecarCpuMillicores,
@@ -344,25 +373,73 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   const worker: V1Container = {
     name: WORKER_CONTAINER,
     image: spec.image,
-    command: ["node", "-e", WORKER_GATE],
+    command: ["node", "-e", workerGate(claude ? CLAUDE_ENTRYPOINT : CODEX_ENTRYPOINT)],
     env: [
       { name: "WARDBY_PROXY_URL", value: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}` },
       { name: "WARDBY_RUN_CAPABILITY", valueFrom: { secretKeyRef: { name: names.secret, key: "capability" } } },
     ],
     securityContext: containerSecurity(),
     resources: conformResources(profile, {
-      cpuMillicores: Math.round(spec.limits.cpus * 1000),
-      memoryMib: spec.limits.memoryMb,
-      ephemeralStorageMib: WORKER_EPHEMERAL_MIB,
+      cpuMillicores: Math.round((claude ? spec.limits.cpus - tool.cpus : spec.limits.cpus) * 1000),
+      memoryMib: claude ? spec.limits.memoryMb - tool.memoryMb : spec.limits.memoryMb,
+      ephemeralStorageMib: claude ? WORKER_EPHEMERAL_MIB - TOOL_RUNNER_EPHEMERAL_MIB : WORKER_EPHEMERAL_MIB,
     }),
-    volumeMounts: [
-      { name: "storage", mountPath: "/workspace", subPath: "workspace" },
-      { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
-      { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
-      { name: "tmp", mountPath: "/tmp" },
-      { name: "home", mountPath: "/home/wardby" },
-    ],
+    // Claude's agent never sees the repository: the tool runner does, over the socket.
+    volumeMounts: claude
+      ? [
+          { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+          { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
+          { name: "storage", mountPath: "/run/wardby/tool", subPath: "tool" },
+          { name: "tmp", mountPath: "/tmp" },
+          { name: "home", mountPath: "/home/wardby" },
+        ]
+      : [
+          { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+          { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+          { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
+          { name: "tmp", mountPath: "/tmp" },
+          { name: "home", mountPath: "/home/wardby" },
+        ],
   };
+  /**
+   * Claude's tool runner (docs/coding-worker-isolation.md): a native sidecar, so the kubelet starts it
+   * before the keeper and worker and holds them until its socket exists. It mounts the workspace and
+   * the socket, gets its registry/service setup from the run's Secret, and never the capability. It
+   * shares the pod's network namespace, so the run's single egress rule (the proxy) applies to it too.
+   */
+  const toolRunner: V1Container | undefined = claude
+    ? {
+        name: TOOL_RUNNER_CONTAINER,
+        image: spec.toolImage,
+        command: ["node", "/opt/wardby/claude-tool-runner/main.mjs"],
+        restartPolicy: "Always",
+        env: [
+          {
+            name: CLAUDE_TOOL_SETUP_ENV,
+            valueFrom: { secretKeyRef: { name: names.secret, key: TOOL_SETUP_SECRET_KEY } },
+          },
+        ],
+        securityContext: containerSecurity(),
+        resources: conformResources(profile, {
+          cpuMillicores: Math.round(tool.cpus * 1000),
+          memoryMib: tool.memoryMb,
+          ephemeralStorageMib: TOOL_RUNNER_EPHEMERAL_MIB,
+        }),
+        startupProbe: {
+          exec: { command: ["test", "-S", TOOL_SOCKET_PATH] },
+          periodSeconds: 1,
+          timeoutSeconds: 1,
+          failureThreshold: 60,
+          successThreshold: 1,
+        },
+        volumeMounts: [
+          { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+          { name: "storage", mountPath: "/run/wardby/tool", subPath: "tool" },
+          { name: "tool-tmp", mountPath: "/tmp" },
+          { name: "tool-home", mountPath: "/home/wardby" },
+        ],
+      }
+    : undefined;
   return {
     apiVersion: "v1",
     kind: "Pod",
@@ -402,11 +479,21 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         { name: "storage", emptyDir: { sizeLimit: `${spec.limits.diskMb}Mi` } },
         { name: "tmp", emptyDir: { medium: "Memory", sizeLimit: `${scratchMb}Mi` } },
         { name: "home", emptyDir: { medium: "Memory", sizeLimit: `${scratchMb}Mi` } },
+        ...(claude
+          ? [
+              { name: "tool-tmp", emptyDir: { medium: "Memory", sizeLimit: `${toolScratchMb}Mi` } },
+              { name: "tool-home", emptyDir: { medium: "Memory", sizeLimit: `${toolScratchMb}Mi` } },
+            ]
+          : []),
         ...serviceVolumes(services),
       ],
-      // storage-init first (it must finish before any subPath mount), then each service sidecar in
-      // declaration order; the keeper and worker start only once every sidecar's startup probe passed.
-      initContainers: [storageInit, ...services.map((service, index) => serviceSidecar(service, index, profile))],
+      // storage-init first (it must finish before any subPath mount), then Claude's tool runner, then each
+      // service sidecar in declaration order; the keeper and worker start only once every sidecar started.
+      initContainers: [
+        storageInit,
+        ...(toolRunner ? [toolRunner] : []),
+        ...services.map((service, index) => serviceSidecar(service, index, profile)),
+      ],
       containers: [keeper, worker],
     },
   };
@@ -432,14 +519,19 @@ export function buildRunNetworkPolicy(spec: JobSpec, namespace: string): V1Netwo
   };
 }
 
-export function buildCapabilitySecret(spec: JobSpec, namespace: string, capability: string): V1Secret {
+export function buildCapabilitySecret(
+  spec: JobSpec,
+  namespace: string,
+  capability: string,
+  toolSetup?: string,
+): V1Secret {
   const names = kubernetesRunNames(spec.runId);
   return {
     apiVersion: "v1",
     kind: "Secret",
     type: "Opaque",
     metadata: { name: names.secret, namespace, labels: runLabels(spec.runId) },
-    stringData: { capability },
+    stringData: { capability, ...(toolSetup !== undefined ? { [TOOL_SETUP_SECRET_KEY]: toolSetup } : {}) },
   };
 }
 

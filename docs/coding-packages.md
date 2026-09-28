@@ -5,13 +5,28 @@ coding proxy. Registry mode lets it run `npm install` and `pip install`
 anyway, by routing those requests through the proxy to a per-agent allowlist,
 with supply-chain safeguards and a full record of what was fetched.
 
-**Registry mode currently supports Codex workers only.** Claude Code runs
-every shell command inside a separate, credential-free tool-runner container
-with no network attachment (`--network none`), so it cannot reach the proxy
-even if the registry environment were configured for it. Making registry mode
-work for Claude Code is a follow-up: put that tool-runner container on the
-proxy network and give it the same registry settings the Codex driver already
-gets.
+**Registry mode works for both providers.** Claude Code runs every shell
+command inside a separate, credential-free tool-runner container that shares
+the run's proxy network with the agent, so it can reach the proxy the same
+way Codex's driver does; it never receives the run's model capability, only
+the registry-only settings the trusted launcher builds for it (delivered as
+`WARDBY_TOOL_SETUP`). Claude Code runs support the `node` toolchain (npm)
+today; `pip` installs need a Codex run on the `node-python` worker. See
+[Claude Code](#claude-code) below.
+
+## Claude Code
+
+Claude Code runs support the `node` toolchain today: `npm install` runs
+inside Claude Code's tool-runner container (which has no Python, so `pip` is
+not available there), the same container that mounts the workspace and runs
+every other shell command — the agent container never runs one. The npm lockfile check
+(the shim on `PATH` that plans `npm ci`/`npm install` against the proxy
+before it runs; see "Lockfile installs: verified, then approved exactly"
+below) applies there exactly as it does for Codex. Before a Claude Code run's
+changes are committed, the control plane rewrites any collected lockfile's
+proxy URLs back to the ecosystem's real public registry URL (for example
+`https://registry.npmjs.org/...`), so a lockfile in the resulting pull
+request never names the internal proxy.
 
 ## Three ways to get dependencies into a run
 

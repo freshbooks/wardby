@@ -50,6 +50,26 @@ describe("buildConfiguredExecutor", () => {
     ).toThrow("CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.");
   });
 
+  it("rejects a Claude image that isn't a registry digest on Kubernetes", () => {
+    const REGISTRY_IMAGE = `registry.example/wardby-coding-worker@sha256:${"a".repeat(64)}`;
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: {
+          ...baseEnv,
+          JOB_LAUNCHER: "kubernetes",
+          CODING_WORKER_IMAGE: REGISTRY_IMAGE,
+          CODING_CLAUDE_WORKER_IMAGE: REGISTRY_IMAGE,
+          CODING_CLAUDE_TOOL_RUNNER_IMAGE: LOCAL_IMAGE,
+        },
+        kubernetesApi: new FakeKubernetesApi(),
+      }),
+    ).toThrow(
+      "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be registry digests (repo@sha256:...) when JOB_LAUNCHER=kubernetes.",
+    );
+  });
+
   it("refuses to compose a kubernetes launcher on gke-autopilot without gvisor", () => {
     expect(() =>
       buildConfiguredExecutor({

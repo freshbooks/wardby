@@ -48,6 +48,11 @@ export const GVISOR_RUNTIME_CLASS = "gvisor";
 export const STORAGE_INIT_EPHEMERAL_MIB = 64;
 /** Ephemeral storage reserved for the worker's writable layer (/tmp and /home are memory-backed). */
 export const WORKER_EPHEMERAL_MIB = 1024;
+/**
+ * A Claude run's tool runner's share of WORKER_EPHEMERAL_MIB (its writable layer; /tmp and home are
+ * memory-backed). The agent gets the rest, so a Claude pod reserves exactly what a Codex pod does.
+ */
+export const TOOL_RUNNER_EPHEMERAL_MIB = 256;
 
 export interface PlatformResourceRules {
   /** Smallest CPU request the platform accepts, in millicores. */
