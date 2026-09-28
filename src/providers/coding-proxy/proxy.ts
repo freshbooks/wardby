@@ -666,6 +666,16 @@ function parseAnthropicBeta(value: string | undefined): { header?: string; value
   return { header: normalized.join(","), values: new Set(normalized) };
 }
 
+/**
+ * Models that take manual extended thinking (`{type: "enabled", budget_tokens}`) instead of adaptive
+ * thinking, and no effort level: Claude Haiku 4.5, which returns a 400 for adaptive thinking. The
+ * pinned Claude Agent SDK sends it `budget_tokens` = max_tokens - 1 and no `output_config`
+ * (fixtures/anthropic-sdk-request-haiku-4-5.json). Every other model stays adaptive-only.
+ */
+const MANUAL_THINKING_MODELS: ReadonlySet<string> = new Set(["claude-haiku-4-5"]);
+/** Anthropic's minimum manual thinking budget. */
+const MIN_THINKING_BUDGET_TOKENS = 1024;
+
 function requireAnthropicBeta(values: Set<string>, beta: (typeof CLAUDE_CODE_ANTHROPIC_BETAS)[number]): void {
   if (!values.has(beta)) throw new CodingProxyError(400, "anthropic_beta_required");
 }
@@ -739,12 +749,27 @@ function parseAnthropicRequest(rawBody: string, betaHeader: string | undefined):
     onlyKeys(metadata, ["user_id"]);
     if (typeof metadata.user_id !== "string") throw new CodingProxyError(400, "invalid_anthropic_request");
   }
+  const manualThinking = MANUAL_THINKING_MODELS.has(body.model);
   if (body.thinking !== undefined) {
     requireAnthropicBeta(beta.values, "interleaved-thinking-2025-05-14");
     requireAnthropicBeta(beta.values, "thinking-token-count-2026-05-13");
     const thinking = record(body.thinking);
-    onlyKeys(thinking, ["type"]);
-    if (thinking.type !== "adaptive") throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    if (manualThinking) {
+      onlyKeys(thinking, ["type", "budget_tokens"]);
+      const budget = thinking.budget_tokens;
+      if (
+        thinking.type !== "enabled" ||
+        typeof budget !== "number" ||
+        !Number.isSafeInteger(budget) ||
+        budget < MIN_THINKING_BUDGET_TOKENS ||
+        budget >= body.max_tokens
+      ) {
+        throw new CodingProxyError(400, "unsupported_anthropic_feature");
+      }
+    } else {
+      onlyKeys(thinking, ["type"]);
+      if (thinking.type !== "adaptive") throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    }
   }
   if (body.context_management !== undefined) {
     requireAnthropicBeta(beta.values, "context-management-2025-06-27");
@@ -759,6 +784,8 @@ function parseAnthropicRequest(rawBody: string, betaHeader: string | undefined):
     }
   }
   if (body.output_config !== undefined) {
+    // Effort doesn't exist on a manual-thinking model; the SDK never sends it there.
+    if (manualThinking) throw new CodingProxyError(400, "unsupported_anthropic_feature");
     requireAnthropicBeta(beta.values, "effort-2025-11-24");
     const output = record(body.output_config);
     onlyKeys(output, ["effort"]);

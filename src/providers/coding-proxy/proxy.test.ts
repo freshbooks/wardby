@@ -88,6 +88,7 @@ async function harness(
     price?: () => ModelPricing;
     credentials?: { resolve(reference: string): Promise<string> };
     protocol?: ProxyProtocol;
+    allowedModels?: string[];
   } = {},
 ): Promise<Harness> {
   const ledger = overrides.ledger ?? new MemoryProxyLedger();
@@ -108,7 +109,9 @@ async function harness(
     runId: `run-${Math.random()}`,
     credentialRef: overrides.protocol === "anthropic-messages" ? "anthropic/project-a" : "openai/project-a",
     protocol: overrides.protocol ?? "openai-responses",
-    allowedModels: [overrides.protocol === "anthropic-messages" ? "claude-sonnet-5" : "test-model"],
+    allowedModels: overrides.allowedModels ?? [
+      overrides.protocol === "anthropic-messages" ? "claude-sonnet-5" : "test-model",
+    ],
     deadlineAt: overrides.deadlineAt ?? new Date(NOW.getTime() + 60_000),
     budgetUsd: overrides.budgetUsd ?? 1,
   });
@@ -472,6 +475,63 @@ describe("CodingProxy", () => {
 });
 
 describe("CodingProxy Anthropic Messages", () => {
+  describe("Claude Haiku 4.5 (manual extended thinking, no effort)", () => {
+    const haiku = () => harness({ protocol: "anthropic-messages", allowedModels: ["claude-haiku-4-5"] });
+    const haikuBody = async (edit: (body: Record<string, unknown>) => void = () => {}) => {
+      const body = JSON.parse(await fixture("anthropic-sdk-request-haiku-4-5.json"));
+      body.stream = false;
+      edit(body);
+      return JSON.stringify(body);
+    };
+
+    it("forwards the request the pinned Agent SDK sends for Haiku 4.5", async () => {
+      const h = await haiku();
+      await execute(h, "haiku-captured", new TestSink(), await haikuBody());
+      expect(h.fetch).toHaveBeenCalledTimes(1);
+      const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(forwarded.model).toBe("claude-haiku-4-5");
+      expect(forwarded.thinking).toEqual({ type: "enabled", budget_tokens: 4095 });
+      expect(forwarded).not.toHaveProperty("output_config");
+    });
+
+    it.each([
+      ["adaptive thinking", (b: Record<string, unknown>) => (b.thinking = { type: "adaptive" })],
+      ["an effort level", (b: Record<string, unknown>) => (b.output_config = { effort: "high" })],
+      [
+        "a budget at max_tokens",
+        (b: Record<string, unknown>) => (b.thinking = { type: "enabled", budget_tokens: 4096 }),
+      ],
+      ["a budget under 1024", (b: Record<string, unknown>) => (b.thinking = { type: "enabled", budget_tokens: 1023 })],
+      [
+        "a fractional budget",
+        (b: Record<string, unknown>) => (b.thinking = { type: "enabled", budget_tokens: 2048.5 }),
+      ],
+      [
+        "an unknown thinking field",
+        (b: Record<string, unknown>) => (b.thinking = { type: "enabled", budget_tokens: 2048, display: "summarized" }),
+      ],
+    ])("refuses Haiku 4.5 with %s before calling upstream", async (_label, edit) => {
+      const h = await haiku();
+      await expect(execute(h, "haiku-refused", new TestSink(), await haikuBody(edit))).rejects.toMatchObject({
+        status: 400,
+        code: "unsupported_anthropic_feature",
+      });
+      expect(h.fetch).not.toHaveBeenCalled();
+    });
+
+    it("still refuses manual thinking for a model that only takes adaptive thinking", async () => {
+      const h = await harness({ protocol: "anthropic-messages" });
+      const body = JSON.parse(await fixture("anthropic-sdk-request.json"));
+      body.stream = false;
+      body.thinking = { type: "enabled", budget_tokens: 2048 };
+      await expect(execute(h, "sonnet-manual", new TestSink(), JSON.stringify(body))).rejects.toMatchObject({
+        status: 400,
+        code: "unsupported_anthropic_feature",
+      });
+      expect(h.fetch).not.toHaveBeenCalled();
+    });
+  });
+
   it("forwards only the reviewed SDK envelope and strips client metadata", async () => {
     const response = JSON.parse(await fixture("anthropic-message-response.json"));
     const h = await harness({
