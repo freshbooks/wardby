@@ -12,6 +12,8 @@ const KEEPER_PIDS_LIMIT = 32;
  */
 export const NETWORK_KEEPER_PIDS_LIMIT = 32;
 export const NETWORK_KEEPER_MEMORY_MB = 64;
+/** `--cpus 0.1`, as Docker reports it. */
+const NETWORK_KEEPER_NANO_CPUS = 100_000_000;
 /** Idles until stopped, on the worker image's own `node` (every worker image ships it for the storage keeper). */
 export const NETWORK_KEEPER_SCRIPT =
   "process.once('SIGTERM', () => process.exit(0)); setInterval(() => {}, 2147483647);";
@@ -115,6 +117,8 @@ export interface DockerContainerInspection {
     User?: string;
     Image?: string;
     Labels?: Record<string, string>;
+    Entrypoint?: string[] | null;
+    Cmd?: string[] | null;
   };
   HostConfig?: {
     AutoRemove?: boolean;
@@ -817,13 +821,36 @@ export function assertNetworkKeeperContainerInspection(container: DockerContaine
     !security.includes("seccomp=builtin") ||
     host.PidsLimit !== NETWORK_KEEPER_PIDS_LIMIT ||
     host.Memory !== NETWORK_KEEPER_MEMORY_MB * 1024 * 1024 ||
+    host.MemorySwap !== host.Memory ||
+    // cgroup v2 hosts may report this as null after accepting the explicit
+    // no-swappiness request; MemorySwap still attests that swap is disabled.
+    (host.MemorySwappiness !== 0 && host.MemorySwappiness !== null) ||
+    host.NanoCpus !== NETWORK_KEEPER_NANO_CPUS ||
+    host.CgroupnsMode !== "private" ||
+    host.IpcMode !== "none" ||
+    host.PidMode !== "" ||
+    host.Init !== true ||
     host.RestartPolicy?.Name !== "no" ||
+    host.LogConfig?.Type !== "local" ||
+    host.LogConfig.Config?.["max-size"] !== "1m" ||
+    host.LogConfig.Config?.["max-file"] !== "2" ||
+    (host.Devices?.length ?? 0) !== 0 ||
+    (host.DeviceRequests?.length ?? 0) !== 0 ||
+    (host.GroupAdd?.length ?? 0) !== 0 ||
+    // The worker and services take their DNS and port view from this container.
     (host.Dns?.length ?? 0) !== 0 ||
+    (host.DnsOptions?.length ?? 0) !== 0 ||
+    (host.DnsSearch?.length ?? 0) !== 0 ||
     (host.ExtraHosts?.length ?? 0) !== 0 ||
     Object.keys(host.PortBindings ?? {}).length !== 0 ||
+    host.PublishAllPorts !== false ||
+    Object.keys(container.NetworkSettings?.Ports ?? {}).length !== 0 ||
     (host.Mounts?.length ?? 0) !== 0 ||
     (container.Mounts?.length ?? 0) !== 0 ||
-    Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== names.network
+    Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== names.network ||
+    // Exactly the idle script buildNetworkKeeperCreateArgs runs, never the image's own entrypoint.
+    JSON.stringify(container.Config.Entrypoint ?? null) !== JSON.stringify(["node"]) ||
+    JSON.stringify(container.Config.Cmd ?? null) !== JSON.stringify(["-e", NETWORK_KEEPER_SCRIPT])
   ) {
     throw isolationError();
   }

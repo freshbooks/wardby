@@ -21,7 +21,7 @@ import {
   type DockerJobLauncherOptions,
   parseWorkerDiagnosticLine,
 } from "./docker.js";
-import { buildDockerIsolationPlan, WORKER_PATHS } from "./docker-isolation.js";
+import { buildDockerIsolationPlan, NETWORK_KEEPER_SCRIPT, WORKER_PATHS } from "./docker-isolation.js";
 import { dockerServiceContainerName, serviceMemoryMib, serviceTmpfsOptions } from "./docker-services.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
 import type { JobHandle, JobResult, JobSpec } from "./types.js";
@@ -948,7 +948,13 @@ class ServicesFakeDocker extends FakeDocker {
     const running = this.running.has(this.netns);
     return {
       Id: NETWORK_KEEPER_ID,
-      Config: { User: "10001:10001", Image: this.job.image, Labels: this.resourceLabels.get(this.netns) },
+      Config: {
+        User: "10001:10001",
+        Image: this.job.image,
+        Labels: this.resourceLabels.get(this.netns),
+        Entrypoint: ["node"],
+        Cmd: ["-e", NETWORK_KEEPER_SCRIPT],
+      },
       HostConfig: {
         NetworkMode: this.plan.names.network,
         ReadonlyRootfs: true,
@@ -957,15 +963,26 @@ class ServicesFakeDocker extends FakeDocker {
         CapAdd: null,
         CapDrop: ["ALL"],
         SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
+        CgroupnsMode: "private",
+        IpcMode: "none",
+        PidMode: "",
+        Init: true,
         PidsLimit: 32,
         Memory: 64 * 1024 * 1024,
+        MemorySwap: 64 * 1024 * 1024,
+        MemorySwappiness: null,
+        NanoCpus: 100_000_000,
         RestartPolicy: { Name: "no" },
+        LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
         Dns: [],
+        DnsOptions: [],
+        DnsSearch: [],
         ExtraHosts: null,
         PortBindings: {},
+        PublishAllPorts: false,
       },
       Mounts: [],
-      NetworkSettings: { Networks: { [this.plan.names.network]: {} } },
+      NetworkSettings: { Networks: { [this.plan.names.network]: {} }, Ports: {} },
       State: { Running: running, Status: running ? "running" : "created" },
     };
   }

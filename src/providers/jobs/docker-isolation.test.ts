@@ -359,7 +359,13 @@ function validNetworkKeeperInspection(): DockerContainerInspection {
   const names = isolationNames(spec.runId);
   return {
     Id: KEEPER_ID,
-    Config: { User: "10001:10001", Image: image, Labels: isolationLabels },
+    Config: {
+      User: "10001:10001",
+      Image: image,
+      Labels: isolationLabels,
+      Entrypoint: ["node"],
+      Cmd: ["-e", NETWORK_KEEPER_SCRIPT],
+    },
     HostConfig: {
       NetworkMode: names.network,
       ReadonlyRootfs: true,
@@ -368,15 +374,29 @@ function validNetworkKeeperInspection(): DockerContainerInspection {
       CapAdd: null,
       CapDrop: ["ALL"],
       SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
+      CgroupnsMode: "private",
+      IpcMode: "none",
+      PidMode: "",
+      Init: true,
       PidsLimit: 32,
       Memory: 64 * 1024 * 1024,
+      MemorySwap: 64 * 1024 * 1024,
+      MemorySwappiness: 0,
+      NanoCpus: 100_000_000,
       RestartPolicy: { Name: "no" },
+      LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
+      Devices: [],
+      DeviceRequests: null,
+      GroupAdd: null,
       Dns: [],
+      DnsOptions: [],
+      DnsSearch: [],
       ExtraHosts: null,
       PortBindings: {},
+      PublishAllPorts: false,
     },
     Mounts: [],
-    NetworkSettings: { Networks: { [names.network]: {} } },
+    NetworkSettings: { Networks: { [names.network]: {} }, Ports: {} },
   };
 }
 
@@ -441,15 +461,55 @@ describe("Docker isolation with services", () => {
   it("attests the network keeper", () => {
     const keeper = validNetworkKeeperInspection();
     expect(() => assertNetworkKeeperContainerInspection(keeper, withServices)).not.toThrow();
-    for (const drift of [
-      { ...keeper, Mounts: [{ Type: "volume", Name: "x", Destination: "/data", RW: true }] },
-      { ...keeper, HostConfig: { ...keeper.HostConfig, NetworkMode: "none" } },
-      { ...keeper, HostConfig: { ...keeper.HostConfig, Privileged: true } },
-      { ...keeper, NetworkSettings: { Networks: { bridge: {} } } },
-    ]) {
-      expect(() => assertNetworkKeeperContainerInspection(drift, withServices)).toThrow("docker_isolation_unsupported");
-    }
+    // cgroup v2 may report the accepted no-swappiness request as null.
+    expect(() =>
+      assertNetworkKeeperContainerInspection(
+        { ...keeper, HostConfig: { ...keeper.HostConfig, MemorySwappiness: null } },
+        withServices,
+      ),
+    ).not.toThrow();
     expect(() => assertNetworkKeeperContainerInspection(keeper, spec)).toThrow("docker_isolation_unsupported");
+  });
+
+  const keeper = validNetworkKeeperInspection();
+  const keeperHost = (drift: NonNullable<DockerContainerInspection["HostConfig"]>): DockerContainerInspection => ({
+    ...keeper,
+    HostConfig: { ...keeper.HostConfig, ...drift },
+  });
+  const keeperConfig = (drift: NonNullable<DockerContainerInspection["Config"]>): DockerContainerInspection => ({
+    ...keeper,
+    Config: { ...keeper.Config, ...drift },
+  });
+  it.each<[string, DockerContainerInspection]>([
+    ["a mount", { ...keeper, Mounts: [{ Type: "volume", Name: "x", Destination: "/data", RW: true }] }],
+    ["another network mode", keeperHost({ NetworkMode: "none" })],
+    ["privileged", keeperHost({ Privileged: true })],
+    ["another network", { ...keeper, NetworkSettings: { Networks: { bridge: {} }, Ports: {} } }],
+    ["another user", keeperConfig({ User: "0:0" })],
+    ["another image", keeperConfig({ Image: `registry.example/other@sha256:${"f".repeat(64)}` })],
+    ["missing labels", keeperConfig({ Labels: {} })],
+    ["another PID limit", keeperHost({ PidsLimit: 64 })],
+    ["more memory", keeperHost({ Memory: 128 * 1024 * 1024 })],
+    ["capabilities kept", keeperHost({ CapDrop: [] })],
+    ["DNS options", keeperHost({ DnsOptions: ["ndots:1"] })],
+    ["a DNS search domain", keeperHost({ DnsSearch: ["example.com"] })],
+    ["published ports", keeperHost({ PublishAllPorts: true })],
+    ["publish-all unreported", keeperHost({ PublishAllPorts: undefined })],
+    ["exposed ports", { ...keeper, NetworkSettings: { ...keeper.NetworkSettings, Ports: { "80/tcp": null } } }],
+    ["a shared PID namespace", keeperHost({ PidMode: "host" })],
+    ["a shareable IPC namespace", keeperHost({ IpcMode: "shareable" })],
+    ["the host cgroup namespace", keeperHost({ CgroupnsMode: "host" })],
+    ["swap", keeperHost({ MemorySwap: -1 })],
+    ["swappiness", keeperHost({ MemorySwappiness: 60 })],
+    ["more CPU", keeperHost({ NanoCpus: 1_000_000_000 })],
+    ["no init", keeperHost({ Init: false })],
+    ["unbounded logs", keeperHost({ LogConfig: { Type: "json-file", Config: {} } })],
+    ["a device", keeperHost({ Devices: [{ PathOnHost: "/dev/fuse" }] })],
+    ["the image's entrypoint", keeperConfig({ Entrypoint: null })],
+    ["another entrypoint", keeperConfig({ Entrypoint: ["sh"] })],
+    ["another command", keeperConfig({ Cmd: ["-e", "require('net')"] })],
+  ])("refuses a network keeper with %s", (_label, drift) => {
+    expect(() => assertNetworkKeeperContainerInspection(drift, withServices)).toThrow("docker_isolation_unsupported");
   });
 
   it("attests a services worker in the keeper's namespace and nowhere else", () => {
