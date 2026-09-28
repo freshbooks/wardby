@@ -21,6 +21,8 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   "coding_output_missing",
   "coding_output_invalid",
   "coding_output_run_mismatch",
+  // Claude Code: its command tool (the relay to the tool runner's socket) never connected.
+  "worker_tool_runner_unreachable",
 ]);
 
 /**
