@@ -3,6 +3,7 @@ import { readCodingInput, writeCodingOutputAtomic } from "../coding-worker/artif
 import { safeOutputIssues, safeWorkerErrorCode } from "../coding-worker/errors.js";
 import { runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
+import { assertToolRunnerReachable } from "./tool-socket.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
 const OUTPUT_PATH = "/run/wardby/output/result.json";
@@ -20,6 +21,7 @@ let stage: "input" | "execution" | "output" = "input";
 try {
   const input = await readCodingInput(INPUT_PATH);
   stage = "execution";
+  await assertToolRunnerReachable();
   const output = await runClaudeCodingWorker({
     input,
     proxyBaseUrl: required("WARDBY_PROXY_URL"),

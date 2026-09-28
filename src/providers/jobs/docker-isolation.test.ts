@@ -4,17 +4,24 @@ import {
   assertDockerHostSupportsIsolation,
   assertClaudeToolRunnerContainerInspection,
   assertIsolationNetworkInspection,
+  assertNetworkKeeperContainerInspection,
   buildClaudeAgentCreateArgs,
   buildClaudeToolRunnerCreateArgs,
+  buildNetworkKeeperCreateArgs,
   assertWorkerContainerInspection,
   buildDockerIsolationPlan,
+  dockerSupportsServicesFor,
   buildWorkerCreateArgs,
   isImmutableDockerImage,
   isolationNames,
+  isolationToken,
+  NETWORK_KEEPER_SCRIPT,
   WORKER_PATHS,
   type DockerContainerInspection,
 } from "./docker-isolation.js";
 import type { JobSpec } from "./types.js";
+import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
+import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 
 const image = `registry.example/wardby-worker@sha256:${"a".repeat(64)}`;
 const runHash = createHash("sha256").update("run-sensitive-name").digest("hex");
@@ -27,6 +34,82 @@ const spec: JobSpec = {
   limits: { cpus: 1.5, memoryMb: 1024, pids: 64, diskMb: 512 },
   labels: { untrusted: "do-not-expand" },
 };
+
+function validWorkerInspection(): DockerContainerInspection {
+  const names = isolationNames(spec.runId);
+  return {
+    Config: {
+      User: "10001:10001",
+      Image: image,
+      Env: ["WARDBY_PROXY_URL=http://wardby-proxy:8787", "WARDBY_RUN_CAPABILITY=test-capability"],
+      Labels: {
+        "io.wardby.managed": "true",
+        "io.wardby.component": "coding-worker",
+        "io.wardby.run-sha256": runHash,
+      },
+    },
+    HostConfig: {
+      Binds: null,
+      CapAdd: null,
+      CapDrop: ["ALL"],
+      CgroupnsMode: "private",
+      CpuPeriod: 100_000,
+      CpuQuota: 150_000,
+      Devices: [],
+      DeviceRequests: null,
+      Dns: [],
+      DnsOptions: [],
+      DnsSearch: [],
+      ExtraHosts: null,
+      GroupAdd: null,
+      Init: true,
+      IpcMode: "none",
+      LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
+      Memory: 1024 * 1024 * 1024,
+      MemorySwap: 1024 * 1024 * 1024,
+      MemorySwappiness: 0,
+      NetworkMode: names.network,
+      NanoCpus: 1_500_000_000,
+      PidsLimit: 64,
+      PidMode: "",
+      PortBindings: {},
+      Privileged: false,
+      PublishAllPorts: false,
+      ReadonlyRootfs: true,
+      RestartPolicy: { Name: "no" },
+      SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
+      ShmSize: 16 * 1024 * 1024,
+      Tmpfs: { "/tmp": "rw,noexec", "/home/wardby": "rw,noexec" },
+      Mounts: [
+        {
+          Type: "volume",
+          Source: names.storageVolume,
+          Target: WORKER_PATHS.workspace,
+          VolumeOptions: { NoCopy: true, Subpath: "workspace" },
+        },
+        {
+          Type: "volume",
+          Source: names.storageVolume,
+          Target: WORKER_PATHS.input,
+          ReadOnly: true,
+          VolumeOptions: { NoCopy: true, Subpath: "input" },
+        },
+        {
+          Type: "volume",
+          Source: names.storageVolume,
+          Target: WORKER_PATHS.output,
+          VolumeOptions: { NoCopy: true, Subpath: "output" },
+        },
+      ],
+    },
+    Mounts: [
+      { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.workspace, RW: true },
+      { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.input, RW: false },
+      { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.output, RW: true },
+    ],
+    NetworkSettings: { Networks: { [names.network]: {} }, Ports: {} },
+  };
+}
 
 describe("Docker isolation policy", () => {
   it("builds opaque names and fixed arguments without expanding untrusted values", () => {
@@ -160,79 +243,7 @@ describe("Docker isolation policy", () => {
   });
 
   it("rejects inspection drift before a worker starts", () => {
-    const names = isolationNames(spec.runId);
-    const container: DockerContainerInspection = {
-      Config: {
-        User: "10001:10001",
-        Image: image,
-        Env: ["WARDBY_PROXY_URL=http://wardby-proxy:8787", "WARDBY_RUN_CAPABILITY=test-capability"],
-        Labels: {
-          "io.wardby.managed": "true",
-          "io.wardby.component": "coding-worker",
-          "io.wardby.run-sha256": runHash,
-        },
-      },
-      HostConfig: {
-        Binds: null,
-        CapAdd: null,
-        CapDrop: ["ALL"],
-        CgroupnsMode: "private",
-        CpuPeriod: 100_000,
-        CpuQuota: 150_000,
-        Devices: [],
-        DeviceRequests: null,
-        Dns: [],
-        DnsOptions: [],
-        DnsSearch: [],
-        ExtraHosts: null,
-        GroupAdd: null,
-        Init: true,
-        IpcMode: "none",
-        LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
-        Memory: 1024 * 1024 * 1024,
-        MemorySwap: 1024 * 1024 * 1024,
-        MemorySwappiness: 0,
-        NetworkMode: names.network,
-        NanoCpus: 1_500_000_000,
-        PidsLimit: 64,
-        PidMode: "",
-        PortBindings: {},
-        Privileged: false,
-        PublishAllPorts: false,
-        ReadonlyRootfs: true,
-        RestartPolicy: { Name: "no" },
-        SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
-        ShmSize: 16 * 1024 * 1024,
-        Tmpfs: { "/tmp": "rw,noexec", "/home/wardby": "rw,noexec" },
-        Mounts: [
-          {
-            Type: "volume",
-            Source: names.storageVolume,
-            Target: WORKER_PATHS.workspace,
-            VolumeOptions: { NoCopy: true, Subpath: "workspace" },
-          },
-          {
-            Type: "volume",
-            Source: names.storageVolume,
-            Target: WORKER_PATHS.input,
-            ReadOnly: true,
-            VolumeOptions: { NoCopy: true, Subpath: "input" },
-          },
-          {
-            Type: "volume",
-            Source: names.storageVolume,
-            Target: WORKER_PATHS.output,
-            VolumeOptions: { NoCopy: true, Subpath: "output" },
-          },
-        ],
-      },
-      Mounts: [
-        { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.workspace, RW: true },
-        { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.input, RW: false },
-        { Type: "volume", Name: names.storageVolume, Destination: WORKER_PATHS.output, RW: true },
-      ],
-      NetworkSettings: { Networks: { [names.network]: {} }, Ports: {} },
-    };
+    const container = validWorkerInspection();
     expect(() => assertWorkerContainerInspection(container, spec, "test-capability")).not.toThrow();
     expect(() =>
       assertWorkerContainerInspection(
@@ -326,6 +337,232 @@ describe("Docker isolation policy", () => {
     ]) {
       expect(() => assertClaudeToolRunnerContainerInspection(tampered, claude, SETUP)).toThrow();
     }
+  });
+});
+
+const POSTGRES = resolvedFromDefinition(
+  BUILTIN_CODING_SERVICES.find((service) => service.name === "postgres" && service.version === "16")!,
+);
+const withServices: JobSpec = { ...spec, services: [POSTGRES] };
+const KEEPER_ID = "f".repeat(64);
+const isolationLabels = {
+  "io.wardby.managed": "true",
+  "io.wardby.component": "coding-worker",
+  "io.wardby.run-sha256": runHash,
+};
+
+function flagValues(args: readonly string[], flag: string): string[] {
+  return args.flatMap((value, index) => (value === flag ? [args[index + 1] ?? ""] : []));
+}
+
+function validNetworkKeeperInspection(): DockerContainerInspection {
+  const names = isolationNames(spec.runId);
+  return {
+    Id: KEEPER_ID,
+    Config: {
+      User: "10001:10001",
+      Image: image,
+      Labels: isolationLabels,
+      Entrypoint: ["node"],
+      Cmd: ["-e", NETWORK_KEEPER_SCRIPT],
+    },
+    HostConfig: {
+      NetworkMode: names.network,
+      ReadonlyRootfs: true,
+      Privileged: false,
+      Binds: null,
+      CapAdd: null,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
+      CgroupnsMode: "private",
+      IpcMode: "none",
+      PidMode: "",
+      Init: true,
+      PidsLimit: 32,
+      Memory: 64 * 1024 * 1024,
+      MemorySwap: 64 * 1024 * 1024,
+      MemorySwappiness: 0,
+      NanoCpus: 100_000_000,
+      RestartPolicy: { Name: "no" },
+      LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
+      Devices: [],
+      DeviceRequests: null,
+      GroupAdd: null,
+      Dns: [],
+      DnsOptions: [],
+      DnsSearch: [],
+      ExtraHosts: null,
+      PortBindings: {},
+      PublishAllPorts: false,
+    },
+    Mounts: [],
+    NetworkSettings: { Networks: { [names.network]: {} }, Ports: {} },
+  };
+}
+
+describe("Docker isolation with services", () => {
+  it("names the network keeper with the run's opaque token", () => {
+    const token = isolationToken(spec.runId);
+    expect(token).toMatch(/^[a-f0-9]{20}$/);
+    expect(isolationNames(spec.runId).network).toBe(`wardby-net-${token}`);
+    expect(isolationNames(spec.runId).networkKeeperContainer).toBe(`wardby-netns-${token}`);
+  });
+
+  it("adds a network keeper and moves the worker into its namespace only for a run with services", () => {
+    const plain = buildDockerIsolationPlan(spec, "trusted-proxy");
+    expect(plain).not.toHaveProperty("networkKeeperCreateArgs");
+    expect(flagValues(plain.workerCreateArgs, "--network")).toEqual([plain.names.network]);
+
+    const plan = buildDockerIsolationPlan(withServices, "trusted-proxy");
+    expect(plan.networkKeeperCreateArgs).toEqual(buildNetworkKeeperCreateArgs(withServices));
+    expect(flagValues(plan.workerCreateArgs, "--network")).toEqual([`container:${plan.names.networkKeeperContainer}`]);
+  });
+
+  it("builds a mount-free, bounded network keeper on the run's internal network", () => {
+    const names = isolationNames(spec.runId);
+    const args = buildNetworkKeeperCreateArgs(withServices);
+    expect(args.slice(0, 4)).toEqual(["container", "create", "--name", names.networkKeeperContainer]);
+    expect(flagValues(args, "--network")).toEqual([names.network]);
+    expect(flagValues(args, "--user")).toEqual(["10001:10001"]);
+    expect(flagValues(args, "--cap-drop")).toEqual(["ALL"]);
+    expect(flagValues(args, "--security-opt")).toEqual(["no-new-privileges=true", "seccomp=builtin"]);
+    expect(flagValues(args, "--memory")).toEqual(["64m"]);
+    expect(flagValues(args, "--pids-limit")).toEqual(["32"]);
+    expect(flagValues(args, "--pull")).toEqual(["never"]);
+    expect(args).toContain("--read-only");
+    for (const forbidden of ["--mount", "--tmpfs", "--env", "--publish", "--dns", "--add-host"]) {
+      expect(args).not.toContain(forbidden);
+    }
+    expect(flagValues(args, "--entrypoint")).toEqual(["node"]);
+    expect(args.slice(-3)).toEqual([image, "-e", NETWORK_KEEPER_SCRIPT]);
+    expect(() => buildNetworkKeeperCreateArgs(spec)).toThrow("docker_isolation_unsupported");
+  });
+
+  it("refuses services on a Claude run and an empty service list", () => {
+    const claude: JobSpec = {
+      ...withServices,
+      provider: "claude-code",
+      toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+      limits: { ...spec.limits, pids: 128 },
+    };
+    // Valid as a Claude run without services, so services alone are what's refused.
+    const { services: _services, ...claudeWithout } = claude;
+    expect(() => buildDockerIsolationPlan(claudeWithout, "trusted-proxy")).not.toThrow();
+    expect(dockerSupportsServicesFor("claude-code")).toBe(false);
+    expect(dockerSupportsServicesFor("codex")).toBe(true);
+    expect(() => buildDockerIsolationPlan(claude, "trusted-proxy")).toThrow("docker_isolation_unsupported");
+    // The network keeper can never be built for a Claude run.
+    expect(() => buildNetworkKeeperCreateArgs(claude)).toThrow("docker_isolation_unsupported");
+    expect(() => buildDockerIsolationPlan({ ...spec, services: [] }, "trusted-proxy")).toThrow(
+      "docker_isolation_unsupported",
+    );
+  });
+
+  it("attests the network keeper", () => {
+    const keeper = validNetworkKeeperInspection();
+    expect(() => assertNetworkKeeperContainerInspection(keeper, withServices)).not.toThrow();
+    // cgroup v2 may report the accepted no-swappiness request as null.
+    expect(() =>
+      assertNetworkKeeperContainerInspection(
+        { ...keeper, HostConfig: { ...keeper.HostConfig, MemorySwappiness: null } },
+        withServices,
+      ),
+    ).not.toThrow();
+    expect(() => assertNetworkKeeperContainerInspection(keeper, spec)).toThrow("docker_isolation_unsupported");
+  });
+
+  const keeper = validNetworkKeeperInspection();
+  const keeperHost = (drift: NonNullable<DockerContainerInspection["HostConfig"]>): DockerContainerInspection => ({
+    ...keeper,
+    HostConfig: { ...keeper.HostConfig, ...drift },
+  });
+  const keeperConfig = (drift: NonNullable<DockerContainerInspection["Config"]>): DockerContainerInspection => ({
+    ...keeper,
+    Config: { ...keeper.Config, ...drift },
+  });
+  it.each<[string, DockerContainerInspection]>([
+    ["a mount", { ...keeper, Mounts: [{ Type: "volume", Name: "x", Destination: "/data", RW: true }] }],
+    ["another network mode", keeperHost({ NetworkMode: "none" })],
+    ["privileged", keeperHost({ Privileged: true })],
+    ["another network", { ...keeper, NetworkSettings: { Networks: { bridge: {} }, Ports: {} } }],
+    ["another user", keeperConfig({ User: "0:0" })],
+    ["another image", keeperConfig({ Image: `registry.example/other@sha256:${"f".repeat(64)}` })],
+    ["missing labels", keeperConfig({ Labels: {} })],
+    ["another PID limit", keeperHost({ PidsLimit: 64 })],
+    ["more memory", keeperHost({ Memory: 128 * 1024 * 1024 })],
+    ["capabilities kept", keeperHost({ CapDrop: [] })],
+    ["DNS options", keeperHost({ DnsOptions: ["ndots:1"] })],
+    ["a DNS search domain", keeperHost({ DnsSearch: ["example.com"] })],
+    ["published ports", keeperHost({ PublishAllPorts: true })],
+    ["publish-all unreported", keeperHost({ PublishAllPorts: undefined })],
+    ["exposed ports", { ...keeper, NetworkSettings: { ...keeper.NetworkSettings, Ports: { "80/tcp": null } } }],
+    ["a shared PID namespace", keeperHost({ PidMode: "host" })],
+    ["a shareable IPC namespace", keeperHost({ IpcMode: "shareable" })],
+    ["the host cgroup namespace", keeperHost({ CgroupnsMode: "host" })],
+    ["swap", keeperHost({ MemorySwap: -1 })],
+    ["swappiness", keeperHost({ MemorySwappiness: 60 })],
+    ["more CPU", keeperHost({ NanoCpus: 1_000_000_000 })],
+    ["no init", keeperHost({ Init: false })],
+    ["unbounded logs", keeperHost({ LogConfig: { Type: "json-file", Config: {} } })],
+    ["a device", keeperHost({ Devices: [{ PathOnHost: "/dev/fuse" }] })],
+    ["the image's entrypoint", keeperConfig({ Entrypoint: null })],
+    ["another entrypoint", keeperConfig({ Entrypoint: ["sh"] })],
+    ["another command", keeperConfig({ Cmd: ["-e", "require('net')"] })],
+  ])("refuses a network keeper with %s", (_label, drift) => {
+    expect(() => assertNetworkKeeperContainerInspection(drift, withServices)).toThrow("docker_isolation_unsupported");
+  });
+
+  it("attests a services worker in the keeper's namespace and nowhere else", () => {
+    const names = isolationNames(spec.runId);
+    const base = validWorkerInspection();
+    const shared: DockerContainerInspection = {
+      ...base,
+      HostConfig: { ...base.HostConfig, NetworkMode: `container:${KEEPER_ID}` },
+      NetworkSettings: { Networks: {}, Ports: {} },
+    };
+    const byName: DockerContainerInspection = {
+      ...shared,
+      HostConfig: { ...shared.HostConfig, NetworkMode: `container:${names.networkKeeperContainer}` },
+    };
+    expect(() => assertWorkerContainerInspection(shared, withServices, "test-capability", KEEPER_ID)).not.toThrow();
+    expect(() => assertWorkerContainerInspection(byName, withServices, "test-capability")).not.toThrow();
+    expect(() => assertWorkerContainerInspection(shared, withServices, "test-capability", "0".repeat(64))).toThrow(
+      "docker_isolation_unsupported",
+    );
+    expect(() => assertWorkerContainerInspection(base, withServices, "test-capability", KEEPER_ID)).toThrow(
+      "docker_isolation_unsupported",
+    );
+    expect(() => assertWorkerContainerInspection(shared, spec, "test-capability", KEEPER_ID)).toThrow(
+      "docker_isolation_unsupported",
+    );
+    expect(() =>
+      assertWorkerContainerInspection(
+        { ...shared, NetworkSettings: { Networks: { [names.network]: {} }, Ports: {} } },
+        withServices,
+        "test-capability",
+        KEEPER_ID,
+      ),
+    ).toThrow("docker_isolation_unsupported");
+  });
+});
+
+describe("Docker isolation parity for runs without services", () => {
+  const claude: JobSpec = {
+    ...spec,
+    provider: "claude-code",
+    toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+    // A Claude run needs at least 96 PIDs (its tool runner takes 64).
+    limits: { ...spec.limits, pids: 128 },
+  };
+
+  // Recorded before services existed on Docker. Never update this snapshot:
+  // a run without services must issue exactly these arguments.
+  it.each([
+    ["codex", spec],
+    ["claude-code", claude],
+  ])("keeps every %s argument list unchanged", (_label, job) => {
+    const { names: _names, ...plan } = buildDockerIsolationPlan(job, "trusted-proxy");
+    expect(plan).toMatchSnapshot();
   });
 });
 

@@ -121,17 +121,20 @@ describe("RoutingExecutor", () => {
       start: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
       readCodingServiceDeclaration: vi.fn(async () => "services: {}\n"),
-      supportsCodingServices: vi.fn(() => true),
+      supportsCodingServices: vi.fn((provider: string) => provider === "codex"),
     };
     const executor = new RoutingExecutor({ kindForRun: async () => "coding" }, native, coding);
     await expect(executor.readCodingServiceDeclaration({ repository: "o/r", baseRef: "main" })).resolves.toBe(
       "services: {}\n",
     );
     expect(coding.readCodingServiceDeclaration).toHaveBeenCalledWith({ repository: "o/r", baseRef: "main" });
-    expect(executor.supportsCodingServices()).toBe(true);
+    expect(executor.supportsCodingServices("codex")).toBe(true);
+    expect(coding.supportsCodingServices).toHaveBeenCalledWith("codex");
+    expect(executor.supportsCodingServices("claude-code")).toBe(false);
+    expect(coding.supportsCodingServices).toHaveBeenCalledWith("claude-code");
 
     const bare = new RoutingExecutor({ kindForRun: async () => "coding" }, native, native);
     await expect(bare.readCodingServiceDeclaration({ repository: "o/r", baseRef: "main" })).resolves.toBeNull();
-    expect(bare.supportsCodingServices()).toBe(false);
+    expect(bare.supportsCodingServices("codex")).toBe(false);
   });
 });

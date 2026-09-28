@@ -131,6 +131,39 @@ describe("runClaudeCodingWorker", () => {
     ).rejects.toThrow("coding_output_run_mismatch");
   });
 
+  it("fails the run by name when its command tool never connected, instead of finishing without it", async () => {
+    const done = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "ok",
+      tests: [],
+    });
+    const run = (servers: Array<{ name: string; status: string }>) =>
+      runClaudeCodingWorker({
+        input,
+        proxyBaseUrl: "http://wardby-proxy:8787",
+        capability: "rrp_worker_capability",
+        signal: new AbortController().signal,
+        createQuery: () =>
+          (async function* () {
+            yield { type: "system", subtype: "init", mcp_servers: servers };
+            yield { type: "result", subtype: "success", result: done };
+          })(),
+      });
+    for (const servers of [
+      [{ name: "wardby_tools", status: "failed" }],
+      [{ name: "wardby_tools", status: "disabled" }],
+      [],
+    ]) {
+      await expect(run(servers)).rejects.toThrow("worker_tool_runner_unreachable");
+    }
+    await expect(run([{ name: "wardby_tools", status: "connected" }])).resolves.toMatchObject({
+      outcome: "no_changes",
+    });
+    await expect(run([{ name: "wardby_tools", status: "pending" }])).resolves.toMatchObject({ outcome: "no_changes" });
+  });
+
   it("lets Claude Code retry a failed model request; every retry is metered by the proxy", async () => {
     let captured: ClaudeQueryOptions | undefined;
     await runClaudeCodingWorker({

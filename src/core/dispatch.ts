@@ -8,7 +8,7 @@ import {
   publicCodingRunResult,
   composeCodingTask,
 } from "../coding/protocol.js";
-import { assertCodingProviderModel } from "../coding/provider.js";
+import { assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
 import { parseAllowedServiceNames, workerServices, type ResolvedCodingService } from "../coding/services/catalog.js";
 import {
   MAX_SERVICE_DECLARATION_BYTES,
@@ -369,12 +369,13 @@ async function resolveDispatchServices(
   outcome: DeclarationOutcome,
   allowed: unknown,
   executor: Executor,
+  provider: CodingProvider,
   request: string,
   instructions: string | null,
 ): Promise<ServiceResolution> {
   if (outcome.kind === "refused") return { refusal: outcome.refusal };
   if (outcome.kind === "none" || outcome.services.length === 0) return { services: [] };
-  if (executor.supportsCodingServices?.() !== true) {
+  if (executor.supportsCodingServices?.(provider) !== true) {
     return { refusal: serviceRefusal("service_launcher_unsupported", LAUNCHER_UNSUPPORTED_SENTENCE) };
   }
   return resolveRunServices(
@@ -462,6 +463,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               declarationRead.outcome,
               agent.codingProfile.services,
               options.executor,
+              agent.codingProfile.provider,
               request,
               agent.systemPrompt,
             );

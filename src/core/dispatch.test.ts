@@ -1019,6 +1019,54 @@ describe("coding-run services", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it("asks the executor about the agent's own coding provider", async () => {
+    const agent = servicesAgent();
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const supports = vi.fn(() => true);
+    const executor: Executor = {
+      start: vi.fn(async () => {}),
+      async stop() {},
+      readCodingServiceDeclaration: async () => DECLARATION,
+      supportsCodingServices: supports,
+    };
+    await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(supports).toHaveBeenCalledWith("codex");
+  });
+
+  // What the Kubernetes and Docker job launchers answer (jobs/types.ts supportsServicesFor).
+  const kubernetesSupport = () => true;
+  const dockerSupport = (provider: string) => provider === "codex";
+
+  it.each([
+    ["Kubernetes", "claude-code", kubernetesSupport, "pending"],
+    ["Kubernetes", "codex", kubernetesSupport, "pending"],
+    ["Docker", "codex", dockerSupport, "pending"],
+    ["Docker", "claude-code", dockerSupport, "refused"],
+  ] as const)("on the %s launcher, a %s run with services is %s", async (_launcher, provider, supports, status) => {
+    const base = servicesAgent();
+    const agent = {
+      ...base,
+      model: provider === "claude-code" ? "claude-sonnet-5" : base.model,
+      codingProfile: { ...base.codingProfile, provider },
+    };
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const start = vi.fn(async () => {});
+    const executor: Executor = {
+      start,
+      async stop() {},
+      readCodingServiceDeclaration: async () => DECLARATION,
+      supportsCodingServices: supports,
+    };
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(result?.run.status).toBe(status);
+    if (status === "refused") {
+      expect(result?.run.error).toBe(`service_launcher_unsupported: ${LAUNCHER_UNSUPPORTED_SENTENCE}`);
+      expect(start).not.toHaveBeenCalled();
+    } else {
+      expect(state.codingRuns[0]).toMatchObject({ provider, services: [resolvedFromDefinition(POSTGRES_16)] });
+    }
+  });
+
   it("reads nothing for a native agent", async () => {
     const state = fakeDb(nativeAgent());
     const { executor, reads } = servicesExecutor(DECLARATION);

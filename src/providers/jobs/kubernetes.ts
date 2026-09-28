@@ -65,6 +65,7 @@ import {
 import { claudeToolSetup } from "./claude-tool-setup.js";
 import { readProxyWitness } from "./kubernetes-witness.js";
 import { safeExtract } from "./safe-extract.js";
+import type { CodingProvider } from "../../coding/provider.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
@@ -485,8 +486,6 @@ function errorWithCode(code: string, cause?: unknown): Error {
 // ---------------------------------------------------------------------------
 
 export class KubernetesJobLauncher implements WorkspaceJobLauncher {
-  /** Coding-run services run as native sidecars in the run pod (kubernetes-isolation.ts). */
-  readonly supportsServices = true;
   private readonly api: KubernetesApi;
   private readonly namespace: string;
   private readonly workspaceRoot: string;
@@ -520,6 +519,14 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     );
     this.createArchive = options.createArchive ?? hostTarArchive;
     this.warn = options.onWarning ?? ((message) => kubernetesLog.warn(message));
+  }
+
+  /**
+   * Services run as native sidecars in the run pod (kubernetes-isolation.ts), for either provider:
+   * Claude Code's tool runner is a sidecar in the same pod, so it reaches them on 127.0.0.1 too.
+   */
+  supportsServicesFor(provider: CodingProvider): boolean {
+    return provider === "codex" || provider === "claude-code";
   }
 
   /**

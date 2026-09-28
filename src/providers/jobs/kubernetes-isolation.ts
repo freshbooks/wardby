@@ -123,9 +123,15 @@ function storageInitScript(directories: readonly string[]): string {
     "}",
   ].join("\n");
 }
-const CODEX_STORAGE_DIRECTORIES = ["workspace", "input", "output"] as const;
-/** Claude adds the socket directory both of its containers mount. */
-const CLAUDE_STORAGE_DIRECTORIES = [...CODEX_STORAGE_DIRECTORIES, "tool"] as const;
+const STORAGE_DIRECTORIES = ["workspace", "input", "output"] as const;
+/**
+ * Claude's socket volume: its own memory-backed emptyDir, mounted by the worker and the tool runner
+ * only. Under gVisor a Unix socket bound on the disk-backed storage volume is invisible to another
+ * container; a memory-backed emptyDir that two containers mount is one tmpfs shared across the
+ * sandbox (GKE Autopilot annotates it `share: pod`), so the agent's relay can connect.
+ */
+const TOOL_SOCKET_VOLUME = "tool-socket";
+const TOOL_SOCKET_VOLUME_MIB = 1;
 
 /**
  * `reason` is a short, fixed code naming which check failed (never a value from the spec itself,
@@ -347,7 +353,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   const storageInit: V1Container = {
     name: STORAGE_INIT_CONTAINER,
     image: spec.image,
-    command: ["node", "-e", storageInitScript(claude ? CLAUDE_STORAGE_DIRECTORIES : CODEX_STORAGE_DIRECTORIES)],
+    command: ["node", "-e", storageInitScript(STORAGE_DIRECTORIES)],
     securityContext: containerSecurity(),
     resources: conformResources(profile, {
       cpuMillicores: sidecarCpuMillicores,
@@ -389,7 +395,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       ? [
           { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
           { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
-          { name: "storage", mountPath: "/run/wardby/tool", subPath: "tool" },
+          { name: TOOL_SOCKET_VOLUME, mountPath: "/run/wardby/tool" },
           { name: "tmp", mountPath: "/tmp" },
           { name: "home", mountPath: "/home/wardby" },
         ]
@@ -434,7 +440,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         },
         volumeMounts: [
           { name: "storage", mountPath: "/workspace", subPath: "workspace" },
-          { name: "storage", mountPath: "/run/wardby/tool", subPath: "tool" },
+          { name: TOOL_SOCKET_VOLUME, mountPath: "/run/wardby/tool" },
           { name: "tool-tmp", mountPath: "/tmp" },
           { name: "tool-home", mountPath: "/home/wardby" },
         ],
@@ -481,6 +487,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         { name: "home", emptyDir: { medium: "Memory", sizeLimit: `${scratchMb}Mi` } },
         ...(claude
           ? [
+              { name: TOOL_SOCKET_VOLUME, emptyDir: { medium: "Memory", sizeLimit: `${TOOL_SOCKET_VOLUME_MIB}Mi` } },
               { name: "tool-tmp", emptyDir: { medium: "Memory", sizeLimit: `${toolScratchMb}Mi` } },
               { name: "tool-home", emptyDir: { medium: "Memory", sizeLimit: `${toolScratchMb}Mi` } },
             ]

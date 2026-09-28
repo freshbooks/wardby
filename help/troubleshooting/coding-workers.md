@@ -40,9 +40,9 @@ code followed by a sentence the requester also sees on the run's status comment.
 - [`service_not_allowed`](../errors/service-not-allowed.md): the agent does not
   allow that service.
 - [`service_launcher_unsupported`](../errors/service-launcher-unsupported.md):
-  services need the Kubernetes job launcher.
+  services need the Kubernetes job launcher, or the Docker job launcher with a
+  Codex coding agent.
 - [`service_unready`](../errors/service-unready.md): the run started but a
-  service sidecar never became ready (launcher error
-  `coding_service_unready:<name>`).
+  service never became ready (launcher error `coding_service_unready:<name>`).
 
 See [Coding services](../coding-services.md).
