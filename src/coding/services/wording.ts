@@ -55,7 +55,7 @@ export const DECLARATION_UNAVAILABLE_SENTENCE =
   "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again.";
 
 export const LAUNCHER_UNSUPPORTED_SENTENCE =
-  "This repository asks for services, which this wardby deployment can't start for this agent: services need the Kubernetes or Docker job launcher and a Codex coding agent.";
+  "This repository asks for services, which this wardby deployment can't start for this agent: services need the Kubernetes job launcher, or the Docker job launcher with a Codex coding agent.";
 
 /** The launcher's error when a service's sidecar never became ready: `coding_service_unready:<name>`. */
 export const SERVICE_UNREADY_ERROR = "coding_service_unready";

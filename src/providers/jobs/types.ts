@@ -4,6 +4,8 @@
  * arbitrary environment map or shell command.
  */
 
+import type { CodingProvider } from "../../coding/provider.js";
+
 export interface JobResourceLimits {
   cpus: number;
   memoryMb: number;
@@ -91,6 +93,9 @@ export interface JobLauncher {
 /** A launcher that can safely copy a terminal worker workspace back to trusted storage. */
 export interface WorkspaceJobLauncher extends JobLauncher {
   materializeWorkspace: (handle: JobHandle, destination: string) => Promise<void>;
-  /** Whether this launcher starts JobSpec.services (the Kubernetes and Docker launchers do). */
-  readonly supportsServices?: boolean;
+  /**
+   * Whether this launcher starts JobSpec.services for a run of `provider`: Kubernetes for Codex and
+   * Claude Code, Docker for Codex only. Absent means no services at all.
+   */
+  supportsServicesFor?(provider: CodingProvider): boolean;
 }

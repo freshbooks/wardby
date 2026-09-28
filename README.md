@@ -369,8 +369,9 @@ for the repository's own dependency-override policy.
 - QuickJS tool isolation with host allowlists and secret bindings.
 - Containerized Codex and Claude Code executors with trusted GitHub draft-PR
   finalization.
-- Per-run PostgreSQL, Redis and MySQL services for Codex coding runs on the
-  Kubernetes or Docker launcher, declared in the repository and allowed per agent.
+- Per-run PostgreSQL, Redis and MySQL services for coding runs, declared in the
+  repository and allowed per agent: Codex and Claude Code runs on the
+  Kubernetes launcher, Codex runs on the Docker launcher.
 - In-process reconciliation and optional DBOS durable workflows.
 - Self-hosted or delegated OAuth for remote MCP access.
 - Prometheus metrics and provisioned Grafana dashboards for local operations.

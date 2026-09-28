@@ -56,7 +56,7 @@ export interface Executor {
   readCodingServiceDeclaration?(input: { repository: string; baseRef: string }): Promise<string | null>;
   /**
    * Whether this executor can start coding-run services for a run of `provider`: its job launcher
-   * starts them (Kubernetes, Docker) and the provider's commands can reach them (Codex).
+   * says so (Kubernetes for Codex and Claude Code, Docker for Codex only).
    */
   supportsCodingServices?(provider: CodingProvider): boolean;
 }

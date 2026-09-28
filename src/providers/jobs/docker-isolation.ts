@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { CodingProvider } from "../../coding/provider.js";
 import type { JobSpec } from "./types.js";
 
 export const CODING_WORKER_UID = 10001;
@@ -199,6 +200,14 @@ function assertIntegerRange(value: number, min: number, max: number): void {
   if (!Number.isSafeInteger(value) || value < min || value > max) throw isolationError();
 }
 
+/**
+ * Which runs the Docker launcher starts services for: Codex only. Claude Code's tool runner is on the
+ * run network, not in the network keeper's namespace, so it could not reach a service on 127.0.0.1.
+ */
+export function dockerSupportsServicesFor(provider: CodingProvider): boolean {
+  return provider === "codex";
+}
+
 function validateSpec(spec: JobSpec): void {
   if (spec.kind !== "coding-agent" || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(spec.runId)) {
     throw isolationError();
@@ -214,9 +223,8 @@ function validateSpec(spec: JobSpec): void {
     throw isolationError();
   }
   if (spec.services !== undefined) {
-    // Claude's repository commands run in the no-network tool runner, which can never reach a
-    // service; docker-services.ts re-validates every entry against the catalog schema.
-    if (spec.provider === "claude-code" || spec.services.length === 0) throw isolationError();
+    // docker-services.ts re-validates every entry against the catalog schema.
+    if (!dockerSupportsServicesFor(spec.provider ?? "codex") || spec.services.length === 0) throw isolationError();
   }
   assertFiniteRange(spec.limits.cpus, 0.1, 32);
   assertIntegerRange(spec.limits.memoryMb, 128, 65_536);

@@ -9,9 +9,9 @@ fresh, empty instance, and the run's sandbox and network policy do not change.
 Services work on the Kubernetes job launcher (`JOB_LAUNCHER=kubernetes`,
 running Kubernetes 1.29 or later, which its native sidecars need) and on the
 Docker job launcher (`JOB_LAUNCHER=docker`); see
-[coding-worker-isolation.md](coding-worker-isolation.md). They are available
-to Codex coding agents. A Claude Code agent's repository commands run in a
-container with no network, so they could not reach a service. A run whose
+[coding-worker-isolation.md](coding-worker-isolation.md). On Kubernetes they
+are available to Codex and Claude Code agents; on Docker, to Codex agents only
+(a Claude Code run that declares services is refused there). A run whose
 agent allows at least one service is refused if its repository declares one
 and the deployment or agent can't start services — an agent that allows none
 never reads the declaration in the first place (see "Allowing services for an
@@ -218,15 +218,15 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 
 ## Errors
 
-| Problem                                             | When     | Run                                        | What the requester sees                                                                                                                                                               |
-| --------------------------------------------------- | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `services.yaml` is invalid                          | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                                                                              |
-| The file couldn't be read                           | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                           |
-| A name and version the catalog doesn't have         | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                           |
-| A service the agent isn't allowed                   | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
-| Services on a launcher or agent that can't use them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start for this agent: services need the Kubernetes or Docker job launcher and a Codex coding agent."           |
-| A service never became ready                        | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
-| The run's changes touched a protected path          | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
+| Problem                                             | When     | Run                                        | What the requester sees                                                                                                                                                                        |
+| --------------------------------------------------- | -------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `services.yaml` is invalid                          | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                                                                                       |
+| The file couldn't be read                           | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                                    |
+| A name and version the catalog doesn't have         | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                                    |
+| A service the agent isn't allowed                   | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                                        |
+| Services on a launcher or agent that can't use them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start for this agent: services need the Kubernetes job launcher, or the Docker job launcher with a Codex coding agent." |
+| A service never became ready                        | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                         |
+| The run's changes touched a protected path          | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change."          |
 
 A refused run's `error` (from `get_run`) is the code followed by that sentence.
 The sentence reaches the requester on the run's status comment and, for a

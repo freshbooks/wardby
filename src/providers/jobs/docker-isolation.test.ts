@@ -10,6 +10,7 @@ import {
   buildNetworkKeeperCreateArgs,
   assertWorkerContainerInspection,
   buildDockerIsolationPlan,
+  dockerSupportsServicesFor,
   buildWorkerCreateArgs,
   isImmutableDockerImage,
   isolationNames,
@@ -422,8 +423,16 @@ describe("Docker isolation with services", () => {
       ...withServices,
       provider: "claude-code",
       toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+      limits: { ...spec.limits, pids: 128 },
     };
+    // Valid as a Claude run without services, so services alone are what's refused.
+    const { services: _services, ...claudeWithout } = claude;
+    expect(() => buildDockerIsolationPlan(claudeWithout, "trusted-proxy")).not.toThrow();
+    expect(dockerSupportsServicesFor("claude-code")).toBe(false);
+    expect(dockerSupportsServicesFor("codex")).toBe(true);
     expect(() => buildDockerIsolationPlan(claude, "trusted-proxy")).toThrow("docker_isolation_unsupported");
+    // The network keeper can never be built for a Claude run.
+    expect(() => buildNetworkKeeperCreateArgs(claude)).toThrow("docker_isolation_unsupported");
     expect(() => buildDockerIsolationPlan({ ...spec, services: [] }, "trusted-proxy")).toThrow(
       "docker_isolation_unsupported",
     );

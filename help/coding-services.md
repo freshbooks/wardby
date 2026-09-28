@@ -1,7 +1,7 @@
 ---
 id: coding-services
 title: Give coding runs the services their tests need
-summary: Let Codex coding runs on the Kubernetes or Docker launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml.
+summary: Let coding runs on the Kubernetes launcher, or Codex runs on the Docker launcher, start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml.
 audience: operator
 tags: [coding-agents, services, postgres, redis, mysql, kubernetes, docker]
 appliesTo: >=0.2.1
@@ -33,9 +33,9 @@ one service. Such an agent's runs simply start without services, whatever a
 repository declares, and none of the errors below can apply to them.
 
 Services need the Kubernetes job launcher with Kubernetes 1.29 or later (each
-service runs as a native sidecar in the run's pod) or the Docker job launcher
-(each service runs as its own container sharing the run's network namespace),
-and a Codex coding agent. Each run gets its own empty instance, reachable on
+service runs as a native sidecar in the run's pod; Codex and Claude Code
+agents) or the Docker job launcher (each service runs as its own container
+sharing the run's network namespace; Codex agents only). Each run gets its own empty instance, reachable on
 `127.0.0.1`; the run's sandbox and network policy do not change, and the
 instance is deleted with the run. Each service's CPU, memory and disk count
 toward the run: on Kubernetes toward its pod, namespace quota and what a

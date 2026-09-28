@@ -39,9 +39,11 @@ import {
   assertWorkerContainerInspection,
   buildDockerIsolationPlan,
   CLAUDE_TOOL_SETUP_ENV,
+  dockerSupportsServicesFor,
   type DockerContainerInspection,
   type DockerHostInfo,
 } from "./docker-isolation.js";
+import type { CodingProvider } from "../../coding/provider.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   assertServiceContainerInspection,
@@ -578,8 +580,6 @@ function terminalResult(
 }
 
 export class DockerJobLauncher implements WorkspaceJobLauncher {
-  /** Starts JobSpec.services: a network keeper plus one hardened container per service (docker-services.ts). */
-  readonly supportsServices = true;
   private readonly stateRoot: string;
   private readonly workspaceRoot: string;
   private readonly docker: DockerCommandRunner;
@@ -601,6 +601,11 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     this.sleep =
       options.sleep ?? ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
     this.ready = this.initialize();
+  }
+
+  /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex runs. */
+  supportsServicesFor(provider: CodingProvider): boolean {
+    return dockerSupportsServicesFor(provider);
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {

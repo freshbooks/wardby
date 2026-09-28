@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
+import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
@@ -199,13 +200,17 @@ class FakeJobs implements WorkspaceJobLauncher {
   /** Runs at the start of launch(), so a test can observe what was already persisted. */
   onLaunch?: () => void;
   launches = 0;
-  supportsServices = true;
+  /** Which providers this fake launcher starts services for (Kubernetes-like by default). */
+  serviceProviders: CodingProvider[] = ["codex", "claude-code"];
   materializations = 0;
   removals = 0;
   stops = 0;
   lastSpec?: JobSpec;
   specs: JobSpec[] = [];
   statusValue: JobStatus = { state: "succeeded" };
+  supportsServicesFor(provider: CodingProvider): boolean {
+    return this.serviceProviders.includes(provider);
+  }
   result: JobResult = {
     exitCode: 0,
     reason: "completed",
@@ -459,7 +464,7 @@ describe("ContainerExecutor", () => {
 
     it("fails a run with services on a launcher that can't start them", async () => {
       const created = await harness({ services: [POSTGRES] });
-      created.jobs.supportsServices = false;
+      created.jobs.serviceProviders = [];
       await created.executor.start("run-1");
       expect(created.jobs.launches).toBe(0);
       expect(created.store.terminations).toEqual([
@@ -528,12 +533,54 @@ describe("ContainerExecutor", () => {
       ).resolves.toBeNull();
     });
 
-    it("supports services only for Codex runs on a launcher that starts them", async () => {
+    it("asks its job launcher which providers it starts services for", async () => {
       const created = await harness();
+      // Kubernetes: both providers.
+      expect(created.executor.supportsCodingServices("codex")).toBe(true);
+      expect(created.executor.supportsCodingServices("claude-code")).toBe(true);
+      // Docker: Codex only.
+      created.jobs.serviceProviders = ["codex"];
       expect(created.executor.supportsCodingServices("codex")).toBe(true);
       expect(created.executor.supportsCodingServices("claude-code")).toBe(false);
-      created.jobs.supportsServices = false;
+      created.jobs.serviceProviders = [];
       expect(created.executor.supportsCodingServices("codex")).toBe(false);
+    });
+
+    it("says no services for a launcher that doesn't declare which providers it serves", async () => {
+      const created = await harness();
+      (created.jobs as { supportsServicesFor?: unknown }).supportsServicesFor = undefined;
+      expect(created.executor.supportsCodingServices("codex")).toBe(false);
+      expect(created.executor.supportsCodingServices("claude-code")).toBe(false);
+    });
+
+    const claudeRun = { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const;
+    const claudeImages = { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE };
+
+    it("launches a Claude Code run with services on a launcher that starts them for Claude Code", async () => {
+      const created = await harness(
+        { ...claudeRun, services: [POSTGRES] },
+        IMAGE,
+        new InMemoryCodingRunObserver(),
+        claudeImages,
+      );
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(1);
+      expect(created.jobs.specs[0]).toMatchObject({ provider: "claude-code", services: [POSTGRES] });
+    });
+
+    it("fails a Claude Code run with services on a launcher that starts them only for Codex", async () => {
+      const created = await harness(
+        { ...claudeRun, services: [POSTGRES] },
+        IMAGE,
+        new InMemoryCodingRunObserver(),
+        claudeImages,
+      );
+      created.jobs.serviceProviders = ["codex"];
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(0);
+      expect(created.store.terminations).toEqual([
+        expect.objectContaining({ status: "failed", audit: expect.objectContaining({ failureCategory: "preflight" }) }),
+      ]);
     });
   });
 

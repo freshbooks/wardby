@@ -10,15 +10,16 @@ appliesTo: >=0.2.1
 # Services are not available to this run
 
 `service_launcher_unsupported` means the repository declares services, but this
-run cannot have them. Services need both:
+run cannot have them. Services need a job launcher that starts them for the
+agent's provider:
 
-- a job launcher that starts them: `JOB_LAUNCHER=kubernetes` or
-  `JOB_LAUNCHER=docker` (a deployment with `JOB_LAUNCHER=local` cannot), and
-- a Codex coding agent. A Claude Code agent's repository commands run in a
-  container with no network, so they could not reach a service.
+- `JOB_LAUNCHER=kubernetes` starts them for Codex and Claude Code agents;
+- `JOB_LAUNCHER=docker` starts them for Codex agents only: a Claude Code run
+  that declares services is refused on the Docker launcher;
+- a deployment with `JOB_LAUNCHER=local` cannot start them at all.
 
-1. Run the coding agent on a deployment that uses the Kubernetes or Docker job
-   launcher, or use a Codex coding agent for this repository, or
+1. Run the coding agent on a deployment that uses the Kubernetes job launcher,
+   or, on the Docker launcher, use a Codex coding agent for this repository, or
 2. remove `.wardby/services.yaml` from the base branch if the repository's
    tests do not need the services.
 

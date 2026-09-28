@@ -1027,12 +1027,9 @@ export class ContainerExecutor implements Executor {
     });
   }
 
-  /**
-   * Services need a launcher that starts them and a Codex run: Claude Code's repository commands
-   * run in a tool container with no network, which could never reach a service.
-   */
+  /** The job launcher decides: Kubernetes starts services for both providers, Docker for Codex only. */
   supportsCodingServices(provider: CodingProvider): boolean {
-    return this.options.jobs.supportsServices === true && provider === "codex";
+    return this.options.jobs.supportsServicesFor?.(provider) === true;
   }
 
   private async requireCurrent(runId: string): Promise<ContainerRunSnapshot> {
