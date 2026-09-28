@@ -477,9 +477,7 @@ One pod per run, built by the canonical, deny-by-default policy in
 `kubernetes-isolation.ts`'s `buildRunPod`:
 
 - An **init container `storage-init`** runs first and creates
-  `/run/wardby/storage/{workspace,input,output}` (mode `0700`, owned by uid 10001) before any regular container starts — and, for a Claude Code run,
-  `/run/wardby/storage/tool` as well, the directory both of Claude's
-  containers mount for the socket. This exists because kubelet
+  `/run/wardby/storage/{workspace,input,output}` (mode `0700`, owned by uid 10001) before any regular container starts. This exists because kubelet
   creates a subPath mount's target directory root-owned the first time it
   sets up the worker's volume mounts, and the keeper (uid 10001, no Linux
   capabilities) cannot `chmod` a root-owned directory it doesn't own. This
@@ -489,7 +487,7 @@ One pod per run, built by the canonical, deny-by-default policy in
 - **Claude Code's `tool-runner`** (only for a Claude Code run): a native
   sidecar (init container with `restartPolicy: Always`) after `storage-init`
   and before the service sidecars, `keeper`, and `worker`. It mounts the
-  workspace and the `tool` socket directory, gets its `WARDBY_TOOL_SETUP`
+  workspace and the socket directory `/run/wardby/tool`, gets its `WARDBY_TOOL_SETUP`
   environment variable from the run Secret's `tool-setup` key (never the run
   capability), and shares the pod's network and IPC namespaces with the
   worker, like every container in a pod: loopback and abstract Unix sockets
@@ -498,7 +496,16 @@ One pod per run, built by the canonical, deny-by-default policy in
   (where it runs under `--init`), it has no init process on Kubernetes; it
   stops when the pod is deleted. Its
   `startupProbe` runs `test -S /run/wardby/tool/runner.sock`, so the keeper
-  and worker wait for the socket to exist before they start. Of the pod's
+  and worker wait for the socket to exist before they start. The socket
+  directory is its own small memory-backed `emptyDir` (`tool-socket`),
+  mounted by the tool runner and the worker only, never a subdirectory of the
+  disk-backed storage volume: under gVisor a Unix socket bound on a volume
+  that isn't shared across the sandbox is invisible to the other container,
+  while a memory-backed `emptyDir` that two containers mount is one shared
+  tmpfs (GKE Autopilot annotates it `share: pod`). Before it calls the model,
+  the Claude worker connects to the socket once and fails the run as
+  `worker_tool_runner_unreachable` if it can't, so a run never proceeds
+  without its command tool. Of the pod's
   resources, the tool runner gets a fixed 0.25 CPU and a third of the run's
   memory (clamped between 128 and 512 MiB); the agent (`worker`) gets the
   rest of both. The two also split the worker's 1024 MiB ephemeral-storage
@@ -953,6 +960,7 @@ values. The list is kept only when every entry matches
 | `kubernetes_tool_runner_failed`                                              | (Claude Code only) The tool runner sidecar restarted, exited, or its image could not be pulled before the keeper started. A malformed `WARDBY_TOOL_SETUP` makes the tool runner exit before it is ready (`tool_setup_invalid` in its log), which surfaces as this code on Kubernetes and as `docker_tool_runner_not_ready` on Docker.                                                                                                                                                                                                                                                                                                                                                        |
 | `kubernetes_tool_runner_unready`                                             | (Claude Code only) The tool runner sidecar never started (its socket startup probe never passed) by the pod-start bound (`readyTimeoutMs`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `worker_tool_runner_failed`                                                  | (Claude Code only; also seen on the Docker launcher) The tool runner died mid-run, after the pod/containers started successfully.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `worker_tool_runner_unreachable`                                             | (Claude Code only; both launchers) The Claude worker could not connect to the tool runner's socket before calling the model, or Claude Code reported its command tool as not connected. On Kubernetes, check that the pod has the `tool-socket` volume mounted in both the `worker` and `tool-runner` containers.                                                                                                                                                                                                                                                                                                                                                                            |
 | `claude_tool_setup_too_large`                                                | (Claude Code only) The run's tool-runner setup (registry settings plus every service test variable) would exceed the tool runner's bounds (1024 variables, 4096 bytes per value, 96 KiB in total), so the launch fails before the tool runner is created.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `kubernetes_isolation_unsupported:tool-image-not-registry-digest`            | (Claude Code only) `CODING_CLAUDE_TOOL_RUNNER_IMAGE` isn't a registry digest. Checked on every launch, not only preflight.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `kubernetes_isolation_unsupported:claude-limits-too-small`                   | (Claude Code only) The run's `cpus`/`memoryMb` are too small to leave the tool runner its fixed floor: Claude Code needs `cpus ≥ 0.35` and `memoryMb ≥ 256`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
