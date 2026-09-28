@@ -430,6 +430,8 @@ model CodingRun {
   failureCategory   String?
   diagnosticId      String?
   workerImage       String?
+  /// Claude Code's tool-runner image, resolved from the agent's toolchain at dispatch; null for Codex runs.
+  toolImage         String?
   budgetReservedUsd Decimal             @db.Decimal(10, 6)
   /// Phase 12 concurrency queue: set when start() found every coding slot
   /// taken (CODING_MAX_CONCURRENT), cleared when the run claims a slot. A

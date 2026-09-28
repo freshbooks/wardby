@@ -438,17 +438,17 @@ describe("dispatchRun", () => {
     };
     const state = fakeDb(agent);
     const resolveCodingWorkerImage = vi.fn(() => "sha256:claudeimage".padEnd(71, "0"));
-    const executor: Executor = { async start() {}, async stop() {}, resolveCodingWorkerImage };
+    const resolveCodingToolImage = vi.fn(() => "sha256:claudetools".padEnd(71, "0"));
+    const executor: Executor = { async start() {}, async stop() {}, resolveCodingWorkerImage, resolveCodingToolImage };
 
     await dispatchRun({ db: state.db, executor, agentId: agent.id });
 
-    expect(resolveCodingWorkerImage).toHaveBeenCalledWith({
-      provider: "claude-code",
-      toolchain: "node",
-      toolchainVersion: null,
-      workerImageRef: null,
-    });
-    expect(state.codingRuns).toEqual([expect.objectContaining({ provider: "claude-code" })]);
+    const selector = { provider: "claude-code", toolchain: "node", toolchainVersion: null, workerImageRef: null };
+    expect(resolveCodingWorkerImage).toHaveBeenCalledWith(selector);
+    expect(resolveCodingToolImage).toHaveBeenCalledWith(selector);
+    expect(state.codingRuns).toEqual([
+      expect.objectContaining({ provider: "claude-code", toolImage: "sha256:claudetools".padEnd(71, "0") }),
+    ]);
   });
 
   it("rejects a model that does not belong to the selected coding provider", async () => {

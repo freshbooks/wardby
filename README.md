@@ -319,8 +319,8 @@ production alerts, and SLOs remain operator responsibilities. See the
 - **Allowlisted package installs:** a coding agent's `npm`/`pip` installs are
   limited to an approved dependency graph, served through the same proxy with
   a minimum release age, an OSV vulnerability audit, and every package
-  recorded. (Claude Code runs support the node toolchain, npm, today; pip is
-  Codex-only.)
+  recorded, for Codex and Claude Code runs alike (pip on the `node-python`
+  toolchain).
 - **Credential separation:** workers do not receive provider credentials or the
   GitHub App private key; trusted components proxy model use and finalize Git.
 - **Explicit action authority:** the worker that produces an outcome does not

@@ -76,6 +76,12 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
         );
       }
     }
+    const claudePython = config.claudeToolRunnerImages["node-python"]?.["3.12"];
+    if (claudePython !== undefined && !isRegistryDigest(claudePython)) {
+      throw new Error(
+        "CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.",
+      );
+    }
     const kubernetes = loadKubernetesJobConfig(env);
     // The preflight only runs on the first launch; a configuration that cannot work should
     // fail the process at start-up, not the first coding run an hour later.
@@ -136,6 +142,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     workerImage: config.workerImage,
     claudeWorkerImage: config.claudeWorkerImage,
     claudeToolRunnerImage: config.claudeToolRunnerImage,
+    claudeToolRunnerImages: config.claudeToolRunnerImages,
     additionalWorkerImages: config.additionalWorkerImages,
     credentialRef: config.credentialRef,
     anthropicCredentialRef: config.anthropicCredentialRef,

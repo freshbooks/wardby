@@ -519,12 +519,16 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             continuationOf,
             ...(services.length > 0 ? { services: workerServices(services) } : {}),
           });
-          const workerImage = options.executor.resolveCodingWorkerImage?.({
+          const imageSelector = {
             provider: agent.codingProfile.provider,
             toolchain: agent.codingProfile.toolchain,
             toolchainVersion: agent.codingProfile.toolchainVersion,
             workerImageRef: agent.codingProfile.workerImageRef,
-          });
+          };
+          const workerImage = options.executor.resolveCodingWorkerImage?.(imageSelector);
+          // Claude Code's commands run in its tool runner, so the toolchain picks that image too; fixed
+          // here with the worker image so the run keeps both however the deployment changes later.
+          const toolImage = options.executor.resolveCodingToolImage?.(imageSelector) ?? null;
           await tx.codingRun.create({
             data: {
               runId: run.id,
@@ -540,6 +544,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               packageAllowlist: agent.codingProfile.packageAllowlist as Prisma.InputJsonValue,
               packagePolicy: agent.codingProfile.packagePolicy as Prisma.InputJsonValue,
               workerImage,
+              toolImage,
               budgetReservedUsd: budgetUsd,
               rootCodingRunId,
               workspaceDiskMb: agent.codingProfile.workspaceDiskMb,

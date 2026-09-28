@@ -121,6 +121,7 @@ jobs:
       - run: docker run --rm wardby-claude-compat:${{ github.sha }}
       - run: docker build -f src/claude-coding-worker/Dockerfile -t wardby-claude-coding-worker:${{ github.sha }} .
       - run: docker build -f src/claude-tool-runner/Dockerfile -t wardby-claude-tool-runner:${{ github.sha }} .
+      - run: docker build -f src/claude-tool-runner/Dockerfile --target node-python -t wardby-claude-tool-runner-node-python:${{ github.sha }} .
       - run: npm run test:claude-docker
         env:
           WARDBY_CLAUDE_WORKER_IMAGE: wardby-claude-coding-worker:${{ github.sha }}

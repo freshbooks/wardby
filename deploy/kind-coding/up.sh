@@ -128,16 +128,19 @@ docker build -f src/coding-worker/Dockerfile.node-python -t "localhost:${REGISTR
 docker build -f deploy/Dockerfile --target runtime -t "localhost:${REGISTRY_PORT}/wardby-runtime:dev" .
 docker build -f src/claude-coding-worker/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev" .
 docker build -f src/claude-tool-runner/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev" .
+docker build -f src/claude-tool-runner/Dockerfile --target node-python -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev" .
 docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-runtime:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev"
+docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev"
 WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev")"
 WORKER_NODE_PYTHON_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev")"
 RUNTIME_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-runtime:dev")"
 CLAUDE_WORKER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev")"
 CLAUDE_TOOL_RUNNER_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev")"
+CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev")"
 
 echo "==> 6/${TOTAL_STEPS} verify the worker images have tar, head, and test"
 # Both worker images (plain node, and the node-python toolchain agents on CODING_WORKER_IMAGE_NODE_PYTHON_3_12
@@ -149,11 +152,13 @@ for image_digest in "$WORKER_DIGEST" "$WORKER_NODE_PYTHON_DIGEST" "$CLAUDE_WORKE
     exit 1
   fi
 done
-# Claude's tool runner answers the pod's startup probe with `test -S`.
-if ! docker run --rm --entrypoint sh "$CLAUDE_TOOL_RUNNER_DIGEST" -c 'command -v test' >/dev/null; then
-  echo "up.sh: the Claude tool runner image $CLAUDE_TOOL_RUNNER_DIGEST is missing test." >&2
-  exit 1
-fi
+# Claude's tool runners answer the pod's startup probe with `test -S`.
+for image_digest in "$CLAUDE_TOOL_RUNNER_DIGEST" "$CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST"; do
+  if ! docker run --rm --entrypoint sh "$image_digest" -c 'command -v test' >/dev/null; then
+    echo "up.sh: the Claude tool runner image $image_digest is missing test." >&2
+    exit 1
+  fi
+done
 
 echo "==> 7/${TOTAL_STEPS} apply the namespace and the proxy's env Secret"
 kubectl --context "$KUBE_CONTEXT" apply -f "${MANIFEST_DIR}/manifests/base/namespace.yaml"
@@ -217,6 +222,7 @@ CODING_WORKER_IMAGE=${WORKER_DIGEST}
 CODING_WORKER_IMAGE_NODE_PYTHON_3_12=${WORKER_NODE_PYTHON_DIGEST}
 CODING_CLAUDE_WORKER_IMAGE=${CLAUDE_WORKER_DIGEST}
 CODING_CLAUDE_TOOL_RUNNER_IMAGE=${CLAUDE_TOOL_RUNNER_DIGEST}
+CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12=${CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST}
 
 # The keeper's NetworkPolicy-enforcement probe exec routinely takes longer than the
 # launcher's 10 s default under kind's default node resources (250m CPU / 128Mi); 60 s

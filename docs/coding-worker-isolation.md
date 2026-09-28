@@ -27,7 +27,8 @@ capability. See [Installing packages in coding runs](coding-packages.md).
 Registry mode serves both providers: Claude Code's tool runner gets that
 registry-only token's settings from the trusted launcher, delivered as
 `WARDBY_TOOL_SETUP` — never the run capability. Claude Code runs support the
-`node` toolchain (npm) today; pip is available to Codex runs only.
+`node` and `node-python` toolchains; the toolchain selects the tool-runner
+image, which is resolved when the run is dispatched and kept for the whole run.
 
 Claude Code uses a credential-separated composite job. Its agent container
 holds the run capability and is attached only to the proxy network; it never
@@ -487,8 +488,10 @@ sidecar, described in "Pod layout" below.
 Set `JOB_LAUNCHER=kubernetes` and `CODING_WORKER_IMAGE` to a **registry
 digest** (`repo@sha256:<64 hex>` — a bare `sha256:` local image ID is
 rejected; a cluster cannot pull it). For Claude Code, also set
-`CODING_CLAUDE_WORKER_IMAGE` and `CODING_CLAUDE_TOOL_RUNNER_IMAGE` to registry
-digests; the control plane refuses to start if either is set to anything else.
+`CODING_CLAUDE_WORKER_IMAGE` and `CODING_CLAUDE_TOOL_RUNNER_IMAGE` (and, for
+Claude agents on the `node-python` toolchain,
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`) to registry digests; the
+control plane refuses to start if any of them is set to anything else.
 Kubernetes-specific settings (`src/config/providers.ts`,
 `loadKubernetesJobConfig`):
 
