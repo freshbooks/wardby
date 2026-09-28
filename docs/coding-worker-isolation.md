@@ -230,7 +230,12 @@ The worker policy requires:
 - UID/GID `10001:10001`, all capabilities dropped, no new privileges, Docker's
   built-in seccomp profile, private cgroup and PID namespaces, and no host IPC.
 - A read-only root filesystem with bounded `noexec,nosuid,nodev` tmpfs mounts
-  for `/tmp` and `/home/wardby`.
+  for `/tmp` and `/home/wardby`. The agent's own temporary files (`TMPDIR`)
+  are not among them: they go to the workspace's `.cache/tmp`, which is
+  disk-backed and counts toward the run's `workspaceDiskMb`, not this small
+  in-memory scratch — a real `pip install` or `npm install` unpacks and builds
+  in `TMPDIR`, which the tmpfs is usually too small to hold. `.cache` is
+  never part of the collected diff or pull request.
 - Exact CPU, memory, equal memory+swap, PID, shared-memory, disk, and wall-clock
   limits. Equal memory and memory+swap disables additional swap allowance.
 - No devices, device requests, bind mounts, extra groups, custom DNS, extra
@@ -578,7 +583,10 @@ One pod per run, built by the canonical, deny-by-default policy in
 - `/tmp` and `/home/wardby` are small `medium: Memory` `emptyDir`s (bounded
   `min(64, max(16, memoryMb/8))` MiB), matching Docker's bounded tmpfs mounts;
   a Claude Code run's tool runner gets its own pair, sized the same way from
-  its own memory share.
+  its own memory share. Neither is where the agent's commands get `TMPDIR`:
+  that points at the workspace's `.cache/tmp` on the disk-backed `storage`
+  volume instead, so it scales with `workspaceDiskMb` rather than this tiny
+  in-memory scratch.
 - `dnsPolicy: None` with `dnsConfig.nameservers: ["127.0.0.1"]` — **no DNS is
   configured for worker/agent pods at all.** The proxy is reached by name
   (`WARDBY_PROXY_URL=http://wardby-proxy:8787` — `CODING_PROXY_ALIAS` in

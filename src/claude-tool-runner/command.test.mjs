@@ -33,6 +33,32 @@ test("runs commands in the supplied workspace with a scrubbed environment and bo
   }
 });
 
+test("gives commands a TMPDIR under the workspace's excluded .cache, and creates it", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-tools-tmp-"));
+  try {
+    const env = toolEnvironment(workspace);
+    assert.equal(env.TMPDIR, join(workspace, ".cache", "tmp"));
+
+    const result = await runCommand('test -w "$TMPDIR" && printf ok > "$TMPDIR/probe"', 1_000, workspace);
+    assert.deepEqual(result, { code: 0, output: "" });
+    assert.equal(await readFile(join(workspace, ".cache", "tmp", "probe"), "utf8"), "ok");
+    assert.equal((await stat(join(workspace, ".cache", "tmp"))).mode & 0o777, 0o700);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("recreates TMPDIR a previous command deleted, like a setup file", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-tools-tmp2-"));
+  try {
+    await runCommand("rm -rf .cache", 1_000, workspace);
+    const result = await runCommand('test -d "$TMPDIR" && printf present', 1_000, workspace);
+    assert.deepEqual(result, { code: 0, output: "present" });
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 const setupFor = (workspace) =>
   JSON.stringify({
     schemaVersion: 1,

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -85,10 +85,12 @@ describe("runCodingWorker", () => {
         HOME: "/home/wardby",
         LANG: "C.UTF-8",
         PATH: "/opt/wardby/bin:/usr/local/bin:/usr/bin:/bin",
-        TMPDIR: "/tmp",
+        TMPDIR: join(workspace, ".cache", "tmp"),
         npm_config_registry: "http://proxy:8080/registry/npm/",
       }),
     });
+    expect((await stat(join(workspace, ".cache", "tmp"))).isDirectory()).toBe(true);
+    expect((await stat(join(workspace, ".cache", "tmp"))).mode & 0o777).toBe(0o700);
     expect(capture.thread).toEqual({
       model: input.model,
       sandboxMode: "danger-full-access",
