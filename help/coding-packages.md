@@ -20,10 +20,12 @@ Wardby validates and permits the required transitive dependency graph for the
 run. Changing a package allowlist or policy needs `packages:approve` (or
 `agents:admin`) and a Wardby `admin` or `package-approver` role.
 
-Registry mode does not currently support Claude Code workers because their
-tool-runner container has no network attachment. Use a pinned custom worker
-image when an agent needs system packages, another runtime, or dependencies
-that should be baked into the image.
+Registry mode works for Codex and Claude Code runs alike, on the `node`
+toolchain (npm) and the `node-python` toolchain (npm and pip). Claude Code runs
+its shell commands in a separate, credential-free tool-runner container that
+reaches the registry through the run's proxy network. Use a pinned custom
+worker image when an agent needs system packages, another runtime, or
+dependencies that should be baked into the image.
 
 Read [`docs/coding-packages.md`](../docs/coding-packages.md) for allowlist
 syntax, package-policy controls, lockfile behavior, and refusal errors.
