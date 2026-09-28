@@ -1,9 +1,12 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, describe, expect, it } from "vitest";
+import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
+import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { DockerJobLauncher } from "./docker.js";
 import {
   assertClaudeAgentContainerInspection,
@@ -107,7 +110,7 @@ function fakeProxyProgram(): string {
 const http = require('node:http');
 const text = process.env.FAKE_RESULT;
 // Through the npm shim: two Node processes plus npm must fit in the tool runner's PID limit.
-const TOOL_INPUT = { command: 'printf "%s\\n" "$npm_config_registry"; npm --version', timeout_ms: 30000 };
+const TOOL_INPUT = { command: process.env.FAKE_TOOL_COMMAND || 'printf "%s\\n" "$npm_config_registry"; npm --version', timeout_ms: 30000 };
 let turn = 0;
 function toolSse(id, name, input) { return [
   { type: 'message_start', message: { id: 'msg_wardby_fixture', type: 'message', role: 'assistant', model: 'claude-sonnet-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 12, output_tokens: 0 } } },
@@ -319,4 +322,204 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
     await launcher.remove(handle);
     await expect(launcher.status(handle)).rejects.toThrow("job_removed");
   }, 120_000);
+});
+
+const servicesRunId = `claude-docker-services-${token}`;
+const servicesProxy = `wardby-claude-services-proxy-${token}`;
+const servicesNames = isolationNames(servicesRunId);
+const POSTGRES = resolvedFromDefinition(
+  BUILTIN_CODING_SERVICES.find((service) => service.name === "postgres" && service.version === "16")!,
+);
+// Runs in the tool runner. Prints fixed words only, never a variable's value.
+const SERVICES_PROBE = [
+  'const net = require("node:net");',
+  "const probe = (host, port) => new Promise((done) => {",
+  "const socket = net.connect({ host, port }); socket.setTimeout(3000);",
+  'socket.once("connect", () => { socket.destroy(); done(true); });',
+  'socket.once("timeout", () => { socket.destroy(); done(false); });',
+  'socket.once("error", () => done(false)); });',
+  'Promise.all([probe("127.0.0.1", 5432), probe("wardby-proxy", 8787), probe("1.1.1.1", 443)]).then(([pg, proxy, direct]) => {',
+  'console.log(pg ? "postgres_reachable" : "postgres_unreachable");',
+  'console.log(proxy ? "proxy_reachable" : "proxy_unreachable");',
+  'console.log(direct ? "direct_egress_open" : "direct_egress_blocked");',
+  "process.exitCode = pg && proxy && !direct ? 0 : 1; });",
+].join(" ");
+const SERVICES_TOOL_COMMAND = `node -e '${SERVICES_PROBE}' && test -n "$DATABASE_URL" && echo database_url_set`;
+
+function runFilters(id: string): string[] {
+  return [
+    "--filter",
+    "label=io.wardby.managed=true",
+    "--filter",
+    `label=io.wardby.run-sha256=${createHash("sha256").update(id).digest("hex")}`,
+  ];
+}
+
+/** Every managed container, network and volume still labelled for the run. */
+async function leftovers(id: string): Promise<string[]> {
+  const listed = await Promise.all([
+    docker(["container", "ls", "--all", "--quiet", ...runFilters(id)]),
+    docker(["network", "ls", "--quiet", ...runFilters(id)]),
+    docker(["volume", "ls", "--quiet", ...runFilters(id)]),
+  ]);
+  return listed.join("\n").split("\n").filter(Boolean);
+}
+
+async function sweep(id: string): Promise<void> {
+  const lines = async (args: string[]) => (await docker(args).catch(() => "")).split("\n").filter(Boolean);
+  for (const container of await lines(["container", "ls", "--all", "--quiet", ...runFilters(id)])) {
+    await cleanup(["container", "rm", "--force", "--volumes", container]);
+  }
+  await cleanup(["network", "disconnect", "--force", isolationNames(id).network, servicesProxy]);
+  for (const network of await lines(["network", "ls", "--quiet", ...runFilters(id)])) {
+    await cleanup(["network", "rm", network]);
+  }
+  for (const volume of await lines(["volume", "ls", "--quiet", ...runFilters(id)])) {
+    await cleanup(["volume", "rm", "--force", volume]);
+  }
+}
+
+describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance with services", () => {
+  let servicesRoot: string | undefined;
+
+  afterAll(async () => {
+    await sweep(servicesRunId);
+    await cleanup(["container", "rm", "--force", servicesProxy]);
+    if (servicesRoot) await rm(servicesRoot, { recursive: true, force: true });
+  }, 60_000);
+
+  it("gives the tool runner postgres on 127.0.0.1 and the proxy, nothing else, and keeps the agent off the keeper", async () => {
+    servicesRoot = await mkdtemp(join(tmpdir(), "wardby-claude-docker-services-"));
+    const workspace = join(servicesRoot, "workspaces", servicesRunId, "workspace");
+    const git = join(servicesRoot, "workspaces", servicesRunId, "git");
+    const input = join(servicesRoot, "input.json");
+    const output = {
+      schemaVersion: 1,
+      runId: servicesRunId,
+      outcome: "no_changes",
+      summary: "fixture",
+      tests: [],
+      tag: "fixture",
+    };
+    await Promise.all([mkdir(workspace, { recursive: true }), mkdir(git, { recursive: true })]);
+    await Promise.all([
+      writeFile(join(workspace, "README.md"), "fixture\n"),
+      writeFile(join(git, "HEAD"), "ref: refs/heads/main\n"),
+      writeFile(
+        input,
+        JSON.stringify({
+          schemaVersion: 1,
+          runId: servicesRunId,
+          repository: "wardby/fixture",
+          baseRef: "main",
+          headRef: `wardby/run-${servicesRunId}`,
+          task: "Return the required structured result without making changes.",
+          model: "claude-sonnet-5",
+          budgetUsd: 0.25,
+          deadlineAt: new Date(Date.now() + 240_000).toISOString(),
+        }),
+      ),
+    ]);
+    await docker([
+      "container",
+      "create",
+      "--name",
+      servicesProxy,
+      "--network",
+      "bridge",
+      "--env",
+      `EXPECTED_CAPABILITY=${capability}`,
+      "--env",
+      `FAKE_RESULT=${JSON.stringify(output)}`,
+      "--env",
+      `FAKE_TOOL_COMMAND=${SERVICES_TOOL_COMMAND}`,
+      "--entrypoint",
+      "node",
+      agentImage,
+      "-e",
+      fakeProxyProgram(),
+    ]);
+    await docker(["container", "start", servicesProxy]);
+
+    const launcher = new DockerJobLauncher({
+      stateRoot: join(servicesRoot, "state"),
+      workspaceRoot: join(servicesRoot, "workspaces"),
+      proxyContainer: servicesProxy,
+      resolveCapability: async () => capability,
+      isRunActive: async () => false,
+    });
+    const spec: JobSpec = {
+      kind: "coding-agent",
+      provider: "claude-code",
+      runId: servicesRunId,
+      image: agentImage,
+      toolImage,
+      inputArtifact: input,
+      timeoutSec: 240,
+      limits: { cpus: 1, memoryMb: 512, pids: 128, diskMb: 64 },
+      labels: {},
+      services: [POSTGRES],
+    };
+    const handle = await launcher.launch(spec);
+    const inspectOne = async (name: string) =>
+      JSON.parse(await docker(["container", "inspect", name]))[0] as DockerContainerInspection;
+    const [agent, tool, keeper] = await Promise.all([
+      inspectOne(servicesNames.workerContainer),
+      inspectOne(servicesNames.toolContainer),
+      inspectOne(servicesNames.networkKeeperContainer),
+    ]);
+    // The agent is on the run network only; the tool runner is in the keeper's namespace only.
+    assertClaudeAgentContainerInspection(agent, spec, capability);
+    assertClaudeToolRunnerContainerInspection(tool, spec, claudeToolSetup(spec, capability), keeper.Id);
+    expect(Object.keys(tool.NetworkSettings?.Networks ?? {})).toEqual([]);
+
+    let status = await launcher.status(handle);
+    for (let attempt = 0; attempt < 1_200 && (status.state === "pending" || status.state === "running"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      status = await launcher.status(handle);
+    }
+    if (status.state === "failed") {
+      throw new Error(
+        `claude_agent_failed:${await docker(["container", "logs", servicesNames.workerContainer])}:proxy:${await docker(["container", "logs", servicesProxy])}`,
+      );
+    }
+    expect(status).toEqual({ state: "succeeded" });
+    expect(await launcher.collect(handle)).toEqual({
+      exitCode: 0,
+      reason: "completed",
+      resultArtifact: JSON.stringify(output),
+    });
+
+    const proxyLog = await docker(["container", "logs", servicesProxy]);
+    const toolResults = proxyLog
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((line) => {
+        const event = JSON.parse(line) as { messages?: Array<{ role: string; content: unknown }> };
+        return (event.messages ?? []).flatMap((message) =>
+          Array.isArray(message.content)
+            ? (message.content as Array<{ type?: string; tool_use_id?: string; content?: Array<{ text?: unknown }> }>)
+                .filter((block) => block.type === "tool_result" && block.tool_use_id === "toolu_wardby_docker")
+                .flatMap((block) =>
+                  (block.content ?? []).map((part) => (typeof part.text === "string" ? part.text : "")),
+                )
+            : [],
+        );
+      });
+    expect(
+      toolResults.some(
+        (text) =>
+          text.startsWith("exit_code=0\n") &&
+          text.includes("postgres_reachable") &&
+          text.includes("proxy_reachable") &&
+          text.includes("direct_egress_blocked") &&
+          text.includes("database_url_set"),
+      ),
+    ).toBe(true);
+    // No service variable's value ever reaches the model's transcript.
+    expect(proxyLog).not.toContain(POSTGRES.testEnv.DATABASE_URL);
+
+    await launcher.remove(handle);
+    expect(await leftovers(servicesRunId)).toEqual([]);
+  }, 300_000);
 });
