@@ -58,6 +58,11 @@ export class RoutingExecutor implements Executor {
     return this.coding.resolveCodingWorkerImage(selector);
   }
 
+  resolveCodingToolImage(selector: CodingImageSelector): string | null {
+    if (!this.coding.resolveCodingToolImage) throw new Error("coding_execution_not_configured");
+    return this.coding.resolveCodingToolImage(selector);
+  }
+
   async readCodingServiceDeclaration(input: { repository: string; baseRef: string }): Promise<string | null> {
     if (!this.coding.readCodingServiceDeclaration) return null;
     return this.coding.readCodingServiceDeclaration(input);

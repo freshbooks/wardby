@@ -70,6 +70,23 @@ describe("buildConfiguredExecutor", () => {
     );
   });
 
+  it("rejects a Claude node-python tool-runner image that isn't a registry digest on Kubernetes", () => {
+    const REGISTRY_IMAGE = `registry.example/wardby-coding-worker@sha256:${"a".repeat(64)}`;
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: {
+          ...baseEnv,
+          JOB_LAUNCHER: "kubernetes",
+          CODING_WORKER_IMAGE: REGISTRY_IMAGE,
+          CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12: LOCAL_IMAGE,
+        },
+        kubernetesApi: new FakeKubernetesApi(),
+      }),
+    ).toThrow("CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 must be a registry digest");
+  });
+
   it("refuses to compose a kubernetes launcher on gke-autopilot without gvisor", () => {
     expect(() =>
       buildConfiguredExecutor({

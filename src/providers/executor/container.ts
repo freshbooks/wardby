@@ -116,6 +116,8 @@ export interface ContainerRunSnapshot {
   proxySessionId: string | null;
   result: unknown;
   workerImage: string | null;
+  /** Claude's tool-runner image, resolved at dispatch (CodingRun.toolImage); null on older rows and Codex runs. */
+  toolImage?: string | null;
   workspaceDiskMb: number | null;
   /** Admin-requested debug trace, fixed at dispatch (CodingRun.debugTrace). */
   debugTrace?: boolean;
@@ -201,6 +203,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       proxySessionId: row.codingRun.proxySession?.id ?? null,
       result: row.codingRun.result,
       workerImage: row.codingRun.workerImage,
+      toolImage: row.codingRun.toolImage,
       workspaceDiskMb: row.codingRun.workspaceDiskMb,
       debugTrace: row.codingRun.debugTrace,
       services: row.codingRun.services,
@@ -410,6 +413,12 @@ export interface ContainerExecutorOptions {
   credentialRef: string;
   claudeWorkerImage?: string;
   claudeToolRunnerImage?: string;
+  /**
+   * Claude tool-runner images for toolchains beyond the "node" baseline (claudeToolRunnerImage),
+   * keyed by toolchain, then version -- the same shape as additionalWorkerImages. Claude's agent
+   * image is the same for every toolchain; only the tool runner, which runs the commands, differs.
+   */
+  claudeToolRunnerImages?: Record<string, Record<string, string>>;
   anthropicCredentialRef?: string;
   limits: JobResourceLimits;
   /** Operator ceiling (MiB) on CodingRun.workspaceDiskMb; see coding_workspace_disk_exceeds_limit in jobSpec. */
@@ -475,6 +484,11 @@ export class ContainerExecutor implements Executor {
     }
     for (const image of [options.claudeWorkerImage, options.claudeToolRunnerImage]) {
       if (image !== undefined && !isImmutableDockerImage(image)) throw new Error("coding_worker_image_invalid");
+    }
+    for (const versions of Object.values(options.claudeToolRunnerImages ?? {})) {
+      for (const image of Object.values(versions)) {
+        if (!isImmutableDockerImage(image)) throw new Error("coding_worker_image_invalid");
+      }
     }
     if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,199}$/.test(options.credentialRef)) {
       throw new Error("coding_credential_ref_invalid");
@@ -988,14 +1002,10 @@ export class ContainerExecutor implements Executor {
 
   resolveCodingWorkerImage(selector: CodingImageSelector): string {
     if (selector.provider === "claude-code") {
-      if (selector.toolchain !== "node" || selector.toolchainVersion !== null) {
-        throw new Error("coding_toolchain_unsupported:claude-code");
-      }
+      this.claudeToolImage(selector);
       const image = selector.workerImageRef ?? this.options.claudeWorkerImage;
-      if (!image || !this.options.claudeToolRunnerImage) throw new Error("coding_provider_not_configured:claude-code");
-      if (!isImmutableDockerImage(image) || !isImmutableDockerImage(this.options.claudeToolRunnerImage)) {
-        throw new Error("coding_worker_image_invalid");
-      }
+      if (!image) throw new Error("coding_provider_not_configured:claude-code");
+      if (!isImmutableDockerImage(image)) throw new Error("coding_worker_image_invalid");
       return image;
     }
     if (selector.provider !== "codex") {
@@ -1013,6 +1023,25 @@ export class ContainerExecutor implements Executor {
         `No worker image for toolchain "${selector.toolchain}" version "${selector.toolchainVersion ?? "(none)"}" — refusing to guess. Add it to additionalWorkerImages.`,
       );
     }
+    return image;
+  }
+
+  /** Claude's tool-runner image for the agent's toolchain, at dispatch (Executor.resolveCodingToolImage); null for Codex. */
+  resolveCodingToolImage(selector: CodingImageSelector): string | null {
+    return selector.provider === "claude-code" ? this.claudeToolImage(selector) : null;
+  }
+
+  /** The tool runner is what runs a Claude agent's commands, so it is what the toolchain selects. */
+  private claudeToolImage(selector: CodingImageSelector): string {
+    if (!this.options.claudeToolRunnerImage) throw new Error("coding_provider_not_configured:claude-code");
+    const image =
+      selector.toolchain === "node" && selector.toolchainVersion === null
+        ? this.options.claudeToolRunnerImage
+        : selector.toolchainVersion !== null
+          ? this.options.claudeToolRunnerImages?.[selector.toolchain]?.[selector.toolchainVersion]
+          : undefined;
+    if (!image) throw new Error("coding_toolchain_unsupported:claude-code");
+    if (!isImmutableDockerImage(image)) throw new Error("coding_worker_image_invalid");
     return image;
   }
 
@@ -1056,7 +1085,8 @@ export class ContainerExecutor implements Executor {
       runId: run.runId,
       provider,
       image: run.workerImage ?? this.options.workerImage,
-      ...(provider === "claude-code" ? { toolImage: this.options.claudeToolRunnerImage } : {}),
+      // A run keeps the tool image it was dispatched with; rows from before CodingRun.toolImage use the default.
+      ...(provider === "claude-code" ? { toolImage: run.toolImage ?? this.options.claudeToolRunnerImage } : {}),
       inputArtifact,
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },

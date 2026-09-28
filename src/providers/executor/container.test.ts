@@ -1299,6 +1299,76 @@ describe("ContainerExecutor", () => {
   });
 });
 
+describe("resolveCodingToolImage", () => {
+  const CLAUDE_PY_TOOL_IMAGE = `registry.example/claude-tools-python@sha256:${"e".repeat(64)}`;
+  const claudeHarness = (extra: Partial<ContainerExecutorOptions> = {}) =>
+    harness(
+      {},
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      { claudeToolRunnerImages: { "node-python": { "3.12": CLAUDE_PY_TOOL_IMAGE } }, ...extra },
+    );
+  const claude = (toolchain: string, toolchainVersion: string | null) => ({
+    provider: "claude-code" as const,
+    toolchain,
+    toolchainVersion,
+    workerImageRef: null,
+  });
+
+  it("gives Claude's node toolchain the plain tool runner", async () => {
+    const { executor } = await claudeHarness();
+    expect(executor.resolveCodingToolImage?.(claude("node", null))).toBe(CLAUDE_TOOL_IMAGE);
+  });
+
+  it("gives Claude's node-python 3.12 toolchain its Python tool runner, with the same agent image", async () => {
+    const { executor } = await claudeHarness();
+    expect(executor.resolveCodingToolImage?.(claude("node-python", "3.12"))).toBe(CLAUDE_PY_TOOL_IMAGE);
+    expect(executor.resolveCodingWorkerImage?.(claude("node-python", "3.12"))).toBe(CLAUDE_IMAGE);
+  });
+
+  it("refuses a Claude toolchain that has no tool-runner image", async () => {
+    const { executor } = await claudeHarness();
+    for (const selector of [claude("node-python", "2.7"), claude("node-python", null), claude("node", "20")]) {
+      expect(() => executor.resolveCodingToolImage?.(selector)).toThrow("coding_toolchain_unsupported:claude-code");
+      expect(() => executor.resolveCodingWorkerImage?.(selector)).toThrow("coding_toolchain_unsupported:claude-code");
+    }
+    const { executor: withoutPython } = await claudeHarness({ claudeToolRunnerImages: {} });
+    expect(() => withoutPython.resolveCodingToolImage?.(claude("node-python", "3.12"))).toThrow(
+      "coding_toolchain_unsupported:claude-code",
+    );
+  });
+
+  it("has no tool-runner image for Codex", async () => {
+    const { executor } = await claudeHarness();
+    expect(
+      executor.resolveCodingToolImage?.({
+        provider: "codex",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("launches a Claude run with the tool-runner image fixed on it at dispatch", async () => {
+    const created = await harness(
+      { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_PY_TOOL_IMAGE },
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+    );
+    await created.executor.start("run-1");
+    expect(created.jobs.lastSpec).toMatchObject({ image: CLAUDE_IMAGE, toolImage: CLAUDE_PY_TOOL_IMAGE });
+  });
+
+  it("refuses a tool-runner image entry that is not an immutable digest", async () => {
+    await expect(
+      claudeHarness({ claudeToolRunnerImages: { "node-python": { "3.12": "claude-tools:latest" } } }),
+    ).rejects.toThrow();
+  });
+});
+
 describe("resolveCodingWorkerImage", () => {
   it("returns the node baseline (options.workerImage) for toolchain=node", async () => {
     const { executor } = await harness();

@@ -87,6 +87,14 @@ describe("loadContainerExecutorConfig", () => {
     });
   });
 
+  it("loads Claude's node-python 3.12 tool-runner image when it is configured", () => {
+    const image = `claude-tools-python@sha256:${"e".repeat(64)}`;
+    expect(loadContainerExecutorConfig({ CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12: image })).toMatchObject({
+      claudeToolRunnerImages: { "node-python": { "3.12": image } },
+    });
+    expect(loadContainerExecutorConfig({}).claudeToolRunnerImages).toEqual({});
+  });
+
   it.each(["0", "-1", "nope"])("rejects invalid container CPU limits (%s)", (value) => {
     expect(() => loadContainerExecutorConfig({ CODING_CPUS: value })).toThrow("CODING_CPUS must be a positive");
   });
