@@ -13,8 +13,8 @@ A run that failed with category `service_unready` (launcher error
 `coding_service_unready:<name>`) started, but the named service never became
 ready, so the coding agent never started. A service is not ready when its
 readiness command keeps failing past its failure threshold, its image cannot
-be pulled or started, or it has still not started when the launcher's
-pod-start bound runs out.
+be pulled or started, or it is still not ready when the launcher's start-up
+limit runs out.
 
 1. On Kubernetes, inspect the run pod's init-container status and events for
    the `service-<name>` container: image pull errors, crash loops, or probe
@@ -27,13 +27,17 @@ pod-start bound runs out.
    read-only root filesystem: every directory it writes to must be its
    `dataPath` or one of its `writablePaths`. Probe over TCP on `127.0.0.1`
    rather than a Unix socket.
-3. On Kubernetes, readiness is bounded by the launcher's pod-start timeout
-   (`KUBERNETES_READY_TIMEOUT_MS`, default 120000) whatever the entry's
-   threshold; if first image pulls on new nodes are slow, raise that bound or
-   mirror the image into a nearby registry. On Docker, readiness is bounded by
-   the entry's `failureThreshold` × `periodSeconds`, and an image pull by 5
-   minutes; the launcher pulls without registry credentials, so pull a private
-   or rate-limited image on the Docker host beforehand.
+3. Each entry's readiness settings (`periodSeconds`, `timeoutSeconds`,
+   `failureThreshold`) apply within an overall start-up limit, 120 seconds by
+   default on both launchers, whatever the entry's threshold allows. On
+   Kubernetes that limit is the pod-start timeout
+   (`KUBERNETES_READY_TIMEOUT_MS`, default 120000) and includes image pulls; if
+   first pulls on new nodes are slow, raise it or mirror the image into a
+   nearby registry. On Docker the limit covers every service of the run
+   together (they start one at a time), and never runs past the run's own
+   timeout; image pulls are not counted in it but may take up to 5 minutes
+   each. The Docker launcher pulls without registry credentials, so pull a
+   private or rate-limited image on the Docker host beforehand.
 4. Trigger a new run once the cause is fixed.
 
 When this run is a sub-run another agent dispatched (for example a router

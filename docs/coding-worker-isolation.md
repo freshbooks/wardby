@@ -296,7 +296,9 @@ allocations at the host scheduler as well as per run.
    keeper; then, for each service in turn, use the host's copy of its image or
    pull it by digest, create and inspect its container in the keeper's
    namespace, start it, and run its readiness command until it passes or the
-   run fails with `coding_service_unready:<name>`.
+   run fails with `coding_service_unready:<name>`. All of this shares one
+   120-second start-up limit (image pulls, each bounded to 5 minutes, are not
+   counted) and never runs past the run's deadline.
 7. Create the worker with the run capability supplied only in the child
    environment; inspect every effective control before start.
 8. Start the worker and enforce `deadlineMs`. Send SIGTERM at expiry, then

@@ -62,6 +62,11 @@ const MAX_DOCKER_SEED_DIAGNOSTIC_BYTES = 4 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
 /** How long one service image pull may take before the run fails as service_unready. */
 export const SERVICE_IMAGE_PULL_TIMEOUT_MS = 300_000;
+/**
+ * The default bound on a run's whole service start-up (every service's create, start, inspection and
+ * readiness probing; image pulls excluded), matching the Kubernetes launcher's pod-start bound.
+ */
+export const DEFAULT_SERVICE_READY_TIMEOUT_MS = 120_000;
 const MAX_SERVICE_PROBE_OUTPUT_BYTES = 64 * 1024;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
 export const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|wardby_[a-z_]+)$/;
@@ -431,6 +436,11 @@ export interface DockerJobLauncherOptions {
   now?: () => number;
   /** Waits between service readiness probes; tests replace it. */
   sleep?: (milliseconds: number) => Promise<void>;
+  /**
+   * The bound on a run's whole service start-up, image pulls excluded (default
+   * DEFAULT_SERVICE_READY_TIMEOUT_MS). Start-up never runs past the run's own deadline either.
+   */
+  serviceReadyTimeoutMs?: number;
   /** Optional observer invoked after provisioning fails but before resources are cleaned up. */
   onProvisionFailure?: (context: { runId: string; keeperContainer: string }) => Promise<void>;
 }
@@ -539,6 +549,38 @@ function labelsMatch(actual: Record<string, string> | undefined, expected: Recor
 }
 
 /** `coding_service_unready:<name>` (the executor's service_unready), keeping the Docker failure as the operator's cause. */
+/**
+ * A run's service start-up budget: `budgetMs` from the start, extended by the time image pulls took,
+ * and never past the run's deadline.
+ */
+class ServiceStartBudget {
+  private readonly startedAt: number;
+  private excludedMs = 0;
+
+  constructor(
+    private readonly now: () => number,
+    private readonly budgetMs: number,
+    private readonly deadlineAt: number,
+  ) {
+    this.startedAt = now();
+  }
+
+  /** What is left of the budget, capped by the run's deadline; zero once either runs out. */
+  remainingMs(): number {
+    const now = this.now();
+    return Math.max(0, Math.min(this.startedAt + this.excludedMs + this.budgetMs - now, this.deadlineAt - now));
+  }
+
+  /** What is left before the run's deadline: the only bound (besides its own) on an image pull. */
+  untilDeadlineMs(): number {
+    return Math.max(0, this.deadlineAt - this.now());
+  }
+
+  exclude(milliseconds: number): void {
+    this.excludedMs += Math.max(0, milliseconds);
+  }
+}
+
 function serviceUnready(name: string, cause?: unknown): Error {
   const error = serviceUnreadyError(name);
   if (cause !== undefined) error.cause = cause;
@@ -586,6 +628,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   private readonly transfer: DockerArtifactTransfer;
   private readonly now: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly serviceReadyTimeoutMs: number;
   private readonly locks = new Map<string, Promise<void>>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly ready: Promise<void>;
@@ -600,6 +643,9 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     this.now = options.now ?? Date.now;
     this.sleep =
       options.sleep ?? ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
+    this.serviceReadyTimeoutMs = options.serviceReadyTimeoutMs ?? DEFAULT_SERVICE_READY_TIMEOUT_MS;
+    if (!Number.isFinite(this.serviceReadyTimeoutMs) || this.serviceReadyTimeoutMs <= 0)
+      throw new Error("docker_launcher_service_timeout_invalid");
     this.ready = this.initialize();
   }
 
@@ -874,8 +920,10 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   /**
    * A run with services (docs/coding-services.md). The network keeper joins the run's internal
    * network and owns the namespace; each service joins it and must pass its catalog readiness
-   * command before the next one starts, as Kubernetes starts native sidecars. Returns the keeper's
-   * container ID, which Docker may report as the services' and worker's network mode.
+   * command before the next one starts, as Kubernetes starts native sidecars. The whole start-up is
+   * bounded (ServiceStartBudget): running out fails as coding_service_unready for the service being
+   * waited on. Returns the keeper's container ID, which Docker may report as the services' and
+   * worker's network mode.
    */
   private async startServices(
     record: DockerJobRecord,
@@ -884,6 +932,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     services: readonly DockerServiceContainer[],
     labels: Record<string, string>,
   ): Promise<string> {
+    const budget = new ServiceStartBudget(this.now, this.serviceReadyTimeoutMs, record.deadlineAt);
     const keeper = (await this.createAndAssert(
       appendLabels(keeperArgs, labels),
       ["container", "inspect", keeperName],
@@ -897,65 +946,98 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     if (!keeperId) throw new Error("docker_resource_attestation_failed");
     await this.startContainer(keeperName);
     for (const planned of services) {
-      await this.ensureServiceImage(planned);
-      await this.createAndAssert(
-        appendLabels(planned.createArgs, labels),
-        ["container", "inspect", planned.container],
-        (value) => {
-          const inspected = value as DockerContainerInspection;
-          assertServiceContainerInspection(inspected, record.spec, planned.service, keeperId);
-          if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
-        },
-      );
+      const name = planned.service.name;
+      if (budget.remainingMs() <= 0) throw serviceUnready(name);
+      await this.ensureServiceImage(planned, budget);
+      if (budget.remainingMs() <= 0) throw serviceUnready(name);
+      try {
+        await this.createAndAssert(
+          appendLabels(planned.createArgs, labels),
+          ["container", "inspect", planned.container],
+          (value) => {
+            const inspected = value as DockerContainerInspection;
+            assertServiceContainerInspection(inspected, record.spec, planned.service, keeperId);
+            if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
+          },
+        );
+      } catch (error) {
+        // createAndAssert tolerates a failed create (a crash retry may find it made), so a service
+        // Docker refused to create shows up as a failed inspection. Attestation failures rethrow as is.
+        if (error instanceof DockerCommandError) throw serviceUnready(name, error);
+        throw error;
+      }
+      if (budget.remainingMs() <= 0) throw serviceUnready(name);
       try {
         await this.startContainer(planned.container);
       } catch (error) {
-        throw serviceUnready(planned.service.name, error);
+        throw serviceUnready(name, error);
       }
-      await this.waitForServiceReady(planned);
+      await this.waitForServiceReady(planned, budget);
     }
     return keeperId;
   }
 
-  /** A local copy of the digest-pinned image is used as is; otherwise it is pulled, bounded. */
-  private async ensureServiceImage(planned: DockerServiceContainer): Promise<void> {
+  /**
+   * A local copy of the digest-pinned image is used as is; otherwise it is pulled, bounded by its
+   * own limit and the run's deadline. Pull time does not count toward the start-up budget.
+   */
+  private async ensureServiceImage(planned: DockerServiceContainer, budget: ServiceStartBudget): Promise<void> {
     try {
       await this.run(["image", "inspect", "--format", "{{.Id}}", planned.service.image]);
       return;
     } catch {
       // Missing (or unreadable): pull it by its digest below.
     }
+    const untilDeadline = budget.untilDeadlineMs();
+    if (untilDeadline <= 0) throw serviceUnready(planned.service.name);
+    const startedAt = this.now();
     try {
       await this.run(["image", "pull", "--quiet", planned.service.image], {
-        timeoutMs: SERVICE_IMAGE_PULL_TIMEOUT_MS,
+        timeoutMs: Math.min(SERVICE_IMAGE_PULL_TIMEOUT_MS, untilDeadline),
       });
     } catch (error) {
       throw serviceUnready(planned.service.name, error);
+    } finally {
+      budget.exclude(this.now() - startedAt);
     }
   }
 
   /**
    * The catalog readiness command, like a Kubernetes startup probe: every periodSeconds, each
    * attempt bounded by timeoutSeconds, failing after failureThreshold consecutive failures. A
-   * service that exited fails at once. Probe output is never logged or kept.
+   * service that exited or vanished fails at once, and so does one still unready when the start-up
+   * budget runs out (each probe and wait is clipped to what is left of it). Probe output is never
+   * logged or kept, so these errors carry no cause.
    */
-  private async waitForServiceReady(planned: DockerServiceContainer): Promise<void> {
+  private async waitForServiceReady(planned: DockerServiceContainer, budget: ServiceStartBudget): Promise<void> {
     const { command, periodSeconds, timeoutSeconds, failureThreshold } = planned.service.readiness;
+    const name = planned.service.name;
     let failures = 0;
     for (;;) {
-      const state = await this.inspect<{ State?: { Running?: boolean } }>(["container", "inspect", planned.container]);
-      if (state.State?.Running !== true) throw serviceUnready(planned.service.name);
+      if (budget.remainingMs() <= 0) throw serviceUnready(name);
+      let state: { State?: { Running?: boolean } };
+      try {
+        state = await this.inspect(["container", "inspect", planned.container]);
+      } catch (error) {
+        if (error instanceof DockerCommandError) throw serviceUnready(name);
+        throw error;
+      }
+      if (state.State?.Running !== true) throw serviceUnready(name);
+      const remaining = budget.remainingMs();
+      if (remaining <= 0) throw serviceUnready(name);
       try {
         await this.run(["container", "exec", planned.container, ...command], {
-          timeoutMs: timeoutSeconds * 1_000,
+          timeoutMs: Math.min(timeoutSeconds * 1_000, remaining),
           maxOutputBytes: MAX_SERVICE_PROBE_OUTPUT_BYTES,
         });
         return;
       } catch {
         failures += 1;
-        if (failures >= failureThreshold) throw serviceUnready(planned.service.name);
+        if (failures >= failureThreshold) throw serviceUnready(name);
       }
-      await this.sleep(periodSeconds * 1_000);
+      const wait = Math.min(periodSeconds * 1_000, budget.remainingMs());
+      if (wait <= 0) throw serviceUnready(name);
+      await this.sleep(wait);
     }
   }
 

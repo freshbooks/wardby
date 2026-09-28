@@ -18,6 +18,7 @@ import {
   type DockerCommandOptions,
   type DockerCommandResult,
   type DockerCommandRunner,
+  type DockerJobLauncherOptions,
   parseWorkerDiagnosticLine,
 } from "./docker.js";
 import { buildDockerIsolationPlan, WORKER_PATHS } from "./docker-isolation.js";
@@ -841,6 +842,16 @@ class ServicesFakeDocker extends FakeDocker {
   pullFails = false;
   readinessFailures = 0;
   serviceExitsOnStart = false;
+  /** Docker refuses to create the service container. */
+  serviceCreateFails = false;
+  /** The service container disappears during its first probe. */
+  serviceVanishesOnProbe = false;
+  /** The service inspection shows a privileged container. */
+  serviceDrifts = false;
+  /** How long a pull takes on the harness clock. */
+  pullTakesMs = 0;
+  /** The harness clock; pulls advance it. */
+  clock = { now: Date.now() };
   readonly running = new Set<string>();
   readonly removed = new Set<string>();
   readonly netns: string;
@@ -874,9 +885,17 @@ class ServicesFakeDocker extends FakeDocker {
         throw new DockerCommandError(1, false);
       }
       if (action === "pull") {
+        this.clock.now += this.pullTakesMs;
         if (this.pullFails) throw new DockerCommandError(1, false);
         this.present.add(image);
         return this.ok();
+      }
+    }
+    if (group === "container" && action === "create" && this.serviceCreateFails) {
+      const name = args[args.indexOf("--name") + 1];
+      if (this.serviceContainers.has(name)) {
+        this.calls.push({ args, options });
+        throw new DockerCommandError(125, false);
       }
     }
     if (group === "container" && action !== "create") {
@@ -897,6 +916,10 @@ class ServicesFakeDocker extends FakeDocker {
           return this.ok();
         }
         if (action === "exec") {
+          if (this.serviceVanishesOnProbe) {
+            this.removed.add(name);
+            throw new DockerCommandError(1, false);
+          }
           if (this.readinessFailures > 0) {
             this.readinessFailures -= 1;
             throw new DockerCommandError(1, false);
@@ -966,6 +989,7 @@ class ServicesFakeDocker extends FakeDocker {
         Binds: null,
         CapAdd: null,
         CapDrop: ["ALL"],
+        ...(this.serviceDrifts ? { Privileged: true } : {}),
         CgroupnsMode: "private",
         IpcMode: "private",
         PidMode: "",
@@ -996,7 +1020,11 @@ class ServicesFakeDocker extends FakeDocker {
   }
 }
 
-async function servicesHarness(runId: string, override: Partial<JobSpec> = {}) {
+async function servicesHarness(
+  runId: string,
+  override: Partial<JobSpec> = {},
+  options: Partial<DockerJobLauncherOptions> = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "wardby-docker-job-"));
   temporaryRoots.push(root);
   const job: JobSpec = { ...spec(runId), services: [POSTGRES], ...override };
@@ -1017,9 +1045,12 @@ async function servicesHarness(runId: string, override: Partial<JobSpec> = {}) {
     isRunActive: async () => false,
     docker,
     transfer: new NoopTransfer(),
+    now: () => docker.clock.now,
     sleep: async (milliseconds) => {
       sleeps.push(milliseconds);
+      docker.clock.now += milliseconds;
     },
+    ...options,
   });
   return { launcher, docker, spec: job, sleeps, root };
 }
@@ -1084,7 +1115,10 @@ describe("Docker launcher with services", () => {
     const created = await servicesHarness("docker-services-unready");
     created.docker.present.add(POSTGRES.image);
     created.docker.readinessFailures = Number.POSITIVE_INFINITY;
-    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    const error = await created.launcher.launch(created.spec).catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe("coding_service_unready:postgres");
+    // Probe output never surfaces: the probe path's error carries no cause at all.
+    expect((error as Error).cause).toBeUndefined();
     expect(commands(created.docker, "container", "exec")).toHaveLength(POSTGRES.readiness.failureThreshold);
     expect(created.sleeps).toHaveLength(POSTGRES.readiness.failureThreshold - 1);
     expect(createdContainers(created.docker)).not.toContain(created.docker.plan.names.workerContainer);
@@ -1103,6 +1137,83 @@ describe("Docker launcher with services", () => {
     created.docker.pullFails = true;
     await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
     expect(createdContainers(created.docker)).not.toContain(dockerServiceContainerName(created.spec.runId, "postgres"));
+  });
+
+  it("fails as coding_service_unready when the start-up budget runs out, clipping probes and waits to it", async () => {
+    const created = await servicesHarness("docker-services-budget", {}, { serviceReadyTimeoutMs: 5_000 });
+    created.docker.present.add(POSTGRES.image);
+    created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    // failureThreshold (30) would allow far longer; the 5 s budget stops it after three probes.
+    expect(created.sleeps).toEqual([2_000, 2_000, 1_000]);
+    const probes = created.docker.calls.filter((call) => call.args[1] === "exec");
+    expect(probes.map((call) => call.options?.timeoutMs)).toEqual([2_000, 2_000, 1_000]);
+    expect(createdContainers(created.docker)).not.toContain(created.docker.plan.names.workerContainer);
+    expect(created.docker.removed).toEqual(
+      new Set([
+        dockerServiceContainerName(created.spec.runId, "postgres"),
+        created.docker.plan.names.networkKeeperContainer,
+      ]),
+    );
+  });
+
+  it("stops service start-up at the run's deadline when that comes before the budget", async () => {
+    const created = await servicesHarness("docker-services-deadline", { timeoutSec: 3 });
+    created.docker.present.add(POSTGRES.image);
+    created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    expect(created.sleeps).toEqual([2_000, 1_000]);
+  });
+
+  it("doesn't count an image pull against the budget, but bounds it by the run's deadline", async () => {
+    const created = await servicesHarness(
+      "docker-services-pull-budget",
+      { timeoutSec: 600 },
+      {
+        serviceReadyTimeoutMs: 5_000,
+      },
+    );
+    created.docker.pullTakesMs = 60_000;
+    created.docker.readinessFailures = 1;
+    await created.launcher.launch(created.spec);
+    expect(created.sleeps).toEqual([2_000]);
+    const pull = created.docker.calls.find((call) => call.args[0] === "image" && call.args[1] === "pull");
+    expect(pull?.options?.timeoutMs).toBe(300_000);
+
+    const short = await servicesHarness("docker-services-pull-deadline", { timeoutSec: 60 });
+    await short.launcher.launch(short.spec);
+    const clipped = short.docker.calls.find((call) => call.args[0] === "image" && call.args[1] === "pull");
+    expect(clipped?.options?.timeoutMs).toBe(60_000);
+  });
+
+  it("fails as coding_service_unready, without a cause, when a service vanishes between probes", async () => {
+    const created = await servicesHarness("docker-services-vanish");
+    created.docker.present.add(POSTGRES.image);
+    created.docker.serviceVanishesOnProbe = true;
+    const error = await created.launcher.launch(created.spec).catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe("coding_service_unready:postgres");
+    expect((error as Error).cause).toBeUndefined();
+    expect(commands(created.docker, "container", "exec")).toHaveLength(1);
+  });
+
+  it("fails as coding_service_unready when Docker refuses to create a service", async () => {
+    const created = await servicesHarness("docker-services-create-failure");
+    created.docker.present.add(POSTGRES.image);
+    created.docker.serviceCreateFails = true;
+    const error = await created.launcher.launch(created.spec).catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe("coding_service_unready:postgres");
+    expect((error as Error).cause).toBeInstanceOf(DockerCommandError);
+    expect(createdContainers(created.docker)).not.toContain(created.docker.plan.names.workerContainer);
+  });
+
+  it("keeps a service attestation failure an isolation error, never coding_service_unready", async () => {
+    const created = await servicesHarness("docker-services-drift");
+    created.docker.present.add(POSTGRES.image);
+    created.docker.serviceDrifts = true;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("docker_isolation_unsupported");
+    expect(commands(created.docker, "container", "start").map((args) => args.at(-1))).not.toContain(
+      dockerServiceContainerName(created.spec.runId, "postgres"),
+    );
   });
 
   it("puts serviceEnv only in the service's own create arguments", async () => {

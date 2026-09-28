@@ -246,8 +246,13 @@ time; raise that bound if first pulls on new nodes are slow.
 On Docker, the launcher starts the services one at a time and runs each
 readiness command with `docker exec` every `periodSeconds`, each attempt
 bounded by `timeoutSeconds`. A service is "not ready" after `failureThreshold`
-consecutive failures, when its container exits, or when its image can't be
-pulled within 5 minutes. The launcher uses a local copy of the digest-pinned
+consecutive failures, when its container can't be created or started or
+exits, when its image can't be pulled within 5 minutes, or when the run's
+services are still not all ready after 120 seconds. That start-up limit
+covers creating, starting and probing every service of the run together, not
+image pulls, and start-up never runs past the run's own timeout either. So an
+entry's readiness settings apply within that limit: a `failureThreshold` ×
+(`periodSeconds` + `timeoutSeconds`) longer than it never takes effect. The launcher uses a local copy of the digest-pinned
 image when the Docker host has one and otherwise pulls it without registry
 credentials. For a private registry, or to avoid public pull limits, pull the
 image on the Docker host beforehand (`docker pull <image>@sha256:<digest>`).
