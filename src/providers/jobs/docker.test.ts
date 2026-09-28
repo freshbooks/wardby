@@ -1213,13 +1213,18 @@ describe("Docker launcher with services", () => {
     expect(commands(created.docker, "container", "exec")).toHaveLength(1);
   });
 
-  it("fails as coding_service_unready when Docker refuses to create a service", async () => {
+  it("fails as coding_service_unready when Docker refuses to create a service, with the create failure as the cause", async () => {
     const created = await servicesHarness("docker-services-create-failure");
     created.docker.present.add(POSTGRES.image);
     created.docker.serviceCreateFails = true;
     const error = await created.launcher.launch(created.spec).catch((caught: unknown) => caught);
     expect((error as Error).message).toBe("coding_service_unready:postgres");
-    expect((error as Error).cause).toBeInstanceOf(DockerCommandError);
+    const cause = (error as Error).cause;
+    expect(cause).toBeInstanceOf(DockerCommandError);
+    // The create call fails with exit code 125; the follow-up inspect's "not found" (exit
+    // code 1, notFound) must not paper over it as the cause.
+    expect((cause as DockerCommandError).exitCode).toBe(125);
+    expect((cause as DockerCommandError).notFound).toBe(false);
     expect(createdContainers(created.docker)).not.toContain(created.docker.plan.names.workerContainer);
   });
 

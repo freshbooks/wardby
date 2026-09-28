@@ -548,7 +548,6 @@ function labelsMatch(actual: Record<string, string> | undefined, expected: Recor
   return Object.entries(expected).every(([key, value]) => actual?.[key] === value);
 }
 
-/** `coding_service_unready:<name>` (the executor's service_unready), keeping the Docker failure as the operator's cause. */
 /**
  * A run's service start-up budget: `budgetMs` from the start, extended by the time image pulls took,
  * and never past the run's deadline.
@@ -581,6 +580,7 @@ class ServiceStartBudget {
   }
 }
 
+/** `coding_service_unready:<name>` (the executor's service_unready), keeping the Docker failure as the operator's cause. */
 function serviceUnready(name: string, cause?: unknown): Error {
   const error = serviceUnreadyError(name);
   if (cause !== undefined) error.cause = cause;
@@ -950,6 +950,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       if (budget.remainingMs() <= 0) throw serviceUnready(name);
       await this.ensureServiceImage(planned, budget);
       if (budget.remainingMs() <= 0) throw serviceUnready(name);
+      let createFailure: DockerCommandError | undefined;
       try {
         await this.createAndAssert(
           appendLabels(planned.createArgs, labels),
@@ -959,11 +960,16 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
             assertServiceContainerInspection(inspected, record.spec, planned.service, keeperId);
             if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
           },
+          undefined,
+          (error) => {
+            createFailure = error;
+          },
         );
       } catch (error) {
         // createAndAssert tolerates a failed create (a crash retry may find it made), so a service
-        // Docker refused to create shows up as a failed inspection. Attestation failures rethrow as is.
-        if (error instanceof DockerCommandError) throw serviceUnready(name, error);
+        // Docker refused to create shows up as a failed inspection; the create's own failure is the
+        // useful cause, not that generic "not found". Attestation failures rethrow as is.
+        if (error instanceof DockerCommandError) throw serviceUnready(name, createFailure ?? error);
         throw error;
       }
       if (budget.remainingMs() <= 0) throw serviceUnready(name);
@@ -1251,11 +1257,13 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     inspectArgs: readonly string[],
     assert: (value: unknown) => void,
     options?: DockerCommandOptions,
+    onCreateFailure?: (error: DockerCommandError) => void,
   ): Promise<unknown> {
     try {
       await this.run(createArgs, options);
-    } catch {
+    } catch (error) {
       // A retry may find a resource created before the previous process crashed.
+      if (error instanceof DockerCommandError) onCreateFailure?.(error);
     }
     const inspected = await this.inspect(inspectArgs);
     assert(inspected);
