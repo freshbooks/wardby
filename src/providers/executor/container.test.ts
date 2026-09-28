@@ -538,7 +538,7 @@ describe("ContainerExecutor", () => {
       // Kubernetes: both providers.
       expect(created.executor.supportsCodingServices("codex")).toBe(true);
       expect(created.executor.supportsCodingServices("claude-code")).toBe(true);
-      // Docker: Codex only.
+      // A launcher that starts services for Codex only.
       created.jobs.serviceProviders = ["codex"];
       expect(created.executor.supportsCodingServices("codex")).toBe(true);
       expect(created.executor.supportsCodingServices("claude-code")).toBe(false);

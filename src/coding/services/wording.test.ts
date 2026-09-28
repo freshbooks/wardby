@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DECLARATION_UNAVAILABLE_SENTENCE,
   invalidDeclarationSentence,
+  LAUNCHER_UNSUPPORTED_SENTENCE,
   notAllowedServiceSentence,
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
   serviceRefusal,
@@ -19,6 +20,12 @@ describe("service refusals", () => {
       "service_not_allowed: This repository asks for `redis`, which this agent isn't allowed to use. An admin or the agent's owner can allow it.",
     );
     expect(serviceRefusalSentence(error)).toBe(notAllowedServiceSentence("redis"));
+  });
+
+  it("words the launcher refusal without naming a provider", () => {
+    expect(LAUNCHER_UNSUPPORTED_SENTENCE).toBe(
+      "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes or Docker job launcher.",
+    );
   });
 
   it("words each refusal as the spec says", () => {

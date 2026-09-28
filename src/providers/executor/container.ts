@@ -1056,7 +1056,7 @@ export class ContainerExecutor implements Executor {
     });
   }
 
-  /** The job launcher decides: Kubernetes starts services for both providers, Docker for Codex only. */
+  /** The job launcher decides (Kubernetes and Docker start services for both providers). */
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.options.jobs.supportsServicesFor?.(provider) === true;
   }

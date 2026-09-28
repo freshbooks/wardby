@@ -1033,15 +1033,18 @@ describe("coding-run services", () => {
     expect(supports).toHaveBeenCalledWith("codex");
   });
 
-  // What the Kubernetes and Docker job launchers answer (jobs/types.ts supportsServicesFor).
+  // What the job launchers answer (jobs/types.ts supportsServicesFor): Kubernetes and Docker start
+  // services for both providers; a deployment without a coding job launcher (local) for neither.
   const kubernetesSupport = () => true;
-  const dockerSupport = (provider: string) => provider === "codex";
+  const dockerSupport = (provider: string) => provider === "codex" || provider === "claude-code";
+  const noLauncherSupport = () => false;
 
   it.each([
     ["Kubernetes", "claude-code", kubernetesSupport, "pending"],
     ["Kubernetes", "codex", kubernetesSupport, "pending"],
     ["Docker", "codex", dockerSupport, "pending"],
-    ["Docker", "claude-code", dockerSupport, "refused"],
+    ["Docker", "claude-code", dockerSupport, "pending"],
+    ["local (no job launcher)", "claude-code", noLauncherSupport, "refused"],
   ] as const)("on the %s launcher, a %s run with services is %s", async (_launcher, provider, supports, status) => {
     const base = servicesAgent();
     const agent = {

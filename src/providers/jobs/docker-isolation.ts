@@ -205,11 +205,12 @@ function assertIntegerRange(value: number, min: number, max: number): void {
 }
 
 /**
- * Which runs the Docker launcher starts services for: Codex only. Claude Code's tool runner is on the
- * run network, not in the network keeper's namespace, so it could not reach a service on 127.0.0.1.
+ * Which runs the Docker launcher starts services for: Codex and Claude Code. The container that runs
+ * the run's commands (Codex's worker, Claude Code's tool runner) joins the network keeper's
+ * namespace and reaches the services on 127.0.0.1; Claude Code's agent stays on the run network.
  */
 export function dockerSupportsServicesFor(provider: CodingProvider): boolean {
-  return provider === "codex";
+  return provider === "codex" || provider === "claude-code";
 }
 
 function validateSpec(spec: JobSpec): void {

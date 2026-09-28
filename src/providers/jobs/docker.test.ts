@@ -1108,10 +1108,10 @@ function commands(docker: FakeDocker, group: string, action: string): Array<read
 }
 
 describe("Docker launcher with services", () => {
-  it("starts services for Codex runs only", async () => {
+  it("starts services for Codex and Claude Code runs", async () => {
     const { launcher } = await harness("docker-supports-services");
     expect(launcher.supportsServicesFor("codex")).toBe(true);
-    expect(launcher.supportsServicesFor("claude-code")).toBe(false);
+    expect(launcher.supportsServicesFor("claude-code")).toBe(true);
   });
 
   it("starts the network keeper, then each service, then the worker in the keeper's namespace", async () => {

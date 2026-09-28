@@ -649,7 +649,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     this.ready = this.initialize();
   }
 
-  /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex runs. */
+  /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex and Claude Code runs. */
   supportsServicesFor(provider: CodingProvider): boolean {
     return dockerSupportsServicesFor(provider);
   }

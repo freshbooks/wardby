@@ -11,6 +11,7 @@ import {
   buildNetworkKeeperCreateArgs,
   assertWorkerContainerInspection,
   buildDockerIsolationPlan,
+  dockerSupportsServicesFor,
   buildWorkerCreateArgs,
   claudeToolLimits,
   isImmutableDockerImage,
@@ -693,6 +694,11 @@ describe("Docker isolation with services", () => {
         KEEPER_ID,
       ),
     ).toThrow("docker_isolation_unsupported");
+  });
+
+  it("offers services to Codex and Claude Code runs", () => {
+    expect(dockerSupportsServicesFor("codex")).toBe(true);
+    expect(dockerSupportsServicesFor("claude-code")).toBe(true);
   });
 });
 
