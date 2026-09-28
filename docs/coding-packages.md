@@ -275,7 +275,12 @@ Inside the run, `npm install <package>` and `pip install <package>` (into
 for anything reachable from the allowlist. Installed `node_modules`, the
 `.venv`, and package-manager caches are never collected: they don't count
 toward workspace size or checks, and they're never part of the resulting
-commit or diff.
+commit or diff. The agent's shells get `TMPDIR` pointed at the workspace's
+`.cache/tmp` rather than the sandbox's small in-memory `/tmp`, since an
+install like `pip install -e '.[test]'` unpacks and builds in `TMPDIR` and
+can otherwise run out of space on a large package; that directory counts
+toward the run's `workspaceDiskMb` and, like the rest of `.cache`, is never
+collected either.
 
 ## Safeguards
 

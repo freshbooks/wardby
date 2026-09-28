@@ -13,6 +13,10 @@ export const TOOL_SETUP_ENV = "WARDBY_TOOL_SETUP";
 export const SHIM_DIRECTORY = "/opt/wardby/bin";
 
 const RESERVED_NAMES = new Set(["HOME", "LANG", "PATH", "TMPDIR", TOOL_SETUP_ENV]);
+/** Workspace-relative cache root: registry config files (parseToolSetup) and the
+ *  agent's temporary files (TMPDIR, below) both live here, so both stay out of
+ *  the collected workspace via the ".cache" entry in collect-exclude.ts. */
+const CACHE_DIRNAME = ".cache";
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 /**
  * Setup bounds; claude-tool-setup.ts builds within exactly these. Entries cover the registry's
@@ -27,12 +31,23 @@ export const MAX_SETUP_BYTES = 96 * 1024;
 const FILE_MODES = new Set([0o600, 0o644]);
 const EMPTY_SETUP = Object.freeze({ env: Object.freeze({}), files: Object.freeze([]) });
 
-export function toolEnvironment() {
+function cacheRootFor(workspacePath) {
+  return `${workspacePath}/${CACHE_DIRNAME}`;
+}
+
+/** Where a command's TMPDIR points: workspace disk, not the tiny `/tmp` tmpfs
+ *  (docker-isolation.ts's scratchMb caps it at 64 MiB, too small for a real
+ *  `pip install` or `npm install` to unpack and build in). */
+function cacheTmpDirFor(workspacePath) {
+  return `${cacheRootFor(workspacePath)}/tmp`;
+}
+
+export function toolEnvironment(workspacePath = "/workspace") {
   return {
     HOME: "/home/wardby",
     LANG: "C.UTF-8",
     PATH: `${SHIM_DIRECTORY}:/usr/local/bin:/usr/bin:/bin`,
-    TMPDIR: "/tmp",
+    TMPDIR: cacheTmpDirFor(workspacePath),
   };
 }
 
@@ -63,7 +78,7 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
     env[name] = text;
   }
   if (!Array.isArray(value.files) || value.files.length > MAX_FILES) throw invalid();
-  const cacheRoot = `${workspacePath}/.cache/`;
+  const cacheRoot = `${cacheRootFor(workspacePath)}/`;
   const files = value.files.map((file) => {
     if (!file || typeof file.path !== "string" || typeof file.content !== "string") throw invalid();
     if (!file.path.startsWith(cacheRoot) || file.path.split("/").includes("..")) throw invalid();
@@ -90,14 +105,27 @@ async function applySetupFiles(setup) {
   }
 }
 
+/**
+ * Rewritten before every command, like applySetupFiles above: a command may delete its own
+ * .cache (including TMPDIR), and a package manager needs the directory to already exist.
+ */
+async function ensureTmpDir(workspacePath) {
+  try {
+    await mkdir(cacheTmpDirFor(workspacePath), { recursive: true, mode: 0o700 });
+  } catch {
+    // Best effort: a command that can't create its own TMPDIR fails loudly on its own.
+  }
+}
+
 export async function runCommand(command, timeoutMs, workspacePath = "/workspace", setup = EMPTY_SETUP) {
   if (Buffer.byteLength(command) > MAX_COMMAND_BYTES) throw new Error("tool_command_too_large");
   const timeout = Math.max(1_000, Math.min(MAX_TIMEOUT_MS, timeoutMs));
   await applySetupFiles(setup);
+  await ensureTmpDir(workspacePath);
   return new Promise((resolve) => {
     const child = spawn("/bin/sh", ["-lc", command], {
       cwd: workspacePath,
-      env: { ...setup.env, ...toolEnvironment() },
+      env: { ...setup.env, ...toolEnvironment(workspacePath) },
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, so a timeout reaches grandchildren that still hold the pipes.
       detached: true,

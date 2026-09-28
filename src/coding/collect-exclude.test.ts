@@ -51,6 +51,9 @@ describe("isCollectExcluded", () => {
     ["web/distribution/app.js", false],
     ["src/node_modules_helper.ts", false],
     ["src/app.ts", false],
+    // The agent's TMPDIR (coding-worker/driver.ts, claude-tool-runner/command.mjs)
+    // lives under the workspace's .cache, so it must never reach a pull request.
+    [".cache/tmp/pip-req-build-abc123/setup.py", true],
   ])("%s -> %s", (path, expected) => {
     expect(isCollectExcluded(path, exclusions)).toBe(expected);
   });
