@@ -45,6 +45,12 @@ const WARDBY_COMMAND_TOOL = "mcp__wardby_tools__run_command";
 const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_TOOL_TEXT_BYTES = 256 * 1024;
+/**
+ * The longest run_command timeout the Claude tool runner offers the model (its MAX_TIMEOUT_MS,
+ * src/claude-tool-runner/command.mjs; the proxy tests keep the two equal). A lower limit here let the
+ * command run, then refused the next request, which replays that tool call, as unsupported.
+ */
+export const MAX_COMMAND_TIMEOUT_MS = 120_000;
 
 export class CodingProxyError extends Error {
   constructor(
@@ -557,7 +563,7 @@ function validateCommandInput(value: unknown): void {
     (typeof input.timeout_ms !== "number" ||
       !Number.isSafeInteger(input.timeout_ms) ||
       input.timeout_ms < 1_000 ||
-      input.timeout_ms > 60_000)
+      input.timeout_ms > MAX_COMMAND_TIMEOUT_MS)
   ) {
     throw new CodingProxyError(400, "unsupported_anthropic_feature");
   }
