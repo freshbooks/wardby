@@ -96,12 +96,29 @@ function boundedPrompt(task: string, runId: string): string {
  *  the real tools on the agent's PATH. */
 export const WORKER_SHIM_DIRECTORY = "/opt/wardby/bin";
 
-function workerEnvironment(): Record<string, string> {
+/**
+ * The workspace-relative cache root: registryWorkerSetup writes package-manager
+ * config under here, and the agent's temporary files (TMPDIR) now live here too
+ * -- both stay out of the collected workspace via the ".cache" entry in
+ * BUILTIN_COLLECT_EXCLUDE_NAMES (coding/collect-exclude.ts).
+ */
+function workspaceCacheRoot(workspace: string): string {
+  return `${workspace}/.cache`;
+}
+
+/** Where the agent's shells get TMPDIR: workspace disk, not the tiny `/tmp` tmpfs
+ *  (docker-isolation.ts's scratchMb caps it at 64 MiB, too small for a real
+ *  `pip install` or `npm install` to unpack and build in). */
+function workspaceTmpDir(workspace: string): string {
+  return `${workspaceCacheRoot(workspace)}/tmp`;
+}
+
+function workerEnvironment(workspace: string): Record<string, string> {
   return {
     HOME: "/home/wardby",
     LANG: "C.UTF-8",
     PATH: `${WORKER_SHIM_DIRECTORY}:/usr/local/bin:/usr/bin:/bin`,
-    TMPDIR: "/tmp",
+    TMPDIR: workspaceTmpDir(workspace),
   };
 }
 
@@ -126,17 +143,22 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
   const registry = registryWorkerSetup({
     proxyBaseUrl: options.proxyBaseUrl,
     capability: options.capability,
-    cacheRoot: `${options.workspace}/.cache`,
+    cacheRoot: workspaceCacheRoot(options.workspace),
   });
   for (const file of registry.files) {
     await mkdir(dirname(file.path), { recursive: true });
     await writeFile(file.path, file.content, { mode: file.mode });
   }
+  await mkdir(workspaceTmpDir(options.workspace), { recursive: true, mode: 0o700 });
   const client = options.createClient({
     proxyBaseUrl: options.proxyBaseUrl,
     capability: options.capability,
     developerInstructions: WORKER_SECURITY_INSTRUCTIONS,
-    environment: { ...serviceEnvironment(options.input.services), ...workerEnvironment(), ...registry.env },
+    environment: {
+      ...serviceEnvironment(options.input.services),
+      ...workerEnvironment(options.workspace),
+      ...registry.env,
+    },
   });
   const thread = client.startThread({
     model: options.input.model,
