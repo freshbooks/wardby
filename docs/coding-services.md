@@ -8,15 +8,13 @@ fresh, empty instance, and the run's sandbox and network policy do not change.
 
 Services work on the Kubernetes job launcher (`JOB_LAUNCHER=kubernetes`,
 running Kubernetes 1.29 or later, which its native sidecars need) and on the
-Docker job launcher (`JOB_LAUNCHER=docker`); see
-[coding-worker-isolation.md](coding-worker-isolation.md). On Kubernetes they
-are available to Codex and Claude Code agents; on Docker, to Codex agents only
-(a Claude Code run that declares services is refused there). A run whose
-agent allows at least one service is refused if its repository declares one
-and the deployment or agent can't start services — an agent that allows none
-never reads the declaration in the first place (see "Allowing services for an
-agent" below), so its runs are unaffected by this and start normally on any
-launcher.
+Docker job launcher (`JOB_LAUNCHER=docker`), for Codex and Claude Code agents
+on both; see [coding-worker-isolation.md](coding-worker-isolation.md). A run
+whose agent allows at least one service is refused if its repository declares
+one and the deployment can't start services (for example
+`JOB_LAUNCHER=local`) — an agent that allows none never reads the declaration
+in the first place (see "Allowing services for an agent" below), so its runs
+are unaffected by this and start normally on any launcher.
 
 ## How it works
 
@@ -33,11 +31,13 @@ launcher.
    coding agent does not start until every service reports ready.
 4. The agent's shells receive each service's variables (such as
    `DATABASE_URL`), and its instructions gain a short note listing the services,
-   their variables, and that they start empty. On Kubernetes, Claude Code runs
-   work the same way: its tool runner, which actually runs shell commands in
-   the repository, reaches every service on `127.0.0.1` with the same
-   variables. The tool runner itself starts before the service sidecars; the
-   keeper and the agent are what wait for every service to be ready.
+   their variables, and that they start empty. Claude Code runs work the same
+   way on both launchers: its tool runner, which actually runs shell commands
+   in the repository, reaches every service on `127.0.0.1` with the same
+   variables. On Kubernetes the tool runner starts before the service
+   sidecars, and the keeper and the agent wait for every service to be ready;
+   on Docker the tool runner and the agent are created only after every
+   service is ready.
 5. When the run ends, its pod (Kubernetes) or its containers (Docker) are
    deleted, and each service and its data go with them.
 
@@ -218,15 +218,15 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 
 ## Errors
 
-| Problem                                             | When     | Run                                        | What the requester sees                                                                                                                                                                        |
-| --------------------------------------------------- | -------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `services.yaml` is invalid                          | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                                                                                       |
-| The file couldn't be read                           | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                                    |
-| A name and version the catalog doesn't have         | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                                    |
-| A service the agent isn't allowed                   | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                                        |
-| Services on a launcher or agent that can't use them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start for this agent: services need the Kubernetes job launcher, or the Docker job launcher with a Codex coding agent." |
-| A service never became ready                        | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                         |
-| The run's changes touched a protected path          | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change."          |
+| Problem                                        | When     | Run                                        | What the requester sees                                                                                                                                                               |
+| ---------------------------------------------- | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `services.yaml` is invalid                     | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                                                                              |
+| The file couldn't be read                      | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                           |
+| A name and version the catalog doesn't have    | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                           |
+| A service the agent isn't allowed              | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
+| Services on a deployment that can't start them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes or Docker job launcher."                                                   |
+| A service never became ready                   | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
+| The run's changes touched a protected path     | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
 
 A refused run's `error` (from `get_run`) is the code followed by that sentence.
 The sentence reaches the requester on the run's status comment and, for a

@@ -181,8 +181,8 @@ services:
   postgres: "16"
 ```
 
-Every run then gets its own fresh database next to it, on the Kubernetes
-launcher, with `DATABASE_URL` set in the agent's shells. Images come from an
+Every run then gets its own fresh database next to it, on the Kubernetes or
+Docker launcher, with `DATABASE_URL` set in the agent's shells. Images come from an
 admin-managed catalog pinned by digest, each agent is allowed only the services
 its owner lists, and the run's network policy does not change. See
 [coding services](https://github.com/wardby/wardby/blob/main/docs/coding-services.md).
@@ -370,8 +370,8 @@ for the repository's own dependency-override policy.
 - Containerized Codex and Claude Code executors with trusted GitHub draft-PR
   finalization.
 - Per-run PostgreSQL, Redis and MySQL services for coding runs, declared in the
-  repository and allowed per agent: Codex and Claude Code runs on the
-  Kubernetes launcher, Codex runs on the Docker launcher.
+  repository and allowed per agent, for Codex and Claude Code runs on the
+  Kubernetes and Docker launchers.
 - In-process reconciliation and optional DBOS durable workflows.
 - Self-hosted or delegated OAuth for remote MCP access.
 - Prometheus metrics and provisioned Grafana dashboards for local operations.
