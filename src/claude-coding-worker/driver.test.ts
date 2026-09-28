@@ -190,8 +190,7 @@ describe("runClaudeCodingWorker", () => {
     });
     expect(captured?.environment.CLAUDE_CODE_MAX_RETRIES).toBe("3");
     expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).toContain(
-      "npm installs in that tool already go through Wardby's package registry; don't configure registries or proxies.",
+      "npm installs in that tool, and pip installs inside a Python virtual environment where the tool has Python, already go through Wardby's package registry; don't configure registries or proxies.",
     );
-    expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).not.toContain("pip");
   });
 });

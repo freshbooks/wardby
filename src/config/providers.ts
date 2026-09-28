@@ -106,6 +106,8 @@ export interface ContainerExecutorConfig {
   workerImage?: string;
   claudeWorkerImage?: string;
   claudeToolRunnerImage?: string;
+  /** Claude tool-runner images for toolchains beyond "node", keyed by toolchain, then version. */
+  claudeToolRunnerImages: Record<string, Record<string, string>>;
   proxyContainer?: string;
   stateRoot?: string;
   artifactRoot?: string;
@@ -145,6 +147,10 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
   if (env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12) {
     additionalWorkerImages["node-python"] = { "3.12": env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12 };
   }
+  const claudeToolRunnerImages: Record<string, Record<string, string>> = {};
+  if (env.CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12) {
+    claudeToolRunnerImages["node-python"] = { "3.12": env.CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 };
+  }
   const diskMb = optionalPositiveInteger(env.CODING_DISK_MB, "CODING_DISK_MB") ?? 2048;
   // Defaults to the effective diskMb: raising the ceiling an agents:write caller can request is an
   // explicit operator choice, so upgrading with an unchanged environment changes nothing.
@@ -156,6 +162,7 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
     workerImage: env.CODING_WORKER_IMAGE,
     claudeWorkerImage: env.CODING_CLAUDE_WORKER_IMAGE,
     claudeToolRunnerImage: env.CODING_CLAUDE_TOOL_RUNNER_IMAGE,
+    claudeToolRunnerImages,
     proxyContainer: env.CODING_PROXY_CONTAINER,
     stateRoot: env.CODING_JOB_STATE_ROOT,
     artifactRoot: env.CODING_ARTIFACT_ROOT,

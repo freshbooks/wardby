@@ -123,7 +123,8 @@ docker build --platform linux/amd64 -t "${REGISTRY}/coding-worker:latest" -f src
 docker build --platform linux/amd64 -t "${REGISTRY}/coding-worker-node-python:latest" -f src/coding-worker/Dockerfile.node-python . >/dev/null
 docker build --platform linux/amd64 -t "${REGISTRY}/claude-coding-worker:latest" -f src/claude-coding-worker/Dockerfile . >/dev/null
 docker build --platform linux/amd64 -t "${REGISTRY}/claude-tool-runner:latest" -f src/claude-tool-runner/Dockerfile . >/dev/null
-for img in runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner; do docker push "${REGISTRY}/${img}:latest" >/dev/null; done
+docker build --platform linux/amd64 --target node-python -t "${REGISTRY}/claude-tool-runner-node-python:latest" -f src/claude-tool-runner/Dockerfile . >/dev/null
+for img in runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner claude-tool-runner-node-python; do docker push "${REGISTRY}/${img}:latest" >/dev/null; done
 
 # Digests, not tags. The launcher refuses a tag, and a digest is the only
 # reference that still means the same bytes tomorrow.
@@ -134,6 +135,7 @@ WORKER_IMAGE="$(digest_of coding-worker)"
 WORKER_IMAGE_NODE_PYTHON="$(digest_of coding-worker-node-python)"
 CLAUDE_WORKER_IMAGE="$(digest_of claude-coding-worker)"
 CLAUDE_TOOL_RUNNER_IMAGE="$(digest_of claude-tool-runner)"
+CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON="$(digest_of claude-tool-runner-node-python)"
 
 echo "==> 4/${TOTAL_STEPS} verify the worker images have tar, head and test"
 # Seeding and collection shell out to these. Without them every launch hangs
@@ -151,8 +153,15 @@ if ! docker run --rm --platform linux/amd64 --entrypoint sh "$WORKER_IMAGE_NODE_
   exit 1
 fi
 # Claude's tool runner answers the pod's startup probe with `test -S`.
-if ! docker run --rm --platform linux/amd64 --entrypoint sh "$CLAUDE_TOOL_RUNNER_IMAGE" -c 'command -v test' >/dev/null; then
-  echo "up.sh: the Claude tool runner image is missing test." >&2
+for image in "$CLAUDE_TOOL_RUNNER_IMAGE" "$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON"; do
+  if ! docker run --rm --platform linux/amd64 --entrypoint sh "$image" -c 'command -v test' >/dev/null; then
+    echo "up.sh: the Claude tool runner image ${image} is missing test." >&2
+    exit 1
+  fi
+done
+# Claude's node-python tool runner runs a Python project's own checks, like the Codex one.
+if ! docker run --rm --platform linux/amd64 --entrypoint sh "$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON" -c 'python --version && python -m pytest --version && python -m ruff --version' >/dev/null; then
+  echo "up.sh: the Claude node-python tool runner image is missing python, pytest or ruff." >&2
   exit 1
 fi
 
@@ -319,6 +328,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
+        -e "s|value: wardby-claude-tool-runner-image-node-python-3-12$|value: ${CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON}|" \
         -e "s|value: wardby-claude-tool-runner-image$|value: ${CLAUDE_TOOL_RUNNER_IMAGE}|" \
         -e "s|value: wardby-claude-coding-worker-image$|value: ${CLAUDE_WORKER_IMAGE}|" \
         -e "s|value: wardby-coding-worker-image$|value: ${WORKER_IMAGE}|" \

@@ -3,7 +3,8 @@ WORKDIR /runner
 COPY src/claude-tool-runner/package.json src/claude-tool-runner/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
+# The tool runner every Claude Code run uses; the two targets below add only their toolchain.
+FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS base
 RUN npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
@@ -31,3 +32,42 @@ RUN test ! -e /usr/bin/docker \
 USER 10001:10001
 ENV NODE_ENV=production HOME=/home/wardby
 ENTRYPOINT ["node", "/opt/wardby/claude-tool-runner/main.mjs"]
+
+# node-python (build with --target node-python): the same tool runner plus Python, pytest and ruff,
+# matching the Codex node-python worker image (src/coding-worker/Dockerfile.node-python) package for
+# package. python3-venv stays: in registry mode the agent installs packages with
+# `python -m venv --system-site-packages .venv && .venv/bin/python -m pip install ...`, and pip there
+# reaches only the proxy's registry through the PIP_* settings in WARDBY_TOOL_SETUP. The system pip is
+# removed (Debian refuses `pip install` outside a venv, and the root filesystem is read-only anyway).
+FROM base AS node-python
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
+    && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 \
+    && apt-get purge -y --auto-remove python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    # Most Python projects (and their own docs) say `python`, not `python3`.
+    && ln -s /usr/bin/python3 /usr/bin/python
+RUN test ! -e /usr/bin/docker \
+    && test ! -e /usr/bin/ssh \
+    && test ! -e /usr/bin/curl \
+    && test ! -e /usr/bin/wget \
+    && test ! -e /usr/bin/sudo \
+    && test ! -e /usr/bin/gcc \
+    && test ! -e /usr/bin/make \
+    && test ! -e /usr/bin/git \
+    && test ! -e /usr/bin/pip \
+    && test ! -e /usr/bin/pip3 \
+    && python --version \
+    && python -m pytest --version \
+    && python -m ruff --version \
+    # A registry-mode venv must be creatable offline, carry pip, and still see pytest/ruff.
+    && python -m venv --system-site-packages /tmp/venv-check \
+    && /tmp/venv-check/bin/python -m pip --version \
+    && /tmp/venv-check/bin/python -m pytest --version \
+    && rm -rf /tmp/venv-check \
+    && test "$(sh -lc 'command -v python')" = /usr/bin/python
+USER 10001:10001
+
+# The plain Node tool runner: the default target, so `docker build` without --target builds it.
+FROM base AS runtime

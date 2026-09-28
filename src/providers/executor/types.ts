@@ -48,6 +48,13 @@ export interface Executor {
    */
   resolveCodingWorkerImage?(selector: CodingImageSelector): string;
   /**
+   * Claude Code's tool-runner image (the container that runs its commands) for the agent's
+   * toolchain, resolved and persisted at dispatch alongside the worker image; null for Codex, whose
+   * one worker image carries the toolchain. Throws, like resolveCodingWorkerImage, on a toolchain
+   * with no image.
+   */
+  resolveCodingToolImage?(selector: CodingImageSelector): string | null;
+  /**
    * Coding-run services (docs/coding-services.md): the raw text of the
    * repository's .wardby/services.yaml at `baseRef`, or null when it has none.
    * Called by dispatch before its transaction (it is a network call). An

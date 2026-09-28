@@ -78,6 +78,8 @@ JOB_LAUNCHER=local
 CODING_WORKER_IMAGE=sha256:replace-with-worker-image-id
 CODING_CLAUDE_WORKER_IMAGE=sha256:replace-with-claude-worker-image-id
 CODING_CLAUDE_TOOL_RUNNER_IMAGE=sha256:replace-with-claude-tool-runner-image-id
+# Only for Claude Code agents on the node-python toolchain (version 3.12):
+CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12=sha256:replace-with-claude-tool-runner-node-python-image-id
 CODING_PROXY_CONTAINER=wardby-coding-proxy
 VCS_WORK_ROOT=/tmp/wardby-vcs
 CODING_JOB_STATE_ROOT=/tmp/wardby-docker-jobs
@@ -88,8 +90,11 @@ GITHUB_APP_ID=replace-with-app-id
 GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
 ```
 
-This local, immutable-`sha256:` ID form of `CODING_CLAUDE_WORKER_IMAGE` and
-`CODING_CLAUDE_TOOL_RUNNER_IMAGE` is only accepted by the Docker launcher.
+`npm run claude:images:local` builds the Claude agent image and both tool-runner
+images (`wardby-claude-tool-runner:phase5`, and
+`wardby-claude-tool-runner:phase5-node-python` for the `node-python` toolchain).
+This local, immutable-`sha256:` ID form of the `CODING_CLAUDE_*` images is only
+accepted by the Docker launcher.
 `JOB_LAUNCHER=kubernetes` needs both images pushed to a registry and set as
 `repo@sha256:<64 hex>` registry digests instead — the control plane refuses
 to start otherwise — which `deploy/gke/up.sh` and `deploy/kind-coding/up.sh`
