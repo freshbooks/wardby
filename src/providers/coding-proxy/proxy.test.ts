@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { estimateReservationUsd } from "./metering.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
 import {
+  MAX_COMMAND_TIMEOUT_MS,
   CodingProxy,
   CodingProxyError,
   CLAUDE_CODE_ANTHROPIC_BETAS,
@@ -11,6 +12,7 @@ import {
   type CreatedCodingProxySession,
   type ProxyResponseSink,
 } from "./proxy.js";
+import { MAX_TIMEOUT_MS as TOOL_RUNNER_MAX_TIMEOUT_MS } from "../../claude-tool-runner/command.mjs";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import type { ModelPricing } from "../llm/pricing.js";
 import type { ProxyAuditEvent, ProxyProtocol } from "./types.js";
@@ -715,6 +717,51 @@ describe("CodingProxy Anthropic Messages", () => {
       type: "tool_result",
       tool_use_id: "toolu_wardby_command",
       cache_control: { type: "ephemeral" },
+    });
+  });
+
+  describe("run_command timeouts", () => {
+    const replaying = async (timeoutMs: number) => {
+      const body = JSON.parse(await fixture("anthropic-sdk-request.json"));
+      body.stream = false;
+      body.messages.push(
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_wardby_timeout",
+              name: "mcp__wardby_tools__run_command",
+              input: { command: "python -m pytest -q", timeout_ms: timeoutMs },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_wardby_timeout", content: "exit_code=0\n", is_error: false },
+          ],
+        },
+      );
+      return JSON.stringify(body);
+    };
+
+    it("accepts the longest timeout the tool runner offers the model", async () => {
+      expect(MAX_COMMAND_TIMEOUT_MS).toBe(TOOL_RUNNER_MAX_TIMEOUT_MS);
+      const h = await harness({
+        protocol: "anthropic-messages",
+        fetch: async () => Response.json(JSON.parse(await fixture("anthropic-message-response.json"))),
+      });
+      await execute(h, "command-max-timeout", new TestSink(), await replaying(TOOL_RUNNER_MAX_TIMEOUT_MS));
+      expect(h.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses a timeout past the tool runner's own limit", async () => {
+      const h = await harness({ protocol: "anthropic-messages" });
+      await expect(
+        execute(h, "command-over-timeout", new TestSink(), await replaying(TOOL_RUNNER_MAX_TIMEOUT_MS + 1)),
+      ).rejects.toMatchObject({ status: 400, code: "unsupported_anthropic_feature" });
+      expect(h.fetch).not.toHaveBeenCalled();
     });
   });
 
