@@ -6,13 +6,17 @@ says which services it needs; wardby's service catalog says what each one is;
 the agent's owner says which ones the agent may use. Every run gets its own
 fresh, empty instance, and the run's sandbox and network policy do not change.
 
-Services need the Kubernetes job launcher (`JOB_LAUNCHER=kubernetes`, see
-[coding-worker-isolation.md](coding-worker-isolation.md)) running Kubernetes
-1.29 or later, which the native sidecars below need. On the Docker
-launcher, a run whose agent allows at least one service is refused if its
-repository declares one — an agent that allows none never reads the
-declaration in the first place (see "Allowing services for an agent" below),
-so its runs are unaffected by this and start normally on either launcher.
+Services work on the Kubernetes job launcher (`JOB_LAUNCHER=kubernetes`,
+running Kubernetes 1.29 or later, which its native sidecars need) and on the
+Docker job launcher (`JOB_LAUNCHER=docker`); see
+[coding-worker-isolation.md](coding-worker-isolation.md). They are available
+to Codex coding agents. A Claude Code agent's repository commands run in a
+container with no network, so they could not reach a service. A run whose
+agent allows at least one service is refused if its repository declares one
+and the deployment or agent can't start services — an agent that allows none
+never reads the declaration in the first place (see "Allowing services for an
+agent" below), so its runs are unaffected by this and start normally on any
+launcher.
 
 ## How it works
 
@@ -22,15 +26,16 @@ so its runs are unaffected by this and start normally on either launcher.
    branch through the GitHub App (never from the run's own branch), checks each
    entry against the service catalog and the agent's allowed services, and
    either refuses the run or records the resolved services on it.
-3. The run's pod starts each service as a native sidecar (an init container
-   with `restartPolicy: Always`, a Kubernetes feature that needs Kubernetes
-   1.29 or later) before anything else in the run. The coding agent does not
-   start until every service reports ready.
+3. The run starts each service before anything else in the run. On
+   Kubernetes each is a native sidecar in the run's pod (an init container
+   with `restartPolicy: Always`, which needs Kubernetes 1.29 or later). On
+   Docker each is its own container sharing the run's network namespace. The
+   coding agent does not start until every service reports ready.
 4. The agent's shells receive each service's variables (such as
    `DATABASE_URL`), and its instructions gain a short note listing the services,
    their variables, and that they start empty.
-5. When the run ends, its pod is deleted, and each service and its data go
-   with it.
+5. When the run ends, its pod (Kubernetes) or its containers (Docker) are
+   deleted, and each service and its data go with them.
 
 `get_run` lists a run's services, for example `"services": ["postgres 16"]`.
 
@@ -96,14 +101,14 @@ An entry has:
 | Field             | Meaning                                                                                                                                                  |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`, `version` | What a repository declares. Unique together.                                                                                                             |
-| `kind`            | `sidecar`: a fresh instance in each run's pod.                                                                                                           |
+| `kind`            | `sidecar`: a fresh instance next to each run.                                                                                                            |
 | `image`           | The image, pinned by digest.                                                                                                                             |
 | `port`            | The port it listens on.                                                                                                                                  |
 | `serviceEnv`      | Environment for the service container. Per-run throwaway values only; never put a secret here.                                                           |
 | `testEnv`         | Variables the agent's shells receive. Upper-case names; names wardby uses itself (`PATH`, `HOME`, `PIP_*`, `WARDBY_*`, proxy settings, ...) are refused. |
 | `readiness`       | A command in the image that succeeds once the service accepts connections on `127.0.0.1`, with its period, timeout and failure threshold.                |
 | `resources`       | CPU (millicores), memory (MiB) and disk (MiB). Requests equal limits.                                                                                    |
-| `dataPath`        | The directory the service writes its data to; an empty volume in every run.                                                                              |
+| `dataPath`        | The directory the service writes its data to; an empty volume in every run (memory-backed on Docker).                                                    |
 | `writablePaths`   | Other directories the image writes to (a socket directory, `/tmp`). The service's root filesystem is read-only.                                          |
 
 ### Built-in services
@@ -157,6 +162,11 @@ filesystem and no Linux capabilities, so list every directory it writes to.
 Probe the service over TCP on `127.0.0.1` rather than a Unix socket: database
 images commonly start a temporary socket-only server while they initialize.
 
+On the Docker launcher, every directory the image declares as a `VOLUME` must
+be its `dataPath` or one of its `writablePaths`. Any other `VOLUME` would be an
+unbounded volume on the host's disk, so the run fails its isolation check
+instead.
+
 ## Allowing services for an agent
 
 The agent's owner lists the catalog names its runs may use (any version the
@@ -204,15 +214,15 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 
 ## Errors
 
-| Problem                                      | When     | Run                                        | What the requester sees                                                                                                                                                               |
-| -------------------------------------------- | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `services.yaml` is invalid                   | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                                                                              |
-| The file couldn't be read                    | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                           |
-| A name and version the catalog doesn't have  | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                           |
-| A service the agent isn't allowed            | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
-| Services on a launcher that can't start them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes job launcher."                                                             |
-| A service never became ready                 | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
-| The run's changes touched a protected path   | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
+| Problem                                             | When     | Run                                        | What the requester sees                                                                                                                                                               |
+| --------------------------------------------------- | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `services.yaml` is invalid                          | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                                                                              |
+| The file couldn't be read                           | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                           |
+| A name and version the catalog doesn't have         | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                           |
+| A service the agent isn't allowed                   | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
+| Services on a launcher or agent that can't use them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start for this agent: services need the Kubernetes or Docker job launcher and a Codex coding agent."           |
+| A service never became ready                        | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
+| The run's changes touched a protected path          | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
 
 A refused run's `error` (from `get_run`) is the code followed by that sentence.
 The sentence reaches the requester on the run's status comment and, for a
@@ -221,13 +231,22 @@ coding run started by another agent, in that agent's tool result. A
 [Run changed a protected path](../help/errors/protected-path.md) -- but is
 listed here because it uses the same category/sentence mechanism.
 
-A service is "not ready" when its readiness command keeps failing past its
-failure threshold (the sidecar restarts), its image can't be pulled or started,
-or it has still not started when the launcher's pod-start bound
-(`KUBERNETES_READY_TIMEOUT_MS`, default 120000) is reached. So an entry's
+On Kubernetes, a service is "not ready" when its readiness command keeps
+failing past its failure threshold (the sidecar restarts), its image can't be
+pulled or started, or it has still not started when the launcher's pod-start
+bound (`KUBERNETES_READY_TIMEOUT_MS`, default 120000) is reached. So an entry's
 readiness is bounded by that timeout: a `failureThreshold` × `periodSeconds`
 longer than it never takes effect. Pulling a service image adds to pod start
 time; raise that bound if first pulls on new nodes are slow.
+
+On Docker, the launcher starts the services one at a time and runs each
+readiness command with `docker exec` every `periodSeconds`, each attempt
+bounded by `timeoutSeconds`. A service is "not ready" after `failureThreshold`
+consecutive failures, when its container exits, or when its image can't be
+pulled within 5 minutes. The launcher uses a local copy of the digest-pinned
+image when the Docker host has one and otherwise pulls it without registry
+credentials. For a private registry, or to avoid public pull limits, pull the
+image on the Docker host beforehand (`docker pull <image>@sha256:<digest>`).
 
 ## Cost and capacity
 
@@ -238,6 +257,22 @@ toward the namespace's ResourceQuota and, on GKE Autopilot, toward what you are
 billed for the run's pod and its 10 GiB pod ephemeral-storage ceiling. A run
 whose workspace and services together exceed that ceiling fails before its pod
 is created.
+
+On the Docker launcher everything a service stores is in memory: its data
+path and each writable path are tmpfs mounts, so its memory limit is its
+catalog memory plus its disk (its data volume and 64 MiB for each writable
+path) plus 64 MiB of shared memory, with its catalog CPU and at most 512
+processes. Size the Docker host's RAM for `CODING_MAX_CONCURRENT` runs with
+their services. A service that exits during a run is not restarted on Docker;
+the run's tests see it gone.
+
+Unlike a managed Kubernetes tier such as GKE Autopilot, which checks a
+resource ceiling per pod, the Docker launcher does not cap the combined memory
+of a single run's services. Size a Docker host's RAM for the worker plus the
+worst case a repository could declare in one run: up to five services, each
+at its catalog entry's memory plus disk plus 64 MiB. A custom catalog entry's
+`resources` (`create_service`/`update_service`) is what sets those numbers, so
+review them before allowing a repository to declare more or larger services.
 
 ## Upgrading an existing deployment
 

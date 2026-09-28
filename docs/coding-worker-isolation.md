@@ -220,6 +220,27 @@ The worker policy requires:
 - At most 2 MiB of local Docker logs and a cooperative SIGTERM grace period
   before forced termination.
 
+A run with services (see [coding-services.md](coding-services.md)) adds two
+kinds of container, both labelled and attested like the others before they
+start:
+
+- A **network keeper** (`wardby-netns-<token>`): the worker image running an
+  idle `node` process as `10001:10001`, read-only, all capabilities dropped,
+  no new privileges, built-in seccomp, 64 MiB and 32 PIDs, with no mounts, on
+  the run's internal network. It owns the run's network namespace.
+- One container per service (`wardby-svc-<token>-<name>`): the catalog image
+  by digest, as `10001:10001`, with a read-only root filesystem, all
+  capabilities dropped, no new privileges, built-in seccomp, private cgroup
+  namespace, private IPC with 64 MiB of shared memory, the catalog's CPU,
+  memory (plus its tmpfs disk and shared memory), 512 PIDs, a bounded tmpfs at
+  its data path and each writable path, its catalog `serviceEnv`, and no
+  published ports, mounts, devices or restart policy.
+
+The worker and every service use `--network container:<network keeper>`, so a
+service answers the worker on `127.0.0.1` and the worker still reaches the
+proxy by its alias on the internal network. Nothing else about the worker
+changes.
+
 The capability value is inherited from the trusted launcher's child-process
 environment with `--env WARDBY_RUN_CAPABILITY`; it is never included in command
 arguments. Docker administrators can still inspect container environment, so
@@ -254,21 +275,27 @@ allocations at the host scheduler as well as per run.
 4. Seed the four fixed storage areas through the keeper, never a bind mount.
 5. Attach the dedicated proxy and attest that it is both internally and
    externally connected.
-6. Create the worker with the run capability supplied only in the child
+6. For a run with services only: create, inspect and start the network
+   keeper; then, for each service in turn, use the host's copy of its image or
+   pull it by digest, create and inspect its container in the keeper's
+   namespace, start it, and run its readiness command until it passes or the
+   run fails with `coding_service_unready:<name>`.
+7. Create the worker with the run capability supplied only in the child
    environment; inspect every effective control before start.
-7. Start the worker and enforce `deadlineMs`. Send SIGTERM at expiry, then
+8. Start the worker and enforce `deadlineMs`. Send SIGTERM at expiry, then
    SIGKILL after `stopGraceSeconds` if it remains alive.
-8. Cancel the proxy session, collect and validate bounded output, and re-read
+9. Cancel the proxy session, collect and validate bounded output, and re-read
    authoritative usage before any repository publication.
-9. For `changes_ready` only, copy the worker workspace into a new host staging
-   directory, reject special files, nested `.git`, escaping symlinks, and size
-   or entry-limit violations, then atomically replace the trusted checkout.
-10. Revalidate protected paths, Git configuration, branch ancestry, remotes,
+10. For `changes_ready` only, copy the worker workspace into a new host staging
+    directory, reject special files, nested `.git`, escaping symlinks, and size
+    or entry-limit violations, then atomically replace the trusted checkout.
+11. Revalidate protected paths, Git configuration, branch ancestry, remotes,
     and budget; create one controlled commit, push one deterministic branch,
     and create or find one draft pull request.
-11. Persist the typed coding result and terminal run status in one transaction,
-    then remove the worker, keeper, network, volume, input artifact, and VCS
-    workspace. `no_changes` and `budget_exhausted` never push.
+12. Persist the typed coding result and terminal run status in one transaction,
+    then remove the worker, any service containers and network keeper, the
+    keeper, network, volume, input artifact, and VCS workspace. `no_changes`
+    and `budget_exhausted` never push.
 
 `ContainerExecutor` treats a durable proxy session without a durable job handle
 as ambiguous provisioning and never relaunches it. A persisted handle is the

@@ -1,9 +1,9 @@
 ---
 id: coding-services
 title: Give coding runs the services their tests need
-summary: Let coding runs on the Kubernetes launcher start fresh PostgreSQL, Redis or MySQL sidecars declared in the repository's .wardby/services.yaml.
+summary: Let Codex coding runs on the Kubernetes or Docker launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml.
 audience: operator
-tags: [coding-agents, services, postgres, redis, mysql, kubernetes]
+tags: [coding-agents, services, postgres, redis, mysql, kubernetes, docker]
 appliesTo: >=0.2.1
 ---
 
@@ -32,13 +32,15 @@ wardby only looks at `.wardby/services.yaml` for an agent that allows at least
 one service. Such an agent's runs simply start without services, whatever a
 repository declares, and none of the errors below can apply to them.
 
-Services need the Kubernetes job launcher, and Kubernetes 1.29 or later (each
-service runs as a native sidecar: an init container with `restartPolicy:
-Always`, a feature that needs that version). Each run gets its own empty
-instance as a sidecar in the run's pod, reachable on `127.0.0.1`; the run's
-sandbox and NetworkPolicy do not change, and the instance is deleted with the
-pod. Each sidecar's CPU, memory and disk count toward the run's pod, its
-namespace quota, and what a managed cluster bills for it.
+Services need the Kubernetes job launcher with Kubernetes 1.29 or later (each
+service runs as a native sidecar in the run's pod) or the Docker job launcher
+(each service runs as its own container sharing the run's network namespace),
+and a Codex coding agent. Each run gets its own empty instance, reachable on
+`127.0.0.1`; the run's sandbox and network policy do not change, and the
+instance is deleted with the run. Each service's CPU, memory and disk count
+toward the run: on Kubernetes toward its pod, namespace quota and what a
+managed cluster bills; on Docker toward the host's memory, because its data is
+kept in memory.
 
 A bring-your-own worker image
 ([`docs/coding-worker-byo-images.md`](../docs/coding-worker-byo-images.md))
