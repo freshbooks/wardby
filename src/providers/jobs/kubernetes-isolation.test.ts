@@ -1010,7 +1010,7 @@ describe("buildRunPod for Claude Code", () => {
     expect(w.volumeMounts).toEqual([
       { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
       { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
-      { name: "storage", mountPath: "/run/wardby/tool", subPath: "tool" },
+      { name: "tool-socket", mountPath: "/run/wardby/tool" },
       { name: "tmp", mountPath: "/tmp" },
       { name: "home", mountPath: "/home/wardby" },
     ]);
@@ -1025,7 +1025,7 @@ describe("buildRunPod for Claude Code", () => {
     ]);
     expect(t.volumeMounts).toEqual([
       { name: "storage", mountPath: "/workspace", subPath: "workspace" },
-      { name: "storage", mountPath: "/run/wardby/tool", subPath: "tool" },
+      { name: "tool-socket", mountPath: "/run/wardby/tool" },
       { name: "tool-tmp", mountPath: "/tmp" },
       { name: "tool-home", mountPath: "/home/wardby" },
     ]);
@@ -1040,9 +1040,23 @@ describe("buildRunPod for Claude Code", () => {
 
   it("gives the tool runner its own scratch, never the worker's /tmp or home", () => {
     expect(p().spec!.volumes!.slice(3)).toEqual([
+      { name: "tool-socket", emptyDir: { medium: "Memory", sizeLimit: "1Mi" } },
       { name: "tool-tmp", emptyDir: { medium: "Memory", sizeLimit: "64Mi" } },
       { name: "tool-home", emptyDir: { medium: "Memory", sizeLimit: "64Mi" } },
     ]);
+  });
+
+  it("shares the socket through its own memory-backed volume that only the worker and tool runner mount", () => {
+    // Under gVisor a Unix socket bound on the disk-backed storage volume is invisible to another
+    // container; a memory-backed emptyDir mounted by both containers is shared across the sandbox.
+    const built = p();
+    const mounting = [...built.spec!.initContainers!, ...built.spec!.containers]
+      .filter((c) => c.volumeMounts?.some((m) => m.name === "tool-socket"))
+      .map((c) => c.name);
+    expect(mounting).toEqual(["tool-runner", "worker"]);
+    for (const c of [...built.spec!.initContainers!, ...built.spec!.containers]) {
+      expect(c.volumeMounts ?? []).not.toContainEqual(expect.objectContaining({ subPath: "tool" }));
+    }
   });
 
   it("splits the run's CPU and memory like Docker, and the worker's disk reservation between the two", () => {
@@ -1060,8 +1074,8 @@ describe("buildRunPod for Claude Code", () => {
     expect([tool, agent]).toEqual(["256Mi", "768Mi"]);
   });
 
-  it("creates the socket directory before any subPath mount", () => {
-    expect(storageInit(p()).command![2]).toContain('"tool"');
+  it("keeps the socket off the storage volume, so storage-init creates only the Codex directories", () => {
+    expect(storageInit(p()).command).toEqual(storageInit(pod()).command);
   });
 
   it("puts the tool runner before any service sidecar", () => {

@@ -49,6 +49,24 @@ export interface ClaudeSdkMessage {
   type: string;
   subtype?: string;
   result?: string;
+  /** On the `system`/`init` message: each configured MCP server and whether it connected. */
+  mcp_servers?: Array<{ name: string; status: string }>;
+}
+
+/** The MCP server (sdk.ts) whose one tool runs commands through the tool runner's socket. */
+const TOOL_SERVER = "wardby_tools";
+/** Statuses that can still become "connected"; anything else means the run has no command tool. */
+const TOOL_SERVER_USABLE = new Set(["connected", "pending"]);
+
+/**
+ * Without its command tool the model can only answer "I could not run anything", which would end
+ * the run as a clean no_changes. The relay connects to the tool runner's socket when Claude Code
+ * starts it, so a failed (or missing) server here means the socket was unreachable.
+ */
+function toolServerUnreachable(message: ClaudeSdkMessage): boolean {
+  if (message.type !== "system" || message.subtype !== "init") return false;
+  const server = message.mcp_servers?.find((candidate) => candidate.name === TOOL_SERVER);
+  return !server || !TOOL_SERVER_USABLE.has(server.status);
 }
 
 export interface ClaudeQueryOptions {
@@ -130,8 +148,13 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   });
   let finalJson: string | undefined;
   let failed = false;
+  let toolUnreachable = false;
   try {
     for await (const message of stream) {
+      if (toolServerUnreachable(message)) {
+        toolUnreachable = true;
+        break;
+      }
       if (message.type === "system") {
         options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "turn_started" });
       } else if (message.type === "assistant") {
@@ -151,6 +174,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   } catch {
     throw new Error("coding_stream_failed");
   }
+  if (toolUnreachable) throw new Error("worker_tool_runner_unreachable");
   if (failed) throw new Error("coding_turn_failed");
   if (!finalJson) throw new Error("coding_output_missing");
   let output: CodingAgentOutput;
