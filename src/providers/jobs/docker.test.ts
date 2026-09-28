@@ -4,20 +4,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { collectExclusions, type CollectExclusions } from "../../coding/collect-exclude.js";
+import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
+import { resolvedFromDefinition, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import { jobLauncherContract } from "./contract-suite.js";
 import {
   DockerCommandError,
   DockerJobLauncher,
   dockerTransferEnvironment,
   isMissingDockerResource,
+  NodeDockerCommandRunner,
   validateMaterializedWorkspace,
   type DockerArtifactTransfer,
   type DockerCommandOptions,
   type DockerCommandResult,
   type DockerCommandRunner,
+  type DockerJobLauncherOptions,
   parseWorkerDiagnosticLine,
 } from "./docker.js";
-import { buildDockerIsolationPlan, WORKER_PATHS } from "./docker-isolation.js";
+import { buildDockerIsolationPlan, NETWORK_KEEPER_SCRIPT, WORKER_PATHS } from "./docker-isolation.js";
+import { dockerServiceContainerName, serviceMemoryMib, serviceTmpfsOptions } from "./docker-services.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
 import type { JobHandle, JobResult, JobSpec } from "./types.js";
 
@@ -133,7 +138,7 @@ class FailingSeedTransfer extends NoopTransfer {
 class FakeDocker implements DockerCommandRunner {
   readonly plan: ReturnType<typeof buildDockerIsolationPlan>;
   readonly calls: { args: readonly string[]; options?: DockerCommandOptions }[] = [];
-  private readonly resourceLabels = new Map<string, Record<string, string>>();
+  protected readonly resourceLabels = new Map<string, Record<string, string>>();
   private workerState: { status: string; running: boolean; exitCode?: number; oomKilled?: boolean } = {
     status: "created",
     running: false,
@@ -324,7 +329,7 @@ class FakeDocker implements DockerCommandRunner {
     };
   }
 
-  private workerInspection(): object {
+  protected workerInspection(): object {
     const mounts =
       this.job.provider === "claude-code"
         ? [
@@ -472,10 +477,10 @@ class FakeDocker implements DockerCommandRunner {
     };
   }
 
-  private ok(): DockerCommandResult {
+  protected ok(): DockerCommandResult {
     return { stdout: "", stderr: "" };
   }
-  private json(value: object): DockerCommandResult {
+  protected json(value: object): DockerCommandResult {
     return { stdout: JSON.stringify([value]), stderr: "" };
   }
 }
@@ -733,6 +738,49 @@ describe("DockerJobLauncher", () => {
   });
 });
 
+describe("Docker launcher parity for runs without services", () => {
+  // Recorded before services existed on Docker. Never update these snapshots:
+  // a run without services must issue exactly these Docker commands.
+  const stable = (argument: string) => argument.replace(/^(io\.wardby\.(?:spec-sha256|job-id))=.*$/, "$1=<varies>");
+
+  async function parityLauncher(runId: string) {
+    const created = await harness(runId);
+    const launcher = new DockerJobLauncher({
+      stateRoot: join(created.root, "parity-state"),
+      workspaceRoot: join(created.root, "workspaces"),
+      proxyContainer: "trusted-proxy",
+      resolveCapability: async () => capability,
+      isRunActive: async () => false,
+      docker: created.docker,
+      transfer: new NoopTransfer(),
+      now: () => 1_000,
+    });
+    return { ...created, launcher };
+  }
+
+  it("launches, observes, finishes and removes with the same commands", async () => {
+    const created = await parityLauncher("docker-parity");
+    const handle = await created.launcher.launch(created.spec);
+    await created.launcher.status(handle);
+    created.docker.finish();
+    await created.launcher.status(handle);
+    await created.launcher.remove(handle);
+    expect(
+      created.docker.calls.map((call) => ({ args: call.args.map(stable), options: call.options })),
+    ).toMatchSnapshot();
+  });
+
+  it("stops and removes with the same commands", async () => {
+    const created = await parityLauncher("docker-parity-stop");
+    const handle = await created.launcher.launch(created.spec);
+    await created.launcher.stop(handle);
+    await created.launcher.remove(handle);
+    expect(
+      created.docker.calls.map((call) => ({ args: call.args.map(stable), options: call.options })),
+    ).toMatchSnapshot();
+  });
+});
+
 describe("Docker workspace validation", () => {
   it("rejects nested Git control paths, escaping symlinks, and oversized output", async () => {
     const root = await mkdtemp(join(tmpdir(), "wardby-docker-output-"));
@@ -780,5 +828,499 @@ describe("parseWorkerDiagnosticLine", () => {
     expect(parseWorkerDiagnosticLine("null")).toBeUndefined();
     expect(parseWorkerDiagnosticLine(JSON.stringify({ error: "provider said: sk-SECRET" }))).toBeUndefined();
     expect(parseWorkerDiagnosticLine(JSON.stringify({ issues: ["tag:invalid_string"] }))).toBeUndefined();
+  });
+});
+
+const POSTGRES = resolvedFromDefinition(
+  BUILTIN_CODING_SERVICES.find((service) => service.name === "postgres" && service.version === "16")!,
+);
+const NETWORK_KEEPER_ID = "f".repeat(64);
+
+/** FakeDocker plus a network keeper and service containers with scriptable image and readiness behaviour. */
+class ServicesFakeDocker extends FakeDocker {
+  readonly present = new Set<string>();
+  pullFails = false;
+  readinessFailures = 0;
+  serviceExitsOnStart = false;
+  /** Docker refuses to create the service container. */
+  serviceCreateFails = false;
+  /** The service container disappears during its first probe. */
+  serviceVanishesOnProbe = false;
+  /** The service inspection shows a privileged container. */
+  serviceDrifts = false;
+  /** How long a pull takes on the harness clock. */
+  pullTakesMs = 0;
+  /** The harness clock; pulls advance it. */
+  clock = { now: Date.now() };
+  readonly running = new Set<string>();
+  readonly removed = new Set<string>();
+  readonly netns: string;
+  readonly serviceContainers: Map<string, ResolvedCodingService>;
+
+  constructor(job: JobSpec) {
+    super(job);
+    this.netns = this.plan.names.networkKeeperContainer;
+    this.serviceContainers = new Map(
+      (job.services ?? []).map((service) => [dockerServiceContainerName(job.runId, service.name), service]),
+    );
+  }
+
+  override async run(args: readonly string[], options?: DockerCommandOptions): Promise<DockerCommandResult> {
+    const [group, action] = args;
+    // Real Docker has no worker until it is created; cleanup of a failed launch must see "no such container".
+    if (
+      group === "container" &&
+      action === "inspect" &&
+      args[2] === this.plan.names.workerContainer &&
+      !this.resourceLabels.has(args[2])
+    ) {
+      this.calls.push({ args, options });
+      throw new DockerCommandError(1, true);
+    }
+    if (group === "image") {
+      this.calls.push({ args, options });
+      const image = args.at(-1)!;
+      if (action === "inspect") {
+        if (this.present.has(image)) return { stdout: "sha256:present\n", stderr: "" };
+        throw new DockerCommandError(1, false);
+      }
+      if (action === "pull") {
+        this.clock.now += this.pullTakesMs;
+        if (this.pullFails) throw new DockerCommandError(1, false);
+        this.present.add(image);
+        return this.ok();
+      }
+    }
+    if (group === "container" && action === "create" && this.serviceCreateFails) {
+      const name = args[args.indexOf("--name") + 1];
+      if (this.serviceContainers.has(name)) {
+        this.calls.push({ args, options });
+        throw new DockerCommandError(125, false);
+      }
+    }
+    if (group === "container" && action !== "create") {
+      const name = action === "exec" || action === "inspect" ? args[2] : args.at(-1)!;
+      if (name === this.netns || this.serviceContainers.has(name)) {
+        this.calls.push({ args, options });
+        if (action === "start") {
+          if (!(this.serviceContainers.has(name) && this.serviceExitsOnStart)) this.running.add(name);
+          return this.ok();
+        }
+        if (action === "stop") {
+          this.running.delete(name);
+          return this.ok();
+        }
+        if (action === "rm") {
+          this.running.delete(name);
+          this.removed.add(name);
+          return this.ok();
+        }
+        if (action === "exec") {
+          if (this.serviceVanishesOnProbe) {
+            this.removed.add(name);
+            throw new DockerCommandError(1, false);
+          }
+          if (this.readinessFailures > 0) {
+            this.readinessFailures -= 1;
+            throw new DockerCommandError(1, false);
+          }
+          return this.ok();
+        }
+        if (action === "inspect") {
+          if (this.removed.has(name) || !this.resourceLabels.has(name)) throw new DockerCommandError(1, true);
+          return this.json(name === this.netns ? this.networkKeeperInspection() : this.serviceInspection(name));
+        }
+      }
+    }
+    return super.run(args, options);
+  }
+
+  protected override workerInspection(): object {
+    const base = super.workerInspection() as { HostConfig: object };
+    return {
+      ...base,
+      HostConfig: { ...base.HostConfig, NetworkMode: `container:${NETWORK_KEEPER_ID}` },
+      NetworkSettings: { Networks: {}, Ports: {} },
+    };
+  }
+
+  private networkKeeperInspection(): object {
+    const running = this.running.has(this.netns);
+    return {
+      Id: NETWORK_KEEPER_ID,
+      Config: {
+        User: "10001:10001",
+        Image: this.job.image,
+        Labels: this.resourceLabels.get(this.netns),
+        Entrypoint: ["node"],
+        Cmd: ["-e", NETWORK_KEEPER_SCRIPT],
+      },
+      HostConfig: {
+        NetworkMode: this.plan.names.network,
+        ReadonlyRootfs: true,
+        Privileged: false,
+        Binds: null,
+        CapAdd: null,
+        CapDrop: ["ALL"],
+        SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
+        CgroupnsMode: "private",
+        IpcMode: "none",
+        PidMode: "",
+        Init: true,
+        PidsLimit: 32,
+        Memory: 64 * 1024 * 1024,
+        MemorySwap: 64 * 1024 * 1024,
+        MemorySwappiness: null,
+        NanoCpus: 100_000_000,
+        RestartPolicy: { Name: "no" },
+        LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
+        Dns: [],
+        DnsOptions: [],
+        DnsSearch: [],
+        ExtraHosts: null,
+        PortBindings: {},
+        PublishAllPorts: false,
+      },
+      Mounts: [],
+      NetworkSettings: { Networks: { [this.plan.names.network]: {} }, Ports: {} },
+      State: { Running: running, Status: running ? "running" : "created" },
+    };
+  }
+
+  private serviceInspection(name: string): object {
+    const service = this.serviceContainers.get(name)!;
+    const memory = serviceMemoryMib(service) * 1024 * 1024;
+    const running = this.running.has(name);
+    return {
+      Id: "e".repeat(64),
+      Config: {
+        User: "10001:10001",
+        Image: service.image,
+        Env: ["PATH=/usr/bin:/bin", ...Object.entries(service.serviceEnv).map(([key, value]) => `${key}=${value}`)],
+        Labels: this.resourceLabels.get(name),
+      },
+      HostConfig: {
+        NetworkMode: `container:${NETWORK_KEEPER_ID}`,
+        ReadonlyRootfs: true,
+        Privileged: false,
+        Binds: null,
+        CapAdd: null,
+        CapDrop: ["ALL"],
+        ...(this.serviceDrifts ? { Privileged: true } : {}),
+        CgroupnsMode: "private",
+        IpcMode: "private",
+        PidMode: "",
+        ShmSize: 64 * 1024 * 1024,
+        Memory: memory,
+        MemorySwap: memory,
+        MemorySwappiness: 0,
+        PidsLimit: 512,
+        NanoCpus: service.resources.cpuMillicores * 1_000_000,
+        RestartPolicy: { Name: "no" },
+        LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
+        SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
+        Devices: [],
+        DeviceRequests: null,
+        Dns: [],
+        DnsOptions: [],
+        DnsSearch: [],
+        ExtraHosts: null,
+        GroupAdd: null,
+        PortBindings: {},
+        PublishAllPorts: false,
+        Tmpfs: serviceTmpfsOptions(service),
+      },
+      Mounts: [],
+      NetworkSettings: { Networks: {}, Ports: {} },
+      State: { Running: running, Status: running ? "running" : "exited" },
+    };
+  }
+}
+
+async function servicesHarness(
+  runId: string,
+  override: Partial<JobSpec> = {},
+  options: Partial<DockerJobLauncherOptions> = {},
+) {
+  const root = await mkdtemp(join(tmpdir(), "wardby-docker-job-"));
+  temporaryRoots.push(root);
+  const job: JobSpec = { ...spec(runId), services: [POSTGRES], ...override };
+  const runRoot = join(root, "workspaces", runId);
+  await Promise.all([
+    mkdir(join(runRoot, "workspace"), { recursive: true }),
+    mkdir(join(runRoot, "git"), { recursive: true }),
+  ]);
+  job.inputArtifact = join(root, "input.json");
+  await writeFile(job.inputArtifact, "{}", { mode: 0o600 });
+  const docker = new ServicesFakeDocker(job);
+  const sleeps: number[] = [];
+  const launcher = new DockerJobLauncher({
+    stateRoot: join(root, "state"),
+    workspaceRoot: join(root, "workspaces"),
+    proxyContainer: "trusted-proxy",
+    resolveCapability: async () => capability,
+    isRunActive: async () => false,
+    docker,
+    transfer: new NoopTransfer(),
+    now: () => docker.clock.now,
+    sleep: async (milliseconds) => {
+      sleeps.push(milliseconds);
+      docker.clock.now += milliseconds;
+    },
+    ...options,
+  });
+  return { launcher, docker, spec: job, sleeps, root };
+}
+
+function createdContainers(docker: FakeDocker): string[] {
+  return docker.calls
+    .filter((call) => call.args[0] === "container" && call.args[1] === "create")
+    .map((call) => call.args[call.args.indexOf("--name") + 1]);
+}
+
+function commands(docker: FakeDocker, group: string, action: string): Array<readonly string[]> {
+  return docker.calls.filter((call) => call.args[0] === group && call.args[1] === action).map((call) => call.args);
+}
+
+describe("Docker launcher with services", () => {
+  it("starts services for Codex runs only", async () => {
+    const { launcher } = await harness("docker-supports-services");
+    expect(launcher.supportsServicesFor("codex")).toBe(true);
+    expect(launcher.supportsServicesFor("claude-code")).toBe(false);
+  });
+
+  it("starts the network keeper, then each service, then the worker in the keeper's namespace", async () => {
+    const created = await servicesHarness("docker-services");
+    created.docker.present.add(POSTGRES.image);
+    const handle = await created.launcher.launch(created.spec);
+    const service = dockerServiceContainerName(created.spec.runId, "postgres");
+    const names = created.docker.plan.names;
+    expect(createdContainers(created.docker)).toEqual([
+      names.keeperContainer,
+      names.networkKeeperContainer,
+      service,
+      names.workerContainer,
+    ]);
+    const workerCreate = commands(created.docker, "container", "create").at(-1)!;
+    expect(workerCreate[workerCreate.indexOf("--network") + 1]).toBe(`container:${names.networkKeeperContainer}`);
+    expect(commands(created.docker, "container", "exec")).toEqual([
+      ["container", "exec", service, ...POSTGRES.readiness.command],
+    ]);
+    const probe = created.docker.calls.find((call) => call.args[1] === "exec" && call.args[2] === service);
+    expect(probe?.options?.timeoutMs).toBe(POSTGRES.readiness.timeoutSeconds * 1_000);
+    expect(commands(created.docker, "image", "pull")).toEqual([]);
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "running" });
+  });
+
+  it("pulls a service image only when it is missing, with a bound", async () => {
+    const created = await servicesHarness("docker-services-pull");
+    await created.launcher.launch(created.spec);
+    expect(commands(created.docker, "image", "pull")).toEqual([["image", "pull", "--quiet", POSTGRES.image]]);
+    const pull = created.docker.calls.find((call) => call.args[0] === "image" && call.args[1] === "pull");
+    expect(pull?.options?.timeoutMs).toBe(300_000);
+  });
+
+  it("passes readiness after transient failures, waiting periodSeconds between probes", async () => {
+    const created = await servicesHarness("docker-services-retry");
+    created.docker.readinessFailures = 2;
+    await created.launcher.launch(created.spec);
+    expect(commands(created.docker, "container", "exec")).toHaveLength(3);
+    expect(created.sleeps).toEqual([2_000, 2_000]);
+  });
+
+  it("fails the launch as coding_service_unready after failureThreshold probes and never creates the worker", async () => {
+    const created = await servicesHarness("docker-services-unready");
+    created.docker.present.add(POSTGRES.image);
+    created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+    const error = await created.launcher.launch(created.spec).catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe("coding_service_unready:postgres");
+    // Probe output never surfaces: the probe path's error carries no cause at all.
+    expect((error as Error).cause).toBeUndefined();
+    expect(commands(created.docker, "container", "exec")).toHaveLength(POSTGRES.readiness.failureThreshold);
+    expect(created.sleeps).toHaveLength(POSTGRES.readiness.failureThreshold - 1);
+    expect(createdContainers(created.docker)).not.toContain(created.docker.plan.names.workerContainer);
+  });
+
+  it("fails at once, as coding_service_unready, when a service exits", async () => {
+    const created = await servicesHarness("docker-services-exit");
+    created.docker.present.add(POSTGRES.image);
+    created.docker.serviceExitsOnStart = true;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    expect(commands(created.docker, "container", "exec")).toEqual([]);
+  });
+
+  it("fails as coding_service_unready when the image can't be pulled", async () => {
+    const created = await servicesHarness("docker-services-pull-failure");
+    created.docker.pullFails = true;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    expect(createdContainers(created.docker)).not.toContain(dockerServiceContainerName(created.spec.runId, "postgres"));
+  });
+
+  it("fails as coding_service_unready when the start-up budget runs out, clipping probes and waits to it", async () => {
+    const created = await servicesHarness("docker-services-budget", {}, { serviceReadyTimeoutMs: 5_000 });
+    created.docker.present.add(POSTGRES.image);
+    created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    // failureThreshold (30) would allow far longer; the 5 s budget stops it after three probes.
+    expect(created.sleeps).toEqual([2_000, 2_000, 1_000]);
+    const probes = created.docker.calls.filter((call) => call.args[1] === "exec");
+    expect(probes.map((call) => call.options?.timeoutMs)).toEqual([2_000, 2_000, 1_000]);
+    expect(createdContainers(created.docker)).not.toContain(created.docker.plan.names.workerContainer);
+    expect(created.docker.removed).toEqual(
+      new Set([
+        dockerServiceContainerName(created.spec.runId, "postgres"),
+        created.docker.plan.names.networkKeeperContainer,
+      ]),
+    );
+  });
+
+  it("stops service start-up at the run's deadline when that comes before the budget", async () => {
+    const created = await servicesHarness("docker-services-deadline", { timeoutSec: 3 });
+    created.docker.present.add(POSTGRES.image);
+    created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    expect(created.sleeps).toEqual([2_000, 1_000]);
+  });
+
+  it("doesn't count an image pull against the budget, but bounds it by the run's deadline", async () => {
+    const created = await servicesHarness(
+      "docker-services-pull-budget",
+      { timeoutSec: 600 },
+      {
+        serviceReadyTimeoutMs: 5_000,
+      },
+    );
+    created.docker.pullTakesMs = 60_000;
+    created.docker.readinessFailures = 1;
+    await created.launcher.launch(created.spec);
+    expect(created.sleeps).toEqual([2_000]);
+    const pull = created.docker.calls.find((call) => call.args[0] === "image" && call.args[1] === "pull");
+    expect(pull?.options?.timeoutMs).toBe(300_000);
+
+    const short = await servicesHarness("docker-services-pull-deadline", { timeoutSec: 60 });
+    await short.launcher.launch(short.spec);
+    const clipped = short.docker.calls.find((call) => call.args[0] === "image" && call.args[1] === "pull");
+    expect(clipped?.options?.timeoutMs).toBe(60_000);
+  });
+
+  it("fails as coding_service_unready, without a cause, when a service vanishes between probes", async () => {
+    const created = await servicesHarness("docker-services-vanish");
+    created.docker.present.add(POSTGRES.image);
+    created.docker.serviceVanishesOnProbe = true;
+    const error = await created.launcher.launch(created.spec).catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe("coding_service_unready:postgres");
+    expect((error as Error).cause).toBeUndefined();
+    expect(commands(created.docker, "container", "exec")).toHaveLength(1);
+  });
+
+  it("fails as coding_service_unready when Docker refuses to create a service", async () => {
+    const created = await servicesHarness("docker-services-create-failure");
+    created.docker.present.add(POSTGRES.image);
+    created.docker.serviceCreateFails = true;
+    const error = await created.launcher.launch(created.spec).catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe("coding_service_unready:postgres");
+    expect((error as Error).cause).toBeInstanceOf(DockerCommandError);
+    expect(createdContainers(created.docker)).not.toContain(created.docker.plan.names.workerContainer);
+  });
+
+  it("keeps a service attestation failure an isolation error, never coding_service_unready", async () => {
+    const created = await servicesHarness("docker-services-drift");
+    created.docker.present.add(POSTGRES.image);
+    created.docker.serviceDrifts = true;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("docker_isolation_unsupported");
+    expect(commands(created.docker, "container", "start").map((args) => args.at(-1))).not.toContain(
+      dockerServiceContainerName(created.spec.runId, "postgres"),
+    );
+  });
+
+  it("puts serviceEnv only in the service's own create arguments", async () => {
+    const created = await servicesHarness("docker-services-env");
+    await created.launcher.launch(created.spec);
+    const carrying = created.docker.calls.filter((call) => JSON.stringify(call).includes("POSTGRES_PASSWORD"));
+    expect(carrying.map((call) => call.args.slice(0, 4))).toEqual([
+      ["container", "create", "--name", dockerServiceContainerName(created.spec.runId, "postgres")],
+    ]);
+  });
+
+  it("refuses a Claude run with services at launch, before touching Docker", async () => {
+    const created = await servicesHarness("docker-services-claude");
+    const claudeWithServices: JobSpec = { ...created.spec, provider: "claude-code", toolImage, limits: claudeLimits };
+    await expect(created.launcher.launch(claudeWithServices)).rejects.toThrow("docker_isolation_unsupported");
+    expect(created.docker.calls).toEqual([]);
+    // The same run without services is a valid Claude plan: services alone are what's refused.
+    const { services: _services, ...withoutServices } = claudeWithServices;
+    expect(() => buildDockerIsolationPlan(withoutServices, "trusted-proxy")).not.toThrow();
+  });
+
+  it("removes services and the network keeper with the run's other resources, in namespace order", async () => {
+    const created = await servicesHarness("docker-services-remove");
+    const handle = await created.launcher.launch(created.spec);
+    created.docker.finish();
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "succeeded" });
+    await created.launcher.remove(handle);
+    const names = created.docker.plan.names;
+    const service = dockerServiceContainerName(created.spec.runId, "postgres");
+    expect(commands(created.docker, "container", "rm").map((args) => args.slice(2))).toEqual([
+      ["--force", names.workerContainer],
+      ["--force", "--volumes", service],
+      ["--force", names.networkKeeperContainer],
+      ["--force", names.keeperContainer],
+    ]);
+    expect(created.docker.removed).toEqual(new Set([service, names.networkKeeperContainer]));
+  });
+
+  it("removes the services of a launch that failed readiness", async () => {
+    const created = await servicesHarness("docker-services-unready-cleanup");
+    created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    expect(created.docker.removed).toEqual(
+      new Set([
+        dockerServiceContainerName(created.spec.runId, "postgres"),
+        created.docker.plan.names.networkKeeperContainer,
+      ]),
+    );
+  });
+
+  it("stops the services when the run is stopped", async () => {
+    const created = await servicesHarness("docker-services-stop");
+    const handle = await created.launcher.launch(created.spec);
+    await created.launcher.stop(handle);
+    const service = dockerServiceContainerName(created.spec.runId, "postgres");
+    expect(commands(created.docker, "container", "stop").map((args) => args.at(-1))).toEqual([
+      created.docker.plan.names.workerContainer,
+      service,
+    ]);
+    expect(created.docker.running.has(service)).toBe(false);
+  });
+
+  it("sweeps an expired run's services when the launcher restarts", async () => {
+    const created = await servicesHarness("docker-services-sweep");
+    const handle = await created.launcher.launch(created.spec);
+    const restarted = new DockerJobLauncher({
+      stateRoot: join(created.root, "state"),
+      workspaceRoot: join(created.root, "workspaces"),
+      proxyContainer: "trusted-proxy",
+      resolveCapability: async () => capability,
+      isRunActive: async () => false,
+      docker: created.docker,
+      transfer: new NoopTransfer(),
+      now: () => Date.now() + 24 * 60 * 60 * 1_000,
+    });
+    await expect(restarted.status(handle)).rejects.toThrow("job_removed");
+    expect(created.docker.removed).toEqual(
+      new Set([
+        dockerServiceContainerName(created.spec.runId, "postgres"),
+        created.docker.plan.names.networkKeeperContainer,
+      ]),
+    );
+  });
+});
+
+describe("NodeDockerCommandRunner timeouts", () => {
+  it("kills a command that outlives its timeout", async () => {
+    const runner = new NodeDockerCommandRunner({ dockerBinary: "sleep", homeDir: tmpdir() });
+    const started = Date.now();
+    await expect(runner.run(["5"], { timeoutMs: 100 })).rejects.toThrow(/^docker_command_failed:/);
+    expect(Date.now() - started).toBeLessThan(4_000);
   });
 });

@@ -33,14 +33,24 @@ import {
   assertClaudeToolRunnerContainerInspection,
   assertIsolationNetworkInspection,
   assertKeeperContainerInspection,
+  assertNetworkKeeperContainerInspection,
   assertProxyContainerInspection,
   assertStorageVolumeInspection,
   assertWorkerContainerInspection,
   buildDockerIsolationPlan,
   CLAUDE_TOOL_SETUP_ENV,
+  dockerSupportsServicesFor,
   type DockerContainerInspection,
   type DockerHostInfo,
 } from "./docker-isolation.js";
+import type { CodingProvider } from "../../coding/provider.js";
+import { serviceUnreadyError } from "../../coding/services/wording.js";
+import {
+  assertServiceContainerInspection,
+  buildDockerServicePlan,
+  dockerServiceContainerNames,
+  type DockerServiceContainer,
+} from "./docker-services.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
@@ -50,6 +60,14 @@ const STATE_SCHEMA_VERSION = 1;
 const MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024;
 const MAX_DOCKER_SEED_DIAGNOSTIC_BYTES = 4 * 1024;
 const MAX_WORKSPACE_ENTRIES = 100_000;
+/** How long one service image pull may take before the run fails as service_unready. */
+export const SERVICE_IMAGE_PULL_TIMEOUT_MS = 300_000;
+/**
+ * The default bound on a run's whole service start-up (every service's create, start, inspection and
+ * readiness probing; image pulls excluded), matching the Kubernetes launcher's pod-start bound.
+ */
+export const DEFAULT_SERVICE_READY_TIMEOUT_MS = 120_000;
+const MAX_SERVICE_PROBE_OUTPUT_BYTES = 64 * 1024;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
 export const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|wardby_[a-z_]+)$/;
 
@@ -86,6 +104,8 @@ const dockerLog = logger.child({ module: "docker-jobs" });
 export interface DockerCommandOptions {
   env?: Record<string, string>;
   maxOutputBytes?: number;
+  /** Kill the Docker client and fail after this long (service readiness probes and image pulls). */
+  timeoutMs?: number;
 }
 
 export interface DockerCommandResult {
@@ -167,6 +187,14 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
         rejectPromise(new DockerCommandError(null));
         return;
       }
+      let timedOut = false;
+      const timer =
+        options.timeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              timedOut = true;
+              child.kill("SIGKILL");
+            }, options.timeoutMs);
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
       let bytes = 0;
@@ -187,6 +215,12 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
         spawnFailed = true;
       });
       child.once("close", (code) => {
+        if (timer) clearTimeout(timer);
+        if (timedOut) {
+          return rejectPromise(
+            new DockerCommandError(code, false, false, { subcommand: args[0], stderr: "timed out" }),
+          );
+        }
         if (exceeded) return rejectPromise(new DockerCommandError(code, false, true));
         if (spawnFailed) return rejectPromise(new DockerCommandError(null));
         const result = {
@@ -400,6 +434,13 @@ export interface DockerJobLauncherOptions {
   docker?: DockerCommandRunner;
   transfer?: DockerArtifactTransfer;
   now?: () => number;
+  /** Waits between service readiness probes; tests replace it. */
+  sleep?: (milliseconds: number) => Promise<void>;
+  /**
+   * The bound on a run's whole service start-up, image pulls excluded (default
+   * DEFAULT_SERVICE_READY_TIMEOUT_MS). Start-up never runs past the run's own deadline either.
+   */
+  serviceReadyTimeoutMs?: number;
   /** Optional observer invoked after provisioning fails but before resources are cleaned up. */
   onProvisionFailure?: (context: { runId: string; keeperContainer: string }) => Promise<void>;
 }
@@ -507,6 +548,45 @@ function labelsMatch(actual: Record<string, string> | undefined, expected: Recor
   return Object.entries(expected).every(([key, value]) => actual?.[key] === value);
 }
 
+/** `coding_service_unready:<name>` (the executor's service_unready), keeping the Docker failure as the operator's cause. */
+/**
+ * A run's service start-up budget: `budgetMs` from the start, extended by the time image pulls took,
+ * and never past the run's deadline.
+ */
+class ServiceStartBudget {
+  private readonly startedAt: number;
+  private excludedMs = 0;
+
+  constructor(
+    private readonly now: () => number,
+    private readonly budgetMs: number,
+    private readonly deadlineAt: number,
+  ) {
+    this.startedAt = now();
+  }
+
+  /** What is left of the budget, capped by the run's deadline; zero once either runs out. */
+  remainingMs(): number {
+    const now = this.now();
+    return Math.max(0, Math.min(this.startedAt + this.excludedMs + this.budgetMs - now, this.deadlineAt - now));
+  }
+
+  /** What is left before the run's deadline: the only bound (besides its own) on an image pull. */
+  untilDeadlineMs(): number {
+    return Math.max(0, this.deadlineAt - this.now());
+  }
+
+  exclude(milliseconds: number): void {
+    this.excludedMs += Math.max(0, milliseconds);
+  }
+}
+
+function serviceUnready(name: string, cause?: unknown): Error {
+  const error = serviceUnreadyError(name);
+  if (cause !== undefined) error.cause = cause;
+  return error;
+}
+
 function capabilityFromInspection(container: DockerContainerInspection): string | undefined {
   return container.Config?.Env?.find((value) => value.startsWith("WARDBY_RUN_CAPABILITY="))?.slice(
     "WARDBY_RUN_CAPABILITY=".length,
@@ -547,6 +627,8 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   private readonly docker: DockerCommandRunner;
   private readonly transfer: DockerArtifactTransfer;
   private readonly now: () => number;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly serviceReadyTimeoutMs: number;
   private readonly locks = new Map<string, Promise<void>>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly ready: Promise<void>;
@@ -559,7 +641,17 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     this.docker = options.docker ?? new NodeDockerCommandRunner({ homeDir: join(this.stateRoot, ".home") });
     this.transfer = options.transfer ?? new NodeDockerArtifactTransfer();
     this.now = options.now ?? Date.now;
+    this.sleep =
+      options.sleep ?? ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
+    this.serviceReadyTimeoutMs = options.serviceReadyTimeoutMs ?? DEFAULT_SERVICE_READY_TIMEOUT_MS;
+    if (!Number.isFinite(this.serviceReadyTimeoutMs) || this.serviceReadyTimeoutMs <= 0)
+      throw new Error("docker_launcher_service_timeout_invalid");
     this.ready = this.initialize();
+  }
+
+  /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex runs. */
+  supportsServicesFor(provider: CodingProvider): boolean {
+    return dockerSupportsServicesFor(provider);
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {
@@ -683,6 +775,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
 
   private async launchLocked(spec: JobSpec): Promise<JobHandle> {
     const plan = buildDockerIsolationPlan(spec, this.options.proxyContainer);
+    const services = buildDockerServicePlan(spec);
     const specHash = stableSpecHash(spec);
     const existing = await this.readRecord(spec.runId);
     if (existing) {
@@ -704,7 +797,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
         await this.refresh(existing);
         return clone(existing.handle);
       }
-      return this.provision(existing, plan, capability);
+      return this.provision(existing, plan, services, capability);
     }
     await this.validateInputArtifact(spec.inputArtifact);
     const capability = ensureCapability(await this.options.resolveCapability(spec.runId));
@@ -723,7 +816,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     // This durable record is the idempotency fence before any Docker side effect.
     await this.writeRecord(record);
     try {
-      return await this.provision(record, plan, capability);
+      return await this.provision(record, plan, services, capability);
     } catch (error) {
       await this.options
         .onProvisionFailure?.({ runId: record.runId, keeperContainer: plan.names.keeperContainer })
@@ -739,6 +832,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   private async provision(
     record: DockerJobRecord,
     plan: ReturnType<typeof buildDockerIsolationPlan>,
+    services: readonly DockerServiceContainer[],
     capability: string,
   ): Promise<JobHandle> {
     await this.assertHost();
@@ -792,6 +886,15 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       await this.startContainer(plan.names.toolContainer);
       await this.waitForToolRunner(plan.names.toolContainer);
     }
+    const networkKeeperId = plan.networkKeeperCreateArgs
+      ? await this.startServices(
+          record,
+          plan.networkKeeperCreateArgs,
+          plan.names.networkKeeperContainer,
+          services,
+          labels,
+        )
+      : undefined;
     const workerArgs = appendLabels(plan.workerCreateArgs, labels);
     await this.createAndAssert(
       workerArgs,
@@ -801,7 +904,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
         if (record.spec.provider === "claude-code") {
           assertClaudeAgentContainerInspection(inspected, record.spec, capability);
         } else {
-          assertWorkerContainerInspection(inspected, record.spec, capability);
+          assertWorkerContainerInspection(inspected, record.spec, capability, networkKeeperId);
         }
         if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
       },
@@ -812,6 +915,130 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     await this.writeRecord(record);
     this.scheduleDeadline(record);
     return clone(record.handle);
+  }
+
+  /**
+   * A run with services (docs/coding-services.md). The network keeper joins the run's internal
+   * network and owns the namespace; each service joins it and must pass its catalog readiness
+   * command before the next one starts, as Kubernetes starts native sidecars. The whole start-up is
+   * bounded (ServiceStartBudget): running out fails as coding_service_unready for the service being
+   * waited on. Returns the keeper's container ID, which Docker may report as the services' and
+   * worker's network mode.
+   */
+  private async startServices(
+    record: DockerJobRecord,
+    keeperArgs: readonly string[],
+    keeperName: string,
+    services: readonly DockerServiceContainer[],
+    labels: Record<string, string>,
+  ): Promise<string> {
+    const budget = new ServiceStartBudget(this.now, this.serviceReadyTimeoutMs, record.deadlineAt);
+    const keeper = (await this.createAndAssert(
+      appendLabels(keeperArgs, labels),
+      ["container", "inspect", keeperName],
+      (value) => {
+        const inspected = value as DockerContainerInspection;
+        assertNetworkKeeperContainerInspection(inspected, record.spec);
+        if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
+      },
+    )) as DockerContainerInspection;
+    const keeperId = keeper.Id;
+    if (!keeperId) throw new Error("docker_resource_attestation_failed");
+    await this.startContainer(keeperName);
+    for (const planned of services) {
+      const name = planned.service.name;
+      if (budget.remainingMs() <= 0) throw serviceUnready(name);
+      await this.ensureServiceImage(planned, budget);
+      if (budget.remainingMs() <= 0) throw serviceUnready(name);
+      try {
+        await this.createAndAssert(
+          appendLabels(planned.createArgs, labels),
+          ["container", "inspect", planned.container],
+          (value) => {
+            const inspected = value as DockerContainerInspection;
+            assertServiceContainerInspection(inspected, record.spec, planned.service, keeperId);
+            if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
+          },
+        );
+      } catch (error) {
+        // createAndAssert tolerates a failed create (a crash retry may find it made), so a service
+        // Docker refused to create shows up as a failed inspection. Attestation failures rethrow as is.
+        if (error instanceof DockerCommandError) throw serviceUnready(name, error);
+        throw error;
+      }
+      if (budget.remainingMs() <= 0) throw serviceUnready(name);
+      try {
+        await this.startContainer(planned.container);
+      } catch (error) {
+        throw serviceUnready(name, error);
+      }
+      await this.waitForServiceReady(planned, budget);
+    }
+    return keeperId;
+  }
+
+  /**
+   * A local copy of the digest-pinned image is used as is; otherwise it is pulled, bounded by its
+   * own limit and the run's deadline. Pull time does not count toward the start-up budget.
+   */
+  private async ensureServiceImage(planned: DockerServiceContainer, budget: ServiceStartBudget): Promise<void> {
+    try {
+      await this.run(["image", "inspect", "--format", "{{.Id}}", planned.service.image]);
+      return;
+    } catch {
+      // Missing (or unreadable): pull it by its digest below.
+    }
+    const untilDeadline = budget.untilDeadlineMs();
+    if (untilDeadline <= 0) throw serviceUnready(planned.service.name);
+    const startedAt = this.now();
+    try {
+      await this.run(["image", "pull", "--quiet", planned.service.image], {
+        timeoutMs: Math.min(SERVICE_IMAGE_PULL_TIMEOUT_MS, untilDeadline),
+      });
+    } catch (error) {
+      throw serviceUnready(planned.service.name, error);
+    } finally {
+      budget.exclude(this.now() - startedAt);
+    }
+  }
+
+  /**
+   * The catalog readiness command, like a Kubernetes startup probe: every periodSeconds, each
+   * attempt bounded by timeoutSeconds, failing after failureThreshold consecutive failures. A
+   * service that exited or vanished fails at once, and so does one still unready when the start-up
+   * budget runs out (each probe and wait is clipped to what is left of it). Probe output is never
+   * logged or kept, so these errors carry no cause.
+   */
+  private async waitForServiceReady(planned: DockerServiceContainer, budget: ServiceStartBudget): Promise<void> {
+    const { command, periodSeconds, timeoutSeconds, failureThreshold } = planned.service.readiness;
+    const name = planned.service.name;
+    let failures = 0;
+    for (;;) {
+      if (budget.remainingMs() <= 0) throw serviceUnready(name);
+      let state: { State?: { Running?: boolean } };
+      try {
+        state = await this.inspect(["container", "inspect", planned.container]);
+      } catch (error) {
+        if (error instanceof DockerCommandError) throw serviceUnready(name);
+        throw error;
+      }
+      if (state.State?.Running !== true) throw serviceUnready(name);
+      const remaining = budget.remainingMs();
+      if (remaining <= 0) throw serviceUnready(name);
+      try {
+        await this.run(["container", "exec", planned.container, ...command], {
+          timeoutMs: Math.min(timeoutSeconds * 1_000, remaining),
+          maxOutputBytes: MAX_SERVICE_PROBE_OUTPUT_BYTES,
+        });
+        return;
+      } catch {
+        failures += 1;
+        if (failures >= failureThreshold) throw serviceUnready(name);
+      }
+      const wait = Math.min(periodSeconds * 1_000, budget.remainingMs());
+      if (wait <= 0) throw serviceUnready(name);
+      await this.sleep(wait);
+    }
   }
 
   private async refresh(record: DockerJobRecord): Promise<void> {
@@ -856,7 +1083,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
         return;
       }
     } else {
-      assertWorkerContainerInspection(inspection, record.spec, capability);
+      assertWorkerContainerInspection(inspection, record.spec, capability, await this.attestedNetworkKeeperId(record));
     }
     const phase = dockerState(inspection);
     if (!phase || phase === "provisioning" || phase === "active") return;
@@ -868,25 +1095,25 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
 
   private async stopRecord(record: DockerJobRecord, timedOut: boolean): Promise<void> {
     if (isTerminal(record)) return;
-    try {
-      await this.run(["container", "stop", "--time", "10", record.handle.id]);
-    } catch (error) {
-      if (!(error instanceof DockerCommandError && error.notFound))
-        throw new Error("docker_stop_failed", { cause: error });
-    }
+    await this.stopContainer(record.handle.id);
     if (record.spec.provider === "claude-code") {
-      const tool = buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.toolContainer;
-      try {
-        await this.run(["container", "stop", "--time", "10", tool]);
-      } catch (error) {
-        if (!(error instanceof DockerCommandError && error.notFound))
-          throw new Error("docker_stop_failed", { cause: error });
-      }
+      await this.stopContainer(buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.toolContainer);
     }
+    // Services stop with the run; they (and the network keeper) are removed with its other resources.
+    for (const service of dockerServiceContainerNames(record.spec)) await this.stopContainer(service);
     record.phase = timedOut ? "failed" : "stopped";
     record.result = timedOut ? { exitCode: 124, reason: "timed_out" } : resultFor("stopped");
     await this.writeRecord(record);
     this.clearDeadline(record);
+  }
+
+  private async stopContainer(name: string): Promise<void> {
+    try {
+      await this.run(["container", "stop", "--time", "10", name]);
+    } catch (error) {
+      if (!(error instanceof DockerCommandError && error.notFound))
+        throw new Error("docker_stop_failed", { cause: error });
+    }
   }
 
   private async sweepExpired(record: DockerJobRecord): Promise<void> {
@@ -906,17 +1133,29 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     const labels = resourceLabels(record);
     await this.removeContainerIfAttested(plan.names.workerContainer, labels);
     if (plan.toolCreateArgs) await this.removeContainerIfAttested(plan.names.toolContainer, labels);
+    // Services, then the network keeper: nothing may still share its namespace when it goes.
+    // --volumes: an image VOLUME the attestation rejected must not outlive its container.
+    for (const service of dockerServiceContainerNames(record.spec)) {
+      await this.removeContainerIfAttested(service, labels, true);
+    }
+    if (plan.networkKeeperCreateArgs) {
+      await this.removeContainerIfAttested(plan.names.networkKeeperContainer, labels);
+    }
     await this.runIgnoreMissing(["network", "disconnect", plan.names.network, this.options.proxyContainer]);
     await this.removeContainerIfAttested(plan.names.keeperContainer, labels);
     await this.removeNetworkIfAttested(plan.names.network, labels);
     await this.removeVolumeIfAttested(plan.names.storageVolume, labels);
   }
 
-  private async removeContainerIfAttested(name: string, labels: Record<string, string>): Promise<void> {
+  private async removeContainerIfAttested(
+    name: string,
+    labels: Record<string, string>,
+    anonymousVolumes = false,
+  ): Promise<void> {
     try {
       const inspected = await this.inspect<DockerContainerInspection>(["container", "inspect", name]);
       if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
-      await this.runIgnoreMissing(["container", "rm", "--force", name]);
+      await this.runIgnoreMissing(["container", "rm", "--force", ...(anonymousVolumes ? ["--volumes"] : []), name]);
     } catch (error) {
       if (!(error instanceof DockerCommandError && error.notFound)) throw error;
     }
@@ -985,6 +1224,23 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     return buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.keeperContainer;
   }
 
+  /** For a run with services: the attested network keeper's ID, which the worker's network mode may name. */
+  private async attestedNetworkKeeperId(record: DockerJobRecord): Promise<string | undefined> {
+    if (record.spec.services === undefined) return undefined;
+    const name = buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.networkKeeperContainer;
+    let keeper: DockerContainerInspection;
+    try {
+      keeper = await this.inspect<DockerContainerInspection>(["container", "inspect", name]);
+    } catch (error) {
+      throw new Error("docker_status_unavailable", { cause: error });
+    }
+    assertNetworkKeeperContainerInspection(keeper, record.spec);
+    if (!labelsMatch(keeper.Config?.Labels, resourceLabels(record)) || !keeper.Id) {
+      throw new Error("docker_resource_attestation_failed");
+    }
+    return keeper.Id;
+  }
+
   private async assertHost(): Promise<void> {
     const info = await this.inspect<DockerHostInfo>(["info", "--format", "{{json .}}"]);
     assertDockerHostSupportsIsolation(info);
@@ -995,13 +1251,15 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     inspectArgs: readonly string[],
     assert: (value: unknown) => void,
     options?: DockerCommandOptions,
-  ): Promise<void> {
+  ): Promise<unknown> {
     try {
       await this.run(createArgs, options);
     } catch {
       // A retry may find a resource created before the previous process crashed.
     }
-    assert(await this.inspect(inspectArgs));
+    const inspected = await this.inspect(inspectArgs);
+    assert(inspected);
+    return inspected;
   }
 
   private async waitForStorage(keeper: string): Promise<void> {

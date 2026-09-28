@@ -1596,7 +1596,8 @@ describe("coding-run services", () => {
 
   it("says it supports services and launches a run with its sidecar in the pod", async () => {
     const h = await harness("run-svc-ok");
-    expect(h.launcher.supportsServices).toBe(true);
+    expect(h.launcher.supportsServicesFor("codex")).toBe(true);
+    expect(h.launcher.supportsServicesFor("claude-code")).toBe(true);
     await h.launcher.launch({ ...h.spec, services: [POSTGRES] });
     const submitted = h.api.objects.get(`pod/wardby-coding/${h.names.pod}`) as V1Pod;
     expect(submitted.spec!.initContainers!.map((c) => c.name)).toEqual(["storage-init", "service-postgres"]);

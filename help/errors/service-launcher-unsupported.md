@@ -1,23 +1,27 @@
 ---
 id: errors/service-launcher-unsupported
-title: Services need the Kubernetes launcher
-summary: Wardby refused the coding run because the repository declares services and this deployment's job launcher cannot start them.
+title: Services are not available to this run
+summary: Wardby refused the coding run because the repository declares services and this deployment or agent cannot start them.
 audience: operator
 tags: [error, coding-agents, services, kubernetes, docker, refusal]
 appliesTo: >=0.2.1
 ---
 
-# Services need the Kubernetes launcher
+# Services are not available to this run
 
 `service_launcher_unsupported` means the repository declares services, but this
-deployment runs coding workers on a launcher that cannot start them. Services
-run as sidecars in the run's pod, so they need `JOB_LAUNCHER=kubernetes`; the
-Docker launcher refuses such runs.
+run cannot have them. Services need a job launcher that starts them for the
+agent's provider:
+
+- `JOB_LAUNCHER=kubernetes` starts them for Codex and Claude Code agents;
+- `JOB_LAUNCHER=docker` starts them for Codex agents only: a Claude Code run
+  that declares services is refused on the Docker launcher;
+- a deployment with `JOB_LAUNCHER=local` cannot start them at all.
 
 1. Run the coding agent on a deployment that uses the Kubernetes job launcher,
-   or
+   or, on the Docker launcher, use a Codex coding agent for this repository, or
 2. remove `.wardby/services.yaml` from the base branch if the repository's
-   tests do not need the services on this deployment.
+   tests do not need the services.
 
 This error only applies to an agent that already allows at least one service
 (`codingProfile.services` is non-empty): wardby reads a repository's
