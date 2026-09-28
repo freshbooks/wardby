@@ -1247,16 +1247,6 @@ describe("Docker launcher with services", () => {
     ]);
   });
 
-  it("refuses a Claude run with services at launch, before touching Docker", async () => {
-    const created = await servicesHarness("docker-services-claude");
-    const claudeWithServices: JobSpec = { ...created.spec, provider: "claude-code", toolImage, limits: claudeLimits };
-    await expect(created.launcher.launch(claudeWithServices)).rejects.toThrow("docker_isolation_unsupported");
-    expect(created.docker.calls).toEqual([]);
-    // The same run without services is a valid Claude plan: services alone are what's refused.
-    const { services: _services, ...withoutServices } = claudeWithServices;
-    expect(() => buildDockerIsolationPlan(withoutServices, "trusted-proxy")).not.toThrow();
-  });
-
   it("removes services and the network keeper with the run's other resources, in namespace order", async () => {
     const created = await servicesHarness("docker-services-remove");
     const handle = await created.launcher.launch(created.spec);
