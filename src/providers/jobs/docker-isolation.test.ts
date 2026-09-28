@@ -482,6 +482,8 @@ describe("Docker isolation parity for runs without services", () => {
     ...spec,
     provider: "claude-code",
     toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+    // A Claude run needs at least 96 PIDs (its tool runner takes 64).
+    limits: { ...spec.limits, pids: 128 },
   };
 
   // Recorded before services existed on Docker. Never update this snapshot:
