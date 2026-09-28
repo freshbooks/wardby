@@ -205,11 +205,12 @@ function assertIntegerRange(value: number, min: number, max: number): void {
 }
 
 /**
- * Which runs the Docker launcher starts services for: Codex only. Claude Code's tool runner is on the
- * run network, not in the network keeper's namespace, so it could not reach a service on 127.0.0.1.
+ * Which runs the Docker launcher starts services for: Codex and Claude Code. The container that runs
+ * the run's commands (Codex's worker, Claude Code's tool runner) joins the network keeper's
+ * namespace and reaches the services on 127.0.0.1; Claude Code's agent stays on the run network.
  */
 export function dockerSupportsServicesFor(provider: CodingProvider): boolean {
-  return provider === "codex";
+  return provider === "codex" || provider === "claude-code";
 }
 
 function validateSpec(spec: JobSpec): void {
@@ -227,8 +228,9 @@ function validateSpec(spec: JobSpec): void {
     throw isolationError();
   }
   if (spec.services !== undefined) {
-    // docker-services.ts re-validates every entry against the catalog schema.
-    if (!dockerSupportsServicesFor(spec.provider ?? "codex") || spec.services.length === 0) throw isolationError();
+    // docker-services.ts re-validates every entry against the catalog schema. Both providers' shells
+    // share the network keeper's namespace: Codex's worker, and Claude Code's tool runner.
+    if (spec.services.length === 0) throw isolationError();
   }
   assertFiniteRange(spec.limits.cpus, 0.1, 32);
   assertIntegerRange(spec.limits.memoryMb, 128, 65_536);
@@ -432,7 +434,10 @@ export function buildNetworkKeeperCreateArgs(spec: JobSpec): string[] {
   ];
 }
 
-/** The worker's network: the run network, or the network keeper's namespace for a run with services. */
+/**
+ * The network of the container that runs the run's commands (Codex's worker, Claude Code's tool
+ * runner): the run network, or the network keeper's namespace for a run with services.
+ */
 function workerNetworkMode(spec: JobSpec): string {
   const names = isolationNames(spec.runId);
   return spec.services === undefined ? names.network : `container:${names.networkKeeperContainer}`;
@@ -608,7 +613,10 @@ export function buildClaudeAgentCreateArgs(spec: JobSpec, proxyPort = CODING_PRO
 /**
  * The tool runner receives only the checkout and its own storage subpath; it shares the run's
  * proxy network with the agent (one room) but holds no capability, so the proxy grants it only
- * registry access via its own WARDBY_TOOL_SETUP value.
+ * registry access via its own WARDBY_TOOL_SETUP value. For a run with services it joins the network
+ * keeper's namespace instead, which is on that same run network: it reaches the proxy by its alias
+ * and the services on 127.0.0.1, and nothing else. It talks to the agent over the Unix socket in
+ * their shared `tool` storage subpath, which does not depend on either container's network.
  */
 export function buildClaudeToolRunnerCreateArgs(spec: JobSpec): string[] {
   validateSpec(spec);
@@ -626,9 +634,10 @@ export function buildClaudeToolRunnerCreateArgs(spec: JobSpec): string[] {
     "--user",
     `${CODING_WORKER_UID}:${CODING_WORKER_GID}`,
     // One room (docs/coding-worker-isolation.md): the run's proxy network, like the agent, so npm and
-    // pip reach the registry. It holds no capability, so the proxy refuses it anything else.
+    // pip reach the registry. It holds no capability, so the proxy refuses it anything else. With
+    // services: the network keeper's namespace on that network, so the services answer on 127.0.0.1.
     "--network",
-    names.network,
+    workerNetworkMode(spec),
     "--read-only",
     "--cap-drop",
     "ALL",
@@ -857,9 +866,9 @@ export function assertNetworkKeeperContainerInspection(container: DockerContaine
 }
 
 /**
- * A worker without services is on the run network only. With services it is in the network
- * keeper's namespace: Docker reports `container:<name>` before start and `container:<id>` after,
- * and lists no networks of its own.
+ * The worker (Codex) or tool runner (Claude Code) of a run without services is on the run network
+ * only. With services it is in the network keeper's namespace: Docker reports `container:<name>`
+ * before start and `container:<id>` after, and lists no networks of its own.
  */
 function workerNetworkAttested(
   container: DockerContainerInspection,
@@ -1025,7 +1034,6 @@ function assertExactMountSet(
 function assertClaudeContainerBaseline(
   container: DockerContainerInspection,
   image: string,
-  network: string,
   spec: JobSpec,
   limits: { cpus: number; memoryMb: number; pids: number },
 ): void {
@@ -1051,7 +1059,6 @@ function assertClaudeContainerBaseline(
     host.PidsLimit !== limits.pids ||
     host.NanoCpus !== Math.round(limits.cpus * 1_000_000_000) ||
     host.ShmSize !== 16 * 1024 * 1024 ||
-    host.NetworkMode !== network ||
     host.PidMode !== "" ||
     host.RestartPolicy?.Name !== "no" ||
     host.LogConfig?.Type !== "local" ||
@@ -1082,7 +1089,7 @@ export function assertClaudeAgentContainerInspection(
   validateSpec(spec);
   if (spec.provider !== "claude-code") throw isolationError();
   const names = isolationNames(spec.runId);
-  assertClaudeContainerBaseline(container, spec.image, names.network, spec, claudeAgentLimits(spec));
+  assertClaudeContainerBaseline(container, spec.image, spec, claudeAgentLimits(spec));
   const environment = (container.Config?.Env ?? []).filter((value) => value.startsWith("WARDBY_"));
   if (
     environment.length !== 2 ||
@@ -1095,22 +1102,28 @@ export function assertClaudeAgentContainerInspection(
     { path: WORKER_PATHS.output, writable: true, subpath: "output" },
     { path: WORKER_PATHS.tool, writable: true, subpath: "tool" },
   ]);
-  if (Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== names.network) throw isolationError();
+  // The agent holds the capability: always on the run network only, never in the keeper's namespace.
+  if (
+    container.HostConfig?.NetworkMode !== names.network ||
+    Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== names.network
+  )
+    throw isolationError();
 }
 
 export function assertClaudeToolRunnerContainerInspection(
   container: DockerContainerInspection,
   spec: JobSpec,
   expectedSetup: string,
+  networkKeeperId?: string,
 ): void {
   validateSpec(spec);
   if (spec.provider !== "claude-code" || !spec.toolImage) throw isolationError();
   const names = isolationNames(spec.runId);
-  assertClaudeContainerBaseline(container, spec.toolImage, names.network, spec, claudeToolLimits(spec));
+  assertClaudeContainerBaseline(container, spec.toolImage, spec, claudeToolLimits(spec));
   const environment = (container.Config?.Env ?? []).filter((value) => value.startsWith("WARDBY_"));
   if (environment.length !== 1 || environment[0] !== `${CLAUDE_TOOL_SETUP_ENV}=${expectedSetup}`)
     throw isolationError();
-  if (Object.keys(container.NetworkSettings?.Networks ?? {}).join(",") !== names.network) throw isolationError();
+  if (!workerNetworkAttested(container, spec, networkKeeperId)) throw isolationError();
   assertExactMountSet(container, names, [
     { path: WORKER_PATHS.workspace, writable: true, subpath: "workspace" },
     { path: WORKER_PATHS.tool, writable: true, subpath: "tool" },

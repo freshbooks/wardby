@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   assertDockerHostSupportsIsolation,
+  assertClaudeAgentContainerInspection,
   assertClaudeToolRunnerContainerInspection,
   assertIsolationNetworkInspection,
   assertNetworkKeeperContainerInspection,
@@ -12,6 +13,7 @@ import {
   buildDockerIsolationPlan,
   dockerSupportsServicesFor,
   buildWorkerCreateArgs,
+  claudeToolLimits,
   isImmutableDockerImage,
   isolationNames,
   isolationToken,
@@ -400,6 +402,92 @@ function validNetworkKeeperInspection(): DockerContainerInspection {
   };
 }
 
+const claudeWithServices: JobSpec = {
+  ...withServices,
+  provider: "claude-code",
+  toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
+  // A Claude run needs at least 96 PIDs (its tool runner takes 64).
+  limits: { ...spec.limits, pids: 128 },
+};
+const { services: _claudeServices, ...claudeWithoutServices } = claudeWithServices;
+const TOOL_SETUP = '{"schemaVersion":1,"env":{},"files":[]}';
+
+/** A Claude agent or tool runner as Docker reports it, with the given network mode and networks. */
+function claudeInspection(role: "agent" | "tool", networkMode: string, networks: string[]): DockerContainerInspection {
+  const names = isolationNames(spec.runId);
+  const tool = claudeToolLimits(claudeWithServices);
+  const limits =
+    role === "tool"
+      ? tool
+      : {
+          cpus: claudeWithServices.limits.cpus - tool.cpus,
+          memoryMb: claudeWithServices.limits.memoryMb - tool.memoryMb,
+          pids: claudeWithServices.limits.pids - tool.pids,
+        };
+  const mounts: Array<[string, boolean, string]> =
+    role === "tool"
+      ? [
+          [WORKER_PATHS.workspace, true, "workspace"],
+          [WORKER_PATHS.tool, true, "tool"],
+        ]
+      : [
+          [WORKER_PATHS.input, false, "input"],
+          [WORKER_PATHS.output, true, "output"],
+          [WORKER_PATHS.tool, true, "tool"],
+        ];
+  return {
+    Config: {
+      User: "10001:10001",
+      Image: role === "tool" ? claudeWithServices.toolImage : claudeWithServices.image,
+      Env:
+        role === "tool"
+          ? [`WARDBY_TOOL_SETUP=${TOOL_SETUP}`]
+          : ["WARDBY_PROXY_URL=http://wardby-proxy:8787", "WARDBY_RUN_CAPABILITY=test-capability"],
+      Labels: isolationLabels,
+    },
+    HostConfig: {
+      Binds: null,
+      CapAdd: null,
+      CapDrop: ["ALL"],
+      CgroupnsMode: "private",
+      Devices: [],
+      DeviceRequests: null,
+      Dns: [],
+      DnsOptions: [],
+      DnsSearch: [],
+      ExtraHosts: null,
+      GroupAdd: null,
+      Init: true,
+      IpcMode: "none",
+      LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } },
+      Memory: limits.memoryMb * 1024 * 1024,
+      MemorySwap: limits.memoryMb * 1024 * 1024,
+      MemorySwappiness: 0,
+      NetworkMode: networkMode,
+      NanoCpus: Math.round(limits.cpus * 1_000_000_000),
+      PidsLimit: limits.pids,
+      PidMode: "",
+      PortBindings: {},
+      Privileged: false,
+      PublishAllPorts: false,
+      ReadonlyRootfs: true,
+      RestartPolicy: { Name: "no" },
+      SecurityOpt: ["no-new-privileges=true", "seccomp=builtin"],
+      ShmSize: 16 * 1024 * 1024,
+      Tmpfs: { "/tmp": "rw,noexec", "/home/wardby": "rw,noexec" },
+      Mounts: mounts.map(([Target, writable, Subpath]) => ({
+        Type: "volume",
+        Source: names.storageVolume,
+        Target,
+        ReadOnly: !writable,
+        VolumeOptions: { NoCopy: true, Subpath },
+      })),
+    },
+    Mounts: mounts.map(([Destination, RW]) => ({ Type: "volume", Name: names.storageVolume, Destination, RW })),
+    NetworkSettings: { Networks: Object.fromEntries(networks.map((network) => [network, {}])), Ports: {} },
+  };
+}
+
 describe("Docker isolation with services", () => {
   it("names the network keeper with the run's opaque token", () => {
     const token = isolationToken(spec.runId);
@@ -438,24 +526,87 @@ describe("Docker isolation with services", () => {
     expect(() => buildNetworkKeeperCreateArgs(spec)).toThrow("docker_isolation_unsupported");
   });
 
-  it("refuses services on a Claude run and an empty service list", () => {
-    const claude: JobSpec = {
-      ...withServices,
-      provider: "claude-code",
-      toolImage: `registry.example/wardby-tools@sha256:${"b".repeat(64)}`,
-      limits: { ...spec.limits, pids: 128 },
-    };
-    // Valid as a Claude run without services, so services alone are what's refused.
-    const { services: _services, ...claudeWithout } = claude;
-    expect(() => buildDockerIsolationPlan(claudeWithout, "trusted-proxy")).not.toThrow();
-    expect(dockerSupportsServicesFor("claude-code")).toBe(false);
-    expect(dockerSupportsServicesFor("codex")).toBe(true);
-    expect(() => buildDockerIsolationPlan(claude, "trusted-proxy")).toThrow("docker_isolation_unsupported");
-    // The network keeper can never be built for a Claude run.
-    expect(() => buildNetworkKeeperCreateArgs(claude)).toThrow("docker_isolation_unsupported");
+  it("refuses an empty service list for either provider", () => {
     expect(() => buildDockerIsolationPlan({ ...spec, services: [] }, "trusted-proxy")).toThrow(
       "docker_isolation_unsupported",
     );
+    expect(() => buildDockerIsolationPlan({ ...claudeWithServices, services: [] }, "trusted-proxy")).toThrow(
+      "docker_isolation_unsupported",
+    );
+  });
+
+  it("moves only a Claude run's tool runner into the keeper's namespace; its agent stays on the run network", () => {
+    const plan = buildDockerIsolationPlan(claudeWithServices, "trusted-proxy");
+    const plain = buildDockerIsolationPlan(claudeWithoutServices, "trusted-proxy");
+    expect(plan.networkKeeperCreateArgs).toEqual(buildNetworkKeeperCreateArgs(claudeWithServices));
+    expect(flagValues(plan.toolCreateArgs!, "--network")).toEqual([`container:${plan.names.networkKeeperContainer}`]);
+    expect(flagValues(plan.workerCreateArgs, "--network")).toEqual([plan.names.network]);
+    // Nothing else about either container changes: the agent's arguments are identical, and the
+    // tool runner's differ only in the --network value.
+    expect(plan.workerCreateArgs).toEqual(plain.workerCreateArgs);
+    const exceptNetwork = (args: readonly string[]) => args.filter((_value, index) => args[index - 1] !== "--network");
+    expect(exceptNetwork(plan.toolCreateArgs!)).toEqual(exceptNetwork(plain.toolCreateArgs!));
+    // Still no capability and exactly one variable, by name only.
+    expect(plan.toolCreateArgs!.join(" ")).not.toContain("WARDBY_RUN_CAPABILITY");
+    expect(flagValues(plan.toolCreateArgs!, "--env")).toEqual(["WARDBY_TOOL_SETUP"]);
+  });
+
+  it("attests a services tool runner in the keeper's namespace and nowhere else", () => {
+    const names = isolationNames(spec.runId);
+    const shared = claudeInspection("tool", `container:${KEEPER_ID}`, []);
+    const byName = claudeInspection("tool", `container:${names.networkKeeperContainer}`, []);
+    const onRunNetwork = claudeInspection("tool", names.network, [names.network]);
+    // Docker reports container:<name> before start and container:<id> after.
+    expect(() =>
+      assertClaudeToolRunnerContainerInspection(shared, claudeWithServices, TOOL_SETUP, KEEPER_ID),
+    ).not.toThrow();
+    expect(() => assertClaudeToolRunnerContainerInspection(byName, claudeWithServices, TOOL_SETUP)).not.toThrow();
+    // Without services the tool runner stays exactly where it was.
+    expect(() =>
+      assertClaudeToolRunnerContainerInspection(onRunNetwork, claudeWithoutServices, TOOL_SETUP),
+    ).not.toThrow();
+    for (const [label, drifted, job, keeperId] of [
+      ["another keeper's ID", shared, claudeWithServices, "0".repeat(64)],
+      ["the run network while the run has services", onRunNetwork, claudeWithServices, KEEPER_ID],
+      [
+        "a network of its own besides the keeper's namespace",
+        claudeInspection("tool", `container:${KEEPER_ID}`, [names.network]),
+        claudeWithServices,
+        KEEPER_ID,
+      ],
+      ["the keeper's namespace in a run without services", shared, claudeWithoutServices, KEEPER_ID],
+      ["the host network", claudeInspection("tool", "host", []), claudeWithServices, KEEPER_ID],
+      [
+        "another container's namespace",
+        claudeInspection("tool", `container:${names.workerContainer}`, []),
+        claudeWithServices,
+        KEEPER_ID,
+      ],
+    ] as const) {
+      expect(() => assertClaudeToolRunnerContainerInspection(drifted, job, TOOL_SETUP, keeperId), label).toThrow(
+        "docker_isolation_unsupported",
+      );
+    }
+  });
+
+  it("never lets a Claude agent into the keeper's namespace", () => {
+    const names = isolationNames(spec.runId);
+    const onRunNetwork = claudeInspection("agent", names.network, [names.network]);
+    expect(() =>
+      assertClaudeAgentContainerInspection(onRunNetwork, claudeWithServices, "test-capability"),
+    ).not.toThrow();
+    expect(() =>
+      assertClaudeAgentContainerInspection(onRunNetwork, claudeWithoutServices, "test-capability"),
+    ).not.toThrow();
+    for (const mode of [`container:${KEEPER_ID}`, `container:${names.networkKeeperContainer}`]) {
+      expect(() =>
+        assertClaudeAgentContainerInspection(
+          claudeInspection("agent", mode, []),
+          claudeWithServices,
+          "test-capability",
+        ),
+      ).toThrow("docker_isolation_unsupported");
+    }
   });
 
   it("attests the network keeper", () => {
@@ -543,6 +694,11 @@ describe("Docker isolation with services", () => {
         KEEPER_ID,
       ),
     ).toThrow("docker_isolation_unsupported");
+  });
+
+  it("offers services to Codex and Claude Code runs", () => {
+    expect(dockerSupportsServicesFor("codex")).toBe(true);
+    expect(dockerSupportsServicesFor("claude-code")).toBe(true);
   });
 });
 

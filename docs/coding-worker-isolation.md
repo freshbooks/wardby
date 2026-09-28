@@ -33,9 +33,10 @@ image, which is resolved when the run is dispatched and kept for the whole run.
 Claude Code uses a credential-separated composite job. Its agent container
 holds the run capability and is attached only to the proxy network; it never
 mounts the repository. Its tool runner container mounts the workspace and
-shares that same run network, so it can reach the coding proxy too, but it
+shares that same run network (for a run with services, through the network
+keeper's namespace; see below), so it can reach the coding proxy too, but it
 holds no model capability or provider credential of its own — only the
-registry-only settings in `WARDBY_TOOL_SETUP`. The two talk over a private
+registry-only settings and service variables in `WARDBY_TOOL_SETUP`. The two talk over a private
 Unix socket (`/run/wardby/tool/runner.sock`). The trade is deliberate: the
 tool runner can reach the proxy, but the proxy accepts nothing from it for a
 model call. Both containers, the socket volume, keeper, network, and
@@ -259,10 +260,25 @@ start:
   its data path and each writable path, its catalog `serviceEnv`, and no
   published ports, mounts, devices or restart policy.
 
-The worker and every service use `--network container:<network keeper>`, so a
-service answers the worker on `127.0.0.1` and the worker still reaches the
-proxy by its alias on the internal network. Nothing else about the worker
-changes.
+A Codex run's worker and every service use `--network container:<network
+keeper>`, so a service answers the worker on `127.0.0.1` and the worker still
+reaches the proxy by its alias on the internal network. Nothing else about the
+worker changes.
+
+For a Claude Code run it is the tool runner, which runs the agent's shell
+commands, that joins the network keeper's namespace: it reaches every service
+on `127.0.0.1` and the proxy by its alias, and it is created only after every
+service is ready. The agent container stays on the run's internal network,
+unchanged; it reaches the tool runner over the Unix socket in their shared
+storage volume, which does not depend on either container's network. The
+launcher attests the tool runner's network before it starts and on every
+status check: the network keeper's namespace and no network of its own.
+
+A service may listen on every interface of the network keeper's namespace, so
+anything on the run's internal network (the proxy, and for a Claude Code run
+the agent container) can address it there, just as every container in a
+Kubernetes run's pod shares the services' namespace. Services are disposable
+test fixtures with catalog credentials; do not treat them as a boundary.
 
 The capability value is inherited from the trusted launcher's child-process
 environment with `--env WARDBY_RUN_CAPABILITY`; it is never included in command
@@ -305,6 +321,8 @@ allocations at the host scheduler as well as per run.
    run fails with `coding_service_unready:<name>`. All of this shares one
    120-second start-up limit (image pulls, each bounded to 5 minutes, are not
    counted) and never runs past the run's deadline.
+   A Claude Code run's tool runner is created, inspected and started only
+   after this step, in the network keeper's namespace.
 7. Create the worker with the run capability supplied only in the child
    environment; inspect every effective control before start.
 8. Start the worker and enforce `deadlineMs`. Send SIGTERM at expiry, then

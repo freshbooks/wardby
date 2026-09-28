@@ -94,8 +94,8 @@ export interface JobLauncher {
 export interface WorkspaceJobLauncher extends JobLauncher {
   materializeWorkspace: (handle: JobHandle, destination: string) => Promise<void>;
   /**
-   * Whether this launcher starts JobSpec.services for a run of `provider`: Kubernetes for Codex and
-   * Claude Code, Docker for Codex only. Absent means no services at all.
+   * Whether this launcher starts JobSpec.services for a run of `provider`: Kubernetes and Docker, for
+   * Codex and Claude Code. Absent means no services at all.
    */
   supportsServicesFor?(provider: CodingProvider): boolean;
 }

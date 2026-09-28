@@ -28,9 +28,9 @@ The GitHub App installation is the only step that cannot be created from this
 repository. It is intentionally scoped to the test repository because a coding
 run can push a branch and create a draft pull request.
 
-Coding runs can also have services such as a PostgreSQL database next to them:
-Codex and Claude Code runs on the Kubernetes launcher, and Codex runs on the
-Docker launcher; see [coding-services.md](coding-services.md).
+Coding runs can also have services such as a PostgreSQL database next to them,
+for Codex and Claude Code runs on the Kubernetes and Docker launchers; see
+[coding-services.md](coding-services.md).
 
 ## Repository authorization
 

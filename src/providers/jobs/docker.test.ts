@@ -412,7 +412,7 @@ class FakeDocker implements DockerCommandRunner {
     };
   }
 
-  private toolInspection(): object {
+  protected toolInspection(): object {
     const mounts = [
       [WORKER_PATHS.workspace, true, "workspace"],
       [WORKER_PATHS.tool, true, "tool"],
@@ -641,6 +641,18 @@ describe("DockerJobLauncher", () => {
     await expect(created.launcher.collect(handle)).resolves.toMatchObject({ diagnostic: "worker_tool_runner_failed" });
   });
 
+  it("never looks for a network keeper in a Claude run without services", async () => {
+    const created = await harness("docker-claude-no-netns", {
+      provider: "claude-code",
+      toolImage,
+      limits: claudeLimits,
+    });
+    const handle = await created.launcher.launch(created.spec);
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "running" });
+    const netns = created.docker.plan.names.networkKeeperContainer;
+    expect(created.docker.calls.some((call) => call.args.includes(netns))).toBe(false);
+  });
+
   it("never relaunches an ambiguous provisioning record", async () => {
     const created = await harness("docker-ambiguous", { provider: "claude-code", toolImage, limits: claudeLimits });
     const plan = created.docker.plan;
@@ -848,6 +860,8 @@ class ServicesFakeDocker extends FakeDocker {
   serviceVanishesOnProbe = false;
   /** The service inspection shows a privileged container. */
   serviceDrifts = false;
+  /** Overrides the tool runner's reported network mode (a Claude run's tool runner in the keeper's namespace). */
+  toolNetworkMode = `container:${NETWORK_KEEPER_ID}`;
   /** How long a pull takes on the harness clock. */
   pullTakesMs = 0;
   /** The harness clock; pulls advance it. */
@@ -871,7 +885,7 @@ class ServicesFakeDocker extends FakeDocker {
     if (
       group === "container" &&
       action === "inspect" &&
-      args[2] === this.plan.names.workerContainer &&
+      (args[2] === this.plan.names.workerContainer || args[2] === this.plan.names.toolContainer) &&
       !this.resourceLabels.has(args[2])
     ) {
       this.calls.push({ args, options });
@@ -936,10 +950,21 @@ class ServicesFakeDocker extends FakeDocker {
   }
 
   protected override workerInspection(): object {
+    // A Claude run's agent stays on the run network; only Codex's worker shares the keeper's namespace.
+    if (this.job.provider === "claude-code") return super.workerInspection();
     const base = super.workerInspection() as { HostConfig: object };
     return {
       ...base,
       HostConfig: { ...base.HostConfig, NetworkMode: `container:${NETWORK_KEEPER_ID}` },
+      NetworkSettings: { Networks: {}, Ports: {} },
+    };
+  }
+
+  protected override toolInspection(): object {
+    const base = super.toolInspection() as { HostConfig: object };
+    return {
+      ...base,
+      HostConfig: { ...base.HostConfig, NetworkMode: this.toolNetworkMode },
       NetworkSettings: { Networks: {}, Ports: {} },
     };
   }
@@ -1083,10 +1108,10 @@ function commands(docker: FakeDocker, group: string, action: string): Array<read
 }
 
 describe("Docker launcher with services", () => {
-  it("starts services for Codex runs only", async () => {
+  it("starts services for Codex and Claude Code runs", async () => {
     const { launcher } = await harness("docker-supports-services");
     expect(launcher.supportsServicesFor("codex")).toBe(true);
-    expect(launcher.supportsServicesFor("claude-code")).toBe(false);
+    expect(launcher.supportsServicesFor("claude-code")).toBe(true);
   });
 
   it("starts the network keeper, then each service, then the worker in the keeper's namespace", async () => {
@@ -1247,14 +1272,102 @@ describe("Docker launcher with services", () => {
     ]);
   });
 
-  it("refuses a Claude run with services at launch, before touching Docker", async () => {
-    const created = await servicesHarness("docker-services-claude");
-    const claudeWithServices: JobSpec = { ...created.spec, provider: "claude-code", toolImage, limits: claudeLimits };
-    await expect(created.launcher.launch(claudeWithServices)).rejects.toThrow("docker_isolation_unsupported");
-    expect(created.docker.calls).toEqual([]);
-    // The same run without services is a valid Claude plan: services alone are what's refused.
-    const { services: _services, ...withoutServices } = claudeWithServices;
-    expect(() => buildDockerIsolationPlan(withoutServices, "trusted-proxy")).not.toThrow();
+  const claudeRun = { provider: "claude-code", toolImage, limits: claudeLimits } as const;
+
+  it("starts a Claude run's services before its tool runner, which joins the keeper's namespace, and keeps the agent on the run network", async () => {
+    const created = await servicesHarness("docker-services-claude", claudeRun);
+    created.docker.present.add(POSTGRES.image);
+    const handle = await created.launcher.launch(created.spec);
+    const names = created.docker.plan.names;
+    const service = dockerServiceContainerName(created.spec.runId, "postgres");
+    expect(createdContainers(created.docker)).toEqual([
+      names.keeperContainer,
+      names.networkKeeperContainer,
+      service,
+      names.toolContainer,
+      names.workerContainer,
+    ]);
+    const creates = commands(created.docker, "container", "create");
+    const toolCreate = creates.find((args) => args.includes(names.toolContainer))!;
+    const agentCreate = creates.find((args) => args.includes(names.workerContainer))!;
+    expect(toolCreate[toolCreate.indexOf("--network") + 1]).toBe(`container:${names.networkKeeperContainer}`);
+    expect(agentCreate[agentCreate.indexOf("--network") + 1]).toBe(names.network);
+    // The tool runner starts only after the service's readiness probe passed.
+    const sequence = created.docker.calls.map((call) => call.args);
+    const probed = sequence.findIndex((args) => args[1] === "exec" && args[2] === service);
+    const toolStarted = sequence.findIndex((args) => args[1] === "start" && args.at(-1) === names.toolContainer);
+    expect(probed).toBeGreaterThanOrEqual(0);
+    expect(toolStarted).toBeGreaterThan(probed);
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "running" });
+  });
+
+  it("gives a Claude run's tool runner the services' test variables only through its setup, never in arguments", async () => {
+    const created = await servicesHarness("docker-services-claude-env", claudeRun);
+    await created.launcher.launch(created.spec);
+    const names = created.docker.plan.names;
+    const carrying = created.docker.calls.filter((call) => JSON.stringify(call).includes("DATABASE_URL"));
+    expect(carrying.map((call) => call.args.slice(0, 4))).toEqual([
+      ["container", "create", "--name", names.toolContainer],
+    ]);
+    expect(JSON.stringify(carrying[0].args)).not.toContain("DATABASE_URL");
+    const setup = JSON.parse(carrying[0].options!.env!.WARDBY_TOOL_SETUP) as { env: Record<string, string> };
+    expect(setup.env).toMatchObject(POSTGRES.testEnv);
+    // serviceEnv still reaches only the service's own create arguments.
+    const serviceCarrying = created.docker.calls.filter((call) => JSON.stringify(call).includes("POSTGRES_PASSWORD"));
+    expect(serviceCarrying.map((call) => call.args.slice(0, 4))).toEqual([
+      ["container", "create", "--name", dockerServiceContainerName(created.spec.runId, "postgres")],
+    ]);
+  });
+
+  it("never creates a Claude run's tool runner or agent when a service never becomes ready", async () => {
+    const created = await servicesHarness("docker-services-claude-unready", claudeRun);
+    created.docker.present.add(POSTGRES.image);
+    created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+    await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    const names = created.docker.plan.names;
+    expect(createdContainers(created.docker)).not.toContain(names.toolContainer);
+    expect(createdContainers(created.docker)).not.toContain(names.workerContainer);
+    expect(created.docker.removed).toEqual(
+      new Set([dockerServiceContainerName(created.spec.runId, "postgres"), names.networkKeeperContainer]),
+    );
+  });
+
+  it("re-attests a Claude run's tool runner against the network keeper on every status", async () => {
+    const created = await servicesHarness("docker-services-claude-drift", claudeRun);
+    const handle = await created.launcher.launch(created.spec);
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "running" });
+    created.docker.toolNetworkMode = `container:${"0".repeat(64)}`;
+    await expect(created.launcher.status(handle)).rejects.toThrow("docker_isolation_unsupported");
+  });
+
+  it("removes a Claude run's tool runner before its services and the network keeper", async () => {
+    const created = await servicesHarness("docker-services-claude-remove", claudeRun);
+    const handle = await created.launcher.launch(created.spec);
+    created.docker.finish();
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "succeeded" });
+    await created.launcher.remove(handle);
+    const names = created.docker.plan.names;
+    const service = dockerServiceContainerName(created.spec.runId, "postgres");
+    expect(commands(created.docker, "container", "rm").map((args) => args.slice(2))).toEqual([
+      ["--force", names.workerContainer],
+      ["--force", names.toolContainer],
+      ["--force", "--volumes", service],
+      ["--force", names.networkKeeperContainer],
+      ["--force", names.keeperContainer],
+    ]);
+  });
+
+  it("stops a Claude run's agent, tool runner and services when the run is stopped", async () => {
+    const created = await servicesHarness("docker-services-claude-stop", claudeRun);
+    const handle = await created.launcher.launch(created.spec);
+    await created.launcher.stop(handle);
+    const names = created.docker.plan.names;
+    const service = dockerServiceContainerName(created.spec.runId, "postgres");
+    expect(commands(created.docker, "container", "stop").map((args) => args.at(-1))).toEqual([
+      names.workerContainer,
+      names.toolContainer,
+      service,
+    ]);
   });
 
   it("removes services and the network keeper with the run's other resources, in namespace order", async () => {

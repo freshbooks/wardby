@@ -649,7 +649,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     this.ready = this.initialize();
   }
 
-  /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex runs. */
+  /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex and Claude Code runs. */
   supportsServicesFor(provider: CodingProvider): boolean {
     return dockerSupportsServicesFor(provider);
   }
@@ -870,22 +870,11 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     await this.run(plan.proxyNetworkConnectArgs);
     const proxy = await this.inspect<DockerContainerInspection>(["container", "inspect", this.options.proxyContainer]);
     assertProxyContainerInspection(proxy, record.runId);
+    // Built before anything starts, so a setup past the tool runner's bounds fails the launch early.
     const toolSetup = record.spec.provider === "claude-code" ? claudeToolSetup(record.spec, capability) : undefined;
-    if (plan.toolCreateArgs) {
-      await this.createAndAssert(
-        appendLabels(plan.toolCreateArgs, labels),
-        ["container", "inspect", plan.names.toolContainer],
-        (value) => {
-          assertClaudeToolRunnerContainerInspection(value as DockerContainerInspection, record.spec, toolSetup!);
-          if (!labelsMatch((value as DockerContainerInspection).Config?.Labels, labels)) {
-            throw new Error("docker_resource_attestation_failed");
-          }
-        },
-        { env: { WARDBY_TOOL_SETUP: toolSetup! } },
-      );
-      await this.startContainer(plan.names.toolContainer);
-      await this.waitForToolRunner(plan.names.toolContainer);
-    }
+    // Services first (a run with services only): the Codex worker and Claude Code's tool runner join
+    // the network keeper's namespace, so it must exist, and every service must pass readiness before
+    // anything that runs the run's commands starts.
     const networkKeeperId = plan.networkKeeperCreateArgs
       ? await this.startServices(
           record,
@@ -895,6 +884,26 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
           labels,
         )
       : undefined;
+    if (plan.toolCreateArgs) {
+      await this.createAndAssert(
+        appendLabels(plan.toolCreateArgs, labels),
+        ["container", "inspect", plan.names.toolContainer],
+        (value) => {
+          assertClaudeToolRunnerContainerInspection(
+            value as DockerContainerInspection,
+            record.spec,
+            toolSetup!,
+            networkKeeperId,
+          );
+          if (!labelsMatch((value as DockerContainerInspection).Config?.Labels, labels)) {
+            throw new Error("docker_resource_attestation_failed");
+          }
+        },
+        { env: { WARDBY_TOOL_SETUP: toolSetup! } },
+      );
+      await this.startContainer(plan.names.toolContainer);
+      await this.waitForToolRunner(plan.names.toolContainer);
+    }
     const workerArgs = appendLabels(plan.workerCreateArgs, labels);
     await this.createAndAssert(
       workerArgs,
@@ -1080,7 +1089,12 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
         "inspect",
         buildDockerIsolationPlan(record.spec, this.options.proxyContainer).names.toolContainer,
       ]);
-      assertClaudeToolRunnerContainerInspection(tool, record.spec, claudeToolSetup(record.spec, capability));
+      assertClaudeToolRunnerContainerInspection(
+        tool,
+        record.spec,
+        claudeToolSetup(record.spec, capability),
+        await this.attestedNetworkKeeperId(record),
+      );
       if (tool.State?.Running !== true || tool.State?.Status !== "running") {
         record.phase = "failed";
         record.result = { exitCode: 1, reason: "failed", diagnostic: "worker_tool_runner_failed" };
@@ -1139,7 +1153,8 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     const labels = resourceLabels(record);
     await this.removeContainerIfAttested(plan.names.workerContainer, labels);
     if (plan.toolCreateArgs) await this.removeContainerIfAttested(plan.names.toolContainer, labels);
-    // Services, then the network keeper: nothing may still share its namespace when it goes.
+    // Services, then the network keeper: nothing (the Codex worker, Claude's tool runner, a service)
+    // may still share its namespace when it goes.
     // --volumes: an image VOLUME the attestation rejected must not outlive its container.
     for (const service of dockerServiceContainerNames(record.spec)) {
       await this.removeContainerIfAttested(service, labels, true);

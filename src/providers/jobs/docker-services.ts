@@ -56,7 +56,7 @@ export function dockerServiceContainerNames(spec: JobSpec): string[] {
 export function validateDockerServices(spec: JobSpec): ResolvedCodingService[] {
   if (spec.services === undefined) return [];
   const names = spec.services.map((service) => service.name);
-  if (spec.provider === "claude-code" || spec.services.length === 0 || new Set(names).size !== names.length) {
+  if (spec.services.length === 0 || new Set(names).size !== names.length) {
     throw isolationError();
   }
   const parsed = StoredCodingServicesSchema.safeParse(spec.services);

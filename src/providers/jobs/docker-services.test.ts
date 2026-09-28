@@ -175,13 +175,13 @@ describe("Docker service containers", () => {
     ]) {
       expect(() => buildDockerServicePlan({ ...spec, services })).toThrow("docker_isolation_unsupported");
     }
-    expect(() =>
-      buildDockerServicePlan({
-        ...spec,
-        provider: "claude-code",
-        toolImage: `registry.example/t@sha256:${"b".repeat(64)}`,
-      }),
-    ).toThrow("docker_isolation_unsupported");
+    // A Claude Code run's services are planned exactly like a Codex run's.
+    const claude: JobSpec = {
+      ...spec,
+      provider: "claude-code",
+      toolImage: `registry.example/t@sha256:${"b".repeat(64)}`,
+    };
+    expect(buildDockerServicePlan(claude)).toEqual(buildDockerServicePlan(spec));
   });
 
   it("fills catalog defaults and never throws a raw TypeError on an invalid spec", () => {
