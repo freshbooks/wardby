@@ -10,16 +10,22 @@ command inside a separate, credential-free tool-runner container that shares
 the run's proxy network with the agent, so it can reach the proxy the same
 way Codex's driver does; it never receives the run's model capability, only
 the registry-only settings the trusted launcher builds for it (delivered as
-`WARDBY_TOOL_SETUP`). Claude Code runs support the `node` toolchain (npm)
-today; `pip` installs need a Codex run on the `node-python` worker. See
-[Claude Code](#claude-code) below.
+`WARDBY_TOOL_SETUP`). Both providers support the `node` toolchain (npm) and
+the `node-python` toolchain (npm and pip). See [Claude Code](#claude-code)
+below.
 
 ## Claude Code
 
-Claude Code runs support the `node` toolchain today: `npm install` runs
-inside Claude Code's tool-runner container (which has no Python, so `pip` is
-not available there), the same container that mounts the workspace and runs
-every other shell command — the agent container never runs one. The npm lockfile check
+`npm install` and, on the `node-python` toolchain, `pip install` run inside
+Claude Code's tool-runner container, the same container that mounts the
+workspace and runs every other shell command — the agent container never runs
+one. The toolchain picks the tool-runner image: `node` uses
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE`, and `node-python` with toolchain version
+`3.12` uses `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (Python with
+pytest and ruff, the same packages as the Codex `node-python` worker). As with
+Codex, pip installs go into a virtual environment
+(`python -m venv --system-site-packages .venv`), and pip there reaches only the
+registry. The npm lockfile check
 (the shim on `PATH` that plans `npm ci`/`npm install` against the proxy
 before it runs; see "Lockfile installs: verified, then approved exactly"
 below) applies there exactly as it does for Codex. Before a Claude Code run's

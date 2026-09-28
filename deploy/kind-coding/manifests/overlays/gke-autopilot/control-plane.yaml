@@ -319,6 +319,10 @@ spec:
               value: wardby-claude-coding-worker-image
             - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE
               value: wardby-claude-tool-runner-image
+            # Claude's tool runner for agents whose profile sets toolchain "node-python" and
+            # toolchainVersion "3.12" (Python with pytest and ruff). Substituted the same way.
+            - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12
+              value: wardby-claude-tool-runner-image-node-python-3-12
           ports:
             - name: mcp
               containerPort: 8080
