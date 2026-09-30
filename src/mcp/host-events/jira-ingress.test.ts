@@ -11,6 +11,7 @@ vi.mock("../../providers/issue-tracker/jira-events.js", async (orig) => ({
 }));
 import { routeIssueEvent } from "../../core/issue-events.js";
 import { normalizeJiraEvent } from "../../providers/issue-tracker/jira-events.js";
+import { resetPruneClockForTests } from "./deliveries.js";
 import { handleJiraEventIngress } from "./jira-ingress.js";
 
 const SECRET = "jira-webhook-secret-0123456789";
@@ -65,8 +66,20 @@ describe("handleJiraEventIngress", () => {
     expect(result).toMatchObject({ status: 202, body: { runIds: ["run1"] } });
     expect(hostEventDelivery.create).toHaveBeenCalledWith({ data: { provider: "jira", deliveryId: "id-1" } });
     expect(normalizeJiraEvent).toHaveBeenCalledWith(JSON.parse(body), "bot-1");
-    expect(routeIssueEvent).toHaveBeenCalledTimes(1);
+    expect(routeIssueEvent).toHaveBeenCalledWith(
+      { kind: "created" },
+      { db: d.db, executor: d.executor, trackers: d.trackers },
+    );
     await result.afterResponse?.();
+  });
+
+  it("prunes old delivery rows on a Jira delivery", async () => {
+    resetPruneClockForTests();
+    const { deps: d, hostEventDelivery } = deps();
+    await handleJiraEventIngress({ headers: headers(), rawBody: body }, d);
+    expect(hostEventDelivery.deleteMany).toHaveBeenCalledWith({
+      where: { receivedAt: { lt: expect.any(Date) } },
+    });
   });
 
   it("rejects a bad signature without writing or routing", async () => {

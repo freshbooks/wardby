@@ -5,6 +5,7 @@
  * Nothing from the body is logged.
  */
 import { Prisma, type PrismaClient } from "#prisma";
+import { maybePruneHostEventDeliveries } from "./deliveries.js";
 import type { HostEventDb } from "../../core/host-events.js";
 import { routeHostEvent } from "../../core/host-events.js";
 import { logger } from "../../core/logger.js";
@@ -14,10 +15,7 @@ import type { ReviewHostRegistry } from "../../providers/review-host/types.js";
 import type { RepoAccessGate } from "../../core/repo-access.js";
 
 const log = logger.child({ module: "github-ingress" });
-const DELIVERY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const SAFE_DELIVERY = /^[A-Za-z0-9-]{1,100}$/;
-let lastPruneAt = 0;
 
 export interface GitHubIngressDeps {
   db: HostEventDb & Pick<PrismaClient, "hostEventDelivery">;
@@ -75,12 +73,7 @@ export async function handleGitHubEventIngress(
     }
     throw err;
   }
-  if (now.getTime() - lastPruneAt > PRUNE_INTERVAL_MS) {
-    lastPruneAt = now.getTime();
-    await deps.db.hostEventDelivery
-      .deleteMany({ where: { receivedAt: { lt: new Date(now.getTime() - DELIVERY_RETENTION_MS) } } })
-      .catch((err: unknown) => log.warn({ err }, "delivery prune failed"));
-  }
+  await maybePruneHostEventDeliveries(deps.db, now);
 
   // The delivery row is recorded before routing so a duplicate can never
   // race past it, but that means a transient failure inside routeHostEvent
@@ -117,7 +110,4 @@ export async function handleGitHubEventIngress(
   }
 }
 
-/** Test-only: reset the prune clock. */
-export function resetPruneClockForTests(): void {
-  lastPruneAt = 0;
-}
+export { resetPruneClockForTests } from "./deliveries.js";

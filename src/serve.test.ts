@@ -16,10 +16,17 @@ const ENV_KEYS = [
   "AUTH_CREDENTIAL_HASH_KEY",
   "SECRET_APP_KEY",
   "CODING_MAX_CONCURRENT",
+  "WARDBY_JIRA_SITE_URL",
+  "WARDBY_JIRA_API_BASE_URL",
+  "WARDBY_JIRA_API_EMAIL",
+  "WARDBY_JIRA_API_TOKEN",
+  "WARDBY_JIRA_API_TOKEN_EXPIRES_AT",
+  "WARDBY_JIRA_WEBHOOK_SECRET",
 ] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 beforeEach(() => {
   for (const k of ENV_KEYS) saved[k] = process.env[k];
+  for (const k of ENV_KEYS) if (k.startsWith("WARDBY_JIRA_")) delete process.env[k];
 });
 afterEach(() => {
   for (const k of ENV_KEYS) {

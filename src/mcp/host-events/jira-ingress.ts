@@ -6,6 +6,7 @@
  * retries, so it is the dedupe key. Nothing from the body is logged.
  */
 import { Prisma, type PrismaClient } from "#prisma";
+import { maybePruneHostEventDeliveries } from "./deliveries.js";
 import { routeIssueEvent, type IssueEventDb } from "../../core/issue-events.js";
 import { logger } from "../../core/logger.js";
 import type { Executor } from "../../providers/executor/types.js";
@@ -61,7 +62,7 @@ export async function handleJiraEventIngress(
     }
     throw err;
   }
-  // Pruning of old delivery rows (all providers) is done by the GitHub ingress.
+  await maybePruneHostEventDeliveries(deps.db, new Date());
 
   // A routing failure must not leave the delivery permanently marked done:
   // un-record it and rethrow so Jira's retry is routed for real.
