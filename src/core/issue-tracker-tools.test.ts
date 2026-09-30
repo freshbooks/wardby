@@ -16,6 +16,7 @@ const WRITE_LINK: IssueProjectLink = {
   commentVisibilityRole: "Developers",
   allowedTransitions: ["In Progress", "Done"],
   writableFields: ["labels", "priority", "customfield_10010"],
+  allowedLinkTypes: ["Blocks", "Duplicate"],
 };
 const READ_LINK: IssueProjectLink = {
   provider: "jira",
@@ -24,6 +25,7 @@ const READ_LINK: IssueProjectLink = {
   commentVisibilityRole: null,
   allowedTransitions: [],
   writableFields: [],
+  allowedLinkTypes: [],
 };
 
 function tracker(): IssueTracker {
@@ -390,6 +392,7 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
     commentVisibilityRole: null,
     allowedTransitions: [],
     writableFields: [],
+    allowedLinkTypes: [],
   };
   const def = (name: string) => ISSUE_TRACKER_TOOL_DEFS.find((t) => t.name === name)!;
   const TRANSITIONS = [
@@ -406,6 +409,7 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
     expect(def("jira_update_fields").description).toMatch(/visible to everyone/);
     expect(def("jira_update_fields").description).toMatch(/service account/);
     expect(def("jira_link_issues").description).toMatch(/both issues/i);
+    expect(def("jira_link_issues").description).toMatch(/allowedLinkTypes/);
     expect(def("jira_set_property").description).toMatch(/this agent/);
   });
 
@@ -600,23 +604,110 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
   });
 
   describe("jira_link_issues", () => {
-    const TYPES = [{ name: "Blocks", inward: "is blocked by", outward: "blocks" }];
+    const TYPES = [
+      { name: "Blocks", inward: "is blocked by", outward: "blocks" },
+      { name: "Duplicate", inward: "is duplicated by", outward: "duplicates" },
+      { name: "Relates", inward: "relates to", outward: "relates to" },
+    ];
+    /** A second writable project whose allowlist names "blocks" in another case. */
+    const TEAM: IssueProjectLink = {
+      provider: "jira",
+      projectKey: "TEAM",
+      access: "write",
+      commentVisibilityRole: null,
+      allowedTransitions: [],
+      writableFields: [],
+      allowedLinkTypes: ["blocks"],
+    };
+    const links = () => [WRITE_LINK, READ_LINK, TEAM, OPS];
 
-    it("links issues in linked projects: write on the outward one, read on the inward one", async () => {
+    it("links issues when both projects are writable and both allowlist the type (case-insensitive)", async () => {
       const t = tracker();
       vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
       expect(
-        await call("jira_link_issues", { type: "blocks", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" }, ctx(t)),
-      ).toEqual({ type: "Blocks", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" });
-      expect(t.linkIssues).toHaveBeenCalledWith({ type: "Blocks", inwardKey: "DOCS-2", outwardKey: "PROJ-1" });
+        await call(
+          "jira_link_issues",
+          { type: "BLOCKS", inwardIssue: "TEAM-2", outwardIssue: "PROJ-1" },
+          ctx(t, links()),
+        ),
+      ).toEqual({ type: "Blocks", inwardIssue: "TEAM-2", outwardIssue: "PROJ-1" });
+      expect(t.linkIssues).toHaveBeenCalledWith({ type: "Blocks", inwardKey: "TEAM-2", outwardKey: "PROJ-1" });
     });
 
-    it("refuses when the outward issue's link is read-only", async () => {
+    it("refuses when a project's allowlist is empty, without calling Jira", async () => {
       const t = tracker();
       vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      for (const [inwardIssue, outwardIssue] of [
+        ["OPS-2", "PROJ-1"],
+        ["PROJ-1", "OPS-2"],
+      ]) {
+        expect(
+          await call("jira_link_issues", { type: "Blocks", inwardIssue, outwardIssue }, ctx(t, links())),
+        ).toMatchObject({ error: "link_type_not_allowed" });
+      }
+      expect(t.issueProject).not.toHaveBeenCalled();
+      expect(t.linkTypes).not.toHaveBeenCalled();
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("refuses a type that is not in both projects' allowlists", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      // Relates is in neither; Duplicate is in PROJ's but not TEAM's.
+      for (const type of ["Relates", "Duplicate"]) {
+        const result = await call(
+          "jira_link_issues",
+          { type, inwardIssue: "TEAM-2", outwardIssue: "PROJ-1" },
+          ctx(t, links()),
+        );
+        expect(result).toMatchObject({ error: "link_type_not_allowed" });
+      }
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("applies the resolved project's allowlist too", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      // TEAM-2 was moved: it now lives in OPS, which is writable but allowlists nothing.
+      vi.mocked(t.issueProject).mockImplementation(async (key) => (key === "TEAM-2" ? "OPS" : projectOf(key)));
       expect(
-        await call("jira_link_issues", { type: "Blocks", inwardIssue: "PROJ-1", outwardIssue: "DOCS-2" }, ctx(t)),
-      ).toMatchObject({ error: "write_access_required" });
+        await call(
+          "jira_link_issues",
+          { type: "Blocks", inwardIssue: "TEAM-2", outwardIssue: "PROJ-1" },
+          ctx(t, links()),
+        ),
+      ).toMatchObject({ error: "link_type_not_allowed" });
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("applies the live link's allowlist, not the pinned one", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      const c = ctx(t, links());
+      c.currentLink = async (k) =>
+        k === "TEAM" ? { ...TEAM, allowedLinkTypes: [] } : (links().find((l) => l.projectKey === k) ?? null);
+      expect(
+        await call("jira_link_issues", { type: "Blocks", inwardIssue: "TEAM-2", outwardIssue: "PROJ-1" }, c),
+      ).toMatchObject({ error: "link_type_not_allowed" });
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("refuses when either issue's project is read-only", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      const readWithTypes = { ...READ_LINK, allowedLinkTypes: ["Blocks"] };
+      for (const [inwardIssue, outwardIssue] of [
+        ["DOCS-2", "PROJ-1"],
+        ["PROJ-1", "DOCS-2"],
+      ]) {
+        expect(
+          await call(
+            "jira_link_issues",
+            { type: "Blocks", inwardIssue, outwardIssue },
+            ctx(t, [WRITE_LINK, readWithTypes]),
+          ),
+        ).toMatchObject({ error: "write_access_required" });
+      }
       expect(t.linkIssues).not.toHaveBeenCalled();
     });
 
@@ -627,9 +718,9 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
         ["SECRET-1", "PROJ-1"],
         ["PROJ-1", "SECRET-1"],
       ]) {
-        expect(await call("jira_link_issues", { type: "Blocks", inwardIssue, outwardIssue }, ctx(t))).toMatchObject({
-          error: "project_not_linked",
-        });
+        expect(
+          await call("jira_link_issues", { type: "Blocks", inwardIssue, outwardIssue }, ctx(t, links())),
+        ).toMatchObject({ error: "project_not_linked" });
       }
       expect(t.linkIssues).not.toHaveBeenCalled();
     });
@@ -637,10 +728,28 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
     it("refuses when the inward issue resolves to an unlinked project, without writing", async () => {
       const t = tracker();
       vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
-      vi.mocked(t.issueProject).mockImplementation(async (key) => (key === "DOCS-2" ? "SECRET" : projectOf(key)));
+      vi.mocked(t.issueProject).mockImplementation(async (key) => (key === "TEAM-2" ? "SECRET" : projectOf(key)));
       expect(
-        await call("jira_link_issues", { type: "Blocks", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" }, ctx(t)),
+        await call(
+          "jira_link_issues",
+          { type: "Blocks", inwardIssue: "TEAM-2", outwardIssue: "PROJ-1" },
+          ctx(t, links()),
+        ),
       ).toMatchObject({ error: "project_not_linked" });
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("refuses when the inward issue resolves to a read-only project", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      vi.mocked(t.issueProject).mockImplementation(async (key) => (key === "TEAM-2" ? "DOCS" : projectOf(key)));
+      expect(
+        await call(
+          "jira_link_issues",
+          { type: "Blocks", inwardIssue: "TEAM-2", outwardIssue: "PROJ-1" },
+          ctx(t, links()),
+        ),
+      ).toMatchObject({ error: "write_access_required" });
       expect(t.linkIssues).not.toHaveBeenCalled();
     });
 
@@ -649,7 +758,11 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
       vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
       vi.mocked(t.issueProject).mockImplementation(async (key) => (key === "PROJ-1" ? "DOCS" : projectOf(key)));
       expect(
-        await call("jira_link_issues", { type: "Blocks", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" }, ctx(t)),
+        await call(
+          "jira_link_issues",
+          { type: "Blocks", inwardIssue: "TEAM-2", outwardIssue: "PROJ-1" },
+          ctx(t, links()),
+        ),
       ).toMatchObject({ error: "write_access_required" });
       expect(t.linkIssues).not.toHaveBeenCalled();
     });
@@ -663,13 +776,13 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
       expect(t.linkIssues).not.toHaveBeenCalled();
     });
 
-    it("refuses an unknown link type, naming the available ones", async () => {
+    it("refuses an allowlisted type the Jira site does not have, naming the available ones", async () => {
       const t = tracker();
-      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      vi.mocked(t.linkTypes).mockResolvedValue([TYPES[0]]);
       const result = await call(
         "jira_link_issues",
-        { type: "Duplicates", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" },
-        ctx(t),
+        { type: "Duplicate", inwardIssue: "PROJ-2", outwardIssue: "PROJ-1" },
+        ctx(t, links()),
       );
       expect(result).toMatchObject({ error: "invalid_link_type" });
       expect(result.message).toContain("Blocks");

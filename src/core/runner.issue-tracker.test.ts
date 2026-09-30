@@ -20,6 +20,7 @@ interface FakeLink {
   commentVisibilityRole: string | null;
   allowedTransitions?: string[];
   writableFields?: string[];
+  allowedLinkTypes?: string[];
 }
 
 interface FakeStatus {
@@ -252,6 +253,23 @@ describe("jira_* built-ins in the native run loop", () => {
     expect(state.toolResults.some((r) => r.includes('"toStatus":"Done"'))).toBe(true);
   });
 
+  it("links issues through the tracker when the live link allowlists the type", async () => {
+    const tracker = fakeTracker();
+    vi.mocked(tracker.linkTypes).mockResolvedValue([
+      { name: "Duplicate", inward: "is duplicated by", outward: "duplicates" },
+    ]);
+    const { db, state, llm } = harness({
+      links: [{ ...LINK, allowedLinkTypes: ["Duplicate"] }],
+      script: [
+        toolCall("jira_link_issues", { type: "duplicate", inwardIssue: "PROJ-2", outwardIssue: "PROJ-1" }),
+        text("done"),
+      ],
+    });
+    await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(tracker.linkIssues).toHaveBeenCalledWith({ type: "Duplicate", inwardKey: "PROJ-2", outwardKey: "PROJ-1" });
+    expect(state.toolResults.some((r) => r.includes('"type":"Duplicate"'))).toBe(true);
+  });
+
   it("fails closed for a link row without allowlists", async () => {
     const tracker = fakeTracker();
     const { db, state, llm } = harness({
@@ -259,12 +277,15 @@ describe("jira_* built-ins in the native run loop", () => {
       script: [
         toolCall("jira_transition", { issueKey: "PROJ-1", toStatus: "Done" }),
         toolCall("jira_update_fields", { issueKey: "PROJ-1", fields: { labels: ["x"] } }),
+        toolCall("jira_link_issues", { type: "Blocks", inwardIssue: "PROJ-2", outwardIssue: "PROJ-1" }),
         text("done"),
       ],
     });
     await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
     expect(tracker.transitionTo).not.toHaveBeenCalled();
     expect(tracker.editFields).not.toHaveBeenCalled();
+    expect(tracker.linkIssues).not.toHaveBeenCalled();
+    expect(state.toolResults.some((r) => r.includes("link_type_not_allowed"))).toBe(true);
     expect(state.toolResults.some((r) => r.includes("transition_not_allowed"))).toBe(true);
     expect(state.toolResults.some((r) => r.includes("field_not_allowed"))).toBe(true);
   });

@@ -200,6 +200,7 @@ function toIssueProjectLink(row: {
   commentVisibilityRole: string | null;
   allowedTransitions?: string[] | null;
   writableFields?: string[] | null;
+  allowedLinkTypes?: string[] | null;
 }): IssueProjectLink {
   return {
     provider: "jira",
@@ -209,6 +210,7 @@ function toIssueProjectLink(row: {
     // `?? []` (fail closed): a row or pinned load from before the allowlists existed allows nothing.
     allowedTransitions: row.allowedTransitions ?? [],
     writableFields: row.writableFields ?? [],
+    allowedLinkTypes: row.allowedLinkTypes ?? [],
   };
 }
 

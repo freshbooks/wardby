@@ -33,7 +33,23 @@ type LinkArgs = {
   commentVisibilityRole?: string;
   allowedTransitions?: string[];
   writableFields?: string[];
+  allowedLinkTypes?: string[];
 };
+
+/** Trimmed names, 1-100 characters each, de-duplicated case-insensitively (first spelling kept). */
+function nameList(field: string, raw: readonly string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const entry of raw ?? []) {
+    const name = entry.trim();
+    if (name.length === 0 || name.length > 100) throw new McpError(400, `invalid ${field} entry (1-100 characters)`);
+    if (!seen.has(name.toLowerCase())) {
+      seen.add(name.toLowerCase());
+      names.push(name);
+    }
+  }
+  return names;
+}
 
 function normalizeProjectKey(projectKey: string): string {
   const key = projectKey.trim().toUpperCase();
@@ -57,7 +73,11 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
       "allowedTransitions (write access only): the target status names jira_transition may move issues to (matched by target " +
       "status name, case-insensitive). writableFields (write access only): the field ids jira_update_fields may change " +
       "(labels, components, priority, or customfield_NNNNN). Both allowlists fail closed: empty or omitted means the agent " +
-      "cannot transition issues or edit fields at all.",
+      "cannot transition issues or edit fields at all. " +
+      'allowedLinkTypes (write access only): the issue link type names jira_link_issues may create (e.g. "Duplicate", ' +
+      "case-insensitive, at most 20); linking also needs write access to both issues' projects, each allowlisting the type. " +
+      "It fails closed too: empty or omitted means the agent cannot link issues. Issue properties (jira_set_property) are " +
+      "not allowlisted: any write link may set them.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -78,6 +98,7 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
         commentVisibilityRole: { type: "string", minLength: 1, maxLength: 100 },
         allowedTransitions: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 50 },
         writableFields: { type: "array", items: { type: "string", pattern: WRITABLE_FIELD.source }, maxItems: 50 },
+        allowedLinkTypes: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 20 },
       },
       required: ["agentId", "projectKey", "access"],
     },
@@ -101,24 +122,18 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
           "invalid trustedAccountIds entry (letters, digits, ':', '_', '-'; up to 128 characters)",
         );
       }
-      const seen = new Set<string>();
-      const allowedTransitions: string[] = [];
-      for (const raw of args.allowedTransitions ?? []) {
-        const name = raw.trim();
-        if (name.length === 0 || name.length > 100) {
-          throw new McpError(400, "invalid allowedTransitions entry (1-100 characters)");
-        }
-        if (!seen.has(name.toLowerCase())) {
-          seen.add(name.toLowerCase());
-          allowedTransitions.push(name);
-        }
-      }
+      const allowedTransitions = nameList("allowedTransitions", args.allowedTransitions);
+      const allowedLinkTypes = nameList("allowedLinkTypes", args.allowedLinkTypes);
+      if (allowedLinkTypes.length > 20) throw new McpError(400, "allowedLinkTypes takes at most 20 entries");
       const writableFields = [...new Set(args.writableFields ?? [])];
       if (writableFields.some((f) => !WRITABLE_FIELD.test(f))) {
         throw new McpError(400, "invalid writableFields entry (labels, components, priority, or customfield_NNNNN)");
       }
-      if ((allowedTransitions.length > 0 || writableFields.length > 0) && args.access !== "write") {
-        throw new McpError(400, "allowedTransitions and writableFields need write access.");
+      if (
+        (allowedTransitions.length > 0 || writableFields.length > 0 || allowedLinkTypes.length > 0) &&
+        args.access !== "write"
+      ) {
+        throw new McpError(400, "allowedTransitions, writableFields, and allowedLinkTypes need write access.");
       }
       if (triggers.length > 0 && args.access !== "write") throw new McpError(400, "Event triggers need write access.");
       if (triggers.includes("transitioned") && triggerStatuses.length === 0) {
@@ -143,6 +158,7 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
         commentVisibilityRole: args.commentVisibilityRole ?? null,
         allowedTransitions,
         writableFields,
+        allowedLinkTypes,
         authorizedById: ctx.principal.id,
         authorizedAt: new Date(),
       };

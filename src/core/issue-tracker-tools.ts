@@ -16,10 +16,13 @@
  * links, issue properties). Each authorizes the issue's resolved project
  * against the live link like jira_comment does, and each is further bounded
  * by a per-link allowlist that fails closed: an empty allowedTransitions or
- * writableFields refuses every transition or field edit. jira_link_issues
- * authorizes both issues. Issue properties are namespaced by wardby as
- * `wardby.<agentId>.<property>`, so an agent can neither read nor clobber
- * another app's or another agent's properties.
+ * writableFields refuses every transition or field edit, and an empty
+ * allowedLinkTypes refuses every issue link. jira_link_issues needs write on
+ * both issues' projects and the link type in both projects' allowlists.
+ * Issue properties are not allowlisted (any write link may set them); they
+ * are namespaced by wardby as `wardby.<agentId>.<property>`, so an agent
+ * cannot read or overwrite another app's or another agent's properties
+ * through these tools.
  * See docs/private/2026-09-30-jira-issue-tracker-design.md.
  */
 import { z } from "zod";
@@ -46,6 +49,8 @@ export interface IssueProjectLink {
   allowedTransitions: string[];
   /** Field ids jira_update_fields may change; empty = none. */
   writableFields: string[];
+  /** Issue link type names jira_link_issues may create (case-insensitive); empty = none. */
+  allowedLinkTypes: string[];
 }
 
 export interface IssueToolContext {
@@ -259,7 +264,7 @@ export const ISSUE_TRACKER_TOOL_DEFS: LoadedTool[] = [
   {
     name: "jira_link_issues",
     description:
-      "Links two Jira issues, e.g. type \"Blocks\" with outwardIssue blocking inwardIssue, made as this deployment's Jira service account. Both issues must be in projects this agent is linked to: write access on the outward issue's project, at least read on the inward one's. type must be one of the Jira site's issue link type names.",
+      "Links two Jira issues, e.g. type \"Blocks\" with outwardIssue blocking inwardIssue, made as this deployment's Jira service account. Both issues must be in projects this agent has write access to, and type (case-insensitive) must be in the allowedLinkTypes of both projects' links, or nothing is linked. type must also be one of the Jira site's issue link type names.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -304,10 +309,15 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set([
   "jira_set_property",
 ]);
 
-/** The wardby-owned Jira issue property key for this agent's `property`. */
+/**
+ * The wardby-owned Jira issue property key for this agent's `property`.
+ * Agent ids are cuids (letters and digits, never a '.'), so the first '.'
+ * after `wardby.` always ends the agent id: no agent id plus property name
+ * can spell another agent's namespace.
+ */
 export const propertyKey = (agentId: string, property: string): string => `wardby.${agentId}.${property}`;
 
-const sameStatus = (a: string, b: string): boolean => a.trim().toLowerCase() === b.trim().toLowerCase();
+const sameName = (a: string, b: string): boolean => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 /**
  * Restricts the model's JQL to `projectKeys`: `project in (...) AND (<filter>)`,
@@ -420,7 +430,7 @@ function allowlistRefusal(name: string, args: unknown, link: IssueProjectLink): 
     }
     if (name === "jira_transition") {
       const { toStatus } = args as z.infer<typeof TransitionArgs>;
-      if (!allowed.some((s) => sameStatus(s, toStatus))) {
+      if (!allowed.some((s) => sameName(s, toStatus))) {
         return error(
           "transition_not_allowed",
           `This agent may only move ${link.projectKey} issues to: ${allowed.join(", ")}.`,
@@ -444,22 +454,47 @@ function allowlistRefusal(name: string, args: unknown, link: IssueProjectLink): 
 }
 
 /**
- * jira_link_issues: both issues are authorized, by requested key and then by
- * resolved project: write on the outward issue's project, read on the inward
- * one's. Nothing is written unless all four checks pass.
+ * The live write link to `projectKey` when it also allowlists link `type`
+ * (case-insensitive; an empty allowedLinkTypes allows nothing), else the refusal.
+ */
+async function authorizeLink(
+  projectKey: string,
+  type: string,
+  ctx: IssueToolContext,
+): Promise<{ link: IssueProjectLink } | { refusal: string }> {
+  const auth = await authorizeProject("write", projectKey, ctx);
+  if ("refusal" in auth) return auth;
+  const allowed = allowlist(auth.link.allowedLinkTypes);
+  if (!allowed.some((t) => sameName(t, type))) {
+    const may = allowed.length > 0 ? ` It may create: ${allowed.join(", ")}.` : "";
+    return {
+      refusal: error(
+        "link_type_not_allowed",
+        `This agent may not create "${type}" issue links in ${projectKey}; nothing was linked.${may}`,
+      ),
+    };
+  }
+  return auth;
+}
+
+/**
+ * jira_link_issues: both issues are authorized, by requested key (before any
+ * tracker call) and then by resolved project: each needs a live write link
+ * whose allowedLinkTypes includes the requested type. Nothing is written
+ * unless all four checks pass.
  */
 async function linkIssues(a: z.infer<typeof LinkIssuesArgs>, ctx: IssueToolContext): Promise<string> {
-  const outward = await authorizeProject("write", projectOf(a.outwardIssue), ctx);
+  const outward = await authorizeLink(projectOf(a.outwardIssue), a.type, ctx);
   if ("refusal" in outward) return outward.refusal;
-  const inward = await authorizeProject("read", projectOf(a.inwardIssue), ctx);
+  const inward = await authorizeLink(projectOf(a.inwardIssue), a.type, ctx);
   if ("refusal" in inward) return inward.refusal;
   const tracker = ctx.trackers[outward.link.provider];
   if (!tracker) {
     return error("tracker_not_configured", `No ${outward.link.provider} site is configured on this deployment.`);
   }
-  const outwardResolved = await authorizeProject("write", await tracker.issueProject(a.outwardIssue), ctx);
+  const outwardResolved = await authorizeLink(await tracker.issueProject(a.outwardIssue), a.type, ctx);
   if ("refusal" in outwardResolved) return outwardResolved.refusal;
-  const inwardResolved = await authorizeProject("read", await tracker.issueProject(a.inwardIssue), ctx);
+  const inwardResolved = await authorizeLink(await tracker.issueProject(a.inwardIssue), a.type, ctx);
   if ("refusal" in inwardResolved) return inwardResolved.refusal;
   const types = await tracker.linkTypes();
   const type = types.find((t) => t.name.toLowerCase() === a.type.toLowerCase());
@@ -582,7 +617,7 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
         const allowed = allowlist(resolved.link.allowedTransitions);
         // Only what this agent may do reaches the model.
         const transitions = (await tracker.transitions(a.issueKey))
-          .filter((t) => allowed.some((s) => sameStatus(s, t.toStatus)))
+          .filter((t) => allowed.some((s) => sameName(s, t.toStatus)))
           .map((t) => ({ name: t.name, toStatus: t.toStatus, toCategory: t.toCategory }));
         return JSON.stringify({ transitions });
       }

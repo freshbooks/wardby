@@ -1148,6 +1148,8 @@ model AgentIssueProject {
   allowedTransitions    String[] @default([])
   /// Field ids jira_update_fields may change ("labels", "components", "priority", "customfield_NNNNN"). Empty = none.
   writableFields        String[] @default([])
+  /// Issue link type names (case-insensitive) jira_link_issues may create. Empty = linking off.
+  allowedLinkTypes      String[] @default([])
   authorizedById        String
   authorizedAt          DateTime @default(now())
   createdAt             DateTime @default(now())
