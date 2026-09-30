@@ -111,7 +111,13 @@ export function adfToText(node: unknown, maxChars = 20_000): string {
     if (BLOCKS.has(a.type)) parts.push("\n");
   };
   walk(node);
-  return cap(parts.join("").replace(/\n{2,}/g, "\n").trim(), maxChars);
+  return cap(
+    parts
+      .join("")
+      .replace(/\n{2,}/g, "\n")
+      .trim(),
+    maxChars,
+  );
 }
 
 function cap(text: string, max: number): string {

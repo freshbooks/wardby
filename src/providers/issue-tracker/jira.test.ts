@@ -28,11 +28,17 @@ function fake(handler: (c: Call) => Response | undefined) {
 const json = (v: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...headers } });
 
-const doc = (text: string) => ({ type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "text", text }] }] });
+const doc = (text: string) => ({
+  type: "doc",
+  version: 1,
+  content: [{ type: "paragraph", content: [{ type: "text", text }] }],
+});
 
 describe("JiraIssueTracker", () => {
   it("sends Basic auth and caches the bot account id", async () => {
-    const { tracker, calls } = fake((c) => (c.path === "/rest/api/3/myself" ? json({ accountId: "bot-1" }) : undefined));
+    const { tracker, calls } = fake((c) =>
+      c.path === "/rest/api/3/myself" ? json({ accountId: "bot-1" }) : undefined,
+    );
     expect(await tracker.botAccountId()).toBe("bot-1");
     expect(await tracker.botAccountId()).toBe("bot-1");
     expect(calls).toHaveLength(1);
@@ -59,7 +65,12 @@ describe("JiraIssueTracker", () => {
               total: 3,
               comments: [
                 { id: "10", author: { accountId: "u-1", displayName: "Ada" }, created: "t1", body: doc("hi") },
-                { id: "11", author: { accountId: "bot-1", displayName: "wardby" }, created: "t2", body: doc(`done\n${agentFooter("agent-7")}`) },
+                {
+                  id: "11",
+                  author: { accountId: "bot-1", displayName: "wardby" },
+                  created: "t2",
+                  body: doc(`done\n${agentFooter("agent-7")}`),
+                },
               ],
             },
           },
@@ -77,7 +88,10 @@ describe("JiraIssueTracker", () => {
       url: `${SITE}/browse/PROJ-1`,
       commentsTruncated: true,
     });
-    expect(issue.comments.map((c) => [c.id, c.byThisAgent])).toEqual([["10", false], ["11", true]]);
+    expect(issue.comments.map((c) => [c.id, c.byThisAgent])).toEqual([
+      ["10", false],
+      ["11", true],
+    ]);
   });
 
   it("posts comments as ADF with the agent-independent body and optional role visibility", async () => {
@@ -98,14 +112,21 @@ describe("JiraIssueTracker", () => {
     const { tracker, calls } = fake((c) =>
       c.method === "POST" && c.path === "/rest/api/3/search/jql"
         ? json({
-            issues: [{ key: "PROJ-2", fields: { summary: "S", status: { name: "Done" }, issuetype: { name: "Task" }, updated: "u" } }],
+            issues: [
+              {
+                key: "PROJ-2",
+                fields: { summary: "S", status: { name: "Done" }, issuetype: { name: "Task" }, updated: "u" },
+              },
+            ],
             nextPageToken: "more",
           })
         : undefined,
     );
     const r = await tracker.search("project = PROJ", { maxResults: 1 });
     expect(r).toEqual({
-      issues: [{ key: "PROJ-2", summary: "S", status: "Done", issueType: "Task", updated: "u", url: `${SITE}/browse/PROJ-2` }],
+      issues: [
+        { key: "PROJ-2", summary: "S", status: "Done", issueType: "Task", updated: "u", url: `${SITE}/browse/PROJ-2` },
+      ],
       truncated: true,
     });
     expect(calls[0].body).toMatchObject({ jql: "project = PROJ", maxResults: 1 });

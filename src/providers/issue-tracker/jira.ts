@@ -115,7 +115,10 @@ export class JiraIssueTracker implements IssueTracker {
     return r.issues.length > 0;
   }
 
-  async comment(key: string, input: { markdown: string; visibilityRole?: string }): Promise<{ id: string; url: string }> {
+  async comment(
+    key: string,
+    input: { markdown: string; visibilityRole?: string },
+  ): Promise<{ id: string; url: string }> {
     const r = await this.client.request<Json>("POST", `/rest/api/3/issue/${key}/comment`, {
       body: markdownToAdf(input.markdown),
       ...(input.visibilityRole ? { visibility: { type: "role", value: input.visibilityRole } } : {}),
@@ -125,7 +128,9 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async editComment(key: string, commentId: string, input: { markdown: string }): Promise<void> {
-    await this.client.request("PUT", `/rest/api/3/issue/${key}/comment/${commentId}`, { body: markdownToAdf(input.markdown) });
+    await this.client.request("PUT", `/rest/api/3/issue/${key}/comment/${commentId}`, {
+      body: markdownToAdf(input.markdown),
+    });
   }
 
   async readComment(key: string, commentId: string): Promise<{ authorId: string | null; body: string } | null> {

@@ -25,7 +25,13 @@ describe("markdownToAdf", () => {
   });
   it("handles headings, lists, code blocks and quotes", () => {
     const doc = markdownToAdf("## Title\n\n- a\n- b\n\n1. one\n\n```ts\nconst x = 1;\n```\n\n> quoted");
-    expect(doc.content?.map((n) => n.type)).toEqual(["heading", "bulletList", "orderedList", "codeBlock", "blockquote"]);
+    expect(doc.content?.map((n) => n.type)).toEqual([
+      "heading",
+      "bulletList",
+      "orderedList",
+      "codeBlock",
+      "blockquote",
+    ]);
     expect(doc.content?.[0].attrs).toEqual({ level: 2 });
     expect(doc.content?.[3]).toEqual({
       type: "codeBlock",
@@ -48,7 +54,13 @@ describe("adfToText", () => {
     type: "doc",
     version: 1,
     content: [
-      { type: "paragraph", content: [{ type: "text", text: "Hello " }, { type: "mention", attrs: { id: "acc-1", text: "@Bot" } }] },
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "Hello " },
+          { type: "mention", attrs: { id: "acc-1", text: "@Bot" } },
+        ],
+      },
       { type: "codeBlock", content: [{ type: "text", text: "x = 1" }] },
     ],
   };
@@ -66,7 +78,20 @@ describe("adfToText", () => {
 
 describe("adfMentionIds", () => {
   it("collects mention account ids at any depth", () => {
-    const doc = { type: "doc", content: [{ type: "bulletList", content: [{ type: "listItem", content: [{ type: "paragraph", content: [{ type: "mention", attrs: { id: "acc-9" } }] }] }] }] };
+    const doc = {
+      type: "doc",
+      content: [
+        {
+          type: "bulletList",
+          content: [
+            {
+              type: "listItem",
+              content: [{ type: "paragraph", content: [{ type: "mention", attrs: { id: "acc-9" } }] }],
+            },
+          ],
+        },
+      ],
+    };
     expect(adfMentionIds(doc)).toEqual(["acc-9"]);
   });
 });

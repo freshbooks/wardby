@@ -59,9 +59,12 @@ export class JiraClient {
 }
 
 function statusError(status: number): IssueTrackerError {
-  if (status === 404) return new IssueTrackerError("tracker_not_found", "Not found in Jira (or not visible to wardby's Jira account).");
-  if (status === 401 || status === 403) return new IssueTrackerError("tracker_permission_denied", "wardby's Jira account is not allowed to do that.");
-  if (status === 429) return new IssueTrackerError("tracker_rate_limited", "Jira is rate-limiting wardby; try again shortly.");
+  if (status === 404)
+    return new IssueTrackerError("tracker_not_found", "Not found in Jira (or not visible to wardby's Jira account).");
+  if (status === 401 || status === 403)
+    return new IssueTrackerError("tracker_permission_denied", "wardby's Jira account is not allowed to do that.");
+  if (status === 429)
+    return new IssueTrackerError("tracker_rate_limited", "Jira is rate-limiting wardby; try again shortly.");
   if (status === 400) return new IssueTrackerError("tracker_invalid_request", "Jira rejected the request as invalid.");
   return new IssueTrackerError("tracker_api_error", `Jira returned HTTP ${status}.`);
 }
