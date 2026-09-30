@@ -20,8 +20,10 @@ the `Jira acting as` startup line to confirm the account.
 
 1. In Atlassian Administration, create a service account (Directory, then
    Service accounts). Give it a project role with Browse Projects, Add
-   Comments and Edit Own Comments in each project agents will use, and only there: its permissions are the outer
-   boundary of what any linked agent can read or change.
+   Comments and Edit Own Comments in each project agents will use, and only
+   there. To let agents change issues also add Transition issues, Edit issues
+   and Link issues. Its permissions are the outer boundary of what any linked
+   agent can read or change.
 2. Create an API token for it with scopes covering reading issues, JQL search
    and writing comments, plus reading its own identity (`read:jira-work`,
    `write:jira-work` and `read:jira-user`), and an expiry.
@@ -43,7 +45,22 @@ the `Jira acting as` startup line to confirm the account.
    example `projectKey: "PROJ"`, `access: "write"`,
    `triggers: ["transitioned", "mention"]`,
    `triggerStatuses: ["Ready for agent"]` and
-   `trustedAccountIds: ["<accountId>"]`.
+   `trustedAccountIds: ["<accountId>"]`. To let the agent change issues, add
+   `allowedTransitions` (target status names) and `writableFields` (`labels`,
+   `components`, `priority`, `customfield_N`); both need `write` access and an
+   empty list means the tool refuses.
+
+## What agents can do
+
+Beyond reading, searching and commenting, linked agents get
+`jira_list_transitions`, `jira_transition`, `jira_update_fields`,
+`jira_link_issues`, and `jira_get_property` / `jira_set_property` for private
+per-issue state. Each authorizes against the issue's own project and the
+agent's live link. Run status comments include an `Agent spend: $...` line.
+If the token belongs to a person, Wardby refuses to act: startup logs an error
+and the webhook answers 503 `jira_personal_account`. Deliveries with a
+timestamp older than two hours (or more than five minutes ahead) are ignored.
+Two recipes, triage on create and scheduled JQL sweeps, are in the full guide.
 
 ## Trust rules
 
@@ -53,7 +70,9 @@ link's `trustedAccountIds`. Issue text is untrusted input to the agent, and
 agents cannot @-mention people. Wardby confines each agent to its linked
 projects, but JQL functions can still reveal facts about other projects the
 service account can browse. The tool names `jira_get_issue`, `jira_search`,
-`jira_comment` and `jira_edit_own_comment` are reserved; rename any existing
+`jira_comment`, `jira_edit_own_comment`, `jira_list_transitions`,
+`jira_transition`, `jira_update_fields`, `jira_link_issues`,
+`jira_get_property` and `jira_set_property` are reserved; rename any existing
 user-defined tool with one of them before linking the agent.
 
 For the full guide, including tools, link options, token rotation and
