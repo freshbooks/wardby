@@ -37,7 +37,7 @@ function db(
   row: Record<string, unknown> | null,
   run: Record<string, unknown> = { id: "r1", status: "running", finalText: null, agentId: "a1" },
   extra: Record<string, unknown> = {},
-  link: Record<string, unknown> | null = { commentVisibilityRole: null },
+  link: Record<string, unknown> | null = { access: "write", commentVisibilityRole: null },
 ) {
   return {
     agentIssueProject: { findUnique: vi.fn(async () => link) },
@@ -79,7 +79,9 @@ describe("completeIssueStatus after the agent was unlinked", () => {
     const md = (t.editComment as any).mock.calls[0][2].markdown as string;
     expect(md).toContain("Stopped reporting: this agent is no longer linked to PROJ.");
     expect(md).not.toContain("SECRET REPLY");
+    expect(md).not.toContain("Agent spend");
     expect(md.trimEnd().split("\n").pop()).toMatch(/wardby run/);
+    expect(isStatusComment(adfToText(markdownToAdf(md)))).toBe(true);
     expect((d as any).runIssueStatus.update).toHaveBeenCalled();
   });
 
@@ -114,12 +116,47 @@ describe("completeIssueStatus after the agent was unlinked", () => {
       { id: "r1", agentId: "a1" },
       {},
       {
+        access: "write",
         commentVisibilityRole: "Current",
       },
     );
     await completeIssueStatus(d, finished, { jira: t }, { postIfMissing: true });
     expect(t.comment).toHaveBeenCalledWith("PROJ-1", expect.objectContaining({ visibilityRole: "Current" }));
     expect((t.comment as any).mock.calls[0][1].markdown).toContain("SECRET REPLY");
+  });
+});
+
+describe("completeIssueStatus after the link was downgraded to read", () => {
+  const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-9", completedAt: null };
+  const finished = { id: "r1", status: "succeeded", finalText: "SECRET REPLY" } as never;
+  const readLink = { access: "read", commentVisibilityRole: null };
+
+  it("edits the comment with a status-only outcome: no reply, no spend, footer last", async () => {
+    const t = tracker();
+    const d = db(row, { id: "r1", agentId: "a1", costUsd: 0.5 }, {}, readLink);
+    await completeIssueStatus(d, finished, { jira: t });
+    expect((d as any).agentIssueProject.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ select: expect.objectContaining({ access: true }) }),
+    );
+    const md = (t.editComment as any).mock.calls[0][2].markdown as string;
+    expect(md).toContain("this agent's link to PROJ is now read-only");
+    expect(md).not.toContain("SECRET REPLY");
+    expect(md).not.toContain("Agent spend");
+    expect(md.trimEnd().split("\n").pop()).toMatch(/^_wardby run `r1`_$/);
+    expect(isStatusComment(adfToText(markdownToAdf(md)))).toBe(true);
+    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+  });
+
+  it("never posts a new comment for a read link; it completes the row", async () => {
+    const t = tracker();
+    const d = db({ ...row, commentId: null }, { id: "r1", agentId: "a1" }, {}, readLink);
+    await completeIssueStatus(d, finished, { jira: t }, { postIfMissing: true });
+    expect(t.comment).not.toHaveBeenCalled();
+    expect(t.editComment).not.toHaveBeenCalled();
+    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
+      where: { runId: "r1" },
+      data: { commentId: null, completedAt: expect.any(Date) },
+    });
   });
 });
 
@@ -177,7 +214,7 @@ describe("completeIssueStatus", () => {
     const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
     const d = db(
       row,
-      { id: "r1", status: "succeeded", finalText: "ok", costUsd: 0.01 },
+      { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok", costUsd: 0.01 },
       {
         aggregate: vi.fn(async () => ({ _sum: { costUsd: { toString: () => "0.0023" } } })),
       },
@@ -195,7 +232,7 @@ describe("completeIssueStatus", () => {
     const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
     const d = db(
       row,
-      { id: "r1", status: "succeeded", finalText: "ok", costUsd: null },
+      { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok", costUsd: null },
       {
         aggregate: vi.fn(async () => ({ _sum: { costUsd: null } })),
       },
@@ -208,7 +245,7 @@ describe("completeIssueStatus", () => {
     const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
     const d = db(
       row,
-      { id: "r1", status: "succeeded", finalText: "ok" },
+      { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok" },
       {
         aggregate: vi.fn(async () => {
           throw new Error("db down");
@@ -218,6 +255,7 @@ describe("completeIssueStatus", () => {
     await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
     const { markdown } = (t.editComment as any).mock.calls[0][2];
     expect(markdown).not.toContain("Agent spend");
+    expect(markdown).toMatch(/^✅ Done\./);
     expect(markdown).toContain("wardby run `r1`");
   });
   it("leaves a comment-less row to the working-status follow-up unless postIfMissing", async () => {
@@ -255,7 +293,7 @@ describe("closeOrphanedIssueStatuses", () => {
         update: vi.fn(async () => undefined),
       },
       run: { findUnique: vi.fn(async () => ({ agentId: "a1" })), findMany: vi.fn(async () => []) },
-      agentIssueProject: { findUnique: vi.fn(async () => ({ commentVisibilityRole: "Dev" })) },
+      agentIssueProject: { findUnique: vi.fn(async () => ({ access: "write", commentVisibilityRole: "Dev" })) },
     } as never;
   }
 
