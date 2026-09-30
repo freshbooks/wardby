@@ -327,7 +327,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   if (jiraConfig?.tokenExpiresAt && jiraConfig.tokenExpiresAt.getTime() - Date.now() < 14 * 24 * 60 * 60 * 1000) {
     mcpLog.warn(
       { expiresAt: jiraConfig.tokenExpiresAt.toISOString() },
-      "the Jira API token expires within 14 days; rotate JIRA_API_TOKEN",
+      "the Jira API token expires within 14 days; rotate WARDBY_JIRA_API_TOKEN",
     );
   }
   const hostEvents =

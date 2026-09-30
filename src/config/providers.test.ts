@@ -414,10 +414,10 @@ describe("loadGitHubUserAuthConfig", () => {
 
 describe("loadJiraConfig", () => {
   const base = {
-    JIRA_SITE_URL: "https://your-site.atlassian.net/",
-    JIRA_API_TOKEN: "tok",
-    JIRA_API_EMAIL: "bot@example.com",
-    JIRA_WEBHOOK_SECRET: "x".repeat(24),
+    WARDBY_JIRA_SITE_URL: "https://your-site.atlassian.net/",
+    WARDBY_JIRA_API_TOKEN: "tok",
+    WARDBY_JIRA_API_EMAIL: "bot@example.com",
+    WARDBY_JIRA_WEBHOOK_SECRET: "x".repeat(24),
   };
   it("is null when nothing is set", () => {
     expect(loadJiraConfig({})).toBeNull();
@@ -433,23 +433,23 @@ describe("loadJiraConfig", () => {
   it("uses Bearer auth against the API gateway for a service-account token", () => {
     const cfg = loadJiraConfig({
       ...base,
-      JIRA_API_EMAIL: undefined,
-      JIRA_API_BASE_URL: "https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555",
+      WARDBY_JIRA_API_EMAIL: undefined,
+      WARDBY_JIRA_API_BASE_URL: "https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555",
     });
     expect(cfg?.auth).toEqual({ kind: "bearer", token: "tok" });
     expect(cfg?.apiBaseUrl).toBe("https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555");
   });
   it("refuses Bearer auth against the site URL (service-account tokens need the gateway)", () => {
-    expect(() => loadJiraConfig({ ...base, JIRA_API_EMAIL: undefined })).toThrow(/JIRA_API_BASE_URL/);
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_API_EMAIL: undefined })).toThrow(/WARDBY_JIRA_API_BASE_URL/);
   });
   it("refuses a partial config, a non-https site, a short secret, and a bad expiry", () => {
-    expect(() => loadJiraConfig({ JIRA_SITE_URL: base.JIRA_SITE_URL })).toThrow(/JIRA_API_TOKEN/);
-    expect(() => loadJiraConfig({ ...base, JIRA_SITE_URL: "http://your-site.atlassian.net" })).toThrow(/https/);
-    expect(() => loadJiraConfig({ ...base, JIRA_WEBHOOK_SECRET: "short" })).toThrow(/20 characters/);
-    expect(() => loadJiraConfig({ ...base, JIRA_API_TOKEN_EXPIRES_AT: "soon" })).toThrow(/ISO date/);
+    expect(() => loadJiraConfig({ WARDBY_JIRA_SITE_URL: base.WARDBY_JIRA_SITE_URL })).toThrow(/WARDBY_JIRA_API_TOKEN/);
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_SITE_URL: "http://your-site.atlassian.net" })).toThrow(/https/);
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_WEBHOOK_SECRET: "short" })).toThrow(/20 characters/);
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_API_TOKEN_EXPIRES_AT: "soon" })).toThrow(/ISO date/);
   });
   it("parses the token expiry", () => {
-    expect(loadJiraConfig({ ...base, JIRA_API_TOKEN_EXPIRES_AT: "2027-09-01" })?.tokenExpiresAt).toEqual(
+    expect(loadJiraConfig({ ...base, WARDBY_JIRA_API_TOKEN_EXPIRES_AT: "2027-09-01" })?.tokenExpiresAt).toEqual(
       new Date("2027-09-01T00:00:00.000Z"),
     );
   });

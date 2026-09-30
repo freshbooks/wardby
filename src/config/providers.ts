@@ -128,34 +128,37 @@ function httpsOrigin(value: string, name: string): string {
 
 /**
  * Jira Cloud issue-tracker settings (docs/jira-agents.md). Unset = Jira is
- * disabled. JIRA_API_EMAIL set = Basic auth (an unscoped user token);
+ * disabled. WARDBY_JIRA_API_EMAIL set = Basic auth (an unscoped user token);
  * unset = Bearer (a scoped / service-account token, which Atlassian only
  * accepts through the api.atlassian.com gateway).
  */
 export function loadJiraConfig(env: NodeJS.ProcessEnv = process.env): JiraConfig | null {
-  const site = env.JIRA_SITE_URL?.trim();
-  const token = env.JIRA_API_TOKEN?.trim();
-  const secret = env.JIRA_WEBHOOK_SECRET?.trim();
-  const email = env.JIRA_API_EMAIL?.trim() || undefined;
-  const base = env.JIRA_API_BASE_URL?.trim() || undefined;
-  const expires = env.JIRA_API_TOKEN_EXPIRES_AT?.trim() || undefined;
+  const site = env.WARDBY_JIRA_SITE_URL?.trim();
+  const token = env.WARDBY_JIRA_API_TOKEN?.trim();
+  const secret = env.WARDBY_JIRA_WEBHOOK_SECRET?.trim();
+  const email = env.WARDBY_JIRA_API_EMAIL?.trim() || undefined;
+  const base = env.WARDBY_JIRA_API_BASE_URL?.trim() || undefined;
+  const expires = env.WARDBY_JIRA_API_TOKEN_EXPIRES_AT?.trim() || undefined;
   if (!site && !token && !secret) return null;
   if (!site || !token || !secret) {
-    throw new Error("Set JIRA_SITE_URL, JIRA_API_TOKEN and JIRA_WEBHOOK_SECRET together, or none of them.");
+    throw new Error(
+      "Set WARDBY_JIRA_SITE_URL, WARDBY_JIRA_API_TOKEN and WARDBY_JIRA_WEBHOOK_SECRET together, or none of them.",
+    );
   }
-  if (secret.length < 20) throw new Error("JIRA_WEBHOOK_SECRET must be at least 20 characters.");
-  const siteUrl = httpsOrigin(site, "JIRA_SITE_URL");
-  const apiBaseUrl = base ? httpsOrigin(base, "JIRA_API_BASE_URL") : siteUrl;
+  if (secret.length < 20) throw new Error("WARDBY_JIRA_WEBHOOK_SECRET must be at least 20 characters.");
+  const siteUrl = httpsOrigin(site, "WARDBY_JIRA_SITE_URL");
+  const apiBaseUrl = base ? httpsOrigin(base, "WARDBY_JIRA_API_BASE_URL") : siteUrl;
   if (!email && !JIRA_GATEWAY.test(apiBaseUrl)) {
     throw new Error(
-      "Without JIRA_API_EMAIL the token is used as a Bearer token, which Atlassian only accepts at " +
-        "JIRA_API_BASE_URL=https://api.atlassian.com/ex/jira/<cloudId>.",
+      "Without WARDBY_JIRA_API_EMAIL the token is used as a Bearer token, which Atlassian only accepts at " +
+        "WARDBY_JIRA_API_BASE_URL=https://api.atlassian.com/ex/jira/<cloudId>.",
     );
   }
   let tokenExpiresAt: Date | undefined;
   if (expires) {
     tokenExpiresAt = new Date(expires);
-    if (Number.isNaN(tokenExpiresAt.getTime())) throw new Error("JIRA_API_TOKEN_EXPIRES_AT must be an ISO date.");
+    if (Number.isNaN(tokenExpiresAt.getTime()))
+      throw new Error("WARDBY_JIRA_API_TOKEN_EXPIRES_AT must be an ISO date.");
   }
   return {
     siteUrl,
