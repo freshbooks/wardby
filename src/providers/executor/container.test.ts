@@ -736,6 +736,7 @@ describe("ContainerExecutor", () => {
       expect(created.vcs.lastFinalizeDetails?.issue).toEqual({
         key: "PROJ-123",
         url: "https://example.atlassian.net/browse/PROJ-123",
+        trackerName: "Jira",
       });
     });
 
@@ -749,7 +750,7 @@ describe("ContainerExecutor", () => {
           extra,
         );
         await created.executor.start("run-1");
-        expect(created.vcs.lastFinalizeDetails?.issue).toEqual({ key: "PROJ-123" });
+        expect(created.vcs.lastFinalizeDetails?.issue).toEqual({ key: "PROJ-123", trackerName: "Jira" });
       }
     });
 

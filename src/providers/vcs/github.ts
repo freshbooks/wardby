@@ -62,10 +62,12 @@ export interface PullRequestInput {
   /**
    * The originating issue-tracker issue (control-plane data, never model
    * output). Provider-neutral: the title gets a `[KEY] ` prefix and the body a
-   * first line linking it. The key is re-validated here and a non-https `url`
-   * is dropped. The PR lookup keys on the hidden run marker, never the title.
+   * first line linking it ("Resolves <trackerName> issue …"). The key is
+   * re-validated here, a non-https `url` is dropped, and so is a `trackerName`
+   * that isn't a short plain name. The PR lookup keys on the hidden run
+   * marker, never the title.
    */
-  issue?: { key: string; url?: string };
+  issue?: { key: string; url?: string; trackerName?: string };
 }
 
 export interface PullRequestResult {
@@ -156,9 +158,10 @@ export function isSafeGitHubInstallationToken(value: unknown): value is string {
 
 /**
  * Same shape as ISSUE_KEY (issue-tracker/types.ts); duplicated so the VCS layer
- * stays free of issue-tracker imports. The executor validates with the shared one.
+ * stays free of issue-tracker imports (a test keeps the two in step). The
+ * executor validates with the shared one.
  */
-const PR_ISSUE_KEY = /^[A-Z][A-Z0-9_]{0,254}-[1-9]\d{0,9}$/;
+export const PR_ISSUE_KEY = /^[A-Z][A-Z0-9_]{0,254}-[1-9]\d{0,9}$/;
 
 /** The issue key when it is well-formed; a malformed one is dropped everywhere it would be rendered. */
 function validIssueKey(input: PullRequestInput): string | undefined {
@@ -176,7 +179,9 @@ function issueLine(input: PullRequestInput): string | undefined {
   const key = validIssueKey(input);
   const url = input.issue?.url;
   if (!key || typeof url !== "string" || !url.startsWith("https://") || /[\s<>()]/.test(url)) return undefined;
-  return `Resolves Jira issue [${key}](${url})`;
+  const name = input.issue?.trackerName;
+  const tracker = typeof name === "string" && /^[A-Za-z][A-Za-z0-9 .-]{0,39}$/.test(name) ? `${name.trim()} ` : "";
+  return `Resolves ${tracker}issue [${key}](${url})`;
 }
 
 /**

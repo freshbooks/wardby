@@ -46,7 +46,7 @@ import type { ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { ContinuationOutcome, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
-import { ISSUE_KEY } from "../issue-tracker/types.js";
+import { ISSUE_KEY, ISSUE_TRACKER_NAMES, type IssueTrackerProvider } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 
 const containerLog = logger.child({ module: "container-executor" });
@@ -779,7 +779,7 @@ export class ContainerExecutor implements Executor {
   }
 
   /** The originating issue for the PR title/body: control-plane data from the CodingRun row, key re-validated. */
-  private issueFor(run: ContainerRunSnapshot): { issue?: { key: string; url?: string } } {
+  private issueFor(run: ContainerRunSnapshot): { issue?: { key: string; url?: string; trackerName?: string } } {
     const { issueProvider, issueKey } = run;
     if (!issueProvider || !issueKey || !ISSUE_KEY.test(issueKey)) return {};
     let url: string | undefined;
@@ -788,7 +788,16 @@ export class ContainerExecutor implements Executor {
     } catch {
       url = undefined;
     }
-    return { issue: { key: issueKey, ...(url?.startsWith("https://") ? { url } : {}) } };
+    const trackerName = Object.hasOwn(ISSUE_TRACKER_NAMES, issueProvider)
+      ? ISSUE_TRACKER_NAMES[issueProvider as IssueTrackerProvider]
+      : undefined;
+    return {
+      issue: {
+        key: issueKey,
+        ...(url?.startsWith("https://") ? { url } : {}),
+        ...(trackerName ? { trackerName } : {}),
+      },
+    };
   }
 
   private preflight(run: ContainerRunSnapshot): VcsPrepareInput {

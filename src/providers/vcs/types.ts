@@ -54,7 +54,7 @@ export interface FinalizeChangesDetails {
   packages?: readonly { ecosystem: string; name: string; version: string }[];
   packageRefusals?: readonly { ecosystem: string; name: string; reason: string }[];
   /** Originating issue (control-plane data): named in the PR title and body. Provider-neutral. */
-  issue?: { key: string; url?: string };
+  issue?: { key: string; url?: string; trackerName?: string };
 }
 
 export type FinalizeChangesResult =

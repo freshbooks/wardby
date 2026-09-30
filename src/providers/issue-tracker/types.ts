@@ -5,6 +5,8 @@
  */
 export type IssueTrackerProvider = "jira";
 export const ISSUE_TRACKER_PROVIDERS: readonly IssueTrackerProvider[] = ["jira"];
+/** The product name shown to people (e.g. in a pull request's "Resolves Jira issue …" line). */
+export const ISSUE_TRACKER_NAMES: Readonly<Record<IssueTrackerProvider, string>> = { jira: "Jira" };
 
 export interface IssuePerson {
   accountId: string;

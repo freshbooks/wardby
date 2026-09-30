@@ -1,7 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
 import { decodeJwt } from "jose";
 import { describe, expect, it, vi } from "vitest";
-import { GitHubAppClient, pullRequestBody, pullRequestTitle, type PullRequestInput } from "./github.js";
+import { ISSUE_KEY } from "../issue-tracker/types.js";
+import { GitHubAppClient, PR_ISSUE_KEY, pullRequestBody, pullRequestTitle, type PullRequestInput } from "./github.js";
 
 const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 const NOW = new Date("2026-09-06T12:00:00.000Z");
@@ -778,7 +779,24 @@ describe("pullRequestBody packages section", () => {
 
 describe("pull request issue reference", () => {
   const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
-  const issue = { key: "PROJ-123", url: "https://example.atlassian.net/browse/PROJ-123" };
+  const issue = { key: "PROJ-123", url: "https://example.atlassian.net/browse/PROJ-123", trackerName: "Jira" };
+
+  it("names the tracker only when one is given", () => {
+    const body = pullRequestBody({ ...base, issue: { key: issue.key, url: issue.url } });
+    expect(body.split("\n\n")[1]).toBe("Resolves issue [PROJ-123](https://example.atlassian.net/browse/PROJ-123)");
+  });
+
+  it("drops a tracker name that is not a plain word or two", () => {
+    for (const trackerName of ["", "  ", "[x](http://evil)", "Jira\n# x", "a".repeat(41)]) {
+      const body = pullRequestBody({ ...base, issue: { ...issue, trackerName } });
+      expect(body.split("\n\n")[1]).toBe("Resolves issue [PROJ-123](https://example.atlassian.net/browse/PROJ-123)");
+    }
+  });
+
+  it("keeps its key pattern in step with the issue trackers' ISSUE_KEY", () => {
+    expect(PR_ISSUE_KEY.source).toBe(ISSUE_KEY.source);
+    expect(PR_ISSUE_KEY.flags).toBe(ISSUE_KEY.flags);
+  });
 
   it("prefixes the title with the key, keeping the model tag after it", () => {
     expect(pullRequestTitle({ ...base, issue })).toBe("[PROJ-123] Wardby run run-1");
