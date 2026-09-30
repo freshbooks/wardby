@@ -59,6 +59,13 @@ export interface PullRequestInput {
    * draft either way; unset (a fresh run), only a draft PR is accepted.
    */
   acceptReadyForReview?: boolean;
+  /**
+   * The originating issue-tracker issue (control-plane data, never model
+   * output). Provider-neutral: the title gets a `[KEY] ` prefix and the body a
+   * first line linking it. The key is re-validated here and a non-https `url`
+   * is dropped. The PR lookup keys on the hidden run marker, never the title.
+   */
+  issue?: { key: string; url?: string };
 }
 
 export interface PullRequestResult {
@@ -147,8 +154,29 @@ export function isSafeGitHubInstallationToken(value: unknown): value is string {
   );
 }
 
-function pullRequestTitle(input: PullRequestInput): string {
-  return input.tag ? `[${input.tag}] Wardby run ${input.runId}` : `Wardby run ${input.runId}`;
+/**
+ * Same shape as ISSUE_KEY (issue-tracker/types.ts); duplicated so the VCS layer
+ * stays free of issue-tracker imports. The executor validates with the shared one.
+ */
+const PR_ISSUE_KEY = /^[A-Z][A-Z0-9_]{0,254}-[1-9]\d{0,9}$/;
+
+/** The issue key when it is well-formed; a malformed one is dropped everywhere it would be rendered. */
+function validIssueKey(input: PullRequestInput): string | undefined {
+  const key = input.issue?.key;
+  return typeof key === "string" && PR_ISSUE_KEY.test(key) ? key : undefined;
+}
+
+export function pullRequestTitle(input: PullRequestInput): string {
+  const base = input.tag ? `[${input.tag}] Wardby run ${input.runId}` : `Wardby run ${input.runId}`;
+  const key = validIssueKey(input);
+  return key ? `[${key}] ${base}` : base;
+}
+
+function issueLine(input: PullRequestInput): string | undefined {
+  const key = validIssueKey(input);
+  const url = input.issue?.url;
+  if (!key || typeof url !== "string" || !url.startsWith("https://") || /[\s<>()]/.test(url)) return undefined;
+  return `Resolves Jira issue [${key}](${url})`;
 }
 
 /**
@@ -230,6 +258,9 @@ function packagesSection(input: PullRequestInput): string | undefined {
 /** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
 export function pullRequestBody(input: PullRequestInput): string {
   const sections = [`${RUN_MARKER_PREFIX}${input.runId} -->`];
+  // Hidden marker stays first; the issue link is the first visible line.
+  const issue = issueLine(input);
+  if (issue) sections.push(issue);
   if (input.summary) sections.push(input.summary);
   if (input.tests?.length) {
     sections.push(["**Tests:**", ...input.tests.map((test) => `- \`${test.command}\`: ${test.outcome}`)].join("\n"));
