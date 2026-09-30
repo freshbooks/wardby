@@ -619,7 +619,7 @@ describe("reconcileOnce orphaned issue status comments", () => {
       findUnique: vi.fn(async () => ({ agentId: "a1" })),
       updateMany: vi.fn(async () => ({ count: 0 })),
     };
-    const agentIssueProject = { findUnique: vi.fn(async () => ({ commentVisibilityRole: null })) };
+    const agentIssueProject = { findUnique: vi.fn(async () => ({ access: "write", commentVisibilityRole: null })) };
     const db = { run, runIssueStatus, agentIssueProject } as unknown as ReconcilerDb;
     const tracker = { provider: "jira", editComment: vi.fn(async () => undefined) } as unknown as IssueTracker;
 
