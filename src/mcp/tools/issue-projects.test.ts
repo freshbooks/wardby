@@ -211,4 +211,77 @@ describe("issue project tools", () => {
     expect(un).toEqual({ unlinked: true });
     expect(rows).toHaveLength(0);
   });
+
+  it("stores allowlists (trimmed, de-duplicated case-insensitively) and lists them", async () => {
+    const { client, rows } = await setup([{ ...NATIVE, ownerId: "admin1" }]);
+    const r = await call(client, "link_issue_project", {
+      agentId: "a1",
+      projectKey: "PROJ",
+      access: "write",
+      allowedTransitions: [" In Review ", "in review", "Done"],
+      writableFields: ["labels", "priority", "customfield_10042", "labels"],
+    });
+    expect(r.isError).toBeFalsy();
+    expect(rows[0]).toMatchObject({
+      allowedTransitions: ["In Review", "Done"],
+      writableFields: ["labels", "priority", "customfield_10042"],
+    });
+    const listed = JSON.parse(text(await call(client, "list_issue_projects", { agentId: "a1" }))) as {
+      issueProjects: { allowedTransitions: string[]; writableFields: string[] }[];
+    };
+    expect(listed.issueProjects[0].allowedTransitions).toEqual(["In Review", "Done"]);
+    expect(listed.issueProjects[0].writableFields).toEqual(["labels", "priority", "customfield_10042"]);
+  });
+
+  it.each([
+    ["an unknown field id", { writableFields: ["summary"] }],
+    ["a malformed custom field", { writableFields: ["customfield_abc"] }],
+    ["a blank transition", { allowedTransitions: ["   "] }],
+  ])("rejects %s", async (_n, extra) => {
+    const { client, rows } = await setup([NATIVE]);
+    const r = await call(client, "link_issue_project", {
+      agentId: "a1",
+      projectKey: "PROJ",
+      access: "write",
+      ...extra,
+    });
+    expect(r.isError).toBeTruthy();
+    expect(rows).toHaveLength(0);
+  });
+
+  it("rejects allowlists on a read link", async () => {
+    const { client, rows } = await setup([NATIVE]);
+    for (const extra of [{ allowedTransitions: ["Done"] }, { writableFields: ["labels"] }]) {
+      const r = await call(client, "link_issue_project", {
+        agentId: "a1",
+        projectKey: "PROJ",
+        access: "read",
+        ...extra,
+      });
+      expect(r.isError).toBeTruthy();
+      expect(text(r)).toMatch(/write access/);
+    }
+    expect(rows).toHaveLength(0);
+  });
+
+  it("clears the allowlists on a re-link without them", async () => {
+    const { client, rows } = await setup([NATIVE]);
+    await call(client, "link_issue_project", {
+      agentId: "a1",
+      projectKey: "PROJ",
+      access: "write",
+      allowedTransitions: ["Done"],
+      writableFields: ["labels"],
+    });
+    await call(client, "link_issue_project", { agentId: "a1", projectKey: "PROJ", access: "write" });
+    expect(rows[0]).toMatchObject({ allowedTransitions: [], writableFields: [] });
+  });
+
+  it("describes the allowlists as fail-closed", async () => {
+    const { client } = await setup([NATIVE]);
+    const { tools } = await client.listTools();
+    const d = tools.find((t) => t.name === "link_issue_project")!.description!;
+    expect(d).toMatch(/fail closed/i);
+    expect(d).toMatch(/target status name/i);
+  });
 });

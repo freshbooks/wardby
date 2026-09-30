@@ -18,6 +18,7 @@ const PROVIDERS = [...ISSUE_TRACKER_PROVIDERS];
 const TRIGGERS = ["created", "transitioned", "labeled", "assigned", "mention"] as const;
 type Trigger = (typeof TRIGGERS)[number];
 const ACCOUNT_ID = /^[A-Za-z0-9:_-]{1,128}$/;
+const WRITABLE_FIELD = /^(labels|components|priority|customfield_\d{1,10})$/;
 
 type LinkArgs = {
   agentId: string;
@@ -30,6 +31,8 @@ type LinkArgs = {
   jqlFilter?: string;
   trustedAccountIds?: string[];
   commentVisibilityRole?: string;
+  allowedTransitions?: string[];
+  writableFields?: string[];
 };
 
 function normalizeProjectKey(projectKey: string): string {
@@ -50,7 +53,11 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
       "output) whose mentions/assignments may trigger the agent; triggered text from anyone else is treated as untrusted. " +
       "jqlFilter optionally narrows which issues trigger; commentVisibilityRole restricts the agent's comments to a project role. " +
       "Re-linking a project replaces its access, triggers, and filters (an omitted field is cleared, not kept) — always send " +
-      "the full desired state.",
+      "the full desired state. " +
+      "allowedTransitions (write access only): the target status names jira_transition may move issues to (matched by target " +
+      "status name, case-insensitive). writableFields (write access only): the field ids jira_update_fields may change " +
+      "(labels, components, priority, or customfield_NNNNN). Both allowlists fail closed: empty or omitted means the agent " +
+      "cannot transition issues or edit fields at all.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -69,6 +76,8 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
           maxItems: 50,
         },
         commentVisibilityRole: { type: "string", minLength: 1, maxLength: 100 },
+        allowedTransitions: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 50 },
+        writableFields: { type: "array", items: { type: "string", pattern: WRITABLE_FIELD.source }, maxItems: 50 },
       },
       required: ["agentId", "projectKey", "access"],
     },
@@ -92,6 +101,25 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
           "invalid trustedAccountIds entry (letters, digits, ':', '_', '-'; up to 128 characters)",
         );
       }
+      const seen = new Set<string>();
+      const allowedTransitions: string[] = [];
+      for (const raw of args.allowedTransitions ?? []) {
+        const name = raw.trim();
+        if (name.length === 0 || name.length > 100) {
+          throw new McpError(400, "invalid allowedTransitions entry (1-100 characters)");
+        }
+        if (!seen.has(name.toLowerCase())) {
+          seen.add(name.toLowerCase());
+          allowedTransitions.push(name);
+        }
+      }
+      const writableFields = [...new Set(args.writableFields ?? [])];
+      if (writableFields.some((f) => !WRITABLE_FIELD.test(f))) {
+        throw new McpError(400, "invalid writableFields entry (labels, components, priority, or customfield_NNNNN)");
+      }
+      if ((allowedTransitions.length > 0 || writableFields.length > 0) && args.access !== "write") {
+        throw new McpError(400, "allowedTransitions and writableFields need write access.");
+      }
       if (triggers.length > 0 && args.access !== "write") throw new McpError(400, "Event triggers need write access.");
       if (triggers.includes("transitioned") && triggerStatuses.length === 0) {
         throw new McpError(400, "The transitioned trigger needs a non-empty triggerStatuses.");
@@ -113,6 +141,8 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
         jqlFilter: args.jqlFilter ?? null,
         trustedAccountIds,
         commentVisibilityRole: args.commentVisibilityRole ?? null,
+        allowedTransitions,
+        writableFields,
         authorizedById: ctx.principal.id,
         authorizedAt: new Date(),
       };
