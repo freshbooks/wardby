@@ -113,9 +113,13 @@ describe("completeIssueStatus", () => {
   it("shows the run's and its children's spend above the footer, which stays last", async () => {
     const t = tracker();
     const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
-    const d = db(row, { id: "r1", status: "succeeded", finalText: "ok", costUsd: 0.01 } as never, {
-      aggregate: vi.fn(async () => ({ _sum: { costUsd: { toString: () => "0.0023" } } })),
-    });
+    const d = db(
+      row,
+      { id: "r1", status: "succeeded", finalText: "ok", costUsd: 0.01 },
+      {
+        aggregate: vi.fn(async () => ({ _sum: { costUsd: { toString: () => "0.0023" } } })),
+      },
+    );
     await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
     const { markdown } = (t.editComment as any).mock.calls[0][2];
     const lines = markdown.trimEnd().split("\n");
@@ -127,9 +131,13 @@ describe("completeIssueStatus", () => {
   it("treats null costs as zero", async () => {
     const t = tracker();
     const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
-    const d = db(row, { id: "r1", status: "succeeded", finalText: "ok", costUsd: null } as never, {
-      aggregate: vi.fn(async () => ({ _sum: { costUsd: null } })),
-    });
+    const d = db(
+      row,
+      { id: "r1", status: "succeeded", finalText: "ok", costUsd: null },
+      {
+        aggregate: vi.fn(async () => ({ _sum: { costUsd: null } })),
+      },
+    );
     await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
     expect((t.editComment as any).mock.calls[0][2].markdown).toContain("Agent spend: $0.0000");
   });
