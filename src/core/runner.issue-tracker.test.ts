@@ -18,6 +18,8 @@ interface FakeLink {
   projectKey: string;
   access: string;
   commentVisibilityRole: string | null;
+  allowedTransitions?: string[];
+  writableFields?: string[];
 }
 
 interface FakeStatus {
@@ -177,10 +179,21 @@ function providers(llm: LlmProvider) {
   };
 }
 
-const JIRA_TOOLS = ["jira_get_issue", "jira_search", "jira_comment", "jira_edit_own_comment"];
+const JIRA_TOOLS = [
+  "jira_get_issue",
+  "jira_search",
+  "jira_comment",
+  "jira_edit_own_comment",
+  "jira_list_transitions",
+  "jira_transition",
+  "jira_update_fields",
+  "jira_link_issues",
+  "jira_get_property",
+  "jira_set_property",
+];
 
 describe("jira_* built-ins in the native run loop", () => {
-  it("offers the four jira_* tools to a linked agent and posts a comment through the tracker", async () => {
+  it("offers the jira_* tools to a linked agent and posts a comment through the tracker", async () => {
     const tracker = fakeTracker();
     const { db, state, llm } = harness({
       links: [LINK],
@@ -225,6 +238,35 @@ describe("jira_* built-ins in the native run loop", () => {
     await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
     expect(tracker.comment).not.toHaveBeenCalled();
     expect(state.toolResults.some((r) => r.includes("project_not_linked"))).toBe(true);
+  });
+
+  it("transitions through the tracker when the live link allowlists the target", async () => {
+    const tracker = fakeTracker();
+    vi.mocked(tracker.transitionTo).mockResolvedValue({ transitionId: "21", toStatus: "Done" });
+    const { db, state, llm } = harness({
+      links: [{ ...LINK, allowedTransitions: ["Done"] }],
+      script: [toolCall("jira_transition", { issueKey: "PROJ-1", toStatus: "Done" }), text("done")],
+    });
+    await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(tracker.transitionTo).toHaveBeenCalledWith("PROJ-1", "Done");
+    expect(state.toolResults.some((r) => r.includes('"toStatus":"Done"'))).toBe(true);
+  });
+
+  it("fails closed for a link row without allowlists", async () => {
+    const tracker = fakeTracker();
+    const { db, state, llm } = harness({
+      links: [LINK],
+      script: [
+        toolCall("jira_transition", { issueKey: "PROJ-1", toStatus: "Done" }),
+        toolCall("jira_update_fields", { issueKey: "PROJ-1", fields: { labels: ["x"] } }),
+        text("done"),
+      ],
+    });
+    await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(tracker.transitionTo).not.toHaveBeenCalled();
+    expect(tracker.editFields).not.toHaveBeenCalled();
+    expect(state.toolResults.some((r) => r.includes("transition_not_allowed"))).toBe(true);
+    expect(state.toolResults.some((r) => r.includes("field_not_allowed"))).toBe(true);
   });
 
   it("completes the run's issue status comment with the outcome", async () => {

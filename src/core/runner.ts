@@ -198,12 +198,17 @@ function toIssueProjectLink(row: {
   projectKey: string;
   access: string;
   commentVisibilityRole: string | null;
+  allowedTransitions?: string[] | null;
+  writableFields?: string[] | null;
 }): IssueProjectLink {
   return {
     provider: "jira",
     projectKey: row.projectKey,
     access: row.access === "write" ? "write" : "read",
     commentVisibilityRole: row.commentVisibilityRole,
+    // `?? []` (fail closed): a row or pinned load from before the allowlists existed allows nothing.
+    allowedTransitions: row.allowedTransitions ?? [],
+    writableFields: row.writableFields ?? [],
   };
 }
 
@@ -619,7 +624,8 @@ async function executeTrackedRun(
         });
       }
       // `?? []`: a load step replayed from before these links were pinned has none.
-      const issueProjectLinks: readonly IssueProjectLink[] = loaded.issueProjectLinks ?? [];
+      // Each link is re-normalised too: one pinned before the allowlists existed lacks them.
+      const issueProjectLinks: readonly IssueProjectLink[] = (loaded.issueProjectLinks ?? []).map(toIssueProjectLink);
       if (ISSUE_TRACKER_TOOL_NAMES.has(name) && issueProjectLinks.length > 0 && issueTrackers) {
         return handleIssueTrackerTool(name, argsJson, {
           agentId: loaded.agentId,

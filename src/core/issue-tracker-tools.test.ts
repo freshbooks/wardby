@@ -14,12 +14,16 @@ const WRITE_LINK: IssueProjectLink = {
   projectKey: "PROJ",
   access: "write",
   commentVisibilityRole: "Developers",
+  allowedTransitions: ["In Progress", "Done"],
+  writableFields: ["labels", "priority", "customfield_10010"],
 };
 const READ_LINK: IssueProjectLink = {
   provider: "jira",
   projectKey: "DOCS",
   access: "read",
   commentVisibilityRole: null,
+  allowedTransitions: [],
+  writableFields: [],
 };
 
 function tracker(): IssueTracker {
@@ -62,12 +66,18 @@ const call = async (name: string, args: unknown, c: IssueToolContext) =>
   JSON.parse(await handleIssueTrackerTool(name, typeof args === "string" ? args : JSON.stringify(args), c));
 
 describe("ISSUE_TRACKER_TOOL_DEFS", () => {
-  it("defines the four jira_* tools and tells the model how it posts", () => {
+  it("defines the jira_* tools and tells the model how it posts", () => {
     expect([...ISSUE_TRACKER_TOOL_NAMES].sort()).toEqual([
       "jira_comment",
       "jira_edit_own_comment",
       "jira_get_issue",
+      "jira_get_property",
+      "jira_link_issues",
+      "jira_list_transitions",
       "jira_search",
+      "jira_set_property",
+      "jira_transition",
+      "jira_update_fields",
     ]);
     const comment = ISSUE_TRACKER_TOOL_DEFS.find((t) => t.name === "jira_comment")!;
     expect(comment.description).toMatch(/service account/);
@@ -369,5 +379,387 @@ describe("scopeJql", () => {
     for (const jql of ["a = b) OR (c = d", "(a = b", 'summary ~ "open', "a = b ORDER BY (x", "a = b\\ c"]) {
       expect(scopeJql(["PROJ"], jql), jql).toHaveProperty("error");
     }
+  });
+});
+
+describe("jira_* write tools (transitions, fields, links, properties)", () => {
+  const OPS: IssueProjectLink = {
+    provider: "jira",
+    projectKey: "OPS",
+    access: "write",
+    commentVisibilityRole: null,
+    allowedTransitions: [],
+    writableFields: [],
+  };
+  const def = (name: string) => ISSUE_TRACKER_TOOL_DEFS.find((t) => t.name === name)!;
+  const TRANSITIONS = [
+    { id: "11", name: "Start", toStatus: "In Progress", toCategory: "indeterminate" },
+    { id: "21", name: "Close", toStatus: "Done", toCategory: "done" },
+    { id: "31", name: "Won't do", toStatus: "Rejected", toCategory: "done" },
+  ];
+
+  it("descriptions name the governing allowlist, the service account, and label visibility", () => {
+    expect(def("jira_list_transitions").description).toMatch(/allowedTransitions/);
+    expect(def("jira_transition").description).toMatch(/allowedTransitions/);
+    expect(def("jira_transition").description).toMatch(/service account/);
+    expect(def("jira_update_fields").description).toMatch(/writableFields/);
+    expect(def("jira_update_fields").description).toMatch(/visible to everyone/);
+    expect(def("jira_update_fields").description).toMatch(/service account/);
+    expect(def("jira_link_issues").description).toMatch(/both issues/i);
+    expect(def("jira_set_property").description).toMatch(/this agent/);
+  });
+
+  describe("jira_list_transitions", () => {
+    it("returns only allowlisted targets (case-insensitive) and works on the link's live allowlist", async () => {
+      const t = tracker();
+      vi.mocked(t.transitions).mockResolvedValue(TRANSITIONS);
+      const c = ctx(t);
+      c.currentLink = async (k) => (k === "PROJ" ? { ...WRITE_LINK, allowedTransitions: ["done"] } : null);
+      expect(await call("jira_list_transitions", { issueKey: "PROJ-1" }, c)).toEqual({
+        transitions: [{ name: "Close", toStatus: "Done", toCategory: "done" }],
+      });
+    });
+
+    it("fails closed on an empty allowlist without calling Jira", async () => {
+      const t = tracker();
+      expect(await call("jira_list_transitions", { issueKey: "DOCS-1" }, ctx(t))).toMatchObject({
+        error: "transition_not_allowed",
+      });
+      expect(t.transitions).not.toHaveBeenCalled();
+    });
+
+    it("refuses a key that resolves to an unlinked project", async () => {
+      const t = tracker();
+      vi.mocked(t.issueProject).mockResolvedValue("SECRET");
+      expect(await call("jira_list_transitions", { issueKey: "PROJ-1" }, ctx(t))).toMatchObject({
+        error: "project_not_linked",
+      });
+      expect(t.transitions).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("jira_transition", () => {
+    it("transitions to an allowlisted status", async () => {
+      const t = tracker();
+      vi.mocked(t.transitionTo).mockResolvedValue({ transitionId: "21", toStatus: "Done" });
+      expect(await call("jira_transition", { issueKey: "PROJ-1", toStatus: "done" }, ctx(t))).toEqual({
+        issueKey: "PROJ-1",
+        toStatus: "Done",
+      });
+      expect(t.transitionTo).toHaveBeenCalledWith("PROJ-1", "done");
+    });
+
+    it("refuses a target outside the allowlist before calling Jira", async () => {
+      const t = tracker();
+      expect(await call("jira_transition", { issueKey: "PROJ-1", toStatus: "Rejected" }, ctx(t))).toMatchObject({
+        error: "transition_not_allowed",
+      });
+      expect(t.transitionTo).not.toHaveBeenCalled();
+      expect(t.issueProject).not.toHaveBeenCalled();
+    });
+
+    it("fails closed on an empty allowlist, even with write access", async () => {
+      const t = tracker();
+      expect(
+        await call("jira_transition", { issueKey: "OPS-1", toStatus: "Done" }, ctx(t, [WRITE_LINK, OPS])),
+      ).toMatchObject({ error: "transition_not_allowed" });
+      expect(t.transitionTo).not.toHaveBeenCalled();
+    });
+
+    it("refuses on a read link", async () => {
+      const t = tracker();
+      const c = ctx(t, [{ ...READ_LINK, allowedTransitions: ["Done"] }]);
+      expect(await call("jira_transition", { issueKey: "DOCS-1", toStatus: "Done" }, c)).toMatchObject({
+        error: "write_access_required",
+      });
+      expect(t.transitionTo).not.toHaveBeenCalled();
+    });
+
+    it("authorizes the resolved project, and uses the resolved link's allowlist", async () => {
+      const t = tracker();
+      vi.mocked(t.issueProject).mockResolvedValue("SECRET");
+      expect(await call("jira_transition", { issueKey: "PROJ-1", toStatus: "Done" }, ctx(t))).toMatchObject({
+        error: "project_not_linked",
+      });
+      // Resolves to OPS: write, but its allowlist is empty.
+      vi.mocked(t.issueProject).mockResolvedValue("OPS");
+      expect(
+        await call("jira_transition", { issueKey: "PROJ-1", toStatus: "Done" }, ctx(t, [WRITE_LINK, OPS])),
+      ).toMatchObject({ error: "transition_not_allowed" });
+      expect(t.transitionTo).not.toHaveBeenCalled();
+    });
+
+    it("maps tracker errors and rejects a bad toStatus", async () => {
+      const t = tracker();
+      vi.mocked(t.transitionTo).mockRejectedValue(new IssueTrackerError("tracker_invalid_request", "No such move."));
+      expect(await call("jira_transition", { issueKey: "PROJ-1", toStatus: "Done" }, ctx(t))).toEqual({
+        error: "tracker_invalid_request",
+        message: "No such move.",
+      });
+      expect(await call("jira_transition", { issueKey: "PROJ-1", toStatus: "x".repeat(101) }, ctx(t))).toMatchObject({
+        error: "invalid_arguments",
+      });
+    });
+  });
+
+  describe("jira_update_fields", () => {
+    const editable = ["labels", "priority", "components", "customfield_10010", "summary"];
+
+    it("edits allowlisted, editable fields", async () => {
+      const t = tracker();
+      vi.mocked(t.editableFields).mockResolvedValue(editable);
+      const fields = { labels: ["triaged", "needs-info"], priority: "High", customfield_10010: { value: "Red" } };
+      expect(await call("jira_update_fields", { issueKey: "PROJ-1", fields }, ctx(t))).toEqual({
+        issueKey: "PROJ-1",
+        updated: ["labels", "priority", "customfield_10010"],
+      });
+      expect(t.editFields).toHaveBeenCalledWith("PROJ-1", fields);
+    });
+
+    it("refuses a field outside writableFields before calling Jira", async () => {
+      const t = tracker();
+      vi.mocked(t.editableFields).mockResolvedValue(editable);
+      expect(
+        await call("jira_update_fields", { issueKey: "PROJ-1", fields: { components: ["api"] } }, ctx(t)),
+      ).toMatchObject({ error: "field_not_allowed" });
+      expect(t.editableFields).not.toHaveBeenCalled();
+      expect(t.editFields).not.toHaveBeenCalled();
+    });
+
+    it("fails closed on an empty writableFields, even with write access", async () => {
+      const t = tracker();
+      expect(
+        await call("jira_update_fields", { issueKey: "OPS-1", fields: { labels: ["x"] } }, ctx(t, [WRITE_LINK, OPS])),
+      ).toMatchObject({ error: "field_not_allowed" });
+      expect(t.editFields).not.toHaveBeenCalled();
+    });
+
+    it("refuses a field the service account cannot edit on this issue", async () => {
+      const t = tracker();
+      vi.mocked(t.editableFields).mockResolvedValue(["labels"]);
+      expect(
+        await call("jira_update_fields", { issueKey: "PROJ-1", fields: { labels: ["a"], priority: "Low" } }, ctx(t)),
+      ).toMatchObject({ error: "field_not_editable" });
+      expect(t.editFields).not.toHaveBeenCalled();
+    });
+
+    it("refuses on a read link and on a key resolving to an unlinked or read-only project", async () => {
+      const t = tracker();
+      const read = ctx(t, [{ ...READ_LINK, writableFields: ["labels"] }]);
+      expect(await call("jira_update_fields", { issueKey: "DOCS-1", fields: { labels: ["a"] } }, read)).toMatchObject({
+        error: "write_access_required",
+      });
+      vi.mocked(t.issueProject).mockResolvedValue("SECRET");
+      expect(await call("jira_update_fields", { issueKey: "PROJ-1", fields: { labels: ["a"] } }, ctx(t))).toMatchObject(
+        { error: "project_not_linked" },
+      );
+      vi.mocked(t.issueProject).mockResolvedValue("DOCS");
+      expect(await call("jira_update_fields", { issueKey: "PROJ-1", fields: { labels: ["a"] } }, ctx(t))).toMatchObject(
+        { error: "write_access_required" },
+      );
+      expect(t.editFields).not.toHaveBeenCalled();
+    });
+
+    it("validates value shapes per field", async () => {
+      const t = tracker();
+      vi.mocked(t.editableFields).mockResolvedValue(editable);
+      const c = ctx(t, [{ ...WRITE_LINK, writableFields: ["labels", "components", "priority", "customfield_10010"] }]);
+      for (const fields of [
+        {},
+        { labels: ["has space"] },
+        { labels: [""] },
+        { labels: ["x".repeat(256)] },
+        { labels: Array.from({ length: 21 }, (_, i) => `l${i}`) },
+        { labels: "notarray" },
+        { components: Array.from({ length: 21 }, (_, i) => `c${i}`) },
+        { priority: "" },
+        { priority: "x".repeat(101) },
+        { customfield_10010: "x".repeat(8001) },
+        { summary: "not a supported field" },
+        { customfield_abc: 1 },
+      ]) {
+        expect(
+          await call("jira_update_fields", { issueKey: "PROJ-1", fields }, c),
+          JSON.stringify(fields).slice(0, 60),
+        ).toMatchObject({
+          error: "invalid_arguments",
+        });
+      }
+      expect(t.editFields).not.toHaveBeenCalled();
+    });
+
+    it("maps tracker errors", async () => {
+      const t = tracker();
+      vi.mocked(t.editableFields).mockResolvedValue(editable);
+      vi.mocked(t.editFields).mockRejectedValue(new IssueTrackerError("tracker_permission_denied", "Nope."));
+      expect(await call("jira_update_fields", { issueKey: "PROJ-1", fields: { labels: ["a"] } }, ctx(t))).toEqual({
+        error: "tracker_permission_denied",
+        message: "Nope.",
+      });
+    });
+  });
+
+  describe("jira_link_issues", () => {
+    const TYPES = [{ name: "Blocks", inward: "is blocked by", outward: "blocks" }];
+
+    it("links issues in linked projects: write on the outward one, read on the inward one", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      expect(
+        await call("jira_link_issues", { type: "blocks", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" }, ctx(t)),
+      ).toEqual({ type: "Blocks", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" });
+      expect(t.linkIssues).toHaveBeenCalledWith({ type: "Blocks", inwardKey: "DOCS-2", outwardKey: "PROJ-1" });
+    });
+
+    it("refuses when the outward issue's link is read-only", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      expect(
+        await call("jira_link_issues", { type: "Blocks", inwardIssue: "PROJ-1", outwardIssue: "DOCS-2" }, ctx(t)),
+      ).toMatchObject({ error: "write_access_required" });
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("refuses when either issue is in an unlinked project", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      for (const [inwardIssue, outwardIssue] of [
+        ["SECRET-1", "PROJ-1"],
+        ["PROJ-1", "SECRET-1"],
+      ]) {
+        expect(await call("jira_link_issues", { type: "Blocks", inwardIssue, outwardIssue }, ctx(t))).toMatchObject({
+          error: "project_not_linked",
+        });
+      }
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("refuses when the inward issue resolves to an unlinked project, without writing", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      vi.mocked(t.issueProject).mockImplementation(async (key) => (key === "DOCS-2" ? "SECRET" : projectOf(key)));
+      expect(
+        await call("jira_link_issues", { type: "Blocks", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" }, ctx(t)),
+      ).toMatchObject({ error: "project_not_linked" });
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("refuses when the outward issue resolves to a read-only project", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      vi.mocked(t.issueProject).mockImplementation(async (key) => (key === "PROJ-1" ? "DOCS" : projectOf(key)));
+      expect(
+        await call("jira_link_issues", { type: "Blocks", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" }, ctx(t)),
+      ).toMatchObject({ error: "write_access_required" });
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("refuses linking an issue to itself", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      expect(
+        await call("jira_link_issues", { type: "Blocks", inwardIssue: "PROJ-1", outwardIssue: "PROJ-1" }, ctx(t)),
+      ).toMatchObject({ error: "invalid_arguments" });
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+
+    it("refuses an unknown link type, naming the available ones", async () => {
+      const t = tracker();
+      vi.mocked(t.linkTypes).mockResolvedValue(TYPES);
+      const result = await call(
+        "jira_link_issues",
+        { type: "Duplicates", inwardIssue: "DOCS-2", outwardIssue: "PROJ-1" },
+        ctx(t),
+      );
+      expect(result).toMatchObject({ error: "invalid_link_type" });
+      expect(result.message).toContain("Blocks");
+      expect(t.linkIssues).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("jira_get_property / jira_set_property", () => {
+    it("namespaces the property key as wardby.<agentId>.<property>", async () => {
+      const t = tracker();
+      vi.mocked(t.getProperty).mockResolvedValue({ n: 1 });
+      expect(await call("jira_get_property", { issueKey: "DOCS-1", property: "triage.state" }, ctx(t))).toEqual({
+        property: "triage.state",
+        value: { n: 1 },
+      });
+      expect(t.getProperty).toHaveBeenCalledWith("DOCS-1", "wardby.a1.triage.state");
+      expect(
+        await call("jira_set_property", { issueKey: "PROJ-1", property: "triage.state", value: { n: 2 } }, ctx(t)),
+      ).toEqual({ property: "triage.state", ok: true });
+      expect(t.setProperty).toHaveBeenCalledWith("PROJ-1", "wardby.a1.triage.state", { n: 2 });
+    });
+
+    it("reports a missing property as a null value", async () => {
+      const t = tracker();
+      vi.mocked(t.getProperty).mockResolvedValue(null);
+      expect(await call("jira_get_property", { issueKey: "PROJ-1", property: "x" }, ctx(t))).toEqual({
+        property: "x",
+        value: null,
+      });
+    });
+
+    it("rejects property names that could escape the namespace", async () => {
+      const t = tracker();
+      for (const property of [
+        "",
+        ".x",
+        "a..b",
+        "A",
+        "x/y",
+        "x y",
+        "../other",
+        "x".repeat(65),
+        "wardby.b2.x".toUpperCase(),
+      ]) {
+        expect(await call("jira_get_property", { issueKey: "PROJ-1", property }, ctx(t)), property).toMatchObject({
+          error: "invalid_arguments",
+        });
+        expect(
+          await call("jira_set_property", { issueKey: "PROJ-1", property, value: 1 }, ctx(t)),
+          property,
+        ).toMatchObject({ error: "invalid_arguments" });
+      }
+      expect(t.getProperty).not.toHaveBeenCalled();
+      expect(t.setProperty).not.toHaveBeenCalled();
+    });
+
+    it("caps the serialised value and requires one", async () => {
+      const t = tracker();
+      expect(
+        await call("jira_set_property", { issueKey: "PROJ-1", property: "x", value: "y".repeat(8000) }, ctx(t)),
+      ).toMatchObject({ error: "invalid_arguments" });
+      expect(await call("jira_set_property", { issueKey: "PROJ-1", property: "x" }, ctx(t))).toMatchObject({
+        error: "invalid_arguments",
+      });
+      expect(t.setProperty).not.toHaveBeenCalled();
+    });
+
+    it("set needs a write link; both authorize the resolved project", async () => {
+      const t = tracker();
+      expect(await call("jira_set_property", { issueKey: "DOCS-1", property: "x", value: 1 }, ctx(t))).toMatchObject({
+        error: "write_access_required",
+      });
+      vi.mocked(t.issueProject).mockResolvedValue("SECRET");
+      expect(await call("jira_get_property", { issueKey: "PROJ-1", property: "x" }, ctx(t))).toMatchObject({
+        error: "project_not_linked",
+      });
+      expect(await call("jira_set_property", { issueKey: "PROJ-1", property: "x", value: 1 }, ctx(t))).toMatchObject({
+        error: "project_not_linked",
+      });
+      expect(t.getProperty).not.toHaveBeenCalled();
+      expect(t.setProperty).not.toHaveBeenCalled();
+    });
+
+    it("maps tracker errors", async () => {
+      const t = tracker();
+      vi.mocked(t.setProperty).mockRejectedValue(new IssueTrackerError("tracker_rate_limited", "Slow down."));
+      expect(await call("jira_set_property", { issueKey: "PROJ-1", property: "x", value: 1 }, ctx(t))).toEqual({
+        error: "tracker_rate_limited",
+        message: "Slow down.",
+      });
+    });
   });
 });

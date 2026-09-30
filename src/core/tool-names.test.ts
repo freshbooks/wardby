@@ -15,7 +15,18 @@ describe("reservedToolNameReason", () => {
   });
 
   it("rejects the jira_* issue-tracker built-in names", () => {
-    for (const name of ["jira_get_issue", "jira_search", "jira_comment", "jira_edit_own_comment"]) {
+    for (const name of [
+      "jira_get_issue",
+      "jira_search",
+      "jira_comment",
+      "jira_edit_own_comment",
+      "jira_list_transitions",
+      "jira_transition",
+      "jira_update_fields",
+      "jira_link_issues",
+      "jira_get_property",
+      "jira_set_property",
+    ]) {
       expect(reservedToolNameReason(name), name).toMatch(/reserved for the built-in Jira tools/);
     }
   });
