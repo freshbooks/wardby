@@ -18,8 +18,11 @@ function fake(handler: (c: Call) => Response | undefined) {
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
       authorization: new Headers(init?.headers).get("authorization"),
     };
+    const handled = handler(call);
+    // Unless a test handles /myself itself, the token is a service account ("app") and the guard's lookup is not a recorded call.
+    if (!handled && call.path === "/rest/api/3/myself") return json({ accountId: "bot-1", accountType: "app" });
     calls.push(call);
-    return handler(call) ?? new Response("{}", { status: 404 });
+    return handled ?? new Response("{}", { status: 404 });
   });
   const client = new JiraClient(
     { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
@@ -37,6 +40,30 @@ const doc = (text: string) => ({
 });
 
 describe("JiraIssueTracker", () => {
+  it("refuses every method when the token belongs to a person, with no other HTTP call", async () => {
+    const { tracker, calls } = fake((c) =>
+      c.path === "/rest/api/3/myself" ? json({ accountId: "u-1", accountType: "atlassian" }) : undefined,
+    );
+    const denied = { code: "tracker_permission_denied", message: expect.stringContaining("service account") };
+    await expect(tracker.getIssue("KAN-1", { maxComments: 5, agentMarker: "a" })).rejects.toMatchObject(denied);
+    await expect(tracker.comment("KAN-1", { markdown: "hi" })).rejects.toMatchObject(denied);
+    await expect(tracker.search("project = KAN", { maxResults: 5 })).rejects.toMatchObject(denied);
+    await expect(tracker.transitions("KAN-1")).rejects.toMatchObject(denied);
+    await expect(tracker.setProperty("KAN-1", "p", {})).rejects.toBeInstanceOf(IssueTrackerError);
+    expect(calls.map((c) => c.path)).toEqual(["/rest/api/3/myself"]);
+    expect((await tracker.identity()).accountType).toBe("atlassian");
+  });
+
+  it("does not cache a failed identity lookup as a refusal", async () => {
+    let n = 0;
+    const { tracker } = fake((c) => {
+      if (c.path !== "/rest/api/3/myself") return json({ issues: [] });
+      return ++n === 1 ? new Response("{}", { status: 400 }) : json({ accountId: "b", accountType: "app" });
+    });
+    await expect(tracker.search("x", { maxResults: 1 })).rejects.toBeInstanceOf(IssueTrackerError);
+    await expect(tracker.search("x", { maxResults: 1 })).resolves.toMatchObject({ issues: [] });
+  });
+
   it("sends Bearer auth and caches the bot account id", async () => {
     const { tracker, calls } = fake((c) =>
       c.path === "/rest/api/3/myself" ? json({ accountId: "bot-1" }) : undefined,
@@ -172,7 +199,7 @@ describe("JiraIssueTracker", () => {
   });
 
   it("matchesJql wraps the filter so it cannot widen the query", async () => {
-    const { tracker, calls } = fake(() => json({ issues: [] }));
+    const { tracker, calls } = fake((c) => (c.path === "/rest/api/3/myself" ? undefined : json({ issues: [] })));
     expect(await tracker.matchesJql("PROJ-1", "labels = x OR 1=1")).toBe(false);
     expect((calls[0].body as { jql: string }).jql).toBe("issuekey = PROJ-1 AND (labels = x OR 1=1)");
   });
@@ -384,7 +411,9 @@ describe("JiraIssueTracker", () => {
     });
 
     it("sets a property with the raw JSON value", async () => {
-      const { tracker, calls } = fake(() => new Response(null, { status: 200 }));
+      const { tracker, calls } = fake((c) =>
+        c.path === "/rest/api/3/myself" ? undefined : new Response(null, { status: 200 }),
+      );
       await tracker.setProperty("PROJ-1", "wardby.state", { n: 2 });
       expect(calls[0]).toMatchObject({
         method: "PUT",

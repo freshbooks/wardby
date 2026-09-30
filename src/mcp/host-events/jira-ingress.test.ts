@@ -40,7 +40,9 @@ function deps(overrides: Record<string, unknown> = {}) {
     deps: {
       db: { hostEventDelivery } as never,
       executor: {} as never,
-      trackers: { jira: { botAccountId: async () => "bot-1" } } as never,
+      trackers: {
+        jira: { botAccountId: async () => "bot-1", identity: async () => ({ accountId: "bot-1", accountType: "app" }) },
+      } as never,
       webhookSecret: SECRET,
       ...overrides,
     },
@@ -71,6 +73,27 @@ describe("handleJiraEventIngress", () => {
       { db: d.db, executor: d.executor, trackers: d.trackers },
     );
     await result.afterResponse?.();
+  });
+
+  it("answers 503 for a personal-account token without recording or routing", async () => {
+    const { deps: d, hostEventDelivery } = deps();
+    (d.trackers as { jira: { identity: unknown } }).jira.identity = async () => ({
+      accountId: "u-1",
+      accountType: "atlassian",
+    });
+    const result = await handleJiraEventIngress({ headers: headers(), rawBody: body }, d);
+    expect(result).toMatchObject({ status: 503, body: { error: "jira_personal_account" } });
+    expect(hostEventDelivery.create).not.toHaveBeenCalled();
+    expect(routeIssueEvent).not.toHaveBeenCalled();
+  });
+
+  it("propagates an identity lookup failure so Jira retries", async () => {
+    const { deps: d, hostEventDelivery } = deps();
+    (d.trackers as { jira: { identity: unknown } }).jira.identity = async () => {
+      throw new Error("network");
+    };
+    await expect(handleJiraEventIngress({ headers: headers(), rawBody: body }, d)).rejects.toThrow("network");
+    expect(hostEventDelivery.create).not.toHaveBeenCalled();
   });
 
   it("prunes old delivery rows on a Jira delivery", async () => {

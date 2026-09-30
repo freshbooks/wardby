@@ -19,6 +19,8 @@ import {
 const ISSUE_FIELDS = "project,summary,description,status,issuetype,priority,labels,assignee,reporter,comment";
 const MAX_DESCRIPTION = 20_000;
 const MAX_COMMENT = 4_000;
+const PERSONAL_ACCOUNT_MESSAGE =
+  "wardby's Jira token belongs to a person's account; use a service account (see docs/jira-agents.md).";
 
 export const agentFooter = (agentId: string): string => `_wardby agent ${agentId}_`;
 
@@ -62,6 +64,13 @@ export class JiraIssueTracker implements IssueTracker {
     return pending;
   }
 
+  /** Refuses to act when the token belongs to a person; a failed identity() propagates and is not cached. */
+  private async ready(): Promise<void> {
+    if ((await this.identity()).accountType === "atlassian") {
+      throw new IssueTrackerError("tracker_permission_denied", PERSONAL_ACCOUNT_MESSAGE);
+    }
+  }
+
   async botAccountId(): Promise<string> {
     return (await this.identity()).accountId;
   }
@@ -71,6 +80,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async getIssue(key: string, opts: { maxComments: number; agentMarker: string }): Promise<IssueView> {
+    await this.ready();
     const [raw, bot] = await Promise.all([
       this.client.request<Json>("GET", `/rest/api/3/issue/${key}?fields=${ISSUE_FIELDS}`),
       this.botAccountId(),
@@ -116,6 +126,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async issueProject(key: string): Promise<string> {
+    await this.ready();
     const raw = await this.client.request<Json>("GET", `/rest/api/3/issue/${key}?fields=project`);
     const projectKey = obj(obj(raw.fields).project).key;
     if (typeof projectKey !== "string" || !projectKey) throw new IssueTrackerError("tracker_invalid_response");
@@ -123,6 +134,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult> {
+    await this.ready();
     const r = await this.client.request<Json>("POST", "/rest/api/3/search/jql", {
       jql,
       maxResults: opts.maxResults,
@@ -143,6 +155,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async matchesJql(key: string, jql: string): Promise<boolean> {
+    await this.ready();
     const r = await this.search(`issuekey = ${key} AND (${jql})`, { maxResults: 1 });
     return r.issues.length > 0;
   }
@@ -151,6 +164,7 @@ export class JiraIssueTracker implements IssueTracker {
     key: string,
     input: { markdown: string; visibilityRole?: string },
   ): Promise<{ id: string; url: string }> {
+    await this.ready();
     const r = await this.client.request<Json>("POST", `/rest/api/3/issue/${key}/comment`, {
       body: markdownToAdf(input.markdown),
       ...(input.visibilityRole ? { visibility: { type: "role", value: input.visibilityRole } } : {}),
@@ -160,12 +174,14 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async editComment(key: string, commentId: string, input: { markdown: string }): Promise<void> {
+    await this.ready();
     await this.client.request("PUT", `/rest/api/3/issue/${key}/comment/${commentId}`, {
       body: markdownToAdf(input.markdown),
     });
   }
 
   async readComment(key: string, commentId: string): Promise<{ authorId: string | null; body: string } | null> {
+    await this.ready();
     try {
       const c = await this.client.request<Json>("GET", `/rest/api/3/issue/${key}/comment/${commentId}`);
       return { authorId: person(c.author)?.accountId ?? null, body: adfToText(c.body, Infinity) };
@@ -176,6 +192,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async transitions(key: string): Promise<Array<{ id: string; name: string; toStatus: string; toCategory: string }>> {
+    await this.ready();
     const r = await this.client.request<Json>("GET", `/rest/api/3/issue/${key}/transitions`);
     return (Array.isArray(r.transitions) ? r.transitions : []).map(obj).map((t) => ({
       id: str(t.id),
@@ -186,6 +203,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async transitionTo(key: string, toStatus: string): Promise<{ transitionId: string; toStatus: string }> {
+    await this.ready();
     const wanted = toStatus.trim().toLowerCase();
     const match = (await this.transitions(key)).find((t) => t.toStatus.toLowerCase() === wanted);
     if (!match)
@@ -207,11 +225,13 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async editableFields(key: string): Promise<string[]> {
+    await this.ready();
     const r = await this.client.request<Json>("GET", `/rest/api/3/issue/${key}/editmeta`);
     return Object.keys(obj(r.fields));
   }
 
   async editFields(key: string, fields: Record<string, unknown>): Promise<void> {
+    await this.ready();
     const body: Record<string, unknown> = {};
     for (const [id, value] of Object.entries(fields)) {
       if (id === "components" && Array.isArray(value)) body[id] = value.map((name: unknown) => ({ name }));
@@ -222,6 +242,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>> {
+    await this.ready();
     const r = await this.client.request<Json>("GET", "/rest/api/3/issueLinkType");
     return (Array.isArray(r.issueLinkTypes) ? r.issueLinkTypes : []).map(obj).map((t) => ({
       name: str(t.name),
@@ -231,6 +252,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void> {
+    await this.ready();
     await this.client.request("POST", "/rest/api/3/issueLink", {
       type: { name: input.type },
       inwardIssue: { key: input.inwardKey },
@@ -239,6 +261,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async getProperty(key: string, property: string): Promise<unknown> {
+    await this.ready();
     try {
       const r = await this.client.request<Json>(
         "GET",
@@ -252,6 +275,7 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   async setProperty(key: string, property: string, value: unknown): Promise<void> {
+    await this.ready();
     await this.client.request("PUT", `/rest/api/3/issue/${key}/properties/${encodeURIComponent(property)}`, value);
   }
 }

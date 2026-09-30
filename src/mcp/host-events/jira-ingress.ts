@@ -39,6 +39,12 @@ export async function handleJiraEventIngress(
   if (!verifyJiraSignature(req.rawBody, req.headers["x-hub-signature"], deps.webhookSecret)) {
     return { status: 401, body: { error: "invalid_signature" } };
   }
+  // wardby must not act as a person. A lookup failure throws (5xx), so Jira retries the delivery.
+  const identity = await tracker.identity();
+  if (identity.accountType === "atlassian") {
+    log.error("Jira token belongs to a person; refusing deliveries (use a service account)");
+    return { status: 503, body: { error: "jira_personal_account" } };
+  }
   const deliveryId = req.headers["x-atlassian-webhook-identifier"];
   if (!deliveryId || !SAFE_DELIVERY.test(deliveryId)) {
     return { status: 400, body: { error: "missing_delivery_headers" } };
@@ -50,7 +56,7 @@ export async function handleJiraEventIngress(
   } catch {
     return { status: 400, body: { error: "invalid_json" } };
   }
-  const event = normalizeJiraEvent(payload, await tracker.botAccountId());
+  const event = normalizeJiraEvent(payload, identity.accountId);
   // An event we don't act on must never claim the delivery id (see the GitHub ingress).
   if (!event) return { status: 202, body: { ignored: true } };
 
