@@ -442,7 +442,7 @@ describe("loadJiraConfig", () => {
     const { WARDBY_JIRA_API_BASE_URL: _omit, ...noBase } = base;
     expect(() => loadJiraConfig(noBase)).toThrow(/WARDBY_JIRA_API_BASE_URL/);
     expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_API_BASE_URL: "https://your-site.atlassian.net" })).toThrow(
-      /api\.atlassian\.com\/ex\/jira/,
+      "api.atlassian.com/ex/jira/<cloudId>",
     );
   });
   it("requires the site URL to be a bare https origin", () => {
