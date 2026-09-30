@@ -29,7 +29,7 @@ const TERMINAL = new Set(["succeeded", "failed", "refused", "lost", "budget_exha
 
 export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run">;
 
-type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
+export type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
 
 /** The parts of a CodingRun result this comment uses. */
 export interface PullRequestOutcome {
@@ -169,6 +169,43 @@ export function outcomeBody(
   return `✅ Finished without opening a pull request.${quoted}\n\n${footer}`;
 }
 
+/** What collectRunOutcome reads: a run's children and, when out of budget, its budget facts. */
+export type RunOutcomeDb = Pick<PrismaClient, "run">;
+
+/** The parts of a finished run's outcome a status comment reports; shared by GitHub and Jira status comments. */
+export async function collectRunOutcome(
+  db: RunOutcomeDb,
+  run: FinishedRun,
+): Promise<{ pullRequests: PullRequestOutcome[]; failedChildren: FailedChild[]; budgetSentence?: string }> {
+  const children = await db.run.findMany({
+    where: { parentRunId: run.id },
+    select: {
+      id: true,
+      status: true,
+      error: true,
+      codingRun: { select: { result: true, failureCategory: true, services: true } },
+    },
+    orderBy: { startedAt: "asc" },
+  });
+  const pullRequests = children
+    .map((c) => pullRequestOutcome(c.codingRun?.result))
+    .filter((pr): pr is PullRequestOutcome => pr !== null);
+  const failedChildren = children
+    .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
+    .map((c) => ({
+      id: c.id,
+      status: c.status,
+      failureCategory: c.codingRun?.failureCategory ?? null,
+      error: c.error ?? null,
+      services: storedServiceNames(c.codingRun?.services),
+    }));
+  const budgetSentence =
+    run.status === "budget_exhausted" || run.status === "refused"
+      ? await loadBudgetSentence(db, run.id, run.status)
+      : undefined;
+  return { pullRequests, failedChildren, ...(budgetSentence ? { budgetSentence } : {}) };
+}
+
 /**
  * Writes a finished run's outcome to its status comment and marks it
  * complete: edits the comment when it exists; when it does not yet, posts the
@@ -190,32 +227,7 @@ export async function completeHostStatus(
     if (!status.commentId && !opts.postIfMissing) return;
     const host = hosts[status.provider as ReviewHostProvider];
     if (!host) return;
-    const children = await db.run.findMany({
-      where: { parentRunId: run.id },
-      select: {
-        id: true,
-        status: true,
-        error: true,
-        codingRun: { select: { result: true, failureCategory: true, services: true } },
-      },
-      orderBy: { startedAt: "asc" },
-    });
-    const pullRequests = children
-      .map((c) => pullRequestOutcome(c.codingRun?.result))
-      .filter((pr): pr is PullRequestOutcome => pr !== null);
-    const failedChildren = children
-      .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
-      .map((c) => ({
-        id: c.id,
-        status: c.status,
-        failureCategory: c.codingRun?.failureCategory ?? null,
-        error: c.error ?? null,
-        services: storedServiceNames(c.codingRun?.services),
-      }));
-    const budgetSentence =
-      run.status === "budget_exhausted" || run.status === "refused"
-        ? await loadBudgetSentence(db, run.id, run.status)
-        : undefined;
+    const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
     const body = outcomeBody(run, status.repository, pullRequests, failedChildren, { budgetSentence });
     let commentId = status.commentId;
     if (commentId) {
