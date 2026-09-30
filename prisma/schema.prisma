@@ -52,6 +52,7 @@ model Agent {
   datastores   AgentDatastore[]
   webhooks     Webhook[]
   repositories AgentRepository[]
+  issueProjects AgentIssueProject[]
 
   // Phase 7: at most one budget group. Null = uncapped beyond its own budgetUsd.
   budgetGroupId String?
@@ -335,6 +336,7 @@ model Run {
   codingRun        CodingRun?
   hostCheck        RunHostCheck?
   hostStatus       RunHostStatus?
+  issueStatus      RunIssueStatus?
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -1114,4 +1116,54 @@ model HostIdentityLinkRequest {
 
   @@index([principalId])
   @@index([expiresAt])
+}
+
+/// Which issue-tracker projects (Jira today) a native agent may act on, and
+/// which issue events trigger it. Admin-approved in phase 1 (no way to verify
+/// an owner's Jira access). See
+/// docs/private/2026-09-30-jira-issue-tracker-design.md §3.
+model AgentIssueProject {
+  id                    String   @id @default(cuid())
+  agentId               String
+  agent                 Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// "jira" today; validated in code.
+  provider              String
+  /// Upper-case Jira project key.
+  projectKey            String
+  /// "read" or "write".
+  access                String
+  /// Subset of "created", "transitioned", "labeled", "assigned", "mention".
+  triggers              String[] @default([])
+  /// With "transitioned": the status names (case-insensitive) that trigger.
+  triggerStatuses       String[] @default([])
+  /// With "labeled": the labels whose addition triggers.
+  triggerLabels         String[] @default([])
+  /// Optional JQL the issue must also match for any trigger.
+  jqlFilter             String?
+  /// Jira accountIds whose @-mention or assignment may trigger (required for those triggers).
+  trustedAccountIds     String[] @default([])
+  /// Optional project role that the agent's comments are restricted to.
+  commentVisibilityRole String?
+  authorizedById        String
+  authorizedAt          DateTime @default(now())
+  createdAt             DateTime @default(now())
+
+  @@unique([agentId, provider, projectKey])
+  @@index([provider, projectKey])
+}
+
+/// The status comment wardby posts on the Jira issue whose event started this
+/// run ("working on it"), edited with the outcome when the run ends.
+model RunIssueStatus {
+  runId          String    @id
+  run            Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  provider       String
+  issueKey       String
+  /// Null until the "working on it" comment is posted.
+  commentId      String?
+  visibilityRole String?
+  createdAt      DateTime  @default(now())
+  completedAt    DateTime?
+
+  @@index([completedAt])
 }
