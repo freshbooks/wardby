@@ -1144,6 +1144,12 @@ model AgentIssueProject {
   trustedAccountIds     String[] @default([])
   /// Optional project role that the agent's comments are restricted to.
   commentVisibilityRole String?
+  /// Target status names (case-insensitive) jira_transition may move issues to. Empty = no transitions.
+  allowedTransitions    String[] @default([])
+  /// Field ids jira_update_fields may change ("labels", "components", "priority", "customfield_NNNNN"). Empty = none.
+  writableFields        String[] @default([])
+  /// Issue link type names (case-insensitive) jira_link_issues may create. Empty = linking off.
+  allowedLinkTypes      String[] @default([])
   authorizedById        String
   authorizedAt          DateTime @default(now())
   createdAt             DateTime @default(now())

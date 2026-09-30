@@ -67,13 +67,26 @@ export interface IssueTracker {
   /** The project the issue is in now; an old key (kept as an alias after a move) resolves to its new project. */
   issueProject(key: string): Promise<string>;
   search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult>;
-  /** Whether issue `key` matches `jql` (used for a link's jqlFilter). */
-  matchesJql(key: string, jql: string): Promise<boolean>;
+  /** Whether issue `key` matches `jql` (used for a link's jqlFilter). Callers on a latency budget pass a short timeout and no 429 retry. */
+  matchesJql(key: string, jql: string, opts?: { timeoutMs?: number; retryOn429?: boolean }): Promise<boolean>;
   comment(key: string, input: { markdown: string; visibilityRole?: string }): Promise<{ id: string; url: string }>;
   editComment(key: string, commentId: string, input: { markdown: string }): Promise<void>;
   /** The comment's author accountId and plain text (uncapped: only for ownership checks, never shown to a model), or null when it doesn't exist. */
   readComment(key: string, commentId: string): Promise<{ authorId: string | null; body: string } | null>;
   issueUrl(key: string): string;
+  /** Transitions the service account can perform now: target status name + category. */
+  transitions(key: string): Promise<Array<{ id: string; name: string; toStatus: string; toCategory: string }>>;
+  /** Performs the transition whose target status name matches (case-insensitive). */
+  transitionTo(key: string, toStatus: string): Promise<{ transitionId: string; toStatus: string }>;
+  /** Field ids the service account may edit on this issue (from editmeta). */
+  editableFields(key: string): Promise<string[]>;
+  /** Sets fields: labels (string[]), components (names), priority (name), customfield_N (raw JSON value). */
+  editFields(key: string, fields: Record<string, unknown>): Promise<void>;
+  linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>>;
+  linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void>;
+  /** The property's JSON value, or null when it does not exist. */
+  getProperty(key: string, property: string): Promise<unknown>;
+  setProperty(key: string, property: string, value: unknown): Promise<void>;
 }
 
 export type IssueTrackerErrorCode =

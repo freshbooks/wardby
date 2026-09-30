@@ -11,6 +11,18 @@
  * model as a tool result, which the engine fences as untrusted
  * (engine-native.ts), so it is not wrapped again here. Never throws —
  * failures are JSON tool results.
+ *
+ * Phase 2 adds write tools beyond comments (transitions, field edits, issue
+ * links, issue properties). Each authorizes the issue's resolved project
+ * against the live link like jira_comment does, and each is further bounded
+ * by a per-link allowlist that fails closed: an empty allowedTransitions or
+ * writableFields refuses every transition or field edit, and an empty
+ * allowedLinkTypes refuses every issue link. jira_link_issues needs write on
+ * both issues' projects and the link type in both projects' allowlists.
+ * Issue properties are not allowlisted (any write link may set them); they
+ * are namespaced by wardby as `wardby.<agentId>.<property>`, so an agent
+ * cannot read or overwrite another app's or another agent's properties
+ * through these tools.
  * See docs/private/2026-09-30-jira-issue-tracker-design.md.
  */
 import { z } from "zod";
@@ -33,6 +45,12 @@ export interface IssueProjectLink {
   projectKey: string;
   access: "read" | "write";
   commentVisibilityRole: string | null;
+  /** Target status names jira_transition may move issues to (case-insensitive); empty = none. */
+  allowedTransitions: string[];
+  /** Field ids jira_update_fields may change; empty = none. */
+  writableFields: string[];
+  /** Issue link type names jira_link_issues may create (case-insensitive); empty = none. */
+  allowedLinkTypes: string[];
 }
 
 export interface IssueToolContext {
@@ -59,10 +77,73 @@ const EditOwnCommentArgs = z
   })
   .strict();
 
+const ToStatus = z.string().trim().min(1).max(100);
+/** The property name after wardby's `wardby.<agentId>.` prefix; the model never controls the prefix. */
+const PROPERTY_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const Property = z
+  .string()
+  .regex(PROPERTY_NAME, "must be 1-64 of a-z, 0-9, '.', '_', '-', starting with a letter or digit")
+  .refine((p) => !p.includes(".."), "must not contain '..'");
+const MAX_JSON_CHARS = 8000;
+/** Any JSON value whose serialisation is at most MAX_JSON_CHARS characters. */
+const JsonValue = z.unknown().superRefine((v, c) => {
+  const s = v === undefined ? undefined : JSON.stringify(v);
+  if (s === undefined) c.addIssue({ code: "custom", message: "a JSON value is required" });
+  else if (s.length > MAX_JSON_CHARS) {
+    c.addIssue({ code: "custom", message: `must serialise to at most ${MAX_JSON_CHARS} characters` });
+  }
+});
+/** Same shape link_issue_project accepts for writableFields. */
+const CUSTOM_FIELD = /^customfield_\d{1,10}$/;
+const Label = z.string().min(1).max(255).regex(/^\S+$/, "labels cannot contain whitespace");
+const FieldValues = z
+  .object({
+    labels: z.array(Label).max(20).optional(),
+    components: z.array(z.string().min(1).max(255)).max(20).optional(),
+    priority: z.string().min(1).max(100).optional(),
+  })
+  .catchall(JsonValue)
+  .superRefine((fields, c) => {
+    const keys = Object.keys(fields);
+    if (keys.length === 0) c.addIssue({ code: "custom", message: "set at least one field" });
+    for (const key of keys) {
+      if (key !== "labels" && key !== "components" && key !== "priority" && !CUSTOM_FIELD.test(key)) {
+        c.addIssue({
+          code: "custom",
+          path: [key],
+          message: "not a supported field (labels, components, priority, or customfield_N)",
+        });
+      }
+    }
+  });
+
+const IssueOnlyArgs = z.object({ issueKey: IssueKey }).strict();
+const TransitionArgs = z.object({ issueKey: IssueKey, toStatus: ToStatus }).strict();
+const UpdateFieldsArgs = z.object({ issueKey: IssueKey, fields: FieldValues }).strict();
+const LinkIssuesArgs = z
+  .object({ type: z.string().trim().min(1).max(255), inwardIssue: IssueKey, outwardIssue: IssueKey })
+  .strict()
+  .refine((a) => a.inwardIssue !== a.outwardIssue, {
+    message: "an issue cannot be linked to itself",
+    path: ["outwardIssue"],
+  });
+const GetPropertyArgs = z.object({ issueKey: IssueKey, property: Property }).strict();
+const SetPropertyArgs = z
+  .object({ issueKey: IssueKey, property: Property, value: JsonValue })
+  .strict()
+  .refine((a) => "value" in a && a.value !== undefined, { message: "value is required", path: ["value"] });
+
 const ISSUE_KEY_PROP = {
   type: "string",
   pattern: ISSUE_KEY.source,
   description: 'The issue key, e.g. "PROJ-123"; its project must be one this agent is linked to.',
+};
+
+const PROPERTY_PROP = {
+  type: "string",
+  pattern: PROPERTY_NAME.source,
+  description:
+    'Your property\'s name, e.g. "triage.state". wardby stores it on the issue under a key private to this agent, so other agents and apps cannot read or overwrite it (nor can you theirs).',
 };
 
 const POSTING =
@@ -127,10 +208,116 @@ export const ISSUE_TRACKER_TOOL_DEFS: LoadedTool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "jira_list_transitions",
+    description:
+      "Lists the status transitions you may perform on a Jira issue right now: only those whose target status is in this agent's allowedTransitions for the issue's project (set by whoever linked the project) and that Jira currently offers. notAllowed lists statuses Jira offers from the current status that this agent may not use; jira_transition refuses those. Use a returned toStatus with jira_transition.",
+    jsonSchema: {
+      type: "object",
+      properties: { issueKey: ISSUE_KEY_PROP },
+      required: ["issueKey"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "jira_transition",
+    description:
+      "Moves a Jira issue to another status, made as this deployment's Jira service account. Needs write access to the issue's project, and toStatus must be in this agent's allowedTransitions for that project (matched case-insensitively) and available from the issue's current status; anything else is refused. jira_list_transitions shows the choices.",
+    jsonSchema: {
+      type: "object",
+      properties: {
+        issueKey: ISSUE_KEY_PROP,
+        toStatus: { type: "string", minLength: 1, maxLength: 100, description: 'The target status name, e.g. "Done".' },
+      },
+      required: ["issueKey", "toStatus"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "jira_update_fields",
+    description:
+      "Sets fields on a Jira issue, changed as this deployment's Jira service account. Needs write access to the issue's project; every field must be in this agent's writableFields for that project and editable on the issue, or nothing is changed. Each value replaces the field's current value: labels (all of the issue's labels; free text visible to everyone who can see the issue; no spaces; at most 20), components (names, at most 20), priority (a name such as \"High\"), customfield_N (the raw Jira JSON value).",
+    jsonSchema: {
+      type: "object",
+      properties: {
+        issueKey: ISSUE_KEY_PROP,
+        fields: {
+          type: "object",
+          minProperties: 1,
+          properties: {
+            labels: {
+              type: "array",
+              maxItems: 20,
+              items: { type: "string", minLength: 1, maxLength: 255, pattern: "^\\S+$" },
+            },
+            components: { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 255 } },
+            priority: { type: "string", minLength: 1, maxLength: 100 },
+          },
+          patternProperties: { [CUSTOM_FIELD.source]: {} },
+          additionalProperties: false,
+        },
+      },
+      required: ["issueKey", "fields"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "jira_link_issues",
+    description:
+      "Links two Jira issues, e.g. type \"Blocks\" with outwardIssue blocking inwardIssue, made as this deployment's Jira service account. Both issues must be in projects this agent has write access to, and type (case-insensitive) must be in the allowedLinkTypes of both projects' links, or nothing is linked. type must also be one of the Jira site's issue link type names.",
+    jsonSchema: {
+      type: "object",
+      properties: {
+        type: { type: "string", minLength: 1, maxLength: 255, description: 'An issue link type name, e.g. "Blocks".' },
+        inwardIssue: ISSUE_KEY_PROP,
+        outwardIssue: ISSUE_KEY_PROP,
+      },
+      required: ["type", "inwardIssue", "outwardIssue"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "jira_get_property",
+    description:
+      "Reads a JSON value this agent stored on a Jira issue with jira_set_property (null when unset). Properties are hidden from the issue's page, which makes them useful for remembering state between runs.",
+    jsonSchema: {
+      type: "object",
+      properties: { issueKey: ISSUE_KEY_PROP, property: PROPERTY_PROP },
+      required: ["issueKey", "property"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "jira_set_property",
+    description: `Stores a JSON value (at most ${MAX_JSON_CHARS} characters serialised) on a Jira issue under a name private to this agent, replacing any earlier value, written as this deployment's Jira service account. Needs write access to the issue's project. Read it back with jira_get_property.`,
+    jsonSchema: {
+      type: "object",
+      properties: { issueKey: ISSUE_KEY_PROP, property: PROPERTY_PROP, value: {} },
+      required: ["issueKey", "property", "value"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export const ISSUE_TRACKER_TOOL_NAMES: ReadonlySet<string> = new Set(ISSUE_TRACKER_TOOL_DEFS.map((t) => t.name));
-const WRITE_TOOLS: ReadonlySet<string> = new Set(["jira_comment", "jira_edit_own_comment"]);
+/** Tools that write to the issue named by `issueKey` (jira_link_issues authorizes its two issues itself). */
+const WRITE_TOOLS: ReadonlySet<string> = new Set([
+  "jira_comment",
+  "jira_edit_own_comment",
+  "jira_transition",
+  "jira_update_fields",
+  "jira_set_property",
+]);
+
+/**
+ * The wardby-owned Jira issue property key for this agent's `property`.
+ * Agent ids are cuids (letters and digits, never a '.'), so the first '.'
+ * after `wardby.` always ends the agent id: no agent id plus property name
+ * can spell another agent's namespace.
+ */
+export const propertyKey = (agentId: string, property: string): string => `wardby.${agentId}.${property}`;
+
+const sameName = (a: string, b: string): boolean => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 /**
  * Restricts the model's JQL to `projectKeys`: `project in (...) AND (<filter>)`,
@@ -194,25 +381,131 @@ function error(code: string, message: string = code): string {
 const commentUrl = (tracker: IssueTracker, issueKey: string, commentId: string): string =>
   `${tracker.issueUrl(issueKey)}?focusedCommentId=${commentId}`;
 
-/** The link's project, if it is loaded, still linked, and (for a write tool) still writable; else the refusal. */
+/** The live link to `projectKey`, if it is loaded, still linked, and (when `need` is write) still writable; else the refusal. */
 async function authorizeProject(
-  name: string,
+  need: "read" | "write",
   projectKey: string,
   ctx: IssueToolContext,
 ): Promise<{ link: IssueProjectLink } | { refusal: string }> {
   const loaded = ctx.links.find((l) => l.projectKey === projectKey);
   if (!loaded)
     return { refusal: error("project_not_linked", `This agent is not linked to Jira project ${projectKey}.`) };
-  if (WRITE_TOOLS.has(name) && loaded.access !== "write") {
+  if (need === "write" && loaded.access !== "write") {
     return { refusal: error("write_access_required", `This agent's link to ${projectKey} is read-only.`) };
   }
-  // Live, not from the pinned load: an unlink or downgrade takes effect on the very next call.
+  // Live, not from the pinned load: an unlink, downgrade, or allowlist change takes effect on the very next call.
   const current = await ctx.currentLink(projectKey);
   if (!current) return { refusal: error("project_not_linked", `This agent is no longer linked to ${projectKey}.`) };
-  if (WRITE_TOOLS.has(name) && current.access !== "write") {
+  if (need === "write" && current.access !== "write") {
     return { refusal: error("write_access_required", `This agent's link to ${projectKey} is read-only.`) };
   }
   return { link: current };
+}
+
+/** The per-issue tools' argument schemas (jira_search and jira_link_issues are handled apart). */
+const SINGLE_ISSUE_ARGS: Record<string, z.ZodType<{ issueKey: string }>> = {
+  jira_get_issue: GetIssueArgs,
+  jira_comment: CommentArgs,
+  jira_edit_own_comment: EditOwnCommentArgs,
+  jira_list_transitions: IssueOnlyArgs,
+  jira_transition: TransitionArgs,
+  jira_update_fields: UpdateFieldsArgs,
+  jira_get_property: GetPropertyArgs,
+  jira_set_property: SetPropertyArgs,
+};
+
+/** `?? []`: a link pinned before the allowlists existed has none, which means nothing is allowed. */
+const allowlist = (list: readonly string[] | undefined): readonly string[] => list ?? [];
+
+/**
+ * The refusal when `link`'s allowlists forbid this call, else null. Fails
+ * closed: an empty allowlist refuses everything. Checked on the requested
+ * key's link before any tracker call and again on the resolved project's.
+ */
+function allowlistRefusal(name: string, args: unknown, link: IssueProjectLink): string | null {
+  if (name === "jira_list_transitions" || name === "jira_transition") {
+    const allowed = allowlist(link.allowedTransitions);
+    if (allowed.length === 0) {
+      return error("transition_not_allowed", `This agent may not transition issues in ${link.projectKey}.`);
+    }
+    if (name === "jira_transition") {
+      const { toStatus } = args as z.infer<typeof TransitionArgs>;
+      if (!allowed.some((s) => sameName(s, toStatus))) {
+        return error(
+          "transition_not_allowed",
+          `This agent may only move ${link.projectKey} issues to: ${allowed.join(", ")}.`,
+        );
+      }
+    }
+  }
+  if (name === "jira_update_fields") {
+    const allowed = new Set(allowlist(link.writableFields));
+    const { fields } = args as z.infer<typeof UpdateFieldsArgs>;
+    const refused = Object.keys(fields).filter((f) => !allowed.has(f));
+    if (refused.length > 0) {
+      const may = allowed.size > 0 ? ` It may change: ${[...allowed].join(", ")}.` : "";
+      return error(
+        "field_not_allowed",
+        `This agent may not change ${refused.join(", ")} in ${link.projectKey}; nothing was changed.${may}`,
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * The live write link to `projectKey` when it also allowlists link `type`
+ * (case-insensitive; an empty allowedLinkTypes allows nothing), else the refusal.
+ */
+async function authorizeLink(
+  projectKey: string,
+  type: string,
+  ctx: IssueToolContext,
+): Promise<{ link: IssueProjectLink } | { refusal: string }> {
+  const auth = await authorizeProject("write", projectKey, ctx);
+  if ("refusal" in auth) return auth;
+  const allowed = allowlist(auth.link.allowedLinkTypes);
+  if (!allowed.some((t) => sameName(t, type))) {
+    const may = allowed.length > 0 ? ` It may create: ${allowed.join(", ")}.` : "";
+    return {
+      refusal: error(
+        "link_type_not_allowed",
+        `This agent may not create "${type}" issue links in ${projectKey}; nothing was linked.${may}`,
+      ),
+    };
+  }
+  return auth;
+}
+
+/**
+ * jira_link_issues: both issues are authorized, by requested key (before any
+ * tracker call) and then by resolved project: each needs a live write link
+ * whose allowedLinkTypes includes the requested type. Nothing is written
+ * unless all four checks pass.
+ */
+async function linkIssues(a: z.infer<typeof LinkIssuesArgs>, ctx: IssueToolContext): Promise<string> {
+  const outward = await authorizeLink(projectOf(a.outwardIssue), a.type, ctx);
+  if ("refusal" in outward) return outward.refusal;
+  const inward = await authorizeLink(projectOf(a.inwardIssue), a.type, ctx);
+  if ("refusal" in inward) return inward.refusal;
+  const tracker = ctx.trackers[outward.link.provider];
+  if (!tracker) {
+    return error("tracker_not_configured", `No ${outward.link.provider} site is configured on this deployment.`);
+  }
+  const outwardResolved = await authorizeLink(await tracker.issueProject(a.outwardIssue), a.type, ctx);
+  if ("refusal" in outwardResolved) return outwardResolved.refusal;
+  const inwardResolved = await authorizeLink(await tracker.issueProject(a.inwardIssue), a.type, ctx);
+  if ("refusal" in inwardResolved) return inwardResolved.refusal;
+  const types = await tracker.linkTypes();
+  const type = types.find((t) => t.name.toLowerCase() === a.type.toLowerCase());
+  if (!type) {
+    return error(
+      "invalid_link_type",
+      `No issue link type named "${a.type}". Available: ${types.map((t) => t.name).join(", ") || "none"}.`,
+    );
+  }
+  await tracker.linkIssues({ type: type.name, inwardKey: a.inwardIssue, outwardKey: a.outwardIssue });
+  return JSON.stringify({ type: type.name, inwardIssue: a.inwardIssue, outwardIssue: a.outwardIssue });
 }
 
 /**
@@ -256,28 +549,32 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
       });
     }
 
-    const a =
-      name === "jira_get_issue"
-        ? GetIssueArgs.parse(parsed)
-        : name === "jira_comment"
-          ? CommentArgs.parse(parsed)
-          : name === "jira_edit_own_comment"
-            ? EditOwnCommentArgs.parse(parsed)
-            : null;
-    if (!a) return error("unknown_tool", `No built-in tool named "${name}".`);
+    if (name === "jira_link_issues") return await linkIssues(LinkIssuesArgs.parse(parsed), ctx);
+
+    const schema = SINGLE_ISSUE_ARGS[name];
+    if (!schema) return error("unknown_tool", `No built-in tool named "${name}".`);
+    const a = schema.parse(parsed);
+    const need = WRITE_TOOLS.has(name) ? "write" : "read";
     // The requested key's project first: refuses an obviously unlinked key
-    // without a tracker call.
-    const requested = await authorizeProject(name, projectOf(a.issueKey), ctx);
+    // (or a disallowed transition or field) without a tracker call.
+    const requested = await authorizeProject(need, projectOf(a.issueKey), ctx);
     if ("refusal" in requested) return requested.refusal;
+    const early = allowlistRefusal(name, a, requested.link);
+    if (early) return early;
     const tracker = ctx.trackers[requested.link.provider];
     if (!tracker) {
       return error("tracker_not_configured", `No ${requested.link.provider} site is configured on this deployment.`);
     }
     // Jira keeps an issue's old key as an alias after a move, so the key's
     // prefix is not proof of the project the issue is in now: authorize the
-    // project it resolves to as well.
-    const authorizeResolved = async (projectKey: string) =>
-      projectKey === requested.link.projectKey ? requested : authorizeProject(name, projectKey, ctx);
+    // project it resolves to as well, and apply that project's allowlists.
+    const authorizeResolved = async (projectKey: string) => {
+      const resolved =
+        projectKey === requested.link.projectKey ? requested : await authorizeProject(need, projectKey, ctx);
+      if ("refusal" in resolved) return resolved;
+      const refusal = allowlistRefusal(name, a, resolved.link);
+      return refusal ? { refusal } : resolved;
+    };
 
     switch (name) {
       case "jira_get_issue": {
@@ -299,7 +596,7 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
         });
         return JSON.stringify({ id: posted.id, url: posted.url });
       }
-      default: {
+      case "jira_edit_own_comment": {
         const { issueKey, commentId, body } = a as z.infer<typeof EditOwnCommentArgs>;
         const resolved = await authorizeResolved(await tracker.issueProject(issueKey));
         if ("refusal" in resolved) return resolved.refusal;
@@ -313,6 +610,63 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
         if (!own) return error("not_own_comment", "Only comments this agent posted can be edited.");
         await tracker.editComment(issueKey, commentId, { markdown: `${body}\n\n${agentFooter(ctx.agentId)}` });
         return JSON.stringify({ id: commentId, url: commentUrl(tracker, issueKey, commentId) });
+      }
+      case "jira_list_transitions": {
+        const resolved = await authorizeResolved(await tracker.issueProject(a.issueKey));
+        if ("refusal" in resolved) return resolved.refusal;
+        const allowed = allowlist(resolved.link.allowedTransitions);
+        const offered = await tracker.transitions(a.issueKey);
+        const isAllowed = (status: string) => allowed.some((s) => sameName(s, status));
+        const transitions = offered
+          .filter((t) => isAllowed(t.toStatus))
+          .map((t) => ({ name: t.name, toStatus: t.toStatus, toCategory: t.toCategory }));
+        // Names only (no ids), so the model can tell "wardby forbids it" from "not in the workflow".
+        const notAllowed = [...new Set(offered.filter((t) => !isAllowed(t.toStatus)).map((t) => t.toStatus))];
+        return JSON.stringify({
+          transitions,
+          notAllowed,
+          ...(notAllowed.length > 0
+            ? {
+                note: "Jira offers the notAllowed statuses, but this agent is not permitted to move issues to them — that is wardby's link configuration (allowedTransitions), not the Jira workflow.",
+              }
+            : {}),
+        });
+      }
+      case "jira_transition": {
+        const { issueKey, toStatus } = a as z.infer<typeof TransitionArgs>;
+        const resolved = await authorizeResolved(await tracker.issueProject(issueKey));
+        if ("refusal" in resolved) return resolved.refusal;
+        const done = await tracker.transitionTo(issueKey, toStatus);
+        return JSON.stringify({ issueKey, toStatus: done.toStatus });
+      }
+      case "jira_update_fields": {
+        const { issueKey, fields } = a as z.infer<typeof UpdateFieldsArgs>;
+        const resolved = await authorizeResolved(await tracker.issueProject(issueKey));
+        if ("refusal" in resolved) return resolved.refusal;
+        const editable = new Set(await tracker.editableFields(issueKey));
+        const notEditable = Object.keys(fields).filter((f) => !editable.has(f));
+        if (notEditable.length > 0) {
+          return error(
+            "field_not_editable",
+            `The Jira service account cannot edit ${notEditable.join(", ")} on ${issueKey}; nothing was changed.`,
+          );
+        }
+        await tracker.editFields(issueKey, fields);
+        return JSON.stringify({ issueKey, updated: Object.keys(fields) });
+      }
+      case "jira_get_property": {
+        const { issueKey, property } = a as z.infer<typeof GetPropertyArgs>;
+        const resolved = await authorizeResolved(await tracker.issueProject(issueKey));
+        if ("refusal" in resolved) return resolved.refusal;
+        const value = await tracker.getProperty(issueKey, propertyKey(ctx.agentId, property));
+        return JSON.stringify({ property, value: value ?? null });
+      }
+      default: {
+        const { issueKey, property, value } = a as z.infer<typeof SetPropertyArgs>;
+        const resolved = await authorizeResolved(await tracker.issueProject(issueKey));
+        if ("refusal" in resolved) return resolved.refusal;
+        await tracker.setProperty(issueKey, propertyKey(ctx.agentId, property), value);
+        return JSON.stringify({ property, ok: true });
       }
     }
   } catch (err) {

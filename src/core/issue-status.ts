@@ -5,8 +5,8 @@
  * text. Best effort throughout: nothing here throws.
  */
 import type { Prisma, PrismaClient } from "#prisma";
-import type { IssueTrackerProvider, IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
-import { collectRunOutcome, outcomeBody, workingBody, type FinishedRun } from "./host-status.js";
+import { projectOf, type IssueTrackerProvider, type IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
+import { collectRunOutcome, outcomeBody, runLine, workingBody, type FinishedRun } from "./host-status.js";
 import { logger } from "./logger.js";
 
 const log = logger.child({ module: "issue-status" });
@@ -15,7 +15,7 @@ const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 const ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const ORPHAN_BATCH = 20;
 
-export type IssueStatusDb = Pick<PrismaClient, "runIssueStatus" | "run">;
+export type IssueStatusDb = Pick<PrismaClient, "runIssueStatus" | "run" | "agentIssueProject">;
 
 export function toJiraMarkdown(text: string): string {
   return text
@@ -32,6 +32,28 @@ export function issueStatusRow(
   visibilityRole: string | null,
 ): Prisma.RunIssueStatusUncheckedCreateInput {
   return { runId, provider: "jira", issueKey: event.issueKey, visibilityRole };
+}
+
+/** "Agent spend: $0.0123" for the run plus its direct children; "" if unavailable. */
+async function spendLine(db: IssueStatusDb, runId: string): Promise<string> {
+  try {
+    const own = await db.run.findUnique({ where: { id: runId }, select: { costUsd: true } });
+    const children = await db.run.aggregate({ where: { parentRunId: runId }, _sum: { costUsd: true } });
+    const total = Number(own?.costUsd ?? 0) + Number(children._sum.costUsd ?? 0);
+    return Number.isFinite(total) ? `Agent spend: $${total.toFixed(4)}` : "";
+  } catch (err) {
+    log.warn({ err, runId }, "could not compute the agent spend for the issue comment");
+    return "";
+  }
+}
+
+/** Insert the spend line above the trailing footer, which must stay the last line. */
+function withSpend(body: string, spend: string): string {
+  if (!spend) return body;
+  const trimmed = body.trimEnd();
+  const at = trimmed.lastIndexOf("\n");
+  if (at < 0) return `${spend}\n\n${trimmed}`;
+  return `${trimmed.slice(0, at).trimEnd()}\n\n${spend}\n\n${trimmed.slice(at + 1)}`;
 }
 
 export async function postIssueWorkingStatus(
@@ -63,6 +85,21 @@ export async function postIssueWorkingStatus(
   }
 }
 
+/** The run's agent's live link to the issue's project, or null (also when it cannot be determined: fail closed). */
+async function currentLink(
+  db: IssueStatusDb,
+  runId: string,
+  issueKey: string,
+  provider: string,
+): Promise<{ access: string; commentVisibilityRole: string | null } | null> {
+  const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
+  if (!run?.agentId) return null;
+  return db.agentIssueProject.findUnique({
+    where: { agentId_provider_projectKey: { agentId: run.agentId, provider, projectKey: projectOf(issueKey) } },
+    select: { access: true, commentVisibilityRole: true },
+  });
+}
+
 export async function completeIssueStatus(
   db: IssueStatusDb,
   run: FinishedRun,
@@ -76,20 +113,38 @@ export async function completeIssueStatus(
     if (!status.commentId && !opts.postIfMissing) return;
     const tracker = trackers[status.provider as IssueTrackerProvider];
     if (!tracker) return;
-    const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
-    const markdown = toJiraMarkdown(
-      outcomeBody(run, "", pullRequests, failedChildren, { budgetSentence, noPullRequestText: "Done." }),
-    );
+    // The link may have been removed or downgraded to read since the run
+    // started: then report status only (no reply, no spend), never the agent's reply.
+    const link = await currentLink(db, run.id, status.issueKey, status.provider);
+    const writable = link?.access === "write";
+    const project = projectOf(status.issueKey);
+    let body: string;
+    if (writable) {
+      const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
+      const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
+        budgetSentence,
+        noPullRequestText: "Done.",
+      });
+      body = withSpend(outcome, await spendLine(db, run.id));
+    } else {
+      const why = link
+        ? `this agent's link to ${project} is now read-only`
+        : `this agent is no longer linked to ${project}`;
+      body = `Stopped reporting: ${why}.\n\n${runLine(run.id)}`;
+    }
+    const markdown = toJiraMarkdown(body);
     let commentId = status.commentId;
     if (commentId) await tracker.editComment(status.issueKey, commentId, { markdown });
-    else {
+    else if (writable) {
       commentId = (
         await tracker.comment(status.issueKey, {
           markdown,
-          ...(status.visibilityRole ? { visibilityRole: status.visibilityRole } : {}),
+          ...(link.commentVisibilityRole ? { visibilityRole: link.commentVisibilityRole } : {}),
         })
       ).id;
     }
+    // Unlinked or read-only with no status comment yet: complete the row
+    // without posting; never create content where the agent may not write.
     await db.runIssueStatus.update({ where: { runId: run.id }, data: { commentId, completedAt: new Date() } });
   } catch (err) {
     log.warn({ err, runId: run.id }, "could not complete the issue status comment");
