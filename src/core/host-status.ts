@@ -9,6 +9,7 @@
  * comment. Best effort throughout: nothing here throws.
  */
 import type { Prisma, PrismaClient, Run } from "#prisma";
+import { CODING_CODE_PROVIDER } from "../coding/protocol.js";
 import { storedServiceNames } from "../coding/services/catalog.js";
 import {
   SERVICE_UNREADY_CATEGORY,
@@ -36,6 +37,12 @@ export interface PullRequestOutcome {
   outcome: "pull_request_opened" | "pull_request_updated";
   repository: string;
   pullRequestNumber: number;
+  /** The result's own pull request URL; absent from a malformed result. */
+  pullRequestUrl?: string;
+  /** The code host the repository is on. */
+  codeProvider: string;
+  /** The coding sub-run that produced it; set by collectRunOutcome. */
+  runId?: string;
 }
 
 /** A sub-run that ended without succeeding. */
@@ -78,7 +85,13 @@ function pullRequestOutcome(result: unknown): PullRequestOutcome | null {
   if (r.outcome !== "pull_request_opened" && r.outcome !== "pull_request_updated") return null;
   if (typeof r.repository !== "string" || typeof r.pullRequestNumber !== "number") return null;
   if (!Number.isInteger(r.pullRequestNumber) || r.pullRequestNumber <= 0) return null;
-  return { outcome: r.outcome, repository: r.repository, pullRequestNumber: r.pullRequestNumber };
+  return {
+    outcome: r.outcome,
+    repository: r.repository,
+    pullRequestNumber: r.pullRequestNumber,
+    codeProvider: CODING_CODE_PROVIDER,
+    ...(typeof r.pullRequestUrl === "string" ? { pullRequestUrl: r.pullRequestUrl } : {}),
+  };
 }
 
 /** The agent's reply as a quote, cut to MAX_REPLY_CHARS, with @-mentions defused so nobody is pinged. */
@@ -188,8 +201,11 @@ export async function collectRunOutcome(
     orderBy: { startedAt: "asc" },
   });
   const pullRequests = children
-    .map((c) => pullRequestOutcome(c.codingRun?.result))
-    .filter((pr): pr is PullRequestOutcome => pr !== null);
+    .map((c) => {
+      const pr = pullRequestOutcome(c.codingRun?.result);
+      return pr ? { ...pr, runId: c.id } : null;
+    })
+    .filter((pr): pr is PullRequestOutcome & { runId: string } => pr !== null);
   const failedChildren = children
     .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
     .map((c) => ({

@@ -506,7 +506,9 @@ describe("collectRunOutcome", () => {
       },
     } as never;
     const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
-    expect(out.pullRequests).toEqual([{ outcome: "pull_request_opened", repository: "o/r", pullRequestNumber: 4 }]);
+    expect(out.pullRequests).toEqual([
+      { outcome: "pull_request_opened", repository: "o/r", pullRequestNumber: 4, codeProvider: "github", runId: "c1" },
+    ]);
     expect(out.failedChildren.map((c) => c.id)).toEqual(["c2"]);
     expect(out.budgetSentence).toBeUndefined();
   });

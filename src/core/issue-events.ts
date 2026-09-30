@@ -18,7 +18,7 @@ import { composeTaskOverride } from "./untrusted-content.js";
 const log = logger.child({ module: "issue-events" });
 const MAX_TASK_BODY = 8000;
 
-export type IssueEventDb = DispatchDb & Pick<PrismaClient, "agentIssueProject" | "runIssueStatus">;
+export type IssueEventDb = DispatchDb & Pick<PrismaClient, "agentIssueProject" | "runIssueStatus" | "issuePullRequest">;
 
 export interface RouteIssueEventDeps {
   db: IssueEventDb;

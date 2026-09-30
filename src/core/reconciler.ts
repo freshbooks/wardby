@@ -51,7 +51,7 @@ const reconcilerLog = logger.child({ module: "reconciler" });
 
 export type ReconcilerDb = Pick<
   PrismaClient,
-  "run" | "runHostCheck" | "runHostStatus" | "runIssueStatus" | "agentIssueProject"
+  "run" | "runHostCheck" | "runHostStatus" | "runIssueStatus" | "agentIssueProject" | "issuePullRequest"
 >;
 
 /**

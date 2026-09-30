@@ -84,6 +84,11 @@ export interface IssueTracker {
   editFields(key: string, fields: Record<string, unknown>): Promise<void>;
   linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>>;
   linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void>;
+  /** Adds (or, for an existing globalId, updates) a web link on the issue: Jira's remote link, shown under "Web links". */
+  addRemoteLink(
+    key: string,
+    input: { globalId: string; url: string; title: string; status?: { resolved: boolean } },
+  ): Promise<void>;
   /** The property's JSON value, or null when it does not exist. */
   getProperty(key: string, property: string): Promise<unknown>;
   setProperty(key: string, property: string, value: unknown): Promise<void>;

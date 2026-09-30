@@ -7,6 +7,7 @@
 import type { Prisma, PrismaClient } from "#prisma";
 import { projectOf, type IssueTrackerProvider, type IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import { collectRunOutcome, outcomeBody, runLine, workingBody, type FinishedRun } from "./host-status.js";
+import { recordPullRequests } from "./issue-bridge.js";
 import { logger } from "./logger.js";
 
 const log = logger.child({ module: "issue-status" });
@@ -15,7 +16,7 @@ const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 const ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const ORPHAN_BATCH = 20;
 
-export type IssueStatusDb = Pick<PrismaClient, "runIssueStatus" | "run" | "agentIssueProject">;
+export type IssueStatusDb = Pick<PrismaClient, "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest">;
 
 export function toJiraMarkdown(text: string): string {
   return text
@@ -91,13 +92,19 @@ async function currentLink(
   runId: string,
   issueKey: string,
   provider: string,
-): Promise<{ access: string; commentVisibilityRole: string | null } | null> {
+): Promise<{
+  agentId: string;
+  access: string;
+  commentVisibilityRole: string | null;
+  onPullRequestOpened: string | null;
+} | null> {
   const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
   if (!run?.agentId) return null;
-  return db.agentIssueProject.findUnique({
+  const link = await db.agentIssueProject.findUnique({
     where: { agentId_provider_projectKey: { agentId: run.agentId, provider, projectKey: projectOf(issueKey) } },
-    select: { access: true, commentVisibilityRole: true },
+    select: { access: true, commentVisibilityRole: true, onPullRequestOpened: true },
   });
+  return link ? { agentId: run.agentId, ...link } : null;
 }
 
 export async function completeIssueStatus(
@@ -121,11 +128,36 @@ export async function completeIssueStatus(
     let body: string;
     if (writable) {
       const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
+      const bridged = pullRequests.flatMap((pr) =>
+        pr.pullRequestUrl && pr.runId
+          ? [
+              {
+                codeProvider: pr.codeProvider,
+                repository: pr.repository,
+                number: pr.pullRequestNumber,
+                url: pr.pullRequestUrl,
+                openedByRunId: pr.runId,
+                outcome: pr.outcome,
+              },
+            ]
+          : [],
+      );
+      const { notes } =
+        bridged.length > 0
+          ? await recordPullRequests(db, tracker, {
+              issueKey: status.issueKey,
+              issueProvider: status.provider,
+              agentId: link.agentId,
+              onPullRequestOpened: link.onPullRequestOpened,
+              pullRequests: bridged,
+            })
+          : { notes: [] };
       const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
         budgetSentence,
         noPullRequestText: "Done.",
       });
-      body = withSpend(outcome, await spendLine(db, run.id));
+      // Notes and spend go above the footer, which must stay the last line.
+      body = withSpend(withSpend(outcome, notes.join("\n")), await spendLine(db, run.id));
     } else {
       const why = link
         ? `this agent's link to ${project} is now read-only`
