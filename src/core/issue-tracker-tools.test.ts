@@ -403,6 +403,7 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
 
   it("descriptions name the governing allowlist, the service account, and label visibility", () => {
     expect(def("jira_list_transitions").description).toMatch(/allowedTransitions/);
+    expect(def("jira_list_transitions").description).toMatch(/notAllowed/);
     expect(def("jira_transition").description).toMatch(/allowedTransitions/);
     expect(def("jira_transition").description).toMatch(/service account/);
     expect(def("jira_update_fields").description).toMatch(/writableFields/);
@@ -421,7 +422,21 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
       c.currentLink = async (k) => (k === "PROJ" ? { ...WRITE_LINK, allowedTransitions: ["done"] } : null);
       expect(await call("jira_list_transitions", { issueKey: "PROJ-1" }, c)).toEqual({
         transitions: [{ name: "Close", toStatus: "Done", toCategory: "done" }],
+        notAllowed: ["In Progress", "Rejected"],
+        note: expect.stringMatching(/allowedTransitions.*not the Jira workflow/),
       });
+    });
+
+    it("has an empty notAllowed and no note when everything offered is allowlisted", async () => {
+      const t = tracker();
+      vi.mocked(t.transitions).mockResolvedValue(TRANSITIONS);
+      const c = ctx(t);
+      c.currentLink = async (k) =>
+        k === "PROJ" ? { ...WRITE_LINK, allowedTransitions: ["In Progress", "Done", "Rejected"] } : null;
+      const r = (await call("jira_list_transitions", { issueKey: "PROJ-1" }, c)) as Record<string, unknown>;
+      expect(r.notAllowed).toEqual([]);
+      expect(r).not.toHaveProperty("note");
+      expect(r.transitions).toHaveLength(3);
     });
 
     it("fails closed on an empty allowlist without calling Jira", async () => {

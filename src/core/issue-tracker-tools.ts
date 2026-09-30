@@ -211,7 +211,7 @@ export const ISSUE_TRACKER_TOOL_DEFS: LoadedTool[] = [
   {
     name: "jira_list_transitions",
     description:
-      "Lists the status transitions you may perform on a Jira issue right now: only those whose target status is in this agent's allowedTransitions for the issue's project (set by whoever linked the project) and that Jira currently offers. Use a returned toStatus with jira_transition.",
+      "Lists the status transitions you may perform on a Jira issue right now: only those whose target status is in this agent's allowedTransitions for the issue's project (set by whoever linked the project) and that Jira currently offers. notAllowed lists statuses Jira offers from the current status that this agent may not use; jira_transition refuses those. Use a returned toStatus with jira_transition.",
     jsonSchema: {
       type: "object",
       properties: { issueKey: ISSUE_KEY_PROP },
@@ -615,11 +615,22 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
         const resolved = await authorizeResolved(await tracker.issueProject(a.issueKey));
         if ("refusal" in resolved) return resolved.refusal;
         const allowed = allowlist(resolved.link.allowedTransitions);
-        // Only what this agent may do reaches the model.
-        const transitions = (await tracker.transitions(a.issueKey))
-          .filter((t) => allowed.some((s) => sameName(s, t.toStatus)))
+        const offered = await tracker.transitions(a.issueKey);
+        const isAllowed = (status: string) => allowed.some((s) => sameName(s, status));
+        const transitions = offered
+          .filter((t) => isAllowed(t.toStatus))
           .map((t) => ({ name: t.name, toStatus: t.toStatus, toCategory: t.toCategory }));
-        return JSON.stringify({ transitions });
+        // Names only (no ids), so the model can tell "wardby forbids it" from "not in the workflow".
+        const notAllowed = [...new Set(offered.filter((t) => !isAllowed(t.toStatus)).map((t) => t.toStatus))];
+        return JSON.stringify({
+          transitions,
+          notAllowed,
+          ...(notAllowed.length > 0
+            ? {
+                note: "Jira offers the notAllowed statuses, but this agent is not permitted to move issues to them — that is wardby's link configuration (allowedTransitions), not the Jira workflow.",
+              }
+            : {}),
+        });
       }
       case "jira_transition": {
         const { issueKey, toStatus } = a as z.infer<typeof TransitionArgs>;
