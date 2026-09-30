@@ -85,6 +85,24 @@ describe("handleGitHubEventIngress", () => {
     expect(vi.mocked(routeHostEvent).mock.calls[0][1].repoAccess).toBe(REPO_ACCESS);
   });
 
+  it("routes a closed PR with the issue trackers", async () => {
+    const trackers = { jira: {} as never };
+    const { deps: d } = deps({ issueTrackers: trackers });
+    const raw = JSON.stringify({
+      action: "closed",
+      repository: { full_name: "chfields/knock-knock-jokes" },
+      pull_request: { number: 7, merged: true },
+    });
+    const result = await handleGitHubEventIngress(
+      { headers: headers({ "x-hub-signature-256": sign(raw) }), rawBody: raw },
+      d,
+    );
+    expect(result.status).toBe(202);
+    const [event, routeDeps] = vi.mocked(routeHostEvent).mock.calls[0];
+    expect(event).toMatchObject({ kind: "pr_closed", prNumber: 7, merged: true });
+    expect(routeDeps.issueTrackers).toBe(trackers);
+  });
+
   it("accepts and ignores events it does not handle", async () => {
     const { deps: d } = deps();
     const raw = JSON.stringify({ repository: { full_name: "chfields/knock-knock-jokes" } });

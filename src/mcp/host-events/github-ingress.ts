@@ -11,6 +11,7 @@ import { routeHostEvent } from "../../core/host-events.js";
 import { logger } from "../../core/logger.js";
 import type { Executor } from "../../providers/executor/types.js";
 import { normalizeGitHubEvent, verifyGitHubSignature } from "../../providers/review-host/github-events.js";
+import type { IssueTrackerRegistry } from "../../providers/issue-tracker/types.js";
 import type { ReviewHostRegistry } from "../../providers/review-host/types.js";
 import type { RepoAccessGate } from "../../core/repo-access.js";
 
@@ -23,6 +24,8 @@ export interface GitHubIngressDeps {
   hosts: ReviewHostRegistry;
   /** Repository authorization for every dispatch, and the mention author's permission. */
   repoAccess: RepoAccessGate;
+  /** For a merged/closed PR's linked issue; absent → closed PRs are ignored. */
+  issueTrackers?: IssueTrackerRegistry;
   webhookSecret: string | undefined;
   appIdentity: () => Promise<{ id: number; slug: string }>;
   now?: () => Date;
@@ -87,6 +90,7 @@ export async function handleGitHubEventIngress(
       executor: deps.executor,
       hosts: deps.hosts,
       repoAccess: deps.repoAccess,
+      ...(deps.issueTrackers ? { issueTrackers: deps.issueTrackers } : {}),
       mentionHandle: app.slug,
     });
     log.info(

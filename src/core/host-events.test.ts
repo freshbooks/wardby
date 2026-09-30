@@ -508,3 +508,29 @@ describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)
     });
   });
 });
+
+describe("routeHostEvent pr_closed", () => {
+  const closed: HostEvent = { kind: "pr_closed", provider: "github", repository: REPO, prNumber: 7, merged: true };
+
+  it("hands the closed PR to the issue bridge and starts nothing", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }]);
+    const findMany = vi.fn(async () => []);
+    (d.db as any).issuePullRequest = { findMany };
+    const result = await routeHostEvent(closed, { ...d, issueTrackers: { jira: {} as never } });
+    expect(result).toEqual({ runIds: [], followUps: [] });
+    expect(findMany).toHaveBeenCalledWith({
+      where: { codeProvider: "github", repository: REPO, number: 7, state: "open" },
+    });
+    expect((d.db as any).agentRepository.findMany).not.toHaveBeenCalled();
+    expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("is ignored without issue trackers", async () => {
+    const d = deps([]);
+    const findMany = vi.fn(async () => []);
+    (d.db as any).issuePullRequest = { findMany };
+    await expect(routeHostEvent(closed, d)).resolves.toEqual({ runIds: [], followUps: [] });
+    expect(findMany).not.toHaveBeenCalled();
+  });
+});
