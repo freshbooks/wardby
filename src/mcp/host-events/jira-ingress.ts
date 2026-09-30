@@ -21,6 +21,25 @@ export interface JiraIngressDeps {
   executor: Executor;
   trackers: IssueTrackerRegistry;
   webhookSecret: string;
+  /** Epoch-ms clock; injected by tests. */
+  now?: () => number;
+}
+
+/** Jira retries a delivery up to 5 times, 5-15 min apart, so 2 h comfortably covers a legitimate replay. */
+const MAX_AGE_MS = 2 * 60 * 60 * 1000;
+const MAX_FUTURE_MS = 5 * 60 * 1000;
+
+/**
+ * Whether the payload's top-level `timestamp` is inside the replay window.
+ * Assumed to be epoch milliseconds; a value below 1e12 (before 2001 in ms)
+ * is read as seconds. The unit is unverified against a live delivery.
+ * A missing or non-numeric timestamp is not fresh.
+ */
+function isFresh(payload: unknown, nowMs: number): boolean {
+  const raw = (payload as { timestamp?: unknown } | null)?.timestamp;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return false;
+  const ts = raw < 1e12 ? raw * 1000 : raw;
+  return ts >= nowMs - MAX_AGE_MS && ts <= nowMs + MAX_FUTURE_MS;
 }
 
 export interface JiraIngressResult {
@@ -56,6 +75,8 @@ export async function handleJiraEventIngress(
   } catch {
     return { status: 400, body: { error: "invalid_json" } };
   }
+  // Replay protection: the signature covers the body, so an old captured delivery would otherwise verify forever.
+  if (!isFresh(payload, (deps.now ?? Date.now)())) return { status: 202, body: { ignored: "stale" } };
   const event = normalizeJiraEvent(payload, identity.accountId);
   // An event we don't act on must never claim the delivery id (see the GitHub ingress).
   if (!event) return { status: 202, body: { ignored: true } };

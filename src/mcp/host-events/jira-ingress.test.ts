@@ -15,7 +15,10 @@ import { resetPruneClockForTests } from "./deliveries.js";
 import { handleJiraEventIngress } from "./jira-ingress.js";
 
 const SECRET = "jira-webhook-secret-0123456789";
-const body = JSON.stringify({ webhookEvent: "jira:issue_created", issue: { key: "ABC-1" } });
+const NOW = 1_780_000_000_000;
+const bodyAt = (timestamp?: unknown) =>
+  JSON.stringify({ webhookEvent: "jira:issue_created", issue: { key: "ABC-1" }, timestamp });
+const body = bodyAt(NOW - 1000);
 const sign = (raw: string) => `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`;
 
 function deps(overrides: Record<string, unknown> = {}) {
@@ -44,6 +47,7 @@ function deps(overrides: Record<string, unknown> = {}) {
         jira: { botAccountId: async () => "bot-1", identity: async () => ({ accountId: "bot-1", accountType: "app" }) },
       } as never,
       webhookSecret: SECRET,
+      now: () => NOW,
       ...overrides,
     },
   };
@@ -160,6 +164,37 @@ describe("handleJiraEventIngress", () => {
     const { deps: d, created } = deps();
     await expect(handleJiraEventIngress({ headers: headers(), rawBody: body }, d)).rejects.toThrow("boom");
     expect(created).toEqual([]);
+  });
+
+  describe("replay window", () => {
+    const HOUR = 60 * 60 * 1000;
+    const cases: Array<[string, unknown, boolean]> = [
+      ["fresh (ms)", NOW - 1000, true],
+      ["just inside 2 h", NOW - 2 * HOUR + 1000, true],
+      ["a few minutes ahead", NOW + 4 * 60 * 1000, true],
+      ["fresh, in seconds", Math.floor((NOW - 1000) / 1000), true],
+      ["older than 2 h", NOW - 2 * HOUR - 1000, false],
+      ["stale, in seconds", Math.floor((NOW - 3 * HOUR) / 1000), false],
+      ["more than 5 min ahead", NOW + 6 * 60 * 1000, false],
+      ["missing", undefined, false],
+      ["a string", String(NOW), false],
+      ["null", null, false],
+    ];
+    it.each(cases)("%s", async (_name, ts, accepted) => {
+      const { deps: d, hostEventDelivery } = deps();
+      const raw = bodyAt(ts);
+      const result = await handleJiraEventIngress(
+        { headers: headers({ "x-hub-signature": sign(raw) }), rawBody: raw },
+        d,
+      );
+      if (accepted) {
+        expect(result).toMatchObject({ status: 202, body: { runIds: ["run1"] } });
+      } else {
+        expect(result).toMatchObject({ status: 202, body: { ignored: "stale" } });
+        expect(hostEventDelivery.create).not.toHaveBeenCalled();
+        expect(routeIssueEvent).not.toHaveBeenCalled();
+      }
+    });
   });
 
   it("is disabled without a Jira tracker", async () => {
