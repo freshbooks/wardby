@@ -15,7 +15,9 @@ export interface AdfNode {
   marks?: Array<{ type: string; attrs?: Record<string, unknown> }>;
 }
 
-const INLINE = /\*\*([^*]+)\*\*|`([^`]+)`|_([^_]+)_|\[([^\]]+)\]\(([^)\s]+)\)/g;
+// `_x_` is italic only when the underscores aren't inside a word, so
+// snake_case identifiers (WARDBY_JIRA_API_TOKEN, my_var_name) stay literal.
+const INLINE = /\*\*([^*]+)\*\*|`([^`]+)`|(?<![A-Za-z0-9_])_([^_\s][^_]*?)_(?![A-Za-z0-9_])|\[([^\]]+)\]\(([^)\s]+)\)/g;
 
 function inline(text: string): AdfNode[] {
   const out: AdfNode[] = [];

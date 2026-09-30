@@ -44,6 +44,19 @@ describe("markdownToAdf", () => {
     expect(JSON.stringify(doc)).not.toContain('"link"');
     expect(JSON.stringify(doc)).not.toContain('"mention"');
   });
+  it("keeps snake_case identifiers literal but still italicises _word_", () => {
+    expect(markdownToAdf("Set WARDBY_JIRA_API_TOKEN and my_var_name").content?.[0].content).toEqual([
+      { type: "text", text: "Set WARDBY_JIRA_API_TOKEN and my_var_name" },
+    ]);
+    expect(markdownToAdf("an _italic_ word").content?.[0].content).toEqual([
+      { type: "text", text: "an " },
+      { type: "text", text: "italic", marks: [{ type: "em" }] },
+      { type: "text", text: " word" },
+    ]);
+    expect(markdownToAdf("done\n\n_wardby agent agent-123_").content?.[1].content).toEqual([
+      { type: "text", text: "wardby agent agent-123", marks: [{ type: "em" }] },
+    ]);
+  });
   it("returns a valid empty doc for empty input", () => {
     expect(markdownToAdf("")).toEqual({ type: "doc", version: 1, content: [] });
   });
