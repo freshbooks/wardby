@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { toJiraMarkdown } from "../../core/issue-status.js";
+import { markdownToAdf } from "./adf.js";
 import { JiraClient } from "./jira-client.js";
-import { JiraIssueTracker } from "./jira.js";
+import { isStatusComment, JiraIssueTracker } from "./jira.js";
 import { IssueTrackerError } from "./types.js";
 
 const SITE = "https://your-site.atlassian.net";
@@ -224,5 +226,42 @@ describe("JiraIssueTracker", () => {
     expect(read?.authorId).toBe("bot-1");
     expect(read?.body).toBe(long);
     expect(await tracker.readComment("PROJ-1", "404")).toBeNull();
+  });
+  it("hides wardby status comments, keeps agent replies and human look-alikes", async () => {
+    const bot = { accountId: "bot-1", displayName: "wardby" };
+    const human = { accountId: "u-1", displayName: "Ann" };
+    const status = markdownToAdf(toJiraMarkdown("👀 Working on it\n\n<sub>wardby run `run-9`</sub>"));
+    const { tracker } = fake((c) => {
+      if (c.path === "/rest/api/3/myself") return json({ accountId: "bot-1" });
+      if (c.path.startsWith("/rest/api/3/issue/PROJ-1?")) {
+        return json({
+          key: "PROJ-1",
+          fields: {
+            comment: {
+              total: 4,
+              comments: [
+                { id: "1", author: human, created: "t", body: doc("see\nwardby run x") },
+                { id: "2", author: bot, created: "t", body: status },
+                { id: "3", author: bot, created: "t", body: doc("reply\nwardby agent agent-7") },
+                { id: "4", author: bot, created: "t", body: status },
+              ],
+            },
+          },
+        });
+      }
+      return undefined;
+    });
+    const two = await tracker.getIssue("PROJ-1", { maxComments: 2, agentMarker: "agent-7" });
+    expect(two.comments.map((c) => c.id)).toEqual(["1", "3"]);
+    expect(two.commentsTruncated).toBe(false);
+    const one = await tracker.getIssue("PROJ-1", { maxComments: 1, agentMarker: "agent-7" });
+    expect(one.comments.map((c) => c.id)).toEqual(["3"]);
+    expect(one.commentsTruncated).toBe(true);
+  });
+
+  it("isStatusComment matches the rendered run footer on the last line only", () => {
+    expect(isStatusComment("done\nwardby run abc")).toBe(true);
+    expect(isStatusComment("wardby run abc\nmore")).toBe(false);
+    expect(isStatusComment("wardby agent abc")).toBe(false);
   });
 });

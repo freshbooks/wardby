@@ -28,6 +28,12 @@ export const hasAgentFooter = (text: string, agentId: string): boolean => {
   return last.trim() === `wardby agent ${agentId}`;
 };
 
+/** Whether rendered comment text ends with wardby's run-status footer (`_wardby run <id>_` as adfToText renders it). */
+export const isStatusComment = (text: string): boolean => {
+  const last = text.trimEnd().split("\n").pop() ?? "";
+  return /^wardby run \S+$/.test(last.trim());
+};
+
 type Json = Record<string, unknown>;
 const obj = (v: unknown): Json => (v && typeof v === "object" && !Array.isArray(v) ? (v as Json) : {});
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -72,7 +78,12 @@ export class JiraIssueTracker implements IssueTracker {
     const f = obj(raw.fields);
     const commentBlock = obj(f.comment);
     const all = Array.isArray(commentBlock.comments) ? commentBlock.comments.map(obj) : [];
-    const recent = all.slice(-opts.maxComments);
+    // wardby's own status comments ("Working on it" / outcome) are not issue context and mislead agents; drop
+    // them (bot-authored only) before windowing so they do not crowd out real comments.
+    const visible = all.filter(
+      (c) => !(person(c.author)?.accountId === bot && isStatusComment(adfToText(c.body, Infinity))),
+    );
+    const recent = visible.slice(-opts.maxComments);
     const comments: IssueCommentView[] = recent.map((c) => {
       const author = person(c.author);
       const full = adfToText(c.body, Infinity);
@@ -99,7 +110,8 @@ export class JiraIssueTracker implements IssueTracker {
       reporter: person(f.reporter),
       url: this.issueUrl(str(raw.key)),
       comments,
-      commentsTruncated: total > comments.length,
+      // True when non-status comments were omitted (the window cut some, or Jira returned only part of them).
+      commentsTruncated: visible.length > comments.length || total > all.length,
     };
   }
 
