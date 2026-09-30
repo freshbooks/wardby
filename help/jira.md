@@ -24,9 +24,10 @@ the `Jira acting as` startup line to confirm the account.
    there. To let agents change issues also add Transition issues, Edit issues
    and Link issues. Its permissions are the outer boundary of what any linked
    agent can read or change.
-2. Create an API token for it with scopes covering reading issues, JQL search
-   and writing comments, plus reading its own identity (`read:jira-work`,
-   `write:jira-work` and `read:jira-user`), and an expiry.
+2. Create an API token for it, with an expiry, and the scopes
+   `read:jira-work` (read issues and comments, JQL search), `write:jira-work`
+   (add and edit comments, transition issues, edit fields, link issues, write
+   issue properties) and `read:jira-user` (read its own identity).
 3. Find your site's cloudId at `https://your-site.atlassian.net/_edge/tenant_info`.
 4. In Jira, Settings, System, WebHooks: add
    `https://<your-wardby-host>/hosts/jira/events` with a secret of 20 or more
@@ -46,17 +47,24 @@ the `Jira acting as` startup line to confirm the account.
    `triggers: ["transitioned", "mention"]`,
    `triggerStatuses: ["Ready for agent"]` and
    `trustedAccountIds: ["<accountId>"]`. To let the agent change issues, add
-   `allowedTransitions` (target status names) and `writableFields` (`labels`,
-   `components`, `priority`, `customfield_N`); both need `write` access and an
-   empty list means the tool refuses.
+   `allowedTransitions` (target status names), `writableFields` (`labels`,
+   `components`, `priority`, `customfield_N`) and `allowedLinkTypes` (issue
+   link type names such as `Duplicate`); all need `write` access and an empty
+   list means the tool refuses. Linking two issues also needs a `write` link to
+   both issues' projects, each allowlisting the type. Existing links get these
+   only once you set the lists.
 
 ## What agents can do
 
 Beyond reading, searching and commenting, linked agents get
 `jira_list_transitions`, `jira_transition`, `jira_update_fields`,
-`jira_link_issues`, and `jira_get_property` / `jira_set_property` for private
+`jira_link_issues`, and `jira_get_property` / `jira_set_property` for
 per-issue state. Each authorizes against the issue's own project and the
-agent's live link. Run status comments include an `Agent spend: $...` line.
+agent's live link. Properties are not allowlisted: any `write` link can set
+them and any link can read them. They are stored as `wardby.<agentId>.<name>`,
+and anyone with Jira API access to the issue can read or overwrite them, so
+never store secrets there. Run status comments include an `Agent spend: $...`
+line.
 If the token belongs to a person, Wardby refuses to act: startup logs an error
 and the webhook answers 503 `jira_personal_account`. Deliveries with a
 timestamp older than two hours (or more than five minutes ahead) are ignored.
