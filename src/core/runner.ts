@@ -618,10 +618,12 @@ async function executeTrackedRun(
           },
         });
       }
-      if (ISSUE_TRACKER_TOOL_NAMES.has(name) && loaded.issueProjectLinks.length > 0 && issueTrackers) {
+      // `?? []`: a load step replayed from before these links were pinned has none.
+      const issueProjectLinks: readonly IssueProjectLink[] = loaded.issueProjectLinks ?? [];
+      if (ISSUE_TRACKER_TOOL_NAMES.has(name) && issueProjectLinks.length > 0 && issueTrackers) {
         return handleIssueTrackerTool(name, argsJson, {
           agentId: loaded.agentId,
-          links: loaded.issueProjectLinks,
+          links: issueProjectLinks,
           trackers: issueTrackers,
           // Live, not from the pinned load: an unlink, downgrade, or new
           // visibility role takes effect on the very next call.

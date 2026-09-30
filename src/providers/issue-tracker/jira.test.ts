@@ -154,6 +154,21 @@ describe("JiraIssueTracker", () => {
     expect(calls[0].body).toMatchObject({ jql: "project = PROJ", maxResults: 1 });
   });
 
+  it("issueProject reads only the project field and returns its current key", async () => {
+    const { tracker, calls } = fake((c) =>
+      c.path === "/rest/api/3/issue/PROJ-7?fields=project"
+        ? json({ key: "SECRET-3", fields: { project: { key: "SECRET" } } })
+        : undefined,
+    );
+    expect(await tracker.issueProject("PROJ-7")).toBe("SECRET");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("issueProject rejects a response without a project key", async () => {
+    const { tracker } = fake(() => json({ fields: {} }));
+    await expect(tracker.issueProject("PROJ-7")).rejects.toMatchObject({ code: "tracker_invalid_response" });
+  });
+
   it("matchesJql wraps the filter so it cannot widen the query", async () => {
     const { tracker, calls } = fake(() => json({ issues: [] }));
     expect(await tracker.matchesJql("PROJ-1", "labels = x OR 1=1")).toBe(false);

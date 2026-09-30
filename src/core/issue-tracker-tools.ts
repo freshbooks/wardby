@@ -19,6 +19,7 @@ import { agentFooter, hasAgentFooter } from "../providers/issue-tracker/jira.js"
 import {
   ISSUE_KEY,
   IssueTrackerError,
+  PROJECT_KEY,
   projectOf,
   type IssueTracker,
   type IssueTrackerRegistry,
@@ -133,13 +134,23 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set(["jira_comment", "jira_edit_own
 
 /**
  * Restricts the model's JQL to `projectKeys`: `project in (...) AND (<filter>)`,
- * with a top-level trailing ORDER BY kept outside the parentheses. Returns
- * null when the JQL could close the wrapping parenthesis itself (unbalanced
- * parentheses outside quoted strings, an unterminated string, or a
- * parenthesis after ORDER BY): since AND binds tighter than OR, a filter
- * like `x) OR (y` would otherwise escape the project scope.
+ * with a top-level trailing ORDER BY kept outside the parentheses. This is
+ * defence in depth: jira_search also drops every result outside the linked
+ * projects, which is the real boundary. Refused, as `{ error }`:
+ *  - anything that could close the wrapping parenthesis itself (unbalanced
+ *    parentheses outside quoted strings, an unterminated string, or a
+ *    parenthesis after ORDER BY): since AND binds tighter than OR, a filter
+ *    like `x) OR (y` would otherwise escape the scope;
+ *  - a backslash outside a quoted string: Jira reads `\"` there as an
+ *    escaped character inside an unquoted term, not the start of a string,
+ *    so allowing it would let this scanner and Jira's lexer disagree about
+ *    where strings (and so parentheses) are;
+ *  - `issueFunction` anywhere (ScriptRunner functions that run an inner JQL
+ *    query of their own). Other JQL functions are allowed; the service
+ *    account's own Jira permissions are the outer boundary.
  */
-export function scopeJql(projectKeys: readonly string[], jql: string): string | null {
+export function scopeJql(projectKeys: readonly string[], jql: string): { jql: string } | { error: string } {
+  if (/issuefunction/i.test(jql)) return { error: "issueFunction is not allowed in jira_search." };
   let depth = 0;
   let quote: string | null = null;
   let orderAt = -1;
@@ -150,11 +161,12 @@ export function scopeJql(projectKeys: readonly string[], jql: string): string | 
       else if (c === quote) quote = null;
       continue;
     }
+    if (c === "\\") return { error: "A backslash is only allowed inside a quoted string." };
     if (c === '"' || c === "'") quote = c;
     else if (c === "(" || c === ")") {
-      if (orderAt >= 0) return null;
+      if (orderAt >= 0) return { error: "Parentheses are not allowed after ORDER BY." };
       depth += c === "(" ? 1 : -1;
-      if (depth < 0) return null;
+      if (depth < 0) return { error: "Unbalanced parentheses." };
     } else if (
       orderAt < 0 &&
       depth === 0 &&
@@ -165,10 +177,13 @@ export function scopeJql(projectKeys: readonly string[], jql: string): string | 
       orderAt = i;
     }
   }
-  if (quote || depth !== 0) return null;
+  if (quote) return { error: "Unterminated quoted string." };
+  if (depth !== 0) return { error: "Unbalanced parentheses." };
   const filter = (orderAt < 0 ? jql : jql.slice(0, orderAt)).trim();
   const order = orderAt < 0 ? "" : jql.slice(orderAt).trim();
-  return `project in (${projectKeys.join(", ")})${filter ? ` AND (${filter})` : ""}${order ? ` ${order}` : ""}`;
+  return {
+    jql: `project in (${projectKeys.join(", ")})${filter ? ` AND (${filter})` : ""}${order ? ` ${order}` : ""}`,
+  };
 }
 
 function error(code: string, message: string = code): string {
@@ -214,22 +229,30 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
   try {
     if (name === "jira_search") {
       const a = SearchArgs.parse(parsed);
-      const current: IssueProjectLink[] = [];
+      const linkedKeys = new Set<string>();
       for (const loaded of ctx.links) {
         const link = await ctx.currentLink(loaded.projectKey);
-        if (link) current.push(link);
+        if (!link) continue;
+        // Never splice anything but a well-formed key into the JQL.
+        if (!PROJECT_KEY.test(link.projectKey)) {
+          log.warn({ agentId: ctx.agentId, projectKey: link.projectKey }, "skipping a malformed linked project key");
+          continue;
+        }
+        linkedKeys.add(link.projectKey);
       }
-      if (current.length === 0) return error("project_not_linked", "This agent is no longer linked to any project.");
+      if (linkedKeys.size === 0) return error("project_not_linked", "This agent is no longer linked to any project.");
       const tracker = ctx.trackers.jira;
       if (!tracker) return error("tracker_not_configured", "No Jira site is configured on this deployment.");
-      const jql = scopeJql(
-        current.map((l) => l.projectKey),
-        a.jql,
-      );
-      if (!jql) {
-        return error("invalid_arguments", "jql: unbalanced parentheses or quotes, or a parenthesis after ORDER BY.");
-      }
-      return JSON.stringify(await tracker.search(jql, { maxResults: a.maxResults ?? 20 }));
+      const scoped = scopeJql([...linkedKeys], a.jql);
+      if ("error" in scoped) return error("invalid_jql", scoped.error);
+      const result = await tracker.search(scoped.jql, { maxResults: a.maxResults ?? 20 });
+      // The boundary: only issues in a linked project reach the model, whatever
+      // the JQL did. `truncated` stays the tracker's own flag: when it is
+      // false every match was returned, so nothing in scope was dropped.
+      return JSON.stringify({
+        issues: result.issues.filter((hit) => linkedKeys.has(projectOf(hit.key))),
+        truncated: result.truncated,
+      });
     }
 
     const a =
@@ -241,21 +264,34 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
             ? EditOwnCommentArgs.parse(parsed)
             : null;
     if (!a) return error("unknown_tool", `No built-in tool named "${name}".`);
-    const authorized = await authorizeProject(name, projectOf(a.issueKey), ctx);
-    if ("refusal" in authorized) return authorized.refusal;
-    const { link } = authorized;
-    const tracker = ctx.trackers[link.provider];
-    if (!tracker) return error("tracker_not_configured", `No ${link.provider} site is configured on this deployment.`);
+    // The requested key's project first: refuses an obviously unlinked key
+    // without a tracker call.
+    const requested = await authorizeProject(name, projectOf(a.issueKey), ctx);
+    if ("refusal" in requested) return requested.refusal;
+    const tracker = ctx.trackers[requested.link.provider];
+    if (!tracker) {
+      return error("tracker_not_configured", `No ${requested.link.provider} site is configured on this deployment.`);
+    }
+    // Jira keeps an issue's old key as an alias after a move, so the key's
+    // prefix is not proof of the project the issue is in now: authorize the
+    // project it resolves to as well.
+    const authorizeResolved = async (projectKey: string) =>
+      projectKey === requested.link.projectKey ? requested : authorizeProject(name, projectKey, ctx);
 
     switch (name) {
       case "jira_get_issue": {
         const { issueKey, maxComments } = a as z.infer<typeof GetIssueArgs>;
-        return JSON.stringify(
-          await tracker.getIssue(issueKey, { maxComments: maxComments ?? 10, agentMarker: ctx.agentId }),
-        );
+        const view = await tracker.getIssue(issueKey, { maxComments: maxComments ?? 10, agentMarker: ctx.agentId });
+        const resolved = await authorizeResolved(view.projectKey);
+        // Nothing of an issue outside the linked projects is returned.
+        if ("refusal" in resolved) return resolved.refusal;
+        return JSON.stringify(view);
       }
       case "jira_comment": {
         const { issueKey, body } = a as z.infer<typeof CommentArgs>;
+        const resolved = await authorizeResolved(await tracker.issueProject(issueKey));
+        if ("refusal" in resolved) return resolved.refusal;
+        const { link } = resolved;
         const posted = await tracker.comment(issueKey, {
           markdown: `${body}\n\n${agentFooter(ctx.agentId)}`,
           ...(link.commentVisibilityRole ? { visibilityRole: link.commentVisibilityRole } : {}),
@@ -264,6 +300,8 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
       }
       default: {
         const { issueKey, commentId, body } = a as z.infer<typeof EditOwnCommentArgs>;
+        const resolved = await authorizeResolved(await tracker.issueProject(issueKey));
+        if ("refusal" in resolved) return resolved.refusal;
         const existing = await tracker.readComment(issueKey, commentId);
         if (!existing) return error("tracker_not_found", `No comment ${commentId} on ${issueKey}.`);
         // Both: the bot wrote it, and it carries THIS agent's footer (other agents share the bot).

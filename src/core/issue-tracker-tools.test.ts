@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { IssueTrackerError, type IssueTracker } from "../providers/issue-tracker/types.js";
+import { IssueTrackerError, projectOf, type IssueTracker } from "../providers/issue-tracker/types.js";
 import {
   ISSUE_TRACKER_TOOL_DEFS,
   ISSUE_TRACKER_TOOL_NAMES,
@@ -27,7 +27,8 @@ function tracker(): IssueTracker {
     provider: "jira",
     botAccountId: vi.fn(async () => "bot-1"),
     identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "wardby", accountType: "app" })),
-    getIssue: vi.fn(async (key: string) => ({ key, summary: "S" }) as never),
+    getIssue: vi.fn(async (key: string) => ({ key, projectKey: projectOf(key), summary: "S" }) as never),
+    issueProject: vi.fn(async (key: string) => projectOf(key)),
     search: vi.fn(async () => ({ issues: [], truncated: false })),
     matchesJql: vi.fn(),
     comment: vi.fn(async () => ({
@@ -119,7 +120,11 @@ describe("handleIssueTrackerTool", () => {
 
   it("jira_get_issue passes the agent marker and a default comment cap", async () => {
     const t = tracker();
-    expect(await call("jira_get_issue", { issueKey: "PROJ-12" }, ctx(t))).toEqual({ key: "PROJ-12", summary: "S" });
+    expect(await call("jira_get_issue", { issueKey: "PROJ-12" }, ctx(t))).toEqual({
+      key: "PROJ-12",
+      projectKey: "PROJ",
+      summary: "S",
+    });
     expect(t.getIssue).toHaveBeenCalledWith("PROJ-12", { maxComments: 10, agentMarker: "a1" });
   });
 
@@ -147,7 +152,7 @@ describe("handleIssueTrackerTool", () => {
       "status = Done) OR project = SECRET OR (x = y",
       "a = b)",
     ]) {
-      expect(await call("jira_search", { jql }, ctx(t)), jql).toMatchObject({ error: "invalid_arguments" });
+      expect(await call("jira_search", { jql }, ctx(t)), jql).toMatchObject({ error: "invalid_jql" });
     }
     expect(t.search).not.toHaveBeenCalled();
   });
@@ -255,24 +260,106 @@ describe("handleIssueTrackerTool", () => {
   });
 });
 
+describe("jira_* project boundary", () => {
+  const hit = (key: string) => ({ key, summary: "s", status: "Open", issueType: "Task", updated: "", url: "u" });
+
+  it("jira_search refuses backslash escapes outside quoted strings (scanner/lexer desync)", async () => {
+    const t = tracker();
+    for (const jql of [
+      'summary ~ a\\" ) OR project = SECRET OR ( summary ~ "b\\""',
+      "labels = x\\' ) OR project = SECRET OR ( labels = 'y\\''",
+    ]) {
+      expect(await call("jira_search", { jql }, ctx(t)), jql).toMatchObject({ error: "invalid_jql" });
+    }
+    expect(t.search).not.toHaveBeenCalled();
+  });
+
+  it("jira_search refuses issueFunction in any case", async () => {
+    const t = tracker();
+    for (const jql of ['issueFunction in linkedIssuesOf("project = SECRET")', "ISSUEFUNCTION in x()"]) {
+      expect(await call("jira_search", { jql }, ctx(t)), jql).toMatchObject({ error: "invalid_jql" });
+    }
+    expect(t.search).not.toHaveBeenCalled();
+  });
+
+  it("jira_search drops results outside the live-linked projects and keeps the tracker's truncation flag", async () => {
+    const t = tracker();
+    vi.mocked(t.search).mockResolvedValue({
+      issues: [hit("PROJ-1"), hit("SECRET-9"), hit("DOCS-2")],
+      truncated: false,
+    });
+    const c = ctx(t);
+    c.currentLink = async (key) => (key === "PROJ" ? WRITE_LINK : null);
+    expect(await call("jira_search", { jql: "status = Open" }, c)).toEqual({
+      issues: [hit("PROJ-1")],
+      truncated: false,
+    });
+    vi.mocked(t.search).mockResolvedValue({ issues: [hit("SECRET-9")], truncated: true });
+    expect(await call("jira_search", { jql: "status = Open" }, c)).toEqual({ issues: [], truncated: true });
+  });
+
+  it("jira_search leaves a malformed project key out of the JQL", async () => {
+    const t = tracker();
+    const bad: IssueProjectLink = { ...READ_LINK, projectKey: "X) OR (1=1" };
+    const c = ctx(t, [WRITE_LINK, bad]);
+    await call("jira_search", { jql: "status = Done" }, c);
+    expect(t.search).toHaveBeenCalledWith("project in (PROJ) AND (status = Done)", { maxResults: 20 });
+  });
+
+  it("jira_get_issue refuses a key in a linked project that resolves to an unlinked one, without returning it", async () => {
+    const t = tracker();
+    vi.mocked(t.getIssue).mockResolvedValue({ key: "SECRET-3", projectKey: "SECRET", summary: "classified" } as never);
+    const result = await handleIssueTrackerTool("jira_get_issue", JSON.stringify({ issueKey: "PROJ-7" }), ctx(t));
+    expect(JSON.parse(result)).toMatchObject({ error: "project_not_linked" });
+    expect(result).not.toContain("classified");
+  });
+
+  it("jira_get_issue allows a moved issue whose new project is also linked", async () => {
+    const t = tracker();
+    vi.mocked(t.getIssue).mockResolvedValue({ key: "DOCS-3", projectKey: "DOCS", summary: "S" } as never);
+    expect(await call("jira_get_issue", { issueKey: "PROJ-7" }, ctx(t))).toMatchObject({ key: "DOCS-3" });
+  });
+
+  it("jira_comment and jira_edit_own_comment authorize the project the key resolves to, before writing", async () => {
+    const t = tracker();
+    vi.mocked(t.issueProject).mockResolvedValue("SECRET");
+    expect(await call("jira_comment", { issueKey: "PROJ-7", body: "x" }, ctx(t))).toMatchObject({
+      error: "project_not_linked",
+    });
+    expect(
+      await call("jira_edit_own_comment", { issueKey: "PROJ-7", commentId: "10001", body: "x" }, ctx(t)),
+    ).toMatchObject({ error: "project_not_linked" });
+    // Resolves to a linked but read-only project.
+    vi.mocked(t.issueProject).mockResolvedValue("DOCS");
+    expect(await call("jira_comment", { issueKey: "PROJ-7", body: "x" }, ctx(t))).toMatchObject({
+      error: "write_access_required",
+    });
+    expect(t.comment).not.toHaveBeenCalled();
+    expect(t.editComment).not.toHaveBeenCalled();
+    expect(t.readComment).not.toHaveBeenCalled();
+  });
+});
+
 describe("scopeJql", () => {
   it("wraps the filter and keeps a trailing ORDER BY outside it", () => {
-    expect(scopeJql(["PROJ", "OPS"], "status = Done ORDER BY updated DESC")).toBe(
-      "project in (PROJ, OPS) AND (status = Done) ORDER BY updated DESC",
-    );
-    expect(scopeJql(["PROJ"], "ORDER BY created")).toBe("project in (PROJ) ORDER BY created");
+    expect(scopeJql(["PROJ", "OPS"], "status = Done ORDER BY updated DESC")).toEqual({
+      jql: "project in (PROJ, OPS) AND (status = Done) ORDER BY updated DESC",
+    });
+    expect(scopeJql(["PROJ"], "ORDER BY created")).toEqual({ jql: "project in (PROJ) ORDER BY created" });
   });
 
   it("ignores parentheses and ORDER BY inside quoted strings", () => {
-    expect(scopeJql(["PROJ"], 'summary ~ "a) OR (b order by c"')).toBe(
-      'project in (PROJ) AND (summary ~ "a) OR (b order by c")',
-    );
+    expect(scopeJql(["PROJ"], 'summary ~ "a) OR (b order by c"')).toEqual({
+      jql: 'project in (PROJ) AND (summary ~ "a) OR (b order by c")',
+    });
+    expect(scopeJql(["PROJ"], 'summary ~ "say \\"hi\\""')).toEqual({
+      jql: 'project in (PROJ) AND (summary ~ "say \\"hi\\"")',
+    });
   });
 
-  it("returns null for unbalanced parentheses or an unterminated string", () => {
-    expect(scopeJql(["PROJ"], "a = b) OR (c = d")).toBeNull();
-    expect(scopeJql(["PROJ"], "(a = b")).toBeNull();
-    expect(scopeJql(["PROJ"], 'summary ~ "open')).toBeNull();
-    expect(scopeJql(["PROJ"], "a = b ORDER BY (x")).toBeNull();
+  it("refuses unbalanced parentheses, unterminated strings, and unquoted backslashes", () => {
+    for (const jql of ["a = b) OR (c = d", "(a = b", 'summary ~ "open', "a = b ORDER BY (x", "a = b\\ c"]) {
+      expect(scopeJql(["PROJ"], jql), jql).toHaveProperty("error");
+    }
   });
 });

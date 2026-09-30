@@ -64,6 +64,8 @@ export interface IssueTracker {
   /** The account the credential acts as, from the same cached call as botAccountId. */
   identity(): Promise<IssueTrackerIdentity>;
   getIssue(key: string, opts: { maxComments: number; agentMarker: string }): Promise<IssueView>;
+  /** The project the issue is in now; an old key (kept as an alias after a move) resolves to its new project. */
+  issueProject(key: string): Promise<string>;
   search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult>;
   /** Whether issue `key` matches `jql` (used for a link's jqlFilter). */
   matchesJql(key: string, jql: string): Promise<boolean>;

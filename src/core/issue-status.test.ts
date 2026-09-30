@@ -13,6 +13,7 @@ function tracker(): IssueTracker {
     botAccountId: vi.fn(async () => "bot-1"),
     identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "bot", accountType: "app" })),
     getIssue: vi.fn(),
+    issueProject: vi.fn(async (key: string) => key.slice(0, key.lastIndexOf("-"))),
     search: vi.fn(),
     matchesJql: vi.fn(),
     comment: vi.fn(async () => ({ id: "c-1", url: "u" })),

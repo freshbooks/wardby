@@ -103,6 +103,13 @@ export class JiraIssueTracker implements IssueTracker {
     };
   }
 
+  async issueProject(key: string): Promise<string> {
+    const raw = await this.client.request<Json>("GET", `/rest/api/3/issue/${key}?fields=project`);
+    const projectKey = obj(obj(raw.fields).project).key;
+    if (typeof projectKey !== "string" || !projectKey) throw new IssueTrackerError("tracker_invalid_response");
+    return projectKey;
+  }
+
   async search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult> {
     const r = await this.client.request<Json>("POST", "/rest/api/3/search/jql", {
       jql,
