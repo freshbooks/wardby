@@ -614,8 +614,13 @@ describe("reconcileOnce orphaned issue status comments", () => {
       update: vi.fn(async ({ data }: any) => Object.assign(row, data)),
     };
     // No stale runs to reap; collectRunOutcome's child-run query finds none either.
-    const run = { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) };
-    const db = { run, runIssueStatus } as unknown as ReconcilerDb;
+    const run = {
+      findMany: vi.fn(async () => []),
+      findUnique: vi.fn(async () => ({ agentId: "a1" })),
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    };
+    const agentIssueProject = { findUnique: vi.fn(async () => ({ commentVisibilityRole: null })) };
+    const db = { run, runIssueStatus, agentIssueProject } as unknown as ReconcilerDb;
     const tracker = { provider: "jira", editComment: vi.fn(async () => undefined) } as unknown as IssueTracker;
 
     await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });

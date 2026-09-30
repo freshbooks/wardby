@@ -35,10 +35,12 @@ function tracker(): IssueTracker {
 
 function db(
   row: Record<string, unknown> | null,
-  run: Record<string, unknown> = { id: "r1", status: "running", finalText: null },
+  run: Record<string, unknown> = { id: "r1", status: "running", finalText: null, agentId: "a1" },
   extra: Record<string, unknown> = {},
+  link: Record<string, unknown> | null = { commentVisibilityRole: null },
 ) {
   return {
+    agentIssueProject: { findUnique: vi.fn(async () => link) },
     runIssueStatus: {
       findUnique: vi.fn(async () => row),
       updateMany: vi.fn(async () => ({ count: 1 })),
@@ -58,6 +60,42 @@ describe("toJiraMarkdown", () => {
     expect(toJiraMarkdown("✅ Opened o/r#4.\n\n<sub>wardby run `r1`</sub>")).toBe(
       "✅ Opened [o/r#4](https://github.com/o/r/pull/4).\n\n_wardby run `r1`_",
     );
+  });
+});
+
+describe("completeIssueStatus after the agent was unlinked", () => {
+  const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-9", completedAt: null };
+  const finished = { id: "r1", status: "succeeded", finalText: "SECRET REPLY" } as never;
+
+  it("edits the comment with a status-only outcome and completes the row", async () => {
+    const t = tracker();
+    const d = db(row, { id: "r1", agentId: "a1" }, {}, null);
+    await completeIssueStatus(d, finished, { jira: t });
+    expect((d as any).agentIssueProject.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { agentId_provider_projectKey: { agentId: "a1", provider: "jira", projectKey: "PROJ" } },
+      }),
+    );
+    const md = (t.editComment as any).mock.calls[0][2].markdown as string;
+    expect(md).toContain("Stopped reporting: this agent is no longer linked to PROJ.");
+    expect(md).not.toContain("SECRET REPLY");
+    expect(md.trimEnd().split("\n").pop()).toMatch(/wardby run/);
+    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+  });
+
+  it("posts a new comment with the link's current visibility role", async () => {
+    const t = tracker();
+    const d = db(
+      { ...row, commentId: null, visibilityRole: "Old" },
+      { id: "r1", agentId: "a1" },
+      {},
+      {
+        commentVisibilityRole: "Current",
+      },
+    );
+    await completeIssueStatus(d, finished, { jira: t }, { postIfMissing: true });
+    expect(t.comment).toHaveBeenCalledWith("PROJ-1", expect.objectContaining({ visibilityRole: "Current" }));
+    expect((t.comment as any).mock.calls[0][1].markdown).toContain("SECRET REPLY");
   });
 });
 
@@ -192,7 +230,8 @@ describe("closeOrphanedIssueStatuses", () => {
         findUnique: vi.fn(async ({ where }: any) => rows.find((r) => r.runId === where.runId) ?? null),
         update: vi.fn(async () => undefined),
       },
-      run: { findUnique: vi.fn(), findMany: vi.fn(async () => []) },
+      run: { findUnique: vi.fn(async () => ({ agentId: "a1" })), findMany: vi.fn(async () => []) },
+      agentIssueProject: { findUnique: vi.fn(async () => ({ commentVisibilityRole: "Dev" })) },
     } as never;
   }
 

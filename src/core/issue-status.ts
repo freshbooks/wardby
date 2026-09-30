@@ -5,8 +5,8 @@
  * text. Best effort throughout: nothing here throws.
  */
 import type { Prisma, PrismaClient } from "#prisma";
-import type { IssueTrackerProvider, IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
-import { collectRunOutcome, outcomeBody, workingBody, type FinishedRun } from "./host-status.js";
+import { projectOf, type IssueTrackerProvider, type IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
+import { collectRunOutcome, outcomeBody, runLine, workingBody, type FinishedRun } from "./host-status.js";
 import { logger } from "./logger.js";
 
 const log = logger.child({ module: "issue-status" });
@@ -15,7 +15,7 @@ const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 const ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const ORPHAN_BATCH = 20;
 
-export type IssueStatusDb = Pick<PrismaClient, "runIssueStatus" | "run">;
+export type IssueStatusDb = Pick<PrismaClient, "runIssueStatus" | "run" | "agentIssueProject">;
 
 export function toJiraMarkdown(text: string): string {
   return text
@@ -85,6 +85,20 @@ export async function postIssueWorkingStatus(
   }
 }
 
+/** The run's agent's live link to the issue's project, or null (also when it cannot be determined: fail closed). */
+async function currentLink(
+  db: IssueStatusDb,
+  runId: string,
+  issueKey: string,
+): Promise<{ commentVisibilityRole: string | null } | null> {
+  const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
+  if (!run?.agentId) return null;
+  return db.agentIssueProject.findUnique({
+    where: { agentId_provider_projectKey: { agentId: run.agentId, provider: "jira", projectKey: projectOf(issueKey) } },
+    select: { commentVisibilityRole: true },
+  });
+}
+
 export async function completeIssueStatus(
   db: IssueStatusDb,
   run: FinishedRun,
@@ -100,19 +114,20 @@ export async function completeIssueStatus(
     if (!tracker) return;
     const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
     const spend = await spendLine(db, run.id);
-    const markdown = toJiraMarkdown(
-      withSpend(
-        outcomeBody(run, "", pullRequests, failedChildren, { budgetSentence, noPullRequestText: "Done." }),
-        spend,
-      ),
-    );
+    // The link may have been removed since the run started: report status only, never the agent's reply.
+    const link = await currentLink(db, run.id, status.issueKey);
+    const project = projectOf(status.issueKey);
+    const body = link
+      ? outcomeBody(run, "", pullRequests, failedChildren, { budgetSentence, noPullRequestText: "Done." })
+      : `Stopped reporting: this agent is no longer linked to ${project}.\n\n${runLine(run.id)}`;
+    const markdown = toJiraMarkdown(withSpend(body, spend));
     let commentId = status.commentId;
     if (commentId) await tracker.editComment(status.issueKey, commentId, { markdown });
     else {
       commentId = (
         await tracker.comment(status.issueKey, {
           markdown,
-          ...(status.visibilityRole ? { visibilityRole: status.visibilityRole } : {}),
+          ...(link?.commentVisibilityRole ? { visibilityRole: link.commentVisibilityRole } : {}),
         })
       ).id;
     }
