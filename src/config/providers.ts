@@ -102,6 +102,70 @@ export function loadGitHubUserAuthConfig(env: NodeJS.ProcessEnv = process.env): 
   return { clientId, clientSecret };
 }
 
+export interface JiraConfig {
+  /** The site people browse, e.g. https://your-site.atlassian.net — used for issue links. */
+  siteUrl: string;
+  /** Where REST calls go: the site for an unscoped token, https://api.atlassian.com/ex/jira/<cloudId> for a scoped or service-account token. */
+  apiBaseUrl: string;
+  auth: { kind: "basic"; email: string; token: string } | { kind: "bearer"; token: string };
+  webhookSecret: string;
+  /** Optional, for expiry warnings; Atlassian API tokens last at most a year. */
+  tokenExpiresAt?: Date;
+}
+
+const JIRA_GATEWAY = /^https:\/\/api\.atlassian\.com\/ex\/jira\/[0-9a-f-]{36}$/;
+
+function httpsOrigin(value: string, name: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} is not a valid URL.`);
+  }
+  if (url.protocol !== "https:") throw new Error(`${name} must be an https URL.`);
+  return value.replace(/\/+$/, "");
+}
+
+/**
+ * Jira Cloud issue-tracker settings (docs/jira-agents.md). Unset = Jira is
+ * disabled. JIRA_API_EMAIL set = Basic auth (an unscoped user token);
+ * unset = Bearer (a scoped / service-account token, which Atlassian only
+ * accepts through the api.atlassian.com gateway).
+ */
+export function loadJiraConfig(env: NodeJS.ProcessEnv = process.env): JiraConfig | null {
+  const site = env.JIRA_SITE_URL?.trim();
+  const token = env.JIRA_API_TOKEN?.trim();
+  const secret = env.JIRA_WEBHOOK_SECRET?.trim();
+  const email = env.JIRA_API_EMAIL?.trim() || undefined;
+  const base = env.JIRA_API_BASE_URL?.trim() || undefined;
+  const expires = env.JIRA_API_TOKEN_EXPIRES_AT?.trim() || undefined;
+  if (!site && !token && !secret) return null;
+  if (!site || !token || !secret) {
+    throw new Error("Set JIRA_SITE_URL, JIRA_API_TOKEN and JIRA_WEBHOOK_SECRET together, or none of them.");
+  }
+  if (secret.length < 20) throw new Error("JIRA_WEBHOOK_SECRET must be at least 20 characters.");
+  const siteUrl = httpsOrigin(site, "JIRA_SITE_URL");
+  const apiBaseUrl = base ? httpsOrigin(base, "JIRA_API_BASE_URL") : siteUrl;
+  if (!email && !JIRA_GATEWAY.test(apiBaseUrl)) {
+    throw new Error(
+      "Without JIRA_API_EMAIL the token is used as a Bearer token, which Atlassian only accepts at " +
+        "JIRA_API_BASE_URL=https://api.atlassian.com/ex/jira/<cloudId>.",
+    );
+  }
+  let tokenExpiresAt: Date | undefined;
+  if (expires) {
+    tokenExpiresAt = new Date(expires);
+    if (Number.isNaN(tokenExpiresAt.getTime())) throw new Error("JIRA_API_TOKEN_EXPIRES_AT must be an ISO date.");
+  }
+  return {
+    siteUrl,
+    apiBaseUrl,
+    auth: email ? { kind: "basic", email, token } : { kind: "bearer", token },
+    webhookSecret: secret,
+    ...(tokenExpiresAt ? { tokenExpiresAt } : {}),
+  };
+}
+
 export interface ContainerExecutorConfig {
   workerImage?: string;
   claudeWorkerImage?: string;
