@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { Prisma } from "#prisma";
 import type { IssueTracker } from "../providers/issue-tracker/types.js";
-import { handlePullRequestClosed } from "./issue-bridge.js";
+import { handlePullRequestClosed, recordPullRequests, type BridgedPullRequest } from "./issue-bridge.js";
 
 function tracker(): IssueTracker {
   return {
@@ -159,12 +160,26 @@ describe("handlePullRequestClosed", () => {
     expect(vi.mocked(t.comment).mock.calls[1][0]).toBe("PROJ-8");
   });
 
-  it("no trackers, or a failing lookup: no-op, no throw", async () => {
+  it("no trackers: no-op", async () => {
     const d = db();
     await handlePullRequestClosed(d as never, undefined, closed(true));
     expect(d.issuePullRequest.findMany).not.toHaveBeenCalled();
+  });
+
+  it("a failing lookup (before any row is claimed) throws, so the delivery is rolled back and redelivered", async () => {
+    const t = tracker();
+    const d = db();
     d.issuePullRequest.findMany.mockRejectedValue(new Error("db"));
-    await expect(handlePullRequestClosed(d as never, { jira: tracker() }, closed(true))).resolves.toBeUndefined();
+    await expect(handlePullRequestClosed(d as never, { jira: t }, closed(true))).rejects.toThrow("db");
+    expect(d.issuePullRequest.updateMany).not.toHaveBeenCalled();
+    expect(t.comment).not.toHaveBeenCalled();
+  });
+
+  it("a failure after the row is claimed never throws", async () => {
+    const t = tracker();
+    const d = db();
+    d.agentIssueProject.findUnique.mockRejectedValue(new Error("db"));
+    await expect(handlePullRequestClosed(d as never, { jira: t }, closed(true))).resolves.toBeUndefined();
   });
 
   it("an issue provider with no configured tracker still marks the row", async () => {
@@ -172,5 +187,127 @@ describe("handlePullRequestClosed", () => {
     await handlePullRequestClosed(d as never, { jira: tracker() }, closed(false));
     expect(d.issuePullRequest.updateMany).toHaveBeenCalled();
     expect(d.agentIssueProject.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+type StoredPair = Record<string, unknown> & { state: string; url: string };
+
+/** A stateful stand-in for the IssuePullRequest table, keyed like its unique constraint. */
+function pairStore(initial: StoredPair[] = []) {
+  const rows = [...initial];
+  const keyOf = (r: Record<string, unknown>) =>
+    JSON.stringify([r.codeProvider, r.repository, r.number, r.issueProvider, r.issueKey]);
+  const find = (where: Record<string, Record<string, unknown>>) => {
+    const k = keyOf(where.codeProvider_repository_number_issueProvider_issueKey);
+    return rows.find((r) => keyOf(r) === k) ?? null;
+  };
+  return {
+    rows,
+    issuePullRequest: {
+      findUnique: vi.fn(async ({ where }: { where: Record<string, Record<string, unknown>> }) => find(where)),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        if (rows.some((r) => keyOf(r) === keyOf(data))) {
+          throw new Prisma.PrismaClientKnownRequestError("dup", { code: "P2002", clientVersion: "test" });
+        }
+        const row: StoredPair = { id: `ipr-${rows.length + 1}`, state: "open", url: "", ...data };
+        rows.push(row);
+        return row;
+      }),
+      update: vi.fn(
+        async ({ where, data }: { where: Record<string, Record<string, unknown>>; data: Record<string, unknown> }) => {
+          const row = find(where);
+          if (!row) throw new Error("not found");
+          Object.assign(row, data);
+          return row;
+        },
+      ),
+    },
+  };
+}
+
+const opened = (n: number, outcome: BridgedPullRequest["outcome"] = "pull_request_opened"): BridgedPullRequest => ({
+  codeProvider: "github",
+  repository: REPO,
+  number: n,
+  url: `https://github.com/${REPO}/pull/${n}`,
+  openedByRunId: `r-code-${n}`,
+  outcome,
+});
+
+const recordInput = (pullRequests: BridgedPullRequest[]) => ({
+  issueKey: "PROJ-7",
+  issueProvider: "jira",
+  agentId: "a1",
+  onPullRequestOpened: "In Review",
+  pullRequests,
+});
+
+describe("recordPullRequests", () => {
+  it("records, links and moves once; a repeat call (a retried completion) moves nothing", async () => {
+    const t = tracker();
+    const store = pairStore();
+    await recordPullRequests(store as never, t, recordInput([opened(12)]));
+    expect(store.rows).toHaveLength(1);
+    expect(t.addRemoteLink).toHaveBeenCalledTimes(1);
+    expect(t.transitionTo).toHaveBeenCalledTimes(1);
+
+    await recordPullRequests(store as never, t, recordInput([opened(12)]));
+    expect(store.rows).toHaveLength(1);
+    expect(t.transitionTo).toHaveBeenCalledTimes(1);
+  });
+
+  it("never re-links a pair that has since merged (which would un-resolve its web link)", async () => {
+    const t = tracker();
+    const store = pairStore();
+    await recordPullRequests(store as never, t, recordInput([opened(12)]));
+    store.rows[0].state = "merged";
+    vi.mocked(t.addRemoteLink).mockClear();
+    await recordPullRequests(store as never, t, recordInput([opened(12)]));
+    expect(t.addRemoteLink).not.toHaveBeenCalled();
+    expect(t.transitionTo).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes the url and link of a still-open existing pair without moving the issue", async () => {
+    const t = tracker();
+    const store = pairStore([{ ...ROW, url: "https://github.com/old" }]);
+    await recordPullRequests(store as never, t, recordInput([opened(12)]));
+    expect(store.rows[0].url).toBe(`https://github.com/${REPO}/pull/12`);
+    expect(t.addRemoteLink).toHaveBeenCalledTimes(1);
+    expect(t.transitionTo).not.toHaveBeenCalled();
+  });
+
+  it("moves the issue exactly once for several newly opened pull requests", async () => {
+    const t = tracker();
+    const store = pairStore();
+    await recordPullRequests(store as never, t, recordInput([opened(12), opened(13), opened(14)]));
+    expect(store.rows).toHaveLength(3);
+    expect(t.addRemoteLink).toHaveBeenCalledTimes(3);
+    expect(t.transitionTo).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not move the issue for a newly recorded pull_request_updated pair", async () => {
+    const t = tracker();
+    const store = pairStore();
+    await recordPullRequests(store as never, t, recordInput([opened(12, "pull_request_updated")]));
+    expect(store.rows).toHaveLength(1);
+    expect(t.transitionTo).not.toHaveBeenCalled();
+  });
+
+  it("a lost create race (P2002) counts as existing: no move", async () => {
+    const t = tracker();
+    const store = pairStore();
+    store.issuePullRequest.findUnique.mockResolvedValueOnce(null);
+    store.rows.push({ ...ROW, id: "ipr-race", state: "open" });
+    await recordPullRequests(store as never, t, recordInput([opened(12)]));
+    expect(store.rows).toHaveLength(1);
+    expect(t.transitionTo).not.toHaveBeenCalled();
+  });
+
+  it("a failing store never throws and does not move the issue", async () => {
+    const t = tracker();
+    const store = pairStore();
+    store.issuePullRequest.findUnique.mockRejectedValue(new Error("db"));
+    await expect(recordPullRequests(store as never, t, recordInput([opened(12)]))).resolves.toEqual({ notes: [] });
+    expect(t.transitionTo).not.toHaveBeenCalled();
   });
 });

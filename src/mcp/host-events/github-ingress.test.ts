@@ -103,6 +103,21 @@ describe("handleGitHubEventIngress", () => {
     expect(routeDeps.issueTrackers).toBe(trackers);
   });
 
+  it("un-marks a closed PR's delivery when the issue lookup fails, so GitHub's redelivery is routed", async () => {
+    const { deps: d, created } = deps({ issueTrackers: { jira: {} as never } });
+    vi.mocked(routeHostEvent).mockRejectedValueOnce(new Error("issue lookup failed"));
+    const raw = JSON.stringify({
+      action: "closed",
+      repository: { full_name: "chfields/knock-knock-jokes" },
+      pull_request: { number: 7, merged: true },
+    });
+    const req = { headers: headers({ "x-hub-signature-256": sign(raw) }), rawBody: raw };
+    await expect(handleGitHubEventIngress(req, d)).rejects.toThrow("issue lookup failed");
+    expect(created).toEqual([]);
+    await expect(handleGitHubEventIngress(req, d)).resolves.toMatchObject({ status: 202 });
+    expect(routeHostEvent).toHaveBeenCalledTimes(2);
+  });
+
   it("accepts and ignores events it does not handle", async () => {
     const { deps: d } = deps();
     const raw = JSON.stringify({ repository: { full_name: "chfields/knock-knock-jokes" } });

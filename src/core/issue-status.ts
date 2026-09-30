@@ -16,7 +16,10 @@ const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 const ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const ORPHAN_BATCH = 20;
 
-export type IssueStatusDb = Pick<PrismaClient, "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest">;
+export type IssueStatusDb = Pick<
+  PrismaClient,
+  "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest" | "codingRun"
+>;
 
 export function toJiraMarkdown(text: string): string {
   return text
@@ -107,6 +110,31 @@ async function currentLink(
   return link ? { agentId: run.agentId, ...link } : null;
 }
 
+/**
+ * The coding runs (of `runIds`) that continued a pull request opened for a
+ * different issue: their PR belongs to that issue, not this one. A continued
+ * PR with no issue, or this same issue, is fine.
+ */
+async function continuedForAnotherIssue(
+  db: IssueStatusDb,
+  runIds: string[],
+  issue: { provider: string; issueKey: string },
+): Promise<Set<string>> {
+  if (runIds.length === 0) return new Set();
+  const rows = await db.codingRun.findMany({
+    where: { runId: { in: runIds } },
+    select: { runId: true, rootCodingRun: { select: { issueProvider: true, issueKey: true } } },
+  });
+  return new Set(
+    rows
+      .filter(({ rootCodingRun: root }) => {
+        if (!root?.issueKey) return false;
+        return root.issueKey !== issue.issueKey || root.issueProvider !== issue.provider;
+      })
+      .map((row) => row.runId),
+  );
+}
+
 export async function completeIssueStatus(
   db: IssueStatusDb,
   run: FinishedRun,
@@ -128,8 +156,19 @@ export async function completeIssueStatus(
     let body: string;
     if (writable) {
       const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
+      const foreign = await continuedForAnotherIssue(
+        db,
+        pullRequests.flatMap((pr) => (pr.pullRequestUrl && pr.runId ? [pr.runId] : [])),
+        status,
+      );
+      for (const runId of foreign) {
+        log.info(
+          { runId: run.id, codingRunId: runId, issueKey: status.issueKey },
+          "not linking a pull request continued from another issue's run",
+        );
+      }
       const bridged = pullRequests.flatMap((pr) =>
-        pr.pullRequestUrl && pr.runId
+        pr.pullRequestUrl && pr.runId && !foreign.has(pr.runId)
           ? [
               {
                 codeProvider: pr.codeProvider,

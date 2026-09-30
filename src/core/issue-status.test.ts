@@ -42,7 +42,12 @@ function db(
 ) {
   return {
     agentIssueProject: { findUnique: vi.fn(async () => link) },
-    issuePullRequest: { upsert: vi.fn(async () => undefined) },
+    issuePullRequest: {
+      findUnique: vi.fn(async () => null),
+      create: vi.fn(async () => undefined),
+      update: vi.fn(async () => undefined),
+    },
+    codingRun: { findMany: vi.fn(async () => []) },
     runIssueStatus: {
       findUnique: vi.fn(async () => row),
       updateMany: vi.fn(async () => ({ count: 1 })),
@@ -375,9 +380,9 @@ describe("completeIssueStatus bridging pull requests to the issue", () => {
     (t.transitionTo as any).mockResolvedValue({ transitionId: "1", toStatus: "In Review" });
     const d = db(row, { id: "r1", agentId: "a1" }, withChild(), writeLink({ onPullRequestOpened: "In Review" }));
     await completeIssueStatus(d, finished, { jira: t });
-    expect((d as any).issuePullRequest.upsert).toHaveBeenCalledWith(
+    expect((d as any).issuePullRequest.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        create: expect.objectContaining({
+        data: expect.objectContaining({
           issueProvider: "jira",
           issueKey: "PROJ-1",
           codeProvider: "github",
@@ -415,7 +420,7 @@ describe("completeIssueStatus bridging pull requests to the issue", () => {
       const t = tracker();
       const d = db(row, { id: "r1", agentId: "a1" }, withChild(), link);
       await completeIssueStatus(d, finished, { jira: t });
-      expect((d as any).issuePullRequest.upsert).not.toHaveBeenCalled();
+      expect((d as any).issuePullRequest.create).not.toHaveBeenCalled();
       expect(t.addRemoteLink).not.toHaveBeenCalled();
       expect(t.transitionTo).not.toHaveBeenCalled();
     }
@@ -438,9 +443,42 @@ describe("completeIssueStatus bridging pull requests to the issue", () => {
     const t = tracker();
     (t.addRemoteLink as any).mockRejectedValue(new Error("x"));
     const d = db(row, { id: "r1", agentId: "a1" }, withChild(), writeLink());
-    (d as any).issuePullRequest.upsert.mockRejectedValue(new Error("db"));
+    (d as any).issuePullRequest.findUnique.mockRejectedValue(new Error("db"));
     await completeIssueStatus(d, finished, { jira: t });
     expect(t.editComment).toHaveBeenCalled();
     expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+  });
+
+  it("does not bridge a PR whose coding run continued another issue's pull request", async () => {
+    const t = tracker();
+    const d = db(
+      row,
+      { id: "r1", agentId: "a1" },
+      withChild(child("pull_request_updated")),
+      writeLink({ onPullRequestOpened: "In Review" }),
+    );
+    (d as any).codingRun.findMany.mockResolvedValue([
+      { runId: "child-1", rootCodingRun: { issueProvider: "jira", issueKey: "PROJ-9" } },
+    ]);
+    await completeIssueStatus(d, finished, { jira: t });
+    expect((d as any).codingRun.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { runId: { in: ["child-1"] } } }),
+    );
+    expect((d as any).issuePullRequest.create).not.toHaveBeenCalled();
+    expect(t.addRemoteLink).not.toHaveBeenCalled();
+    expect(t.transitionTo).not.toHaveBeenCalled();
+    expect(t.editComment).toHaveBeenCalled();
+    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+  });
+
+  it("bridges a continuation of this issue's own pull request, or of one with no issue", async () => {
+    for (const root of [{ issueProvider: "jira", issueKey: "PROJ-1" }, { issueProvider: null, issueKey: null }, null]) {
+      const t = tracker();
+      const d = db(row, { id: "r1", agentId: "a1" }, withChild(child("pull_request_updated")), writeLink());
+      (d as any).codingRun.findMany.mockResolvedValue([{ runId: "child-1", rootCodingRun: root }]);
+      await completeIssueStatus(d, finished, { jira: t });
+      expect((d as any).issuePullRequest.create).toHaveBeenCalled();
+      expect(t.addRemoteLink).toHaveBeenCalled();
+    }
   });
 });

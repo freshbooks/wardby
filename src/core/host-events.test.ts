@@ -526,6 +526,12 @@ describe("routeHostEvent pr_closed", () => {
     expect(dispatchRun).not.toHaveBeenCalled();
   });
 
+  it("propagates a failed lookup of the linked issues, so the ingress rolls back the delivery", async () => {
+    const d = deps([]);
+    (d.db as any).issuePullRequest = { findMany: vi.fn(async () => Promise.reject(new Error("db down"))) };
+    await expect(routeHostEvent(closed, { ...d, issueTrackers: { jira: {} as never } })).rejects.toThrow("db down");
+  });
+
   it("is ignored without issue trackers", async () => {
     const d = deps([]);
     const findMany = vi.fn(async () => []);
