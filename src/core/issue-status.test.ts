@@ -82,6 +82,15 @@ describe("completeIssueStatus", () => {
       data: { commentId: "c-1", completedAt: expect.any(Date) },
     });
   });
+  it('says "Done." on Jira when the run opened no pull request', async () => {
+    const t = tracker();
+    const d = db({ runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null });
+    await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "Triaged" }, { jira: t });
+    const { markdown } = (t.editComment as any).mock.calls[0][2];
+    expect(markdown).toMatch(/^✅ Done\./);
+    expect(markdown).toContain("Triaged");
+    expect(markdown).not.toContain("Finished without");
+  });
   it("leaves a comment-less row to the working-status follow-up unless postIfMissing", async () => {
     const t = tracker();
     const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: null, completedAt: null };

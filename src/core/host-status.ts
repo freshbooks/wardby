@@ -96,7 +96,7 @@ export function outcomeBody(
   repository: string,
   pullRequests: PullRequestOutcome[],
   failedChildren: FailedChild[] = [],
-  opts: { budgetSentence?: string } = {},
+  opts: { budgetSentence?: string; noPullRequestText?: string } = {},
 ): string {
   const links = pullRequests.map((pr) => {
     const ref =
@@ -166,7 +166,7 @@ export function outcomeBody(
     return `❌ ${lines.join(" ")}${partial}${quoted}\n\n${footer}`;
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
-  return `✅ Finished without opening a pull request.${quoted}\n\n${footer}`;
+  return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}\n\n${footer}`;
 }
 
 /** What collectRunOutcome reads: a run's children and, when out of budget, its budget facts. */

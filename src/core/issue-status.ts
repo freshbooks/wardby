@@ -77,7 +77,9 @@ export async function completeIssueStatus(
     const tracker = trackers[status.provider as IssueTrackerProvider];
     if (!tracker) return;
     const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
-    const markdown = toJiraMarkdown(outcomeBody(run, "", pullRequests, failedChildren, { budgetSentence }));
+    const markdown = toJiraMarkdown(
+      outcomeBody(run, "", pullRequests, failedChildren, { budgetSentence, noPullRequestText: "Done." }),
+    );
     let commentId = status.commentId;
     if (commentId) await tracker.editComment(status.issueKey, commentId, { markdown });
     else {

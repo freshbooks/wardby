@@ -87,6 +87,10 @@ describe("mentionStatusRow", () => {
 describe("outcomeBody", () => {
   const run = (status: RunStatus, finalText: string | null = null) => ({ id: "r1", status, finalText });
 
+  it("uses a custom no-pull-request sentence when given", () => {
+    const body = outcomeBody(run("succeeded", "hi"), REPO, [], [], { noPullRequestText: "Done." });
+    expect(body).toMatch(/^✅ Done\.\n\n> hi/);
+  });
   it("links the pull requests a coding sub-run opened or updated", () => {
     const body = outcomeBody(run("succeeded"), REPO, [
       { outcome: "pull_request_opened", repository: REPO, pullRequestNumber: 73 },
