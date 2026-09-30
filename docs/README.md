@@ -19,6 +19,8 @@
 - [Services for coding runs](coding-services.md) gives coding runs fresh
   PostgreSQL, Redis or MySQL instances declared in `.wardby/services.yaml`:
   the catalog, per-agent permission, variables, and errors.
+- [Jira agents](jira-agents.md) connects wardby to Jira Cloud with a service
+  account and webhook, and links agents to projects.
 - [Observability](observability.md) covers Prometheus metrics, Grafana, cloud
   collectors, retention, and production ownership.
 - [Release verification](release-verification.md) lists the automated and live

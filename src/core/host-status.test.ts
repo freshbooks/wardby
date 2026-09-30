@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RunStatus } from "#prisma";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
-import { completeHostStatus, mentionStatusRow, outcomeBody, postMentionStatus, workingBody } from "./host-status.js";
+import {
+  collectRunOutcome,
+  completeHostStatus,
+  mentionStatusRow,
+  outcomeBody,
+  postMentionStatus,
+  workingBody,
+} from "./host-status.js";
 
 const REPO = "chfields/knock-knock-jokes";
 
@@ -80,6 +87,10 @@ describe("mentionStatusRow", () => {
 describe("outcomeBody", () => {
   const run = (status: RunStatus, finalText: string | null = null) => ({ id: "r1", status, finalText });
 
+  it("uses a custom no-pull-request sentence when given", () => {
+    const body = outcomeBody(run("succeeded", "hi"), REPO, [], [], { noPullRequestText: "Done." });
+    expect(body).toMatch(/^✅ Done\.\n\n> hi/);
+  });
   it("links the pull requests a coding sub-run opened or updated", () => {
     const body = outcomeBody(run("succeeded"), REPO, [
       { outcome: "pull_request_opened", repository: REPO, pullRequestNumber: 73 },
@@ -472,5 +483,31 @@ describe("completeHostStatus", () => {
     const d = db({ row: row() });
     await completeHostStatus(d as never, finished, undefined);
     expect(d.runHostStatus.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("collectRunOutcome", () => {
+  it("returns opened PRs and failed children for a finished run", async () => {
+    const database = {
+      run: {
+        findMany: vi.fn(async () => [
+          {
+            id: "c1",
+            status: "succeeded",
+            error: null,
+            codingRun: {
+              result: { outcome: "pull_request_opened", repository: "o/r", pullRequestNumber: 4 },
+              failureCategory: null,
+              services: [],
+            },
+          },
+          { id: "c2", status: "failed", error: null, codingRun: { result: null, failureCategory: "x", services: [] } },
+        ]),
+      },
+    } as never;
+    const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
+    expect(out.pullRequests).toEqual([{ outcome: "pull_request_opened", repository: "o/r", pullRequestNumber: 4 }]);
+    expect(out.failedChildren.map((c) => c.id)).toEqual(["c2"]);
+    expect(out.budgetSentence).toBeUndefined();
   });
 });

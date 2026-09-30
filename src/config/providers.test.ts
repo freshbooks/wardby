@@ -11,6 +11,7 @@ import {
   loadCodingConcurrencyConfig,
   loadShutdownDrainSeconds,
   loadKubernetesJobConfig,
+  loadJiraConfig,
 } from "./providers.js";
 
 describe("provider config", () => {
@@ -408,5 +409,61 @@ describe("loadGitHubUserAuthConfig", () => {
     expect(() =>
       loadGitHubUserAuthConfig({ GITHUB_APP_CLIENT_ID: "bad id/../", GITHUB_APP_CLIENT_SECRET: SECRET }),
     ).toThrow("GITHUB_APP_CLIENT_ID is not a valid GitHub App client ID.");
+  });
+});
+
+describe("loadJiraConfig", () => {
+  const GATEWAY = "https://api.atlassian.com/ex/jira/11111111-2222-3333-4444-555555555555";
+  const base = {
+    WARDBY_JIRA_SITE_URL: "https://your-site.atlassian.net/",
+    WARDBY_JIRA_API_TOKEN: "tok",
+    WARDBY_JIRA_API_BASE_URL: GATEWAY,
+    WARDBY_JIRA_WEBHOOK_SECRET: "x".repeat(24),
+  };
+  it("is null when nothing is set", () => {
+    expect(loadJiraConfig({})).toBeNull();
+  });
+  it("uses Bearer auth against the API gateway", () => {
+    expect(loadJiraConfig(base)).toEqual({
+      siteUrl: "https://your-site.atlassian.net",
+      apiBaseUrl: GATEWAY,
+      auth: { kind: "bearer", token: "tok" },
+      webhookSecret: "x".repeat(24),
+    });
+  });
+  it("accepts an uppercase cloudId", () => {
+    const upper = "https://api.atlassian.com/ex/jira/ABCDEF12-2222-3333-4444-555555555555";
+    expect(loadJiraConfig({ ...base, WARDBY_JIRA_API_BASE_URL: upper })?.apiBaseUrl).toBe(upper);
+  });
+  it("refuses a personal/Basic setup: an email set", () => {
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_API_EMAIL: "bot@example.com" })).toThrow(/service account/);
+  });
+  it("requires the gateway API base URL", () => {
+    const { WARDBY_JIRA_API_BASE_URL: _omit, ...noBase } = base;
+    expect(() => loadJiraConfig(noBase)).toThrow(/WARDBY_JIRA_API_BASE_URL/);
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_API_BASE_URL: "https://your-site.atlassian.net" })).toThrow(
+      "api.atlassian.com/ex/jira/<cloudId>",
+    );
+  });
+  it("requires the site URL to be a bare https origin", () => {
+    for (const bad of [
+      "https://your-site.atlassian.net/wiki",
+      "https://your-site.atlassian.net/?a=1",
+      "https://your-site.atlassian.net/#x",
+      "https://user:pw@your-site.atlassian.net",
+    ]) {
+      expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_SITE_URL: bad })).toThrow(/WARDBY_JIRA_SITE_URL/);
+    }
+  });
+  it("refuses a partial config, a non-https site, a short secret, and a bad expiry", () => {
+    expect(() => loadJiraConfig({ WARDBY_JIRA_SITE_URL: base.WARDBY_JIRA_SITE_URL })).toThrow(/WARDBY_JIRA_API_TOKEN/);
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_SITE_URL: "http://your-site.atlassian.net" })).toThrow(/https/);
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_WEBHOOK_SECRET: "short" })).toThrow(/20 characters/);
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_API_TOKEN_EXPIRES_AT: "soon" })).toThrow(/ISO date/);
+  });
+  it("parses the token expiry", () => {
+    expect(loadJiraConfig({ ...base, WARDBY_JIRA_API_TOKEN_EXPIRES_AT: "2027-09-01" })?.tokenExpiresAt).toEqual(
+      new Date("2027-09-01T00:00:00.000Z"),
+    );
   });
 });

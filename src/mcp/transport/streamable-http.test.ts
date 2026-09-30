@@ -13,6 +13,10 @@ vi.mock("../host-events/github-ingress.js", () => ({
   handleGitHubEventIngress: vi.fn(),
 }));
 import { handleGitHubEventIngress, type GitHubIngressDeps } from "../host-events/github-ingress.js";
+import { handleJiraEventIngress, type JiraIngressDeps } from "../host-events/jira-ingress.js";
+vi.mock("../host-events/jira-ingress.js", () => ({
+  handleJiraEventIngress: vi.fn(),
+}));
 vi.mock("../host-events/github-user-callback.js", () => ({
   handleHostUserCallback: vi.fn(async (_url: URL, res: import("node:http").ServerResponse) => {
     res.writeHead(200, { "content-type": "text/html" }).end("callback page");
@@ -407,6 +411,46 @@ describe("startHttpServer (github events ingress)", () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "not_found" });
     expect(handleGitHubEventIngress).not.toHaveBeenCalled();
+  });
+});
+
+describe("startHttpServer (Jira events)", () => {
+  async function start(hostEvents?: StartHttpServerOptions["hostEvents"]) {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb(), config: { canonicalUri: CANONICAL_URI } });
+    const authProvider = fakeAuthProvider(async () => ({ subject: "user-1", roles: [], scopes: [] }));
+    handle = await startHttpServer({
+      mcp,
+      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
+      auth: { authProvider, db: fakeDb(), providers: fakeProviders },
+      hostEvents,
+    });
+    return `http://127.0.0.1:${handle.port}`;
+  }
+
+  it("serves /hosts/jira/events from the raw body and runs follow-ups after responding", async () => {
+    const afterSpy = vi.fn(async () => undefined);
+    vi.mocked(handleJiraEventIngress).mockImplementation(async (req) => {
+      expect(req.rawBody).toBe('{"a": 1}'); // exact bytes, not re-serialised
+      return { status: 202, body: { ok: true }, afterResponse: afterSpy };
+    });
+    const base = await start({ jira: {} as unknown as JiraIngressDeps });
+    const res = await fetch(`${base}/hosts/jira/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"a": 1}',
+    });
+    expect(res.status).toBe(202);
+    await vi.waitFor(() => expect(afterSpy).toHaveBeenCalled());
+  });
+
+  it("returns 404 for /hosts/jira/events when no ingress is configured", async () => {
+    const base = await start(undefined);
+    const res = await fetch(`${base}/hosts/jira/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(404);
   });
 });
 

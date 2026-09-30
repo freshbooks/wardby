@@ -11,6 +11,7 @@ import type { Principal, PrismaClient } from "#prisma";
 import type { RequestStateAccessor } from "@modelcontextprotocol/server";
 import type { ProviderRegistry } from "../providers/index.js";
 import type { RepoAccessGate } from "../core/repo-access.js";
+import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { HostUserAuthorizerRegistry, ReviewHostRegistry } from "../providers/review-host/types.js";
 
 export type McpProviders = Pick<
@@ -18,6 +19,8 @@ export type McpProviders = Pick<
   "llm" | "engine" | "datastore" | "secrets" | "executor" | "memory"
 > & {
   reviewHosts?: ReviewHostRegistry;
+  /** Issue trackers (Jira); empty or absent = no issue-tracker integration. */
+  issueTrackers?: IssueTrackerRegistry;
   /** Identity linking (link_host_account); empty or absent = linking disabled. */
   hostUserAuthorizers?: HostUserAuthorizerRegistry;
   /**

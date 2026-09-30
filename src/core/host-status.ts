@@ -29,7 +29,7 @@ const TERMINAL = new Set(["succeeded", "failed", "refused", "lost", "budget_exha
 
 export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run">;
 
-type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
+export type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
 
 /** The parts of a CodingRun result this comment uses. */
 export interface PullRequestOutcome {
@@ -96,7 +96,7 @@ export function outcomeBody(
   repository: string,
   pullRequests: PullRequestOutcome[],
   failedChildren: FailedChild[] = [],
-  opts: { budgetSentence?: string } = {},
+  opts: { budgetSentence?: string; noPullRequestText?: string } = {},
 ): string {
   const links = pullRequests.map((pr) => {
     const ref =
@@ -166,7 +166,44 @@ export function outcomeBody(
     return `❌ ${lines.join(" ")}${partial}${quoted}\n\n${footer}`;
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
-  return `✅ Finished without opening a pull request.${quoted}\n\n${footer}`;
+  return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}\n\n${footer}`;
+}
+
+/** What collectRunOutcome reads: a run's children and, when out of budget, its budget facts. */
+export type RunOutcomeDb = Pick<PrismaClient, "run">;
+
+/** The parts of a finished run's outcome a status comment reports; shared by GitHub and Jira status comments. */
+export async function collectRunOutcome(
+  db: RunOutcomeDb,
+  run: FinishedRun,
+): Promise<{ pullRequests: PullRequestOutcome[]; failedChildren: FailedChild[]; budgetSentence?: string }> {
+  const children = await db.run.findMany({
+    where: { parentRunId: run.id },
+    select: {
+      id: true,
+      status: true,
+      error: true,
+      codingRun: { select: { result: true, failureCategory: true, services: true } },
+    },
+    orderBy: { startedAt: "asc" },
+  });
+  const pullRequests = children
+    .map((c) => pullRequestOutcome(c.codingRun?.result))
+    .filter((pr): pr is PullRequestOutcome => pr !== null);
+  const failedChildren = children
+    .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
+    .map((c) => ({
+      id: c.id,
+      status: c.status,
+      failureCategory: c.codingRun?.failureCategory ?? null,
+      error: c.error ?? null,
+      services: storedServiceNames(c.codingRun?.services),
+    }));
+  const budgetSentence =
+    run.status === "budget_exhausted" || run.status === "refused"
+      ? await loadBudgetSentence(db, run.id, run.status)
+      : undefined;
+  return { pullRequests, failedChildren, ...(budgetSentence ? { budgetSentence } : {}) };
 }
 
 /**
@@ -190,32 +227,7 @@ export async function completeHostStatus(
     if (!status.commentId && !opts.postIfMissing) return;
     const host = hosts[status.provider as ReviewHostProvider];
     if (!host) return;
-    const children = await db.run.findMany({
-      where: { parentRunId: run.id },
-      select: {
-        id: true,
-        status: true,
-        error: true,
-        codingRun: { select: { result: true, failureCategory: true, services: true } },
-      },
-      orderBy: { startedAt: "asc" },
-    });
-    const pullRequests = children
-      .map((c) => pullRequestOutcome(c.codingRun?.result))
-      .filter((pr): pr is PullRequestOutcome => pr !== null);
-    const failedChildren = children
-      .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
-      .map((c) => ({
-        id: c.id,
-        status: c.status,
-        failureCategory: c.codingRun?.failureCategory ?? null,
-        error: c.error ?? null,
-        services: storedServiceNames(c.codingRun?.services),
-      }));
-    const budgetSentence =
-      run.status === "budget_exhausted" || run.status === "refused"
-        ? await loadBudgetSentence(db, run.id, run.status)
-        : undefined;
+    const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
     const body = outcomeBody(run, status.repository, pullRequests, failedChildren, { budgetSentence });
     let commentId = status.commentId;
     if (commentId) {

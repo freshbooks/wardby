@@ -46,6 +46,7 @@ import { logger } from "./logger.js";
 import { loadCodingConcurrencyConfig } from "../config/providers.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import {
   REVIEW_HOST_TOOL_DEFS,
   REVIEW_HOST_TOOL_NAMES,
@@ -56,6 +57,13 @@ import { closeOpenHostCheck } from "./review-host-checks.js";
 import { serviceRefusalSentence } from "../coding/services/wording.js";
 import { RUN_TASK_TAG, splitTaskOverride, wrapUntrusted } from "./untrusted-content.js";
 import { completeHostStatus } from "./host-status.js";
+import {
+  ISSUE_TRACKER_TOOL_DEFS,
+  ISSUE_TRACKER_TOOL_NAMES,
+  handleIssueTrackerTool,
+  type IssueProjectLink,
+} from "./issue-tracker-tools.js";
+import { completeIssueStatus } from "./issue-status.js";
 import { trackRun } from "./in-flight-runs.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
@@ -153,12 +161,16 @@ export type RunnerDb = Pick<
   | "runHostCheck"
   | "runHostStatus"
   | "hostIdentity"
+  | "agentIssueProject"
+  | "runIssueStatus"
 >;
 
-/** The providers a native run needs; `executor` and `reviewHosts` are optional capabilities. */
+/** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */
 export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
   executor?: ProviderRegistry["executor"];
   reviewHosts?: ReviewHostRegistry;
+  /** Issue trackers (Jira): the jira_* built-ins and issue status comments. */
+  issueTrackers?: IssueTrackerRegistry;
   /** Repository authorization for repo_* calls; built from reviewHosts when absent. */
   repoAccess?: RepoAccessGate;
 };
@@ -170,6 +182,29 @@ export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "data
  */
 function configuredReviewHosts(hosts: ReviewHostRegistry | undefined): ReviewHostRegistry | undefined {
   return hosts && Object.values(hosts).some(Boolean) ? hosts : undefined;
+}
+
+/**
+ * The composed issue trackers, or undefined when there are none (no Jira site
+ * configured yields an empty registry). Undefined means the run never touches
+ * the AgentIssueProject/RunIssueStatus tables at all.
+ */
+function configuredIssueTrackers(trackers: IssueTrackerRegistry | undefined): IssueTrackerRegistry | undefined {
+  return trackers && Object.values(trackers).some(Boolean) ? trackers : undefined;
+}
+
+/** An AgentIssueProject row as the jira_* tools see it. */
+function toIssueProjectLink(row: {
+  projectKey: string;
+  access: string;
+  commentVisibilityRole: string | null;
+}): IssueProjectLink {
+  return {
+    provider: "jira",
+    projectKey: row.projectKey,
+    access: row.access === "write" ? "write" : "read",
+    commentVisibilityRole: row.commentVisibilityRole,
+  };
 }
 
 /**
@@ -365,6 +400,7 @@ async function executeTrackedRun(
   const repoAccess = reviewHosts
     ? (providers.repoAccess ?? createRepoAccessGate({ db, hosts: reviewHosts }))
     : undefined;
+  const issueTrackers = configuredIssueTrackers(providers.issueTrackers);
 
   // Pinned in one checkpointed step: on replay after a crash, the agent row
   // or its budget group may have changed since first execution. The
@@ -419,6 +455,12 @@ async function executeTrackedRun(
           checkName: l.checkName,
         }))
       : [];
+    // Likewise only when a Jira site is configured.
+    const issueProjectLinks: IssueProjectLink[] = issueTrackers
+      ? (await db.agentIssueProject.findMany({ where: { agentId: agent.id, provider: "jira" } })).map(
+          toIssueProjectLink,
+        )
+      : [];
     const isDispatchedChild = existingRun.parentRunId != null;
     // Appended, never prepended: the loaded systemPrompt's stable prefix
     // stays prompt-cache-eligible across every dispatch, even though the
@@ -446,6 +488,7 @@ async function executeTrackedRun(
       memoryEnabled: agent.memoryEnabled,
       subAgentEdges,
       repositoryLinks,
+      issueProjectLinks,
       agent: {
         systemPrompt,
         model: agent.model,
@@ -478,6 +521,7 @@ async function executeTrackedRun(
         ...(isDispatchedChild ? [PARENT_MEMORY_GET_TOOL] : []),
         ...subAgentEdges.map((edge): LoadedTool => delegateToolDef(edge.boundName)),
         ...(repositoryLinks.length > 0 ? REVIEW_HOST_TOOL_DEFS : []),
+        ...(issueProjectLinks.length > 0 ? ISSUE_TRACKER_TOOL_DEFS : []),
       ],
       // An attachment's four capability fields are honoured only when the
       // agent's CURRENT owner granted them (resource-sharing grants spec
@@ -571,6 +615,23 @@ async function executeTrackedRun(
               // The run is under way: retry a transient GitHub error once.
               retryTransient: true,
             });
+          },
+        });
+      }
+      // `?? []`: a load step replayed from before these links were pinned has none.
+      const issueProjectLinks: readonly IssueProjectLink[] = loaded.issueProjectLinks ?? [];
+      if (ISSUE_TRACKER_TOOL_NAMES.has(name) && issueProjectLinks.length > 0 && issueTrackers) {
+        return handleIssueTrackerTool(name, argsJson, {
+          agentId: loaded.agentId,
+          links: issueProjectLinks,
+          trackers: issueTrackers,
+          // Live, not from the pinned load: an unlink, downgrade, or new
+          // visibility role takes effect on the very next call.
+          currentLink: async (projectKey) => {
+            const row = await db.agentIssueProject.findUnique({
+              where: { agentId_provider_projectKey: { agentId: loaded.agentId, provider: "jira", projectKey } },
+            });
+            return row ? toIssueProjectLink(row) : null;
           },
         });
       }
@@ -832,6 +893,7 @@ async function executeTrackedRun(
     });
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
+    await completeIssueStatus(db, finished, issueTrackers);
     return finished;
   } catch (err) {
     // Defensive backstop: the engine is expected to catch its own errors
@@ -846,6 +908,7 @@ async function executeTrackedRun(
     });
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
+    await completeIssueStatus(db, finished, issueTrackers);
     return finished;
   }
 }

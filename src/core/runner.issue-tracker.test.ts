@@ -1,0 +1,242 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Datastore } from "../providers/datastore/types.js";
+import type { IssueTracker } from "../providers/issue-tracker/types.js";
+import type { AgentMemoryStore } from "../providers/memory/types.js";
+import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
+import type { SecretCipher } from "../providers/secrets/types.js";
+import { NativeEngine } from "./engine-native.js";
+import { executeRun, type RunnerDb } from "./runner.js";
+
+// End-to-end coverage of the jira_* built-ins inside a real NativeEngine run
+// loop (scripted LLM, fake DB): offered only to agents with a Jira project
+// link when a tracker is composed in, dispatched to the tracker with the
+// live link, and the run's issue status comment is completed at the end.
+
+interface FakeLink {
+  agentId: string;
+  provider: string;
+  projectKey: string;
+  access: string;
+  commentVisibilityRole: string | null;
+}
+
+interface FakeStatus {
+  runId: string;
+  provider: string;
+  issueKey: string;
+  commentId: string | null;
+  visibilityRole: string | null;
+  completedAt: Date | null;
+}
+
+const LINK: FakeLink = {
+  agentId: "a1",
+  provider: "jira",
+  projectKey: "PROJ",
+  access: "write",
+  commentVisibilityRole: "Developers",
+};
+
+const toolCall = (name: string, args: unknown): LlmStreamEvent[] => [
+  { type: "tool_call", id: "c1", name, argsJson: JSON.stringify(args) },
+  { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.01 } },
+];
+const text = (s: string): LlmStreamEvent[] => [
+  { type: "text", delta: s },
+  { type: "done", stopReason: "stop", usage: { inputTokens: 10, outputTokens: 5, costUsd: 0.01 } },
+];
+
+function fakeTracker(): IssueTracker {
+  return {
+    provider: "jira",
+    botAccountId: vi.fn(async () => "bot-1"),
+    identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "wardby", accountType: "app" })),
+    getIssue: vi.fn(),
+    issueProject: vi.fn(async (key: string) => key.slice(0, key.lastIndexOf("-"))),
+    search: vi.fn(),
+    matchesJql: vi.fn(),
+    comment: vi.fn(async () => ({ id: "10001", url: "https://your-site.atlassian.net/browse/PROJ-1" })),
+    editComment: vi.fn(async () => undefined),
+    readComment: vi.fn(),
+    issueUrl: (k: string) => `https://your-site.atlassian.net/browse/${k}`,
+  };
+}
+
+function harness(opts: { links: FakeLink[]; status?: FakeStatus; script: LlmStreamEvent[][] }) {
+  const state = {
+    toolNamesOfferedOnFirstCall: [] as string[],
+    toolResults: [] as string[],
+    agentIssueProjectQueried: false,
+    links: opts.links,
+    status: opts.status ? { ...opts.status } : null,
+  };
+  const agent = {
+    id: "a1",
+    name: "triager",
+    systemPrompt: "Triage issues.",
+    model: "m",
+    budgetUsd: 10,
+    maxTurns: 10,
+    ownerId: "p1",
+  };
+  const runs = new Map<string, any>([
+    [
+      "run1",
+      {
+        id: "run1",
+        agentId: "a1",
+        status: "pending",
+        trigger: "webhook",
+        tokensIn: 0,
+        tokensOut: 0,
+        costUsd: 0,
+        error: null,
+        startedAt: new Date(),
+        finishedAt: null,
+        finalText: null,
+        turns: 0,
+        parentRunId: null,
+        taskOverride: null,
+      },
+    ],
+  ]);
+
+  const db: any = {
+    agent: { findUnique: async ({ where }: any) => (where.id === agent.id ? agent : null) },
+    run: {
+      findUnique: async ({ where }: any) => runs.get(where.id) ?? null,
+      findUniqueOrThrow: async ({ where }: any) => runs.get(where.id),
+      updateMany: async ({ where, data }: any) => {
+        const record = runs.get(where.id);
+        if (!record || !where.status.in.includes(record.status)) return { count: 0 };
+        runs.set(where.id, { ...record, ...data });
+        return { count: 1 };
+      },
+      findMany: async () => [],
+    },
+    agentTool: { findMany: async () => [] },
+    budgetGroup: { findUnique: async () => null },
+    agentSubAgent: { findMany: async () => [] },
+    agentIssueProject: {
+      findMany: async ({ where }: any) => {
+        state.agentIssueProjectQueried = true;
+        return state.links.filter((l) => l.agentId === where.agentId);
+      },
+      findUnique: async ({ where }: any) => {
+        const key = where.agentId_provider_projectKey;
+        return (
+          state.links.find(
+            (l) => l.agentId === key.agentId && l.provider === key.provider && l.projectKey === key.projectKey,
+          ) ?? null
+        );
+      },
+    },
+    runIssueStatus: {
+      findUnique: async ({ where }: any) =>
+        state.status && state.status.runId === where.runId ? { ...state.status } : null,
+      update: async ({ where, data }: any) => {
+        if (!state.status || state.status.runId !== where.runId) throw new Error("no runIssueStatus");
+        state.status = { ...state.status, ...data };
+        return state.status;
+      },
+    },
+  };
+
+  let turn = 0;
+  const llm: LlmProvider = {
+    async *stream(req) {
+      if (turn === 0) state.toolNamesOfferedOnFirstCall = (req.tools ?? []).map((t) => t.name);
+      for (const m of req.messages) if (m.role === "tool") state.toolResults.push(m.content);
+      for (const event of opts.script[turn++] ?? []) yield event;
+    },
+    async countTokens() {
+      return 10;
+    },
+    priceUsd(_model, usage) {
+      return (usage.inputTokens + usage.outputTokens) / 1000;
+    },
+  };
+  return { db: db as RunnerDb, state, llm };
+}
+
+function providers(llm: LlmProvider) {
+  return {
+    llm,
+    engine: new NativeEngine(),
+    datastore: {} as Datastore,
+    secrets: {} as SecretCipher,
+    memory: {} as AgentMemoryStore,
+  };
+}
+
+const JIRA_TOOLS = ["jira_get_issue", "jira_search", "jira_comment", "jira_edit_own_comment"];
+
+describe("jira_* built-ins in the native run loop", () => {
+  it("offers the four jira_* tools to a linked agent and posts a comment through the tracker", async () => {
+    const tracker = fakeTracker();
+    const { db, state, llm } = harness({
+      links: [LINK],
+      script: [toolCall("jira_comment", { issueKey: "PROJ-1", body: "On it." }), text("done")],
+    });
+    const run = await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(run.status).toBe("succeeded");
+    expect(state.toolNamesOfferedOnFirstCall).toEqual(expect.arrayContaining(JIRA_TOOLS));
+    expect(tracker.comment).toHaveBeenCalledWith("PROJ-1", {
+      markdown: "On it.\n\n_wardby agent a1_",
+      visibilityRole: "Developers",
+    });
+    expect(state.toolResults.some((r) => r.includes('"id":"10001"'))).toBe(true);
+  });
+
+  it("offers no jira_* tools to an agent without a link", async () => {
+    const { db, state, llm } = harness({ links: [], script: [text("done")] });
+    await executeRun("run1", { ...providers(llm), issueTrackers: { jira: fakeTracker() } }, db);
+    expect(state.agentIssueProjectQueried).toBe(true);
+    for (const name of JIRA_TOOLS) expect(state.toolNamesOfferedOnFirstCall).not.toContain(name);
+  });
+
+  it("offers no jira_* tools and touches no Jira tables without a configured tracker", async () => {
+    const { db, state, llm } = harness({ links: [LINK], script: [text("done")] });
+    await executeRun("run1", { ...providers(llm), issueTrackers: {} }, db);
+    expect(state.toolNamesOfferedOnFirstCall).not.toContain("jira_comment");
+    expect(state.agentIssueProjectQueried).toBe(false);
+  });
+
+  it("refuses a call once the project was unlinked after the run loaded it", async () => {
+    const tracker = fakeTracker();
+    const { db, state, llm } = harness({
+      links: [LINK],
+      script: [toolCall("jira_comment", { issueKey: "PROJ-1", body: "On it." }), text("done")],
+    });
+    const findMany = (db as any).agentIssueProject.findMany;
+    (db as any).agentIssueProject.findMany = async (args: any) => {
+      const rows = await findMany(args);
+      state.links = [];
+      return rows;
+    };
+    await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(tracker.comment).not.toHaveBeenCalled();
+    expect(state.toolResults.some((r) => r.includes("project_not_linked"))).toBe(true);
+  });
+
+  it("completes the run's issue status comment with the outcome", async () => {
+    const tracker = fakeTracker();
+    const { db, state, llm } = harness({
+      links: [LINK],
+      status: {
+        runId: "run1",
+        provider: "jira",
+        issueKey: "PROJ-1",
+        commentId: "900",
+        visibilityRole: null,
+        completedAt: null,
+      },
+      script: [text("Triaged.")],
+    });
+    await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(tracker.editComment).toHaveBeenCalledWith("PROJ-1", "900", {
+      markdown: expect.stringContaining("Triaged."),
+    });
+    expect(state.status!.completedAt).toBeInstanceOf(Date);
+  });
+});

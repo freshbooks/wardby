@@ -28,3 +28,5 @@ agent setup and [`docs/code-review-agents.md`](../docs/code-review-agents.md)
 for pull-request review agents and webhook configuration.
 Use [Run GitHub code-review agents](code-review-agents.md) for the operator
 overview of checks, mentions, and fork limitations.
+
+For Jira Cloud instead of GitHub, see [Run Jira agents](jira.md).

@@ -14,8 +14,14 @@ describe("reservedToolNameReason", () => {
     }
   });
 
+  it("rejects the jira_* issue-tracker built-in names", () => {
+    for (const name of ["jira_get_issue", "jira_search", "jira_comment", "jira_edit_own_comment"]) {
+      expect(reservedToolNameReason(name), name).toMatch(/reserved for the built-in Jira tools/);
+    }
+  });
+
   it("allows an ordinary name, including one merely containing a reserved word", () => {
-    for (const name of ["greet", "my_memory_get", "not_delegate_to_x"]) {
+    for (const name of ["greet", "my_memory_get", "not_delegate_to_x", "jira_other"]) {
       expect(reservedToolNameReason(name), name).toBeUndefined();
     }
   });

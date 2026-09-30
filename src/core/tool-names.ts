@@ -13,6 +13,7 @@
 import type { Prisma, PrismaClient, Tool } from "#prisma";
 import { MEMORY_TOOL_NAMES } from "./memory-tools.js";
 import { SUBAGENT_MEMORY_TOOL_NAMES } from "./subagent-memory-tools.js";
+import { ISSUE_TRACKER_TOOL_NAMES } from "./issue-tracker-tools.js";
 
 /** The runner's synthesized sub-agent tools are `delegate_to_<boundName>`. */
 export const DELEGATE_TOOL_PREFIX = "delegate_to_";
@@ -27,6 +28,7 @@ export function reservedToolNameReason(name: string): string | undefined {
   if (SUBAGENT_MEMORY_TOOL_NAMES.has(name)) {
     return `Tool name "${name}" is reserved for the built-in sub-agent memory tools.`;
   }
+  if (ISSUE_TRACKER_TOOL_NAMES.has(name)) return `Tool name "${name}" is reserved for the built-in Jira tools.`;
   if (name.startsWith(DELEGATE_TOOL_PREFIX)) {
     return `Tool names starting with "${DELEGATE_TOOL_PREFIX}" are reserved for sub-agent delegation tools.`;
   }
