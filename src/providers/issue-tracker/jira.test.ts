@@ -421,5 +421,24 @@ describe("JiraIssueTracker", () => {
         body: { n: 2 },
       });
     });
+
+    it("rejects an empty 200 on a JSON-returning call as tracker_invalid_response", async () => {
+      const { tracker } = fake(() => new Response("", { status: 200 }));
+      await expect(tracker.issueProject("PROJ-1")).rejects.toMatchObject({ code: "tracker_invalid_response" });
+      await expect(tracker.search("project = PROJ", { maxResults: 1 })).rejects.toMatchObject({
+        code: "tracker_invalid_response",
+      });
+    });
+
+    it("accepts an empty 201 on linkIssues", async () => {
+      const { tracker } = fake((c) =>
+        c.path === "/rest/api/3/myself"
+          ? json({ accountId: "bot-1", accountType: "app" })
+          : new Response("", { status: 201 }),
+      );
+      await expect(
+        tracker.linkIssues({ type: "Blocks", inwardKey: "PROJ-2", outwardKey: "PROJ-1" }),
+      ).resolves.toBeUndefined();
+    });
   });
 });

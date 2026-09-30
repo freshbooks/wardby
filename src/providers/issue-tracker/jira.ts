@@ -212,7 +212,12 @@ export class JiraIssueTracker implements IssueTracker {
         `No transition to "${toStatus}" is available from this issue's current status.`,
       );
     try {
-      await this.client.request("POST", `/rest/api/3/issue/${key}/transitions`, { transition: { id: match.id } });
+      await this.client.request(
+        "POST",
+        `/rest/api/3/issue/${key}/transitions`,
+        { transition: { id: match.id } },
+        { allowEmpty: true },
+      );
     } catch (err) {
       if (err instanceof IssueTrackerError && err.code === "tracker_invalid_request")
         throw new IssueTrackerError(
@@ -238,7 +243,7 @@ export class JiraIssueTracker implements IssueTracker {
       else if (id === "priority" && typeof value === "string") body[id] = { name: value };
       else body[id] = value;
     }
-    await this.client.request("PUT", `/rest/api/3/issue/${key}`, { fields: body });
+    await this.client.request("PUT", `/rest/api/3/issue/${key}`, { fields: body }, { allowEmpty: true });
   }
 
   async linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>> {
@@ -253,11 +258,16 @@ export class JiraIssueTracker implements IssueTracker {
 
   async linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void> {
     await this.ready();
-    await this.client.request("POST", "/rest/api/3/issueLink", {
-      type: { name: input.type },
-      inwardIssue: { key: input.inwardKey },
-      outwardIssue: { key: input.outwardKey },
-    });
+    await this.client.request(
+      "POST",
+      "/rest/api/3/issueLink",
+      {
+        type: { name: input.type },
+        inwardIssue: { key: input.inwardKey },
+        outwardIssue: { key: input.outwardKey },
+      },
+      { allowEmpty: true },
+    );
   }
 
   async getProperty(key: string, property: string): Promise<unknown> {
@@ -276,6 +286,8 @@ export class JiraIssueTracker implements IssueTracker {
 
   async setProperty(key: string, property: string, value: unknown): Promise<void> {
     await this.ready();
-    await this.client.request("PUT", `/rest/api/3/issue/${key}/properties/${encodeURIComponent(property)}`, value);
+    await this.client.request("PUT", `/rest/api/3/issue/${key}/properties/${encodeURIComponent(property)}`, value, {
+      allowEmpty: true,
+    });
   }
 }

@@ -22,7 +22,12 @@ export class JiraClient {
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
-  async request<T>(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<T> {
+  async request<T>(
+    method: "GET" | "POST" | "PUT",
+    path: string,
+    body?: unknown,
+    opts: { allowEmpty?: boolean } = {},
+  ): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       let res: Response;
       try {
@@ -47,9 +52,10 @@ export class JiraClient {
       if (res.status === 204) return undefined as T;
       if (!res.ok) throw statusError(res.status);
       try {
-        // Some successes (issue links, property writes) carry an empty body.
+        // Void writes (issue links, property writes) may succeed with an empty body; JSON callers may not.
         const text = await res.text();
-        return (text === "" ? undefined : JSON.parse(text)) as T;
+        if (text === "" && opts.allowEmpty) return undefined as T;
+        return JSON.parse(text) as T;
       } catch {
         throw new IssueTrackerError("tracker_invalid_response", "Jira returned a response that was not JSON.");
       }
