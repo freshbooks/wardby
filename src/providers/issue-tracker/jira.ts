@@ -44,6 +44,13 @@ const person = (v: unknown): IssuePerson | null => {
   return typeof p.accountId === "string" ? { accountId: p.accountId, displayName: str(p.displayName) } : null;
 };
 
+/** Jira reports locales as "en_US"; Accept-Language wants BCP-47 ("en-US"). Anything malformed keeps the default. */
+function localeToLanguageTag(locale: unknown): string {
+  if (typeof locale !== "string") return "en-US";
+  const m = /^([a-z]{2,3})(?:[_-]([A-Za-z]{2}|\d{3}))?$/.exec(locale.trim());
+  return m ? (m[2] ? `${m[1]}-${m[2].toUpperCase()}` : m[1]) : "en-US";
+}
+
 export class JiraIssueTracker implements IssueTracker {
   readonly provider = "jira" as const;
   private me: Promise<IssueTrackerIdentity> | null = null;
@@ -56,6 +63,7 @@ export class JiraIssueTracker implements IssueTracker {
   identity(): Promise<IssueTrackerIdentity> {
     const pending = (this.me ??= this.client.request<Json>("GET", "/rest/api/3/myself").then((me) => {
       if (typeof me.accountId !== "string") throw new IssueTrackerError("tracker_invalid_response");
+      this.client.setLanguage(localeToLanguageTag(me.locale));
       return { accountId: me.accountId, displayName: str(me.displayName), accountType: str(me.accountType) };
     }));
     pending.catch(() => {

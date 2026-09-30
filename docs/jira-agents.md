@@ -206,6 +206,12 @@ Notes:
   only on a `write` link. Status names are matched by the transition's target
   status, so `["Done"]` allows any transition that lands in Done. Re-linking
   replaces the lists like every other link field.
+- **Names are matched in the service account's language.** Status names in
+  `allowedTransitions` and `triggerStatuses`, and link type names in
+  `allowedLinkTypes`, are compared with what Jira returns in the service
+  account's own language (its profile language setting, which Jira reports as
+  its locale), not the site default. Set the service account's language to the
+  one your team uses for status names.
 - **Linking needs both projects.** `jira_link_issues` changes both issues, so
   the agent needs a `write` link to each issue's project, and the link type
   must be in `allowedLinkTypes` on both links (for two issues in the same

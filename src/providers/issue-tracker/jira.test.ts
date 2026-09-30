@@ -6,10 +6,17 @@ import { isStatusComment, JiraIssueTracker } from "./jira.js";
 import { IssueTrackerError } from "./types.js";
 
 const SITE = "https://your-site.atlassian.net";
-type Call = { method: string; path: string; body: unknown; authorization: string | null };
+type Call = {
+  method: string;
+  path: string;
+  body: unknown;
+  authorization: string | null;
+  acceptLanguage: string | null;
+};
 
 function fake(handler: (c: Call) => Response | undefined) {
   const calls: Call[] = [];
+  const languages: (string | null)[] = [];
   const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
     const url = new URL(String(input));
     const call = {
@@ -17,7 +24,9 @@ function fake(handler: (c: Call) => Response | undefined) {
       path: `${url.pathname}${url.search}`,
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
       authorization: new Headers(init?.headers).get("authorization"),
+      acceptLanguage: new Headers(init?.headers).get("accept-language"),
     };
+    languages.push(call.acceptLanguage);
     const handled = handler(call);
     // Unless a test handles /myself itself, the token is a service account ("app") and the guard's lookup is not a recorded call.
     if (!handled && call.path === "/rest/api/3/myself") return json({ accountId: "bot-1", accountType: "app" });
@@ -28,7 +37,7 @@ function fake(handler: (c: Call) => Response | undefined) {
     { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
     { fetch: fetchMock as unknown as typeof fetch, sleep: async () => undefined },
   );
-  return { tracker: new JiraIssueTracker(client, SITE), calls };
+  return { tracker: new JiraIssueTracker(client, SITE), calls, languages };
 }
 const json = (v: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...headers } });
@@ -52,6 +61,34 @@ describe("JiraIssueTracker", () => {
     await expect(tracker.setProperty("KAN-1", "p", {})).rejects.toBeInstanceOf(IssueTrackerError);
     expect(calls.map((c) => c.path)).toEqual(["/rest/api/3/myself"]);
     expect((await tracker.identity()).accountType).toBe("atlassian");
+  });
+
+  it("sends Accept-Language on every request: en-US until identity, then the account's locale", async () => {
+    const { tracker, languages } = fake((c) =>
+      c.path === "/rest/api/3/myself"
+        ? json({ accountId: "bot-1", accountType: "app", locale: "zh_CN" })
+        : json({ issues: [] }),
+    );
+    await tracker.identity();
+    await tracker.search("project = X", { maxResults: 5 });
+    expect(languages[0]).toBe("en-US");
+    expect(languages.length).toBeGreaterThan(1);
+    expect(languages.slice(1).every((l) => l === "zh-CN")).toBe(true);
+  });
+
+  it.each([
+    ["en_US", "en-US"],
+    ["pt_BR", "pt-BR"],
+    ["bad locale!", "en-US"],
+    [42, "en-US"],
+    [undefined, "en-US"],
+  ])("maps locale %j to %s", async (locale, expected) => {
+    const { tracker, languages } = fake((c) =>
+      c.path === "/rest/api/3/myself" ? json({ accountId: "bot-1", accountType: "app", locale }) : json({ issues: [] }),
+    );
+    await tracker.identity();
+    await tracker.search("project = X", { maxResults: 5 });
+    expect(languages.at(-1)).toBe(expected);
   });
 
   it("does not cache a failed identity lookup as a refusal", async () => {

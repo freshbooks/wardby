@@ -52,7 +52,10 @@ the `Jira acting as` startup line to confirm the account.
    link type names such as `Duplicate`); all need `write` access and an empty
    list means the tool refuses. Linking two issues also needs a `write` link to
    both issues' projects, each allowlisting the type. Existing links get these
-   only once you set the lists.
+   only once you set the lists. Status and link type names are matched in the
+   service account's Jira language (its profile language setting, which Jira
+   reports as its locale), so set that language to the one your team uses for
+   status names.
 
 ## What agents can do
 

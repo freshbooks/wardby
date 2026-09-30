@@ -22,6 +22,11 @@ export class JiraClient {
   private readonly authorization: string;
   private readonly fetchImpl: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
+  /**
+   * Always sent explicitly: undici's default `Accept-Language: *` makes Jira answer in the site's default
+   * language rather than the account's own, which breaks matching of status and link type names.
+   */
+  private language = "en-US";
 
   constructor(
     private readonly cfg: Pick<JiraConfig, "apiBaseUrl" | "auth">,
@@ -30,6 +35,10 @@ export class JiraClient {
     this.authorization = `Bearer ${cfg.auth.token}`;
     this.fetchImpl = opts.fetch ?? fetch;
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  }
+
+  setLanguage(tag: string): void {
+    this.language = tag;
   }
 
   async request<T>(
@@ -46,6 +55,7 @@ export class JiraClient {
           headers: {
             authorization: this.authorization,
             accept: "application/json",
+            "accept-language": this.language,
             ...(body !== undefined ? { "content-type": "application/json" } : {}),
           },
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
