@@ -74,9 +74,20 @@ describe("adfToText", () => {
     expect(adfToText("plain")).toBe("plain");
     expect(adfToText(null)).toBe("");
   });
+  it("renders wiki-markup mentions in a string as @user", () => {
+    expect(adfToText("[~accountid:bot-1] please fix")).toBe("@user please fix");
+    expect(adfToText("hi [~accountId:557058:abc-123], see [link|https://x]")).toBe("hi @user, see [link|https://x]");
+  });
 });
 
 describe("adfMentionIds", () => {
+  it("reads wiki-markup mentions from a string body (webhook v2 shape)", () => {
+    expect(adfMentionIds("[~accountid:bot-1] please fix, cc [~accountId:557058:abc-123]")).toEqual([
+      "bot-1",
+      "557058:abc-123",
+    ]);
+    expect(adfMentionIds("no mentions [~someone]")).toEqual([]);
+  });
   it("collects mention account ids at any depth", () => {
     const doc = {
       type: "doc",

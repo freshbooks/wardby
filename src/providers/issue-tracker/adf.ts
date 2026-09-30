@@ -1,7 +1,9 @@
 /**
  * Atlassian Document Format helpers. Jira Cloud's v3 API takes and returns
- * rich text as ADF. Agents write a small Markdown subset (markdownToAdf);
- * the control plane reads issue text as plain text (adfToText). Nothing here
+ * rich text as ADF; webhook payloads use the v2 shape (wiki-markup strings),
+ * so the readers (adfToText, adfMentionIds) accept both. Agents write a
+ * small Markdown subset (markdownToAdf); the control plane reads issue text
+ * as plain text (adfToText). Nothing here
  * produces HTML or mention nodes: a model can never ping a person.
  */
 export interface AdfNode {
@@ -98,8 +100,14 @@ export function markdownToAdf(markdown: string): AdfNode {
 
 const BLOCKS = new Set(["paragraph", "heading", "codeBlock", "blockquote", "listItem", "rule", "panel", "tableRow"]);
 
+/**
+ * Webhook payloads carry rich text in the REST v2 shape: a wiki-markup
+ * string, where a mention is `[~accountid:<accountId>]`.
+ */
+const WIKI_MENTION = /\[~accountid:([^\]\s]+)\]/gi;
+
 export function adfToText(node: unknown, maxChars = 20_000): string {
-  if (typeof node === "string") return cap(node, maxChars);
+  if (typeof node === "string") return cap(node.replace(WIKI_MENTION, "@user"), maxChars);
   const parts: string[] = [];
   const walk = (n: unknown) => {
     if (!n || typeof n !== "object") return;
@@ -125,6 +133,7 @@ function cap(text: string, max: number): string {
 }
 
 export function adfMentionIds(node: unknown): string[] {
+  if (typeof node === "string") return [...node.matchAll(WIKI_MENTION)].map((m) => m[1]);
   const ids: string[] = [];
   const walk = (n: unknown) => {
     if (!n || typeof n !== "object") return;

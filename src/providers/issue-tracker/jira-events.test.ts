@@ -89,6 +89,47 @@ describe("normalizeJiraEvent", () => {
     });
     expect(normalizeJiraEvent(comment("someone-else"), BOT)).toBeNull();
   });
+  it("recognizes a wiki-markup mention in a string comment body (webhook v2 shape)", () => {
+    const event = normalizeJiraEvent(
+      {
+        webhookEvent: "comment_created",
+        issue,
+        comment: { id: "99", author: human, body: "[~accountid:bot-1] please fix" },
+      },
+      BOT,
+    );
+    expect(event).toMatchObject({ kinds: ["mention"], actor: { accountId: "u-1" } });
+    expect(event?.comment?.body).toContain("please fix");
+    expect(event?.comment?.body).not.toContain("[~accountid:");
+    expect(
+      normalizeJiraEvent(
+        { webhookEvent: "comment_created", issue, comment: { id: "99", author: human, body: "[~accountid:x] hi" } },
+        BOT,
+      ),
+    ).toBeNull();
+  });
+  it("passes a string description through as text", () => {
+    expect(normalizeJiraEvent({ webhookEvent: "jira:issue_created", user: human, issue }, BOT)?.subject).toEqual({
+      summary: "Login fails",
+      description: "Steps to repro",
+    });
+  });
+  it("uses the editor, not the original author, as the actor of comment_updated", () => {
+    const other = { accountId: "u-2", accountType: "atlassian", displayName: "Eve" };
+    const edited = (updateAuthor: unknown) => ({
+      webhookEvent: "comment_updated",
+      issue,
+      comment: { id: "99", author: human, ...(updateAuthor ? { updateAuthor } : {}), body: mentionDoc(BOT) },
+      user: human,
+    });
+    expect(normalizeJiraEvent(edited(other), BOT)).toMatchObject({
+      kinds: ["mention"],
+      actor: { accountId: "u-2", displayName: "Eve" },
+    });
+    expect(normalizeJiraEvent(edited(undefined), BOT)).toBeNull();
+    expect(normalizeJiraEvent(edited({ ...human, accountId: BOT }), BOT)).toBeNull();
+    expect(normalizeJiraEvent(edited({ ...other, accountType: "app" }), BOT)).toBeNull();
+  });
   it("drops the bot's own events, customers, apps, and actors without an accountId", () => {
     const created = (user: unknown) => normalizeJiraEvent({ webhookEvent: "jira:issue_created", user, issue }, BOT);
     expect(created({ ...human, accountId: BOT })).toBeNull();

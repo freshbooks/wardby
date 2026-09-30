@@ -145,9 +145,10 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set(["jira_comment", "jira_edit_own
  *    escaped character inside an unquoted term, not the start of a string,
  *    so allowing it would let this scanner and Jira's lexer disagree about
  *    where strings (and so parentheses) are;
- *  - `issueFunction` anywhere (ScriptRunner functions that run an inner JQL
- *    query of their own). Other JQL functions are allowed; the service
- *    account's own Jira permissions are the outer boundary.
+ *  - `issueFunction` anywhere (the ScriptRunner field whose functions run
+ *    an inner JQL query of their own). This is not a full ScriptRunner
+ *    block: other JQL functions, including other app-provided ones, still
+ *    run. The result post-filter in jira_search is the real boundary.
  */
 export function scopeJql(projectKeys: readonly string[], jql: string): { jql: string } | { error: string } {
   if (/issuefunction/i.test(jql)) return { error: "issueFunction is not allowed in jira_search." };

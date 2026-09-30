@@ -83,7 +83,13 @@ export function normalizeJiraEvent(payload: unknown, botAccountId: string): Issu
   }
   if (event === "comment_created" || event === "comment_updated") {
     const comment = obj(p.comment);
-    const actor = humanActor(comment?.author ?? p.user, botAccountId);
+    // An edit is attributed to the editor, never the original author:
+    // otherwise anyone who can edit others' comments could reuse a trusted
+    // user's mention to pass the allowlist.
+    const actor =
+      event === "comment_updated"
+        ? humanActor(comment?.updateAuthor, botAccountId)
+        : humanActor(comment?.author ?? p.user, botAccountId);
     if (!actor || !comment || typeof comment.id !== "string") return null;
     if (!adfMentionIds(comment.body).includes(botAccountId)) return null;
     return { ...base, kinds: ["mention"], actor, comment: { id: comment.id, body: adfToText(comment.body, MAX_TEXT) } };
