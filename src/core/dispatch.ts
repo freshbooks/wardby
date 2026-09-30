@@ -40,6 +40,7 @@ export type DispatchTx = Pick<
   | "run"
   | "runHostCheck"
   | "runHostStatus"
+  | "runIssueStatus"
   | "codingRun"
   | "codingService"
   | "task"
