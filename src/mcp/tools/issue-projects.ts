@@ -34,6 +34,8 @@ type LinkArgs = {
   allowedTransitions?: string[];
   writableFields?: string[];
   allowedLinkTypes?: string[];
+  onPullRequestOpened?: string;
+  onPullRequestMerged?: string;
 };
 
 /** Trimmed names, 1-100 characters each, de-duplicated case-insensitively (first spelling kept). */
@@ -49,6 +51,14 @@ function nameList(field: string, raw: readonly string[] | undefined): string[] {
     }
   }
   return names;
+}
+
+/** An optional single status name, trimmed, 1-100 characters; undefined/absent means none. */
+function optionalStatus(field: string, raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  const name = raw.trim();
+  if (name.length === 0 || name.length > 100) throw new McpError(400, `invalid ${field} (1-100 characters)`);
+  return name;
 }
 
 function normalizeProjectKey(projectKey: string): string {
@@ -77,7 +87,10 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
       'allowedLinkTypes (write access only): the issue link type names jira_link_issues may create (e.g. "Duplicate", ' +
       "case-insensitive, at most 20); linking also needs write access to both issues' projects, each allowlisting the type. " +
       "It fails closed too: empty or omitted means the agent cannot link issues. Issue properties (jira_set_property) are " +
-      "not allowlisted: any write link may set them.",
+      "not allowlisted: any write link may set them. " +
+      "onPullRequestOpened / onPullRequestMerged (write access only, optional): the status name to move the issue to when a " +
+      "pull request wardby opened for it opens or merges. These are control-plane moves, not model actions, and are not gated " +
+      "by allowedTransitions; the name is matched in the Jira service account's language, and omitting one means no move.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -99,6 +112,8 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
         allowedTransitions: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 50 },
         writableFields: { type: "array", items: { type: "string", pattern: WRITABLE_FIELD.source }, maxItems: 50 },
         allowedLinkTypes: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 20 },
+        onPullRequestOpened: { type: "string", minLength: 1, maxLength: 100 },
+        onPullRequestMerged: { type: "string", minLength: 1, maxLength: 100 },
       },
       required: ["agentId", "projectKey", "access"],
     },
@@ -128,6 +143,11 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
       const writableFields = [...new Set(args.writableFields ?? [])];
       if (writableFields.some((f) => !WRITABLE_FIELD.test(f))) {
         throw new McpError(400, "invalid writableFields entry (labels, components, priority, or customfield_NNNNN)");
+      }
+      const onPullRequestOpened = optionalStatus("onPullRequestOpened", args.onPullRequestOpened);
+      const onPullRequestMerged = optionalStatus("onPullRequestMerged", args.onPullRequestMerged);
+      if ((onPullRequestOpened !== null || onPullRequestMerged !== null) && args.access !== "write") {
+        throw new McpError(400, "onPullRequestOpened and onPullRequestMerged need write access.");
       }
       if (
         (allowedTransitions.length > 0 || writableFields.length > 0 || allowedLinkTypes.length > 0) &&
@@ -159,6 +179,8 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
         allowedTransitions,
         writableFields,
         allowedLinkTypes,
+        onPullRequestOpened,
+        onPullRequestMerged,
         authorizedById: ctx.principal.id,
         authorizedAt: new Date(),
       };
