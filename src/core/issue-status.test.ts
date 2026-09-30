@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { adfToText, markdownToAdf } from "../providers/issue-tracker/adf.js";
+import { isStatusComment } from "../providers/issue-tracker/jira.js";
 import type { IssueTracker } from "../providers/issue-tracker/types.js";
 import {
   closeOrphanedIssueStatuses,
@@ -31,14 +33,23 @@ function tracker(): IssueTracker {
   };
 }
 
-function db(row: Record<string, unknown> | null, run = { id: "r1", status: "running", finalText: null }) {
+function db(
+  row: Record<string, unknown> | null,
+  run: Record<string, unknown> = { id: "r1", status: "running", finalText: null },
+  extra: Record<string, unknown> = {},
+) {
   return {
     runIssueStatus: {
       findUnique: vi.fn(async () => row),
       updateMany: vi.fn(async () => ({ count: 1 })),
       update: vi.fn(async () => undefined),
     },
-    run: { findUnique: vi.fn(async () => run), findMany: vi.fn(async () => []) },
+    run: {
+      findUnique: vi.fn(async () => run),
+      findMany: vi.fn(async () => []),
+      aggregate: vi.fn(async () => ({ _sum: { costUsd: null } })),
+      ...extra,
+    },
   } as never;
 }
 
@@ -98,6 +109,46 @@ describe("completeIssueStatus", () => {
     expect(markdown).toMatch(/^✅ Done\./);
     expect(markdown).toContain("Triaged");
     expect(markdown).not.toContain("Finished without");
+  });
+  it("shows the run's and its children's spend above the footer, which stays last", async () => {
+    const t = tracker();
+    const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
+    const d = db(row, { id: "r1", status: "succeeded", finalText: "ok", costUsd: 0.01 } as never, {
+      aggregate: vi.fn(async () => ({ _sum: { costUsd: { toString: () => "0.0023" } } })),
+    });
+    await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
+    const { markdown } = (t.editComment as any).mock.calls[0][2];
+    const lines = markdown.trimEnd().split("\n");
+    expect(markdown).toContain("Agent spend: $0.0123");
+    expect(lines.at(-1)).toMatch(/^_wardby run `r1`_$/);
+    expect(isStatusComment(adfToText(markdownToAdf(markdown)))).toBe(true);
+    expect((d as any).run.aggregate).toHaveBeenCalledWith({ where: { parentRunId: "r1" }, _sum: { costUsd: true } });
+  });
+  it("treats null costs as zero", async () => {
+    const t = tracker();
+    const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
+    const d = db(row, { id: "r1", status: "succeeded", finalText: "ok", costUsd: null } as never, {
+      aggregate: vi.fn(async () => ({ _sum: { costUsd: null } })),
+    });
+    await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
+    expect((t.editComment as any).mock.calls[0][2].markdown).toContain("Agent spend: $0.0000");
+  });
+  it("omits the spend line but still posts the outcome when the cost lookup fails", async () => {
+    const t = tracker();
+    const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
+    const d = db(
+      row,
+      { id: "r1", status: "succeeded", finalText: "ok" },
+      {
+        aggregate: vi.fn(async () => {
+          throw new Error("db down");
+        }),
+      },
+    );
+    await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
+    const { markdown } = (t.editComment as any).mock.calls[0][2];
+    expect(markdown).not.toContain("Agent spend");
+    expect(markdown).toContain("wardby run `r1`");
   });
   it("leaves a comment-less row to the working-status follow-up unless postIfMissing", async () => {
     const t = tracker();

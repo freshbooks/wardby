@@ -34,6 +34,28 @@ export function issueStatusRow(
   return { runId, provider: "jira", issueKey: event.issueKey, visibilityRole };
 }
 
+/** "Agent spend: $0.0123" for the run plus its direct children; "" if unavailable. */
+async function spendLine(db: IssueStatusDb, runId: string): Promise<string> {
+  try {
+    const own = await db.run.findUnique({ where: { id: runId }, select: { costUsd: true } });
+    const children = await db.run.aggregate({ where: { parentRunId: runId }, _sum: { costUsd: true } });
+    const total = Number(own?.costUsd ?? 0) + Number(children._sum.costUsd ?? 0);
+    return Number.isFinite(total) ? `Agent spend: $${total.toFixed(4)}` : "";
+  } catch (err) {
+    log.warn({ err, runId }, "could not compute the agent spend for the issue comment");
+    return "";
+  }
+}
+
+/** Insert the spend line above the trailing footer, which must stay the last line. */
+function withSpend(body: string, spend: string): string {
+  if (!spend) return body;
+  const trimmed = body.trimEnd();
+  const at = trimmed.lastIndexOf("\n");
+  if (at < 0) return `${spend}\n\n${trimmed}`;
+  return `${trimmed.slice(0, at).trimEnd()}\n\n${spend}\n\n${trimmed.slice(at + 1)}`;
+}
+
 export async function postIssueWorkingStatus(
   db: IssueStatusDb,
   trackers: IssueTrackerRegistry,
@@ -77,8 +99,12 @@ export async function completeIssueStatus(
     const tracker = trackers[status.provider as IssueTrackerProvider];
     if (!tracker) return;
     const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
+    const spend = await spendLine(db, run.id);
     const markdown = toJiraMarkdown(
-      outcomeBody(run, "", pullRequests, failedChildren, { budgetSentence, noPullRequestText: "Done." }),
+      withSpend(
+        outcomeBody(run, "", pullRequests, failedChildren, { budgetSentence, noPullRequestText: "Done." }),
+        spend,
+      ),
     );
     let commentId = status.commentId;
     if (commentId) await tracker.editComment(status.issueKey, commentId, { markdown });
