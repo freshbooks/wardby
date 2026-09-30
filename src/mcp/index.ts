@@ -60,6 +60,7 @@ import { registerDatastoreTools } from "./tools/datastore.js";
 import { registerSubAgentTools } from "./tools/subagents.js";
 import { registerGrantTools } from "./tools/grants.js";
 import { registerRepositoryTools } from "./tools/repositories.js";
+import { registerIssueProjectTools } from "./tools/issue-projects.js";
 import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
@@ -130,6 +131,7 @@ export function registerAllTools(
   registerSubAgentTools(mcp);
   registerGrantTools(mcp);
   registerRepositoryTools(mcp);
+  registerIssueProjectTools(mcp);
   registerHostAccountTools(mcp);
   registerMemoryTools(mcp);
   registerSecretsTools(mcp, {
