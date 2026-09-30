@@ -80,6 +80,9 @@ In Jira, open **Settings > System > WebHooks** and create a webhook:
 - **Secret:** a random string of at least 20 characters. Use the same value for
   `WARDBY_JIRA_WEBHOOK_SECRET`.
 - **Events:** Issue created, Issue updated, Comment created, Comment updated.
+  With Comment updated, editing a comment that mentions the service account
+  can trigger the agent again (only when the editor is a trusted account);
+  leave it out if you don't want edits to re-trigger.
 - **JQL filter (optional):** limit delivery to the linked projects, for example
   `project in (PROJ)`.
 

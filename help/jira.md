@@ -30,6 +30,9 @@ the `Jira acting as` startup line to confirm the account.
    `https://<your-wardby-host>/hosts/jira/events` with a secret of 20 or more
    characters and the events Issue created, Issue updated, Comment created and
    Comment updated.
+   Editing a comment that mentions the service account can trigger the agent
+   again when the editor is a trusted account; leave out Comment updated if you
+   don't want that.
 5. Set `WARDBY_JIRA_SITE_URL`, `WARDBY_JIRA_API_BASE_URL`
    (`https://api.atlassian.com/ex/jira/<cloudId>`), `WARDBY_JIRA_API_TOKEN` and
    `WARDBY_JIRA_WEBHOOK_SECRET`, then restart. The startup log line
