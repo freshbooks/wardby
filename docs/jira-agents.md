@@ -54,13 +54,17 @@ boundary of what any linked agent can read or change.
 
 In Atlassian Administration open the service account, select **Create
 credentials**, choose **API token**, name it, and set an expiry (Atlassian
-allows 1 to 365 days). Choose scopes when prompted. For Jira, Atlassian lists
-`read:jira-work` and `write:jira-work` as the typical scopes. wardby needs to
-read issues, search with JQL, and add and edit comments, which those two
-classic scopes cover; the granular comment scopes (for example
-`read:comment:jira` and `write:comment:jira`) are an alternative if you want a
-narrower token, but then you must also grant the granular issue and search
-scopes wardby's calls need. Copy the token when it is shown.
+allows 1 to 365 days). Choose these classic scopes when prompted:
+
+- `read:jira-work`: read issues and comments, and search with JQL.
+- `write:jira-work`: add and edit comments.
+- `read:jira-user`: read the service account's own identity
+  (`/rest/api/3/myself`). wardby needs it to recognize its own events and
+  mentions; without it every webhook delivery fails.
+
+Granular scopes are an alternative if you want a narrower token, but then you
+must grant the granular equivalent of each call above. Copy the token when it
+is shown.
 
 See [Manage API tokens for service accounts](https://support.atlassian.com/user-management/docs/manage-api-tokens-for-service-accounts/)
 and the [Jira scope reference](https://developer.atlassian.com/cloud/jira/platform/scopes-for-oauth-2-3LO-and-forge-apps/).

@@ -23,8 +23,8 @@ the `Jira acting as` startup line to confirm the account.
    Comments and Edit Own Comments in each project agents will use, and only there: its permissions are the outer
    boundary of what any linked agent can read or change.
 2. Create an API token for it with scopes covering reading issues, JQL search
-   and writing comments (`read:jira-work` and `write:jira-work`), and an
-   expiry.
+   and writing comments, plus reading its own identity (`read:jira-work`,
+   `write:jira-work` and `read:jira-user`), and an expiry.
 3. Find your site's cloudId at `https://your-site.atlassian.net/_edge/tenant_info`.
 4. In Jira, Settings, System, WebHooks: add
    `https://<your-wardby-host>/hosts/jira/events` with a secret of 20 or more
