@@ -67,8 +67,8 @@ export interface IssueTracker {
   /** The project the issue is in now; an old key (kept as an alias after a move) resolves to its new project. */
   issueProject(key: string): Promise<string>;
   search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult>;
-  /** Whether issue `key` matches `jql` (used for a link's jqlFilter). */
-  matchesJql(key: string, jql: string): Promise<boolean>;
+  /** Whether issue `key` matches `jql` (used for a link's jqlFilter). Callers on a latency budget pass a short timeout and no 429 retry. */
+  matchesJql(key: string, jql: string, opts?: { timeoutMs?: number; retryOn429?: boolean }): Promise<boolean>;
   comment(key: string, input: { markdown: string; visibilityRole?: string }): Promise<{ id: string; url: string }>;
   editComment(key: string, commentId: string, input: { markdown: string }): Promise<void>;
   /** The comment's author accountId and plain text (uncapped: only for ownership checks, never shown to a model), or null when it doesn't exist. */

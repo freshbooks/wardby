@@ -204,6 +204,34 @@ describe("JiraIssueTracker", () => {
     expect((calls[0].body as { jql: string }).jql).toBe("issuekey = PROJ-1 AND (labels = x OR 1=1)");
   });
 
+  it("matchesJql forwards a short timeout that aborts a hanging request, so the caller fails closed", async () => {
+    const hang = vi.fn((_url: string, init?: RequestInit) => {
+      if (String(_url).endsWith("/myself")) return Promise.resolve(json({ accountId: "bot-1", accountType: "app" }));
+      return new Promise<Response>((_res, rej) => init?.signal?.addEventListener("abort", () => rej(new Error("x"))));
+    });
+    const client = new JiraClient(
+      { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
+      { fetch: hang as unknown as typeof fetch },
+    );
+    const tracker = new JiraIssueTracker(client, SITE);
+    await expect(tracker.matchesJql("PROJ-1", "a = b", { timeoutMs: 20 })).rejects.toMatchObject({
+      code: "tracker_api_error",
+    });
+  });
+
+  it("matchesJql with retryOn429 false surfaces the first 429 without retrying", async () => {
+    let searches = 0;
+    const { tracker } = fake((c) => {
+      if (c.path === "/rest/api/3/myself") return undefined;
+      searches++;
+      return json({}, 429, { "retry-after": "1" });
+    });
+    await expect(tracker.matchesJql("PROJ-1", "a = b", { retryOn429: false })).rejects.toMatchObject({
+      code: "tracker_rate_limited",
+    });
+    expect(searches).toBe(1);
+  });
+
   it("retries a 429 once after Retry-After, then maps errors", async () => {
     let n = 0;
     const { tracker } = fake((c) => {

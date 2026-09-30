@@ -7,6 +7,16 @@ import type { JiraConfig } from "../../config/providers.js";
 import { IssueTrackerError } from "./types.js";
 
 const MAX_RETRY_AFTER_MS = 10_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+export interface RequestOptions {
+  /** Accept an empty 2xx body as `undefined` (void writes). */
+  allowEmpty?: boolean;
+  /** Per-attempt timeout; default 30 s. */
+  timeoutMs?: number;
+  /** Retry once on 429 honouring Retry-After; default true. */
+  retryOn429?: boolean;
+}
 
 export class JiraClient {
   private readonly authorization: string;
@@ -26,7 +36,7 @@ export class JiraClient {
     method: "GET" | "POST" | "PUT",
     path: string,
     body?: unknown,
-    opts: { allowEmpty?: boolean } = {},
+    opts: RequestOptions = {},
   ): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       let res: Response;
@@ -39,12 +49,12 @@ export class JiraClient {
             ...(body !== undefined ? { "content-type": "application/json" } : {}),
           },
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-          signal: AbortSignal.timeout(30_000),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
         });
       } catch {
         throw new IssueTrackerError("tracker_api_error", "Jira could not be reached.");
       }
-      if (res.status === 429 && attempt === 0) {
+      if (res.status === 429 && attempt === 0 && opts.retryOn429 !== false) {
         const seconds = Number(res.headers.get("retry-after"));
         await this.sleep(Math.min(Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 2000, MAX_RETRY_AFTER_MS));
         continue;

@@ -133,13 +133,17 @@ export class JiraIssueTracker implements IssueTracker {
     return projectKey;
   }
 
-  async search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult> {
+  async search(
+    jql: string,
+    opts: { maxResults: number; timeoutMs?: number; retryOn429?: boolean },
+  ): Promise<IssueSearchResult> {
     await this.ready();
-    const r = await this.client.request<Json>("POST", "/rest/api/3/search/jql", {
-      jql,
-      maxResults: opts.maxResults,
-      fields: ["summary", "status", "issuetype", "updated"],
-    });
+    const r = await this.client.request<Json>(
+      "POST",
+      "/rest/api/3/search/jql",
+      { jql, maxResults: opts.maxResults, fields: ["summary", "status", "issuetype", "updated"] },
+      { timeoutMs: opts.timeoutMs, retryOn429: opts.retryOn429 },
+    );
     const issues = (Array.isArray(r.issues) ? r.issues : []).map(obj).map((i) => {
       const f = obj(i.fields);
       return {
@@ -154,9 +158,13 @@ export class JiraIssueTracker implements IssueTracker {
     return { issues, truncated: typeof r.nextPageToken === "string" };
   }
 
-  async matchesJql(key: string, jql: string): Promise<boolean> {
+  async matchesJql(
+    key: string,
+    jql: string,
+    opts: { timeoutMs?: number; retryOn429?: boolean } = {},
+  ): Promise<boolean> {
     await this.ready();
-    const r = await this.search(`issuekey = ${key} AND (${jql})`, { maxResults: 1 });
+    const r = await this.search(`issuekey = ${key} AND (${jql})`, { maxResults: 1, ...opts });
     return r.issues.length > 0;
   }
 

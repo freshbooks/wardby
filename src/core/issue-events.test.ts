@@ -130,7 +130,10 @@ describe("routeIssueEvent", () => {
   it("requires the JQL filter to match", async () => {
     const { deps, tracker } = setup([{ triggers: ["created"], jqlFilter: "priority = High" }], false);
     expect((await routeIssueEvent(event({}), deps)).runIds).toHaveLength(0);
-    expect(tracker.matchesJql).toHaveBeenCalledWith("PROJ-7", "priority = High");
+    expect(tracker.matchesJql).toHaveBeenCalledWith("PROJ-7", "priority = High", {
+      timeoutMs: 5000,
+      retryOn429: false,
+    });
   });
   it("skips read links, owner-less agents, and coding agents", async () => {
     const { deps } = setup([
