@@ -74,6 +74,19 @@ export interface IssueTracker {
   /** The comment's author accountId and plain text (uncapped: only for ownership checks, never shown to a model), or null when it doesn't exist. */
   readComment(key: string, commentId: string): Promise<{ authorId: string | null; body: string } | null>;
   issueUrl(key: string): string;
+  /** Transitions the service account can perform now: target status name + category. */
+  transitions(key: string): Promise<Array<{ id: string; name: string; toStatus: string; toCategory: string }>>;
+  /** Performs the transition whose target status name matches (case-insensitive). */
+  transitionTo(key: string, toStatus: string): Promise<{ transitionId: string; toStatus: string }>;
+  /** Field ids the service account may edit on this issue (from editmeta). */
+  editableFields(key: string): Promise<string[]>;
+  /** Sets fields: labels (string[]), components (names), priority (name), customfield_N (raw JSON value). */
+  editFields(key: string, fields: Record<string, unknown>): Promise<void>;
+  linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>>;
+  linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void>;
+  /** The property's JSON value, or null when it does not exist. */
+  getProperty(key: string, property: string): Promise<unknown>;
+  setProperty(key: string, property: string, value: unknown): Promise<void>;
 }
 
 export type IssueTrackerErrorCode =

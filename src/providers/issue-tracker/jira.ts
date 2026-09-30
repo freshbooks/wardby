@@ -174,4 +174,84 @@ export class JiraIssueTracker implements IssueTracker {
       throw err;
     }
   }
+
+  async transitions(key: string): Promise<Array<{ id: string; name: string; toStatus: string; toCategory: string }>> {
+    const r = await this.client.request<Json>("GET", `/rest/api/3/issue/${key}/transitions`);
+    return (Array.isArray(r.transitions) ? r.transitions : []).map(obj).map((t) => ({
+      id: str(t.id),
+      name: str(t.name),
+      toStatus: str(obj(t.to).name),
+      toCategory: str(obj(obj(t.to).statusCategory).key),
+    }));
+  }
+
+  async transitionTo(key: string, toStatus: string): Promise<{ transitionId: string; toStatus: string }> {
+    const wanted = toStatus.trim().toLowerCase();
+    const match = (await this.transitions(key)).find((t) => t.toStatus.toLowerCase() === wanted);
+    if (!match)
+      throw new IssueTrackerError(
+        "tracker_invalid_request",
+        `No transition to "${toStatus}" is available from this issue's current status.`,
+      );
+    try {
+      await this.client.request("POST", `/rest/api/3/issue/${key}/transitions`, { transition: { id: match.id } });
+    } catch (err) {
+      if (err instanceof IssueTrackerError && err.code === "tracker_invalid_request")
+        throw new IssueTrackerError(
+          "tracker_invalid_request",
+          "This transition needs fields wardby can't fill (a transition screen); do it in Jira.",
+        );
+      throw err;
+    }
+    return { transitionId: match.id, toStatus: match.toStatus };
+  }
+
+  async editableFields(key: string): Promise<string[]> {
+    const r = await this.client.request<Json>("GET", `/rest/api/3/issue/${key}/editmeta`);
+    return Object.keys(obj(r.fields));
+  }
+
+  async editFields(key: string, fields: Record<string, unknown>): Promise<void> {
+    const body: Record<string, unknown> = {};
+    for (const [id, value] of Object.entries(fields)) {
+      if (id === "components" && Array.isArray(value)) body[id] = value.map((name: unknown) => ({ name }));
+      else if (id === "priority" && typeof value === "string") body[id] = { name: value };
+      else body[id] = value;
+    }
+    await this.client.request("PUT", `/rest/api/3/issue/${key}`, { fields: body });
+  }
+
+  async linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>> {
+    const r = await this.client.request<Json>("GET", "/rest/api/3/issueLinkType");
+    return (Array.isArray(r.issueLinkTypes) ? r.issueLinkTypes : []).map(obj).map((t) => ({
+      name: str(t.name),
+      inward: str(t.inward),
+      outward: str(t.outward),
+    }));
+  }
+
+  async linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void> {
+    await this.client.request("POST", "/rest/api/3/issueLink", {
+      type: { name: input.type },
+      inwardIssue: { key: input.inwardKey },
+      outwardIssue: { key: input.outwardKey },
+    });
+  }
+
+  async getProperty(key: string, property: string): Promise<unknown> {
+    try {
+      const r = await this.client.request<Json>(
+        "GET",
+        `/rest/api/3/issue/${key}/properties/${encodeURIComponent(property)}`,
+      );
+      return r.value ?? null;
+    } catch (err) {
+      if (err instanceof IssueTrackerError && err.code === "tracker_not_found") return null;
+      throw err;
+    }
+  }
+
+  async setProperty(key: string, property: string, value: unknown): Promise<void> {
+    await this.client.request("PUT", `/rest/api/3/issue/${key}/properties/${encodeURIComponent(property)}`, value);
+  }
 }

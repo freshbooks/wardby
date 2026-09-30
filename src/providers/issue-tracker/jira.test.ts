@@ -264,4 +264,133 @@ describe("JiraIssueTracker", () => {
     expect(isStatusComment("wardby run abc\nmore")).toBe(false);
     expect(isStatusComment("wardby agent abc")).toBe(false);
   });
+
+  describe("phase 2 methods", () => {
+    const transitionsBody = {
+      transitions: [
+        { id: "11", name: "Start", to: { name: "In Progress", statusCategory: { key: "indeterminate" } } },
+        { id: "31", name: "Finish", to: { name: "Done", statusCategory: { key: "done" } } },
+      ],
+    };
+
+    it("lists transitions with target status and category", async () => {
+      const { tracker } = fake((c) =>
+        c.path === "/rest/api/3/issue/PROJ-1/transitions" ? json(transitionsBody) : undefined,
+      );
+      expect(await tracker.transitions("PROJ-1")).toEqual([
+        { id: "11", name: "Start", toStatus: "In Progress", toCategory: "indeterminate" },
+        { id: "31", name: "Finish", toStatus: "Done", toCategory: "done" },
+      ]);
+    });
+
+    it("transitions by target status name, case-insensitively, posting the transition id", async () => {
+      const { tracker, calls } = fake((c) => {
+        if (c.path === "/rest/api/3/issue/PROJ-1/transitions") {
+          return c.method === "GET" ? json(transitionsBody) : new Response(null, { status: 204 });
+        }
+        return undefined;
+      });
+      expect(await tracker.transitionTo("PROJ-1", "in progress")).toEqual({
+        transitionId: "11",
+        toStatus: "In Progress",
+      });
+      const post = calls.find((c) => c.method === "POST");
+      expect(post?.body).toEqual({ transition: { id: "11" } });
+    });
+
+    it("rejects a transition with no matching target status", async () => {
+      const { tracker, calls } = fake((c) =>
+        c.path === "/rest/api/3/issue/PROJ-1/transitions" ? json(transitionsBody) : undefined,
+      );
+      await expect(tracker.transitionTo("PROJ-1", "Blocked")).rejects.toMatchObject({
+        code: "tracker_invalid_request",
+        message: 'No transition to "Blocked" is available from this issue\'s current status.',
+      });
+      expect(calls.some((c) => c.method === "POST")).toBe(false);
+    });
+
+    it("explains a 400 on the transition as a transition screen", async () => {
+      const { tracker } = fake((c) => {
+        if (c.path === "/rest/api/3/issue/PROJ-1/transitions") {
+          return c.method === "GET" ? json(transitionsBody) : json({ errors: {} }, 400);
+        }
+        return undefined;
+      });
+      await expect(tracker.transitionTo("PROJ-1", "Done")).rejects.toMatchObject({
+        code: "tracker_invalid_request",
+        message: "This transition needs fields wardby can't fill (a transition screen); do it in Jira.",
+      });
+    });
+
+    it("lists editable field ids from editmeta", async () => {
+      const { tracker } = fake((c) =>
+        c.path === "/rest/api/3/issue/PROJ-1/editmeta"
+          ? json({ fields: { labels: {}, priority: {}, customfield_10010: {} } })
+          : undefined,
+      );
+      expect(await tracker.editableFields("PROJ-1")).toEqual(["labels", "priority", "customfield_10010"]);
+    });
+
+    it("shapes the editFields body", async () => {
+      const { tracker, calls } = fake((c) =>
+        c.method === "PUT" && c.path === "/rest/api/3/issue/PROJ-1" ? new Response(null, { status: 204 }) : undefined,
+      );
+      await tracker.editFields("PROJ-1", {
+        labels: ["a", "b"],
+        components: ["Api", "Web"],
+        priority: "High",
+        customfield_10010: { value: "x" },
+      });
+      expect(calls[0].body).toEqual({
+        fields: {
+          labels: ["a", "b"],
+          components: [{ name: "Api" }, { name: "Web" }],
+          priority: { name: "High" },
+          customfield_10010: { value: "x" },
+        },
+      });
+    });
+
+    it("lists link types", async () => {
+      const { tracker } = fake((c) =>
+        c.path === "/rest/api/3/issueLinkType"
+          ? json({ issueLinkTypes: [{ id: "1", name: "Blocks", inward: "is blocked by", outward: "blocks" }] })
+          : undefined,
+      );
+      expect(await tracker.linkTypes()).toEqual([{ name: "Blocks", inward: "is blocked by", outward: "blocks" }]);
+    });
+
+    it("posts the link body", async () => {
+      const { tracker, calls } = fake((c) =>
+        c.method === "POST" && c.path === "/rest/api/3/issueLink" ? new Response(null, { status: 201 }) : undefined,
+      );
+      await tracker.linkIssues({ type: "Blocks", inwardKey: "PROJ-2", outwardKey: "PROJ-1" });
+      expect(calls[0].body).toEqual({
+        type: { name: "Blocks" },
+        inwardIssue: { key: "PROJ-2" },
+        outwardIssue: { key: "PROJ-1" },
+      });
+    });
+
+    it("reads a property's value, null on 404", async () => {
+      const { tracker, calls } = fake((c) => {
+        if (c.path === "/rest/api/3/issue/PROJ-1/properties/wardby.state")
+          return json({ key: "wardby.state", value: { n: 1 } });
+        return undefined;
+      });
+      expect(await tracker.getProperty("PROJ-1", "wardby.state")).toEqual({ n: 1 });
+      expect(await tracker.getProperty("PROJ-1", "missing key")).toBeNull();
+      expect(calls[1].path).toBe("/rest/api/3/issue/PROJ-1/properties/missing%20key");
+    });
+
+    it("sets a property with the raw JSON value", async () => {
+      const { tracker, calls } = fake(() => new Response(null, { status: 200 }));
+      await tracker.setProperty("PROJ-1", "wardby.state", { n: 2 });
+      expect(calls[0]).toMatchObject({
+        method: "PUT",
+        path: "/rest/api/3/issue/PROJ-1/properties/wardby.state",
+        body: { n: 2 },
+      });
+    });
+  });
 });

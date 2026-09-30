@@ -47,7 +47,9 @@ export class JiraClient {
       if (res.status === 204) return undefined as T;
       if (!res.ok) throw statusError(res.status);
       try {
-        return (await res.json()) as T;
+        // Some successes (issue links, property writes) carry an empty body.
+        const text = await res.text();
+        return (text === "" ? undefined : JSON.parse(text)) as T;
       } catch {
         throw new IssueTrackerError("tracker_invalid_response", "Jira returned a response that was not JSON.");
       }
