@@ -17,10 +17,7 @@ export class JiraClient {
     private readonly cfg: Pick<JiraConfig, "apiBaseUrl" | "auth">,
     opts: { fetch?: typeof fetch; sleep?: (ms: number) => Promise<void> } = {},
   ) {
-    this.authorization =
-      cfg.auth.kind === "basic"
-        ? `Basic ${Buffer.from(`${cfg.auth.email}:${cfg.auth.token}`).toString("base64")}`
-        : `Bearer ${cfg.auth.token}`;
+    this.authorization = `Bearer ${cfg.auth.token}`;
     this.fetchImpl = opts.fetch ?? fetch;
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }

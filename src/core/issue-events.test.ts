@@ -40,6 +40,7 @@ type Link = Partial<{
 function setup(links: Link[], jqlMatches = true) {
   const tracker = {
     botAccountId: vi.fn(async () => "bot-1"),
+    identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "bot", accountType: "app" })),
     matchesJql: vi.fn(async () => jqlMatches),
     issueUrl: (k: string) => `https://s/browse/${k}`,
   } as unknown as IssueTracker;

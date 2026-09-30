@@ -20,7 +20,7 @@ function fake(handler: (c: Call) => Response | undefined) {
     return handler(call) ?? new Response("{}", { status: 404 });
   });
   const client = new JiraClient(
-    { apiBaseUrl: SITE, auth: { kind: "basic", email: "bot@example.com", token: "tok" } },
+    { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
     { fetch: fetchMock as unknown as typeof fetch, sleep: async () => undefined },
   );
   return { tracker: new JiraIssueTracker(client, SITE), calls };
@@ -35,14 +35,36 @@ const doc = (text: string) => ({
 });
 
 describe("JiraIssueTracker", () => {
-  it("sends Basic auth and caches the bot account id", async () => {
+  it("sends Bearer auth and caches the bot account id", async () => {
     const { tracker, calls } = fake((c) =>
       c.path === "/rest/api/3/myself" ? json({ accountId: "bot-1" }) : undefined,
     );
     expect(await tracker.botAccountId()).toBe("bot-1");
     expect(await tracker.botAccountId()).toBe("bot-1");
     expect(calls).toHaveLength(1);
-    expect(calls[0].authorization).toBe(`Basic ${Buffer.from("bot@example.com:tok").toString("base64")}`);
+    expect(calls[0].authorization).toBe("Bearer tok");
+  });
+
+  it("identity() and botAccountId() share one cached /myself call", async () => {
+    const { tracker, calls } = fake((c) =>
+      c.path === "/rest/api/3/myself"
+        ? json({ accountId: "bot-1", displayName: "wardby bot", accountType: "app" })
+        : undefined,
+    );
+    expect(await tracker.identity()).toEqual({ accountId: "bot-1", displayName: "wardby bot", accountType: "app" });
+    expect(await tracker.botAccountId()).toBe("bot-1");
+    expect(await tracker.identity()).toEqual({ accountId: "bot-1", displayName: "wardby bot", accountType: "app" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("identity() retries after a failed /myself", async () => {
+    let n = 0;
+    const { tracker, calls } = fake((c) =>
+      c.path === "/rest/api/3/myself" && ++n > 1 ? json({ accountId: "bot-1" }) : json({}, 500),
+    );
+    await expect(tracker.identity()).rejects.toBeInstanceOf(IssueTrackerError);
+    expect((await tracker.identity()).accountId).toBe("bot-1");
+    expect(calls).toHaveLength(2);
   });
 
   it("reads an issue as plain text and flags this agent's own comments", async () => {

@@ -324,6 +324,18 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
         }
       : undefined;
   mcpLog.info({ enabled: Boolean(jiraEvents) }, "Jira host events ingress");
+  if (jiraEvents) {
+    // Best effort: show which Jira account wardby acts as; never blocks startup.
+    void providers.issueTrackers?.jira?.identity().then(
+      ({ accountId, displayName, accountType }) =>
+        mcpLog.info({ accountId, displayName, accountType }, "Jira acting as"),
+      (err: unknown) =>
+        mcpLog.warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          "could not read the Jira account identity",
+        ),
+    );
+  }
   if (jiraConfig?.tokenExpiresAt && jiraConfig.tokenExpiresAt.getTime() - Date.now() < 14 * 24 * 60 * 60 * 1000) {
     mcpLog.warn(
       { expiresAt: jiraConfig.tokenExpiresAt.toISOString() },

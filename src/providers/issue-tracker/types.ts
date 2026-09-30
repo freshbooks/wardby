@@ -50,10 +50,19 @@ export interface IssueSearchResult {
   truncated: boolean;
 }
 
+/** Who the tracker credential acts as (Jira: GET /myself). */
+export interface IssueTrackerIdentity {
+  accountId: string;
+  displayName: string;
+  accountType: string;
+}
+
 export interface IssueTracker {
   readonly provider: IssueTrackerProvider;
   /** The bot's own accountId (cached after the first call). */
   botAccountId(): Promise<string>;
+  /** The account the credential acts as, from the same cached call as botAccountId. */
+  identity(): Promise<IssueTrackerIdentity>;
   getIssue(key: string, opts: { maxComments: number; agentMarker: string }): Promise<IssueView>;
   search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult>;
   /** Whether issue `key` matches `jql` (used for a link's jqlFilter). */

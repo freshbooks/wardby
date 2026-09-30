@@ -103,17 +103,18 @@ export function loadGitHubUserAuthConfig(env: NodeJS.ProcessEnv = process.env): 
 }
 
 export interface JiraConfig {
-  /** The site people browse, e.g. https://your-site.atlassian.net — used for issue links. */
+  /** The site people browse, e.g. https://your-site.atlassian.net — used for issue links. A bare https origin. */
   siteUrl: string;
-  /** Where REST calls go: the site for an unscoped token, https://api.atlassian.com/ex/jira/<cloudId> for a scoped or service-account token. */
+  /** Where REST calls go: always https://api.atlassian.com/ex/jira/<cloudId>, the only base a service-account token works against. */
   apiBaseUrl: string;
-  auth: { kind: "basic"; email: string; token: string } | { kind: "bearer"; token: string };
+  /** A service account's API token, sent as a Bearer token. Personal (Basic email:token) auth is not supported. */
+  auth: { kind: "bearer"; token: string };
   webhookSecret: string;
   /** Optional, for expiry warnings; Atlassian API tokens last at most a year. */
   tokenExpiresAt?: Date;
 }
 
-const JIRA_GATEWAY = /^https:\/\/api\.atlassian\.com\/ex\/jira\/[0-9a-f-]{36}$/;
+const JIRA_GATEWAY = /^https:\/\/api\.atlassian\.com\/ex\/jira\/[0-9a-f-]{36}$/i;
 
 function httpsOrigin(value: string, name: string): string {
   let url: URL;
@@ -128,30 +129,47 @@ function httpsOrigin(value: string, name: string): string {
 
 /**
  * Jira Cloud issue-tracker settings (docs/jira-agents.md). Unset = Jira is
- * disabled. WARDBY_JIRA_API_EMAIL set = Basic auth (an unscoped user token);
- * unset = Bearer (a scoped / service-account token, which Atlassian only
- * accepts through the api.atlassian.com gateway).
+ * disabled. wardby acts in Jira only as an Atlassian service account, so
+ * everything an agent does is attributed to that account: the token is sent
+ * as a Bearer token and REST calls go through the api.atlassian.com gateway
+ * (WARDBY_JIRA_API_BASE_URL, required). Personal tokens (Basic email:token)
+ * are rejected.
  */
 export function loadJiraConfig(env: NodeJS.ProcessEnv = process.env): JiraConfig | null {
   const site = env.WARDBY_JIRA_SITE_URL?.trim();
   const token = env.WARDBY_JIRA_API_TOKEN?.trim();
   const secret = env.WARDBY_JIRA_WEBHOOK_SECRET?.trim();
-  const email = env.WARDBY_JIRA_API_EMAIL?.trim() || undefined;
-  const base = env.WARDBY_JIRA_API_BASE_URL?.trim() || undefined;
+  const base = env.WARDBY_JIRA_API_BASE_URL?.trim();
   const expires = env.WARDBY_JIRA_API_TOKEN_EXPIRES_AT?.trim() || undefined;
-  if (!site && !token && !secret) return null;
-  if (!site || !token || !secret) {
+  if (env.WARDBY_JIRA_API_EMAIL?.trim()) {
     throw new Error(
-      "Set WARDBY_JIRA_SITE_URL, WARDBY_JIRA_API_TOKEN and WARDBY_JIRA_WEBHOOK_SECRET together, or none of them.",
+      "WARDBY_JIRA_API_EMAIL is no longer supported: personal (Basic email:token) Jira tokens are not accepted. " +
+        "Use an Atlassian service account's API token with WARDBY_JIRA_API_BASE_URL=https://api.atlassian.com/ex/jira/<cloudId>.",
+    );
+  }
+  if (!site && !token && !secret && !base) return null;
+  if (!site || !token || !secret || !base) {
+    throw new Error(
+      "Set WARDBY_JIRA_SITE_URL, WARDBY_JIRA_API_BASE_URL, WARDBY_JIRA_API_TOKEN and WARDBY_JIRA_WEBHOOK_SECRET together, or none of them.",
     );
   }
   if (secret.length < 20) throw new Error("WARDBY_JIRA_WEBHOOK_SECRET must be at least 20 characters.");
   const siteUrl = httpsOrigin(site, "WARDBY_JIRA_SITE_URL");
-  const apiBaseUrl = base ? httpsOrigin(base, "WARDBY_JIRA_API_BASE_URL") : siteUrl;
-  if (!email && !JIRA_GATEWAY.test(apiBaseUrl)) {
+  const siteParsed = new URL(siteUrl);
+  if (
+    siteParsed.pathname !== "/" ||
+    siteParsed.search ||
+    siteParsed.hash ||
+    siteParsed.username ||
+    siteParsed.password
+  ) {
+    throw new Error("WARDBY_JIRA_SITE_URL must be a bare https origin such as https://your-site.atlassian.net.");
+  }
+  const apiBaseUrl = httpsOrigin(base, "WARDBY_JIRA_API_BASE_URL");
+  if (!JIRA_GATEWAY.test(apiBaseUrl)) {
     throw new Error(
-      "Without WARDBY_JIRA_API_EMAIL the token is used as a Bearer token, which Atlassian only accepts at " +
-        "WARDBY_JIRA_API_BASE_URL=https://api.atlassian.com/ex/jira/<cloudId>.",
+      "WARDBY_JIRA_API_BASE_URL must be https://api.atlassian.com/ex/jira/<cloudId>, the only base a service " +
+        "account's API token works against.",
     );
   }
   let tokenExpiresAt: Date | undefined;
@@ -163,7 +181,7 @@ export function loadJiraConfig(env: NodeJS.ProcessEnv = process.env): JiraConfig
   return {
     siteUrl,
     apiBaseUrl,
-    auth: email ? { kind: "basic", email, token } : { kind: "bearer", token },
+    auth: { kind: "bearer", token },
     webhookSecret: secret,
     ...(tokenExpiresAt ? { tokenExpiresAt } : {}),
   };

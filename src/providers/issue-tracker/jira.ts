@@ -12,6 +12,7 @@ import {
   type IssuePerson,
   type IssueSearchResult,
   type IssueTracker,
+  type IssueTrackerIdentity,
   type IssueView,
 } from "./types.js";
 
@@ -37,20 +38,26 @@ const person = (v: unknown): IssuePerson | null => {
 
 export class JiraIssueTracker implements IssueTracker {
   readonly provider = "jira" as const;
-  private bot: Promise<string> | null = null;
+  private me: Promise<IssueTrackerIdentity> | null = null;
 
   constructor(
     private readonly client: JiraClient,
     private readonly siteUrl: string,
   ) {}
 
-  botAccountId(): Promise<string> {
-    this.bot ??= this.client.request<Json>("GET", "/rest/api/3/myself").then((me) => {
+  identity(): Promise<IssueTrackerIdentity> {
+    const pending = (this.me ??= this.client.request<Json>("GET", "/rest/api/3/myself").then((me) => {
       if (typeof me.accountId !== "string") throw new IssueTrackerError("tracker_invalid_response");
-      return me.accountId;
+      return { accountId: me.accountId, displayName: str(me.displayName), accountType: str(me.accountType) };
+    }));
+    pending.catch(() => {
+      if (this.me === pending) this.me = null;
     });
-    this.bot.catch(() => (this.bot = null));
-    return this.bot;
+    return pending;
+  }
+
+  async botAccountId(): Promise<string> {
+    return (await this.identity()).accountId;
   }
 
   issueUrl(key: string): string {

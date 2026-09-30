@@ -6,6 +6,7 @@ function tracker(): IssueTracker {
   return {
     provider: "jira",
     botAccountId: vi.fn(async () => "bot-1"),
+    identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "bot", accountType: "app" })),
     getIssue: vi.fn(),
     search: vi.fn(),
     matchesJql: vi.fn(),
