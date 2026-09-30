@@ -73,6 +73,24 @@ and the webhook answers 503 `jira_personal_account`. Deliveries with a
 timestamp older than two hours (or more than five minutes ahead) are ignored.
 Two recipes, triage on create and scheduled JQL sweeps, are in the full guide.
 
+## Jira → code
+
+A Jira-linked native agent can delegate to a coding sub-agent (attach it with
+`attach_subagent`; its `codingProfile.repository` is `your-org/your-repo`).
+Link the native agent with `triggers: ["transitioned"]`,
+`triggerStatuses: ["Ready for AI"]`, `allowedTransitions: ["In Progress"]` and,
+optionally, `onPullRequestOpened: "In Review"` and
+`onPullRequestMerged: "Done"`. Those two are control-plane status moves (not
+gated by `allowedTransitions`, write access only, names in the service
+account's language). The prompt should say: read the ticket, move it to In
+Progress, ask instead of delegating if it is underspecified, delegate a
+precise task, and for follow-ups pass the run id from the run message as
+`continuePriorRun`. The pull request title starts with `[PROJ-123]` and the
+issue gets a web link to it (needs Link issues); Jira's development panel
+shows it only if the Jira and GitHub integration is installed. Merge and close
+comments and the merged status move need the GitHub App to deliver
+`pull_request` events. See the full guide for the recipe.
+
 ## Trust rules
 
 Only people (not customers, apps, or the service account itself) can trigger
