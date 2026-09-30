@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IssueTracker } from "../providers/issue-tracker/types.js";
-import { completeIssueStatus, postIssueWorkingStatus, toJiraMarkdown } from "./issue-status.js";
+import {
+  closeOrphanedIssueStatuses,
+  completeIssueStatus,
+  postIssueWorkingStatus,
+  toJiraMarkdown,
+} from "./issue-status.js";
 
 function tracker(): IssueTracker {
   return {
@@ -97,5 +102,64 @@ describe("completeIssueStatus", () => {
       completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: null }, { jira: t }),
     ).resolves.toBeUndefined();
     expect((d as any).runIssueStatus.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("closeOrphanedIssueStatuses", () => {
+  const NOW = new Date("2026-09-30T12:00:00.000Z");
+
+  function orphanDb(rows: Array<Record<string, unknown>>) {
+    return {
+      runIssueStatus: {
+        findMany: vi.fn(async () => rows.map((r) => ({ run: { id: r.runId, status: "lost", finalText: null } }))),
+        findUnique: vi.fn(async ({ where }: any) => rows.find((r) => r.runId === where.runId) ?? null),
+        update: vi.fn(async () => undefined),
+      },
+      run: { findUnique: vi.fn(), findMany: vi.fn(async () => []) },
+    } as never;
+  }
+
+  it("queries open statuses of configured providers whose run ended 2 minutes to a day ago, newest first", async () => {
+    const d = orphanDb([]);
+    await closeOrphanedIssueStatuses(d, { jira: tracker() }, NOW);
+    expect((d as any).runIssueStatus.findMany).toHaveBeenCalledWith({
+      where: {
+        completedAt: null,
+        provider: { in: ["jira"] },
+        run: {
+          status: { notIn: ["pending", "running"] },
+          finishedAt: {
+            lte: new Date(NOW.getTime() - 2 * 60 * 1000),
+            gte: new Date(NOW.getTime() - 24 * 60 * 60 * 1000),
+          },
+        },
+      },
+      select: { run: { select: { id: true, status: true, finalText: true } } },
+      orderBy: { run: { finishedAt: "desc" } },
+      take: 20,
+    });
+  });
+
+  it("posts the outcome as a new comment when the run died before its working comment", async () => {
+    const t = tracker();
+    const d = orphanDb([
+      { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: null, completedAt: null, visibilityRole: "Dev" },
+    ]);
+    await closeOrphanedIssueStatuses(d, { jira: t }, NOW);
+    expect(t.comment).toHaveBeenCalledWith("PROJ-1", {
+      markdown: expect.stringMatching(/^❌ Interrupted before it finished/),
+      visibilityRole: "Dev",
+    });
+    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
+      where: { runId: "r1" },
+      data: { commentId: "c-1", completedAt: expect.any(Date) },
+    });
+  });
+
+  it("never queries without a configured tracker", async () => {
+    const d = orphanDb([]);
+    await closeOrphanedIssueStatuses(d, undefined, NOW);
+    await closeOrphanedIssueStatuses(d, {}, NOW);
+    expect((d as any).runIssueStatus.findMany).not.toHaveBeenCalled();
   });
 });

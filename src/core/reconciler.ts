@@ -31,22 +31,25 @@
  * Each pass also completes review-host checks left "in progress" by a run
  * that ended without reaching `executeRun`'s own finalizer (reaped here as
  * `lost`, failed to start, failed while loading, ...). One sweep covers all
- * of those paths instead of patching each. Mention status comments get the
- * same sweep: it also catches a run that ended before its comment was posted.
+ * of those paths instead of patching each. Mention status comments, and the
+ * status comments of runs started by Jira issue events, get the same sweep:
+ * it also catches a run that ended before its comment was posted.
  */
 
 import type { Prisma, PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
 import { completeHostStatus } from "./host-status.js";
+import { closeOrphanedIssueStatuses } from "./issue-status.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
 
-export type ReconcilerDb = Pick<PrismaClient, "run" | "runHostCheck" | "runHostStatus">;
+export type ReconcilerDb = Pick<PrismaClient, "run" | "runHostCheck" | "runHostStatus" | "runIssueStatus">;
 
 /**
  * How long after a run finishes before its still-open check counts as
@@ -136,6 +139,7 @@ export async function reconcileOnce(
   heartbeatTimeoutMs: number = HEARTBEAT_TIMEOUT_MS,
   executor?: Executor,
   reviewHosts?: ReviewHostRegistry,
+  issueTrackers?: IssueTrackerRegistry,
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - heartbeatTimeoutMs);
   const stale = {
@@ -232,6 +236,7 @@ export async function reconcileOnce(
   }
   await closeOrphanedHostChecks(db, reviewHosts, now);
   await closeOrphanedHostStatuses(db, reviewHosts, now);
+  await closeOrphanedIssueStatuses(db, issueTrackers, now);
   return lost;
 }
 
@@ -242,6 +247,8 @@ export interface ReconcilerOptions {
   executor?: Executor;
   /** Hosts used to complete checks orphaned by runs that ended abnormally; none configured = no sweep. */
   reviewHosts?: ReviewHostRegistry;
+  /** Trackers used to complete issue status comments orphaned the same way; none configured = no sweep. */
+  issueTrackers?: IssueTrackerRegistry;
 }
 
 export interface ReconcilerHandle {
@@ -254,7 +261,14 @@ export function startReconciler(options: ReconcilerOptions = {}): ReconcilerHand
   const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
 
   const timer = setInterval(() => {
-    reconcileOnce(db, new Date(), heartbeatTimeoutMs, options.executor, options.reviewHosts).catch((err) => {
+    reconcileOnce(
+      db,
+      new Date(),
+      heartbeatTimeoutMs,
+      options.executor,
+      options.reviewHosts,
+      options.issueTrackers,
+    ).catch((err) => {
       reconcilerLog.error({ err }, "reconcile pass failed");
     });
   }, intervalMs);

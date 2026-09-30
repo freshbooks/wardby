@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
+import type { IssueTracker } from "../providers/issue-tracker/types.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
 
 interface FakeRun {
@@ -594,5 +595,34 @@ describe("reconcileOnce orphaned status comments", () => {
       body: expect.stringMatching(/^❌ Interrupted before it finished/),
     });
     expect(rows[0]).toMatchObject({ commentId: "9", completedAt: expect.any(Date) });
+  });
+});
+
+describe("reconcileOnce orphaned issue status comments", () => {
+  it("completes the Jira status comment of a run that ended without completing it", async () => {
+    const row = {
+      runId: "lost1",
+      provider: "jira",
+      issueKey: "PROJ-1",
+      commentId: "900",
+      visibilityRole: null,
+      completedAt: null as Date | null,
+    };
+    const runIssueStatus = {
+      findMany: vi.fn(async () => [{ run: { id: "lost1", status: "lost", finalText: null } }]),
+      findUnique: vi.fn(async () => ({ ...row })),
+      update: vi.fn(async ({ data }: any) => Object.assign(row, data)),
+    };
+    // No stale runs to reap; collectRunOutcome's child-run query finds none either.
+    const run = { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) };
+    const db = { run, runIssueStatus } as unknown as ReconcilerDb;
+    const tracker = { provider: "jira", editComment: vi.fn(async () => undefined) } as unknown as IssueTracker;
+
+    await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
+
+    expect(tracker.editComment).toHaveBeenCalledWith("PROJ-1", "900", {
+      markdown: expect.stringMatching(/^❌ Interrupted before it finished/),
+    });
+    expect(row.completedAt).toBeInstanceOf(Date);
   });
 });

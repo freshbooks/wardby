@@ -758,7 +758,7 @@ async function scheduler(args: string[]): Promise<void> {
   );
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config, repoAccess });
   await executor.launch?.();
-  const reconciler = startReconciler({ db: prisma, executor, reviewHosts });
+  const reconciler = startReconciler({ db: prisma, executor, reviewHosts, issueTrackers });
   const sched = startScheduler({
     executor,
     db: prisma,
