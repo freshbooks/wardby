@@ -48,6 +48,7 @@ import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
 import { runAgent } from "./core/runner.js";
 import { cancelRunOnSignal } from "./core/run-heartbeat.js";
+import { buildIssueTrackers } from "./providers/issue-tracker/index.js";
 import { buildReviewHosts } from "./providers/review-host/index.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { validateCronExpression } from "./core/cron.js";
@@ -587,7 +588,7 @@ async function run(name: string | undefined): Promise<void> {
   try {
     run = await runAgent(
       name,
-      { llm, engine, datastore, secrets, memory, reviewHosts: buildReviewHosts() },
+      { llm, engine, datastore, secrets, memory, reviewHosts: buildReviewHosts(), issueTrackers: buildIssueTrackers() },
       prisma,
       (delta) => {
         process.stdout.write(delta);
@@ -747,11 +748,12 @@ async function scheduler(args: string[]): Promise<void> {
   const datastore = buildDatastore(secrets);
   const memory = buildMemory();
   const reviewHosts = buildReviewHosts();
+  const issueTrackers = buildIssueTrackers();
   // One repository-access gate (and cache) for native repo_* calls and coding runs.
   const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });
   const nativeExecutor = buildExecutor(
     config,
-    { llm, engine, datastore, secrets, memory, reviewHosts, repoAccess },
+    { llm, engine, datastore, secrets, memory, reviewHosts, issueTrackers, repoAccess },
     prisma,
   );
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config, repoAccess });

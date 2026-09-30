@@ -11,6 +11,7 @@ import { authenticate, protectedResourceMetadata } from "../auth/resource-server
 import { McpError } from "../errors.js";
 import { handleWebhookIngress } from "../webhooks/ingress.js";
 import { handleGitHubEventIngress, type GitHubIngressDeps } from "../host-events/github-ingress.js";
+import { handleJiraEventIngress, type JiraIngressDeps } from "../host-events/jira-ingress.js";
 import { handleHostUserCallback, type HostUserCallbackDeps } from "../host-events/github-user-callback.js";
 import { canonicalUrl, HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } from "./http-limits.js";
 import { browserHandler } from "../auth/self-hosted/browser.js";
@@ -33,7 +34,7 @@ export interface StartHttpServerOptions {
   auth: { authProvider: AuthProvider; db: PrismaClient; providers: McpProviders };
   selfHosted?: SelfHostedAuthProvider;
   /** Code-review host webhooks; absent = the endpoints answer 404. */
-  hostEvents?: { github?: GitHubIngressDeps };
+  hostEvents?: { github?: GitHubIngressDeps; jira?: JiraIngressDeps };
   /** The host identity-link browser callback (link_host_account); absent = 404. */
   hostUserAuth?: { github?: HostUserCallbackDeps };
 }
@@ -181,6 +182,19 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
       }
       const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
       const result = await handleGitHubEventIngress({ headers, rawBody: rawBody ?? "" }, opts.hostEvents.github);
+      sendJson(res, result.status, result.body);
+      if (result.afterResponse) {
+        void result.afterResponse().catch((err: unknown) => httpLog.warn({ err }, "host event follow-up failed"));
+      }
+      return;
+    }
+    if (url.pathname === "/hosts/jira/events" && req.method === "POST") {
+      if (!opts.hostEvents?.jira) {
+        sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
+      const result = await handleJiraEventIngress({ headers, rawBody: rawBody ?? "" }, opts.hostEvents.jira);
       sendJson(res, result.status, result.body);
       if (result.afterResponse) {
         void result.afterResponse().catch((err: unknown) => httpLog.warn({ err }, "host event follow-up failed"));

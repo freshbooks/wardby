@@ -19,6 +19,7 @@ import {
   loadShutdownDrainSeconds,
   loadAuthConfig,
   loadGitHubEventConfig,
+  loadJiraConfig,
   loadGitHubVcsConfig,
 } from "../config/providers.js";
 import { prisma } from "../core/db.js";
@@ -29,6 +30,7 @@ import { PostgresDatastore } from "../providers/datastore/index.js";
 import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
+import { buildIssueTrackers } from "../providers/issue-tracker/index.js";
 import { buildHostUserAuthorizers, buildReviewHosts } from "../providers/review-host/index.js";
 import { createRepoAccessGate } from "../core/repo-access.js";
 import { userCallbackPath } from "../core/host-identity-links.js";
@@ -157,6 +159,7 @@ export function buildMcpProviders(): McpProviderComposition {
   const datastore = new PostgresDatastore(prisma, secrets);
   const memory = new PostgresAgentMemory(prisma);
   const reviewHosts = buildReviewHosts();
+  const issueTrackers = buildIssueTrackers();
   const hostUserAuthorizers = buildHostUserAuthorizers();
   // One gate (and one cache) for the whole process: set-time checks in the
   // MCP tools, repo_* calls in native runs, coding runs, and host events.
@@ -169,13 +172,33 @@ export function buildMcpProviders(): McpProviderComposition {
   // through the same composed executor everything else uses. There's no
   // way to hand the native executor a reference to its own wrapping
   // RoutingExecutor before that wrapper is constructed.
-  const nativeProviders: NativeRunProviders = { llm, engine, datastore, secrets, memory, reviewHosts, repoAccess };
+  const nativeProviders: NativeRunProviders = {
+    llm,
+    engine,
+    datastore,
+    secrets,
+    memory,
+    reviewHosts,
+    issueTrackers,
+    repoAccess,
+  };
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig, repoAccess });
   nativeProviders.executor = executor;
 
   return {
-    providers: { llm, engine, datastore, secrets, executor, memory, reviewHosts, hostUserAuthorizers, repoAccess },
+    providers: {
+      llm,
+      engine,
+      datastore,
+      secrets,
+      executor,
+      memory,
+      reviewHosts,
+      issueTrackers,
+      hostUserAuthorizers,
+      repoAccess,
+    },
   };
 }
 
@@ -269,7 +292,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const eventConfig = loadGitHubEventConfig();
   const githubConfig = loadGitHubVcsConfig();
   const reviewHosts = providers.reviewHosts;
-  const hostEvents =
+  const githubEvents =
     eventConfig.webhookSecret && reviewHosts?.github && githubConfig.appId && githubConfig.privateKey
       ? {
           github: {
@@ -289,7 +312,28 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
           },
         }
       : undefined;
-  mcpLog.info({ enabled: Boolean(hostEvents) }, "GitHub host events ingress");
+  mcpLog.info({ enabled: Boolean(githubEvents) }, "GitHub host events ingress");
+  const jiraConfig = loadJiraConfig();
+  const jiraEvents =
+    jiraConfig && providers.issueTrackers?.jira
+      ? {
+          db: prisma,
+          executor: providers.executor,
+          trackers: providers.issueTrackers,
+          webhookSecret: jiraConfig.webhookSecret,
+        }
+      : undefined;
+  mcpLog.info({ enabled: Boolean(jiraEvents) }, "Jira host events ingress");
+  if (jiraConfig?.tokenExpiresAt && jiraConfig.tokenExpiresAt.getTime() - Date.now() < 14 * 24 * 60 * 60 * 1000) {
+    mcpLog.warn(
+      { expiresAt: jiraConfig.tokenExpiresAt.toISOString() },
+      "the Jira API token expires within 14 days; rotate JIRA_API_TOKEN",
+    );
+  }
+  const hostEvents =
+    githubEvents || jiraEvents
+      ? { ...(githubEvents ? githubEvents : {}), ...(jiraEvents ? { jira: jiraEvents } : {}) }
+      : undefined;
   const githubAuthorizer = providers.hostUserAuthorizers?.github;
   const hostUserAuth = githubAuthorizer
     ? {

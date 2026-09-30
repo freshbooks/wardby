@@ -46,6 +46,7 @@ import { logger } from "./logger.js";
 import { loadCodingConcurrencyConfig } from "../config/providers.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import {
   REVIEW_HOST_TOOL_DEFS,
   REVIEW_HOST_TOOL_NAMES,
@@ -159,6 +160,8 @@ export type RunnerDb = Pick<
 export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "datastore" | "secrets" | "memory"> & {
   executor?: ProviderRegistry["executor"];
   reviewHosts?: ReviewHostRegistry;
+  /** Issue trackers (Jira); not yet consumed by native runs. */
+  issueTrackers?: IssueTrackerRegistry;
   /** Repository authorization for repo_* calls; built from reviewHosts when absent. */
   repoAccess?: RepoAccessGate;
 };
