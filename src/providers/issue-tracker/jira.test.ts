@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { JiraClient } from "./jira-client.js";
-import { agentFooter, JiraIssueTracker } from "./jira.js";
+import { JiraIssueTracker } from "./jira.js";
 import { IssueTrackerError } from "./types.js";
 
 const SITE = "https://your-site.atlassian.net";
@@ -69,7 +69,7 @@ describe("JiraIssueTracker", () => {
                   id: "11",
                   author: { accountId: "bot-1", displayName: "wardby" },
                   created: "t2",
-                  body: doc(`done\n${agentFooter("agent-7")}`),
+                  body: doc(`done\nwardby agent agent-7`),
                 },
               ],
             },
@@ -152,5 +152,40 @@ describe("JiraIssueTracker", () => {
     });
     const { tracker: t3 } = fake(() => undefined);
     await expect(t3.getIssue("PROJ-1", { maxComments: 5, agentMarker: "a" })).rejects.toBeInstanceOf(IssueTrackerError);
+  });
+
+  it("checks ownership against the full text of long comments and matches the footer exactly", async () => {
+    const long = `${"x".repeat(5000)}\nwardby agent agent-7`;
+    const { tracker } = fake((c) => {
+      if (c.path === "/rest/api/3/myself") return json({ accountId: "bot-1" });
+      if (c.path.startsWith("/rest/api/3/issue/PROJ-1/comment/")) {
+        return c.path.endsWith("/9")
+          ? json({ id: "9", author: { accountId: "bot-1" }, body: doc(long) })
+          : json({}, 404);
+      }
+      if (c.path.startsWith("/rest/api/3/issue/PROJ-1?")) {
+        const bot = { accountId: "bot-1", displayName: "wardby" };
+        return json({
+          key: "PROJ-1",
+          fields: {
+            comment: {
+              total: 2,
+              comments: [
+                { id: "1", author: bot, created: "t", body: doc(long) },
+                { id: "2", author: bot, created: "t", body: doc("hi\nwardby agent agent-70") },
+              ],
+            },
+          },
+        });
+      }
+      return undefined;
+    });
+    const issue = await tracker.getIssue("PROJ-1", { maxComments: 5, agentMarker: "agent-7" });
+    expect(issue.comments.map((c) => c.byThisAgent)).toEqual([true, false]);
+    expect(issue.comments[0].body.length).toBeLessThan(4100);
+    const read = await tracker.readComment("PROJ-1", "9");
+    expect(read?.authorId).toBe("bot-1");
+    expect(read?.body).toBe(long);
+    expect(await tracker.readComment("PROJ-1", "404")).toBeNull();
   });
 });

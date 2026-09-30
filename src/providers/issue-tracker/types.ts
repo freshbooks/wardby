@@ -60,7 +60,7 @@ export interface IssueTracker {
   matchesJql(key: string, jql: string): Promise<boolean>;
   comment(key: string, input: { markdown: string; visibilityRole?: string }): Promise<{ id: string; url: string }>;
   editComment(key: string, commentId: string, input: { markdown: string }): Promise<void>;
-  /** The comment's author accountId and plain text, or null when it doesn't exist. */
+  /** The comment's author accountId and plain text (uncapped: only for ownership checks, never shown to a model), or null when it doesn't exist. */
   readComment(key: string, commentId: string): Promise<{ authorId: string | null; body: string } | null>;
   issueUrl(key: string): string;
 }

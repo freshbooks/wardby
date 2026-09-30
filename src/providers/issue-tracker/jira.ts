@@ -21,6 +21,12 @@ const MAX_COMMENT = 4_000;
 
 export const agentFooter = (agentId: string): string => `_wardby agent ${agentId}_`;
 
+/** Whether rendered comment text ends with this agent's footer (as adfToText renders it: no markdown underscores). */
+export const hasAgentFooter = (text: string, agentId: string): boolean => {
+  const last = text.trimEnd().split("\n").pop() ?? "";
+  return last.trim() === `wardby agent ${agentId}`;
+};
+
 type Json = Record<string, unknown>;
 const obj = (v: unknown): Json => (v && typeof v === "object" && !Array.isArray(v) ? (v as Json) : {});
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -60,16 +66,16 @@ export class JiraIssueTracker implements IssueTracker {
     const commentBlock = obj(f.comment);
     const all = Array.isArray(commentBlock.comments) ? commentBlock.comments.map(obj) : [];
     const recent = all.slice(-opts.maxComments);
-    const footer = agentFooter(opts.agentMarker).replace(/_/g, "");
     const comments: IssueCommentView[] = recent.map((c) => {
       const author = person(c.author);
+      const full = adfToText(c.body, Infinity);
       const body = adfToText(c.body, MAX_COMMENT);
       return {
         id: str(c.id),
         author,
         created: str(c.created),
         body,
-        byThisAgent: author?.accountId === bot && body.includes(footer),
+        byThisAgent: author?.accountId === bot && hasAgentFooter(full, opts.agentMarker),
       };
     });
     const total = typeof commentBlock.total === "number" ? commentBlock.total : all.length;
@@ -136,7 +142,7 @@ export class JiraIssueTracker implements IssueTracker {
   async readComment(key: string, commentId: string): Promise<{ authorId: string | null; body: string } | null> {
     try {
       const c = await this.client.request<Json>("GET", `/rest/api/3/issue/${key}/comment/${commentId}`);
-      return { authorId: person(c.author)?.accountId ?? null, body: adfToText(c.body, MAX_COMMENT) };
+      return { authorId: person(c.author)?.accountId ?? null, body: adfToText(c.body, Infinity) };
     } catch (err) {
       if (err instanceof IssueTrackerError && err.code === "tracker_not_found") return null;
       throw err;
