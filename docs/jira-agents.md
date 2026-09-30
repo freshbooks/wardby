@@ -28,10 +28,12 @@ Phase-1 agents read and comment. They do not change status, fields, or assignees
 ## Why a service account
 
 Everything an agent does in Jira is attributed to the account whose API token
-wardby holds. wardby therefore accepts only an Atlassian
+wardby holds. wardby supports only Atlassian
 [service account](https://support.atlassian.com/user-management/docs/understand-service-accounts/)
-token: a personal token (or `WARDBY_JIRA_API_EMAIL`) is refused at startup, so
-comments can never appear to come from a person. Service accounts do not use a
+tokens used through the API gateway. The email-plus-token (Basic) setup is
+refused at startup (`WARDBY_JIRA_API_EMAIL`). Do not put a personal token in
+`WARDBY_JIRA_API_TOKEN`: everything the agent does would be attributed to that
+person. Check the `Jira acting as` startup line to confirm the account. Service accounts do not use a
 Jira user seat; see Atlassian's page for how many your plan includes.
 
 ## 1. Create the service account
@@ -44,7 +46,9 @@ In Atlassian Administration go to **Directory > Service accounts** and select
 Then grant it access to Jira and give it a project role in every project
 agents will work in, with these project permissions: **Browse Projects**,
 **Add Comments**, **Edit Own Comments**. Grant nothing more: wardby never needs
-to administer projects.
+to administer projects. Grant these only in the projects agents should work in,
+never organization-wide: the service account's Jira permissions are the outer
+boundary of what any linked agent can read or change.
 
 ## 2. Create its API token
 
@@ -131,6 +135,11 @@ Example arguments:
 | `jqlFilter`             | Optional. Only issues matching this JQL trigger the agent. If wardby cannot evaluate it, the event is skipped.                                           |
 | `commentVisibilityRole` | Optional. Restrict the agent's comments to a project role.                                                                                               |
 
+The tool names `jira_get_issue`, `jira_search`, `jira_comment` and
+`jira_edit_own_comment` are reserved: a user-defined tool with one of these
+names on an agent conflicts once that agent is linked to a Jira project, so
+rename it first.
+
 Re-linking a project replaces the whole link: send the full desired state.
 `unlink_issue_project` removes a link and `list_issue_projects` shows them.
 
@@ -154,6 +163,9 @@ comment. To use `assigned`, they assign the issue to it.
 - Agents cannot @-mention or notify people: `@` in a comment body is plain text.
 - The token and webhook secret stay in the wardby server; agents and sandboxes
   never see them.
+- wardby confines each agent to its linked projects, but JQL functions can
+  still reveal facts about other projects the service account can browse, so
+  keep its permissions to the projects you intend.
 - Agents can only touch projects they are linked to, and can only edit comments
   they posted.
 
