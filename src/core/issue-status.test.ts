@@ -83,6 +83,30 @@ describe("completeIssueStatus after the agent was unlinked", () => {
     expect((d as any).runIssueStatus.update).toHaveBeenCalled();
   });
 
+  it("never posts a new comment into an unlinked project; it completes the row", async () => {
+    const t = tracker();
+    const d = db({ ...row, commentId: null }, { id: "r1", agentId: "a1" }, {}, null);
+    await completeIssueStatus(d, finished, { jira: t }, { postIfMissing: true });
+    expect(t.comment).not.toHaveBeenCalled();
+    expect(t.editComment).not.toHaveBeenCalled();
+    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
+      where: { runId: "r1" },
+      data: { commentId: null, completedAt: expect.any(Date) },
+    });
+  });
+
+  it.each([
+    ["the run row is missing", null],
+    ["the run has no agent", { id: "r1", agentId: null }],
+  ])("treats %s as unlinked and leaks no reply", async (_n, runRow) => {
+    const t = tracker();
+    const d = db(row, runRow as never, {}, { commentVisibilityRole: null });
+    await completeIssueStatus(d, finished, { jira: t });
+    const md = (t.editComment as any).mock.calls[0][2].markdown as string;
+    expect(md).toContain("no longer linked to PROJ");
+    expect(md).not.toContain("SECRET REPLY");
+  });
+
   it("posts a new comment with the link's current visibility role", async () => {
     const t = tracker();
     const d = db(

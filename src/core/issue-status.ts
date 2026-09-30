@@ -90,11 +90,12 @@ async function currentLink(
   db: IssueStatusDb,
   runId: string,
   issueKey: string,
+  provider: string,
 ): Promise<{ commentVisibilityRole: string | null } | null> {
   const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
   if (!run?.agentId) return null;
   return db.agentIssueProject.findUnique({
-    where: { agentId_provider_projectKey: { agentId: run.agentId, provider: "jira", projectKey: projectOf(issueKey) } },
+    where: { agentId_provider_projectKey: { agentId: run.agentId, provider, projectKey: projectOf(issueKey) } },
     select: { commentVisibilityRole: true },
   });
 }
@@ -115,7 +116,7 @@ export async function completeIssueStatus(
     const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
     const spend = await spendLine(db, run.id);
     // The link may have been removed since the run started: report status only, never the agent's reply.
-    const link = await currentLink(db, run.id, status.issueKey);
+    const link = await currentLink(db, run.id, status.issueKey, status.provider);
     const project = projectOf(status.issueKey);
     const body = link
       ? outcomeBody(run, "", pullRequests, failedChildren, { budgetSentence, noPullRequestText: "Done." })
@@ -123,7 +124,7 @@ export async function completeIssueStatus(
     const markdown = toJiraMarkdown(withSpend(body, spend));
     let commentId = status.commentId;
     if (commentId) await tracker.editComment(status.issueKey, commentId, { markdown });
-    else {
+    else if (link) {
       commentId = (
         await tracker.comment(status.issueKey, {
           markdown,
@@ -131,6 +132,7 @@ export async function completeIssueStatus(
         })
       ).id;
     }
+    // Unlinked with no status comment yet: complete the row without posting; never create content in an unlinked project.
     await db.runIssueStatus.update({ where: { runId: run.id }, data: { commentId, completedAt: new Date() } });
   } catch (err) {
     log.warn({ err, runId: run.id }, "could not complete the issue status comment");
