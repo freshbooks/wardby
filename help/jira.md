@@ -77,6 +77,9 @@ Two recipes, triage on create and scheduled JQL sweeps, are in the full guide.
 
 A Jira-linked native agent can delegate to a coding sub-agent (attach it with
 `attach_subagent`; its `codingProfile.repository` is `your-org/your-repo`).
+Attach the coding agent directly to the Jira-linked agent: a coding agent
+further down a delegation chain still gets `[PROJ-123]` in its pull request
+title, but no web link, status moves or follow-up hint.
 Link the native agent with `triggers: ["transitioned"]`,
 `triggerStatuses: ["Ready for AI"]`, `allowedTransitions: ["In Progress"]` and,
 optionally, `onPullRequestOpened: "In Review"` and

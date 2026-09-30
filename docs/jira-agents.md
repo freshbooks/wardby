@@ -284,10 +284,15 @@ coding sub-agent that does the work in a repository.
 
 1. Create the coding agent (kind `coding`) with `codingProfile.repository` set
    to `your-org/your-repo`. The repository must be authorized like any coding
-   agent's (see the coding agent docs).
+   agent's (see [`coding-agent-setup.md`](coding-agent-setup.md)).
 2. Create the native agent and attach the coding agent with `attach_subagent`
    (`parentAgentId`, `childAgentId`, optional `boundName`). The native agent
-   then gets a `delegate_to_<boundName>` tool.
+   then gets a `delegate_to_<boundName>` tool. Attach the coding agent
+   directly to the Jira-linked agent: only pull requests from its direct
+   coding sub-runs are linked. If the coding agent sits deeper (the Jira-linked
+   agent delegates to another agent that delegates to it), its pull request
+   title still starts with the issue key, but the issue gets no web link, no
+   status moves and no follow-up hint.
 3. Link the native agent to the project:
 
 ```json
@@ -329,8 +334,10 @@ What happens:
   only when the Jira and GitHub integration is installed on your site; the
   title key is what lets it match. Adding the link needs the service account's
   Link issues permission.
-- **Status moves.** When the pull request opens, the issue moves to
-  `onPullRequestOpened`; when it merges, to `onPullRequestMerged`. These are
+- **Status moves.** When the Jira-triggered run finishes and reports a newly
+  opened pull request, the issue moves to `onPullRequestOpened` (a follow-up
+  run that pushes to the same pull request does not move it again); when the
+  pull request merges, to `onPullRequestMerged`. These are
   control-plane moves that do not go through the model and are not limited by
   `allowedTransitions`. Both need a `write` link, are optional (omit one for no
   move), and their names are matched in the service account's language. If Jira
@@ -423,7 +430,10 @@ secret, change it on the webhook and in `WARDBY_JIRA_WEBHOOK_SECRET`, and restar
 - **401 or 403 from Jira in tool results:** the token expired, lacks scopes, or
   the service account has no role in that project, or it lacks Transition
   issues, Edit issues or Link issues for the change being made.
-- **The issue does not move or get a comment after a merge:** check that the GitHub App delivers `pull_request` events, that the link has `write` access and `onPullRequestMerged`, and that the service account may make that transition and comment.
+- **The issue does not move or get a comment after a merge:** check that the
+  GitHub App delivers `pull_request` events, that the link has `write` access
+  and `onPullRequestMerged`, and that the service account may make that
+  transition and comment.
 - **Webhook answers 503 `jira_personal_account`:** the token belongs to a
   person; replace it with a service-account token.
 - **Deliveries never start runs after a clock change or long outage:** deliveries
