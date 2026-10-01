@@ -12,6 +12,10 @@ on:
 
 jobs:
   claude-review:
+    # Dependabot PRs can't be reviewed here: claude-code-action refuses bot-initiated runs, and a
+    # Dependabot-triggered run only gets Dependabot secrets, so CLAUDE_CODE_OAUTH_TOKEN is empty.
+    # Skip rather than fail; the security checks still run on every dependency bump.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     # Optional: Filter by PR author
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||
