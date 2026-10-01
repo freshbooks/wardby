@@ -302,6 +302,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
             executor: providers.executor,
             hosts: reviewHosts,
             repoAccess: providers.repoAccess ?? createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
+            ...(providers.issueTrackers ? { issueTrackers: providers.issueTrackers } : {}),
             webhookSecret: eventConfig.webhookSecret,
             appIdentity: (() => {
               const client = new GitHubAppClient({

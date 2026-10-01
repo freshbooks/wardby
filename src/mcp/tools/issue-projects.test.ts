@@ -296,4 +296,61 @@ describe("issue project tools", () => {
     expect(d).toMatch(/target status name/i);
     expect(d).toMatch(/allowedLinkTypes/);
   });
+
+  it("stores, lists, and clears the PR statuses (trimmed)", async () => {
+    const { client, rows } = await setup([{ ...NATIVE, ownerId: "admin1" }]);
+    const r = await call(client, "link_issue_project", {
+      agentId: "a1",
+      projectKey: "PROJ",
+      access: "write",
+      onPullRequestOpened: " In Review ",
+      onPullRequestMerged: "Done",
+    });
+    expect(r.isError).toBeFalsy();
+    expect(rows[0]).toMatchObject({ onPullRequestOpened: "In Review", onPullRequestMerged: "Done" });
+    const listed = JSON.parse(text(await call(client, "list_issue_projects", { agentId: "a1" }))) as {
+      issueProjects: { onPullRequestOpened: string | null; onPullRequestMerged: string | null }[];
+    };
+    expect(listed.issueProjects[0]).toMatchObject({ onPullRequestOpened: "In Review", onPullRequestMerged: "Done" });
+    await call(client, "link_issue_project", { agentId: "a1", projectKey: "PROJ", access: "write" });
+    expect(rows[0]).toMatchObject({ onPullRequestOpened: null, onPullRequestMerged: null });
+  });
+
+  it.each([
+    ["a blank opened status", { onPullRequestOpened: "   " }],
+    ["an over-long merged status", { onPullRequestMerged: "x".repeat(101) }],
+  ])("rejects %s", async (_n, extra) => {
+    const { client, rows } = await setup([NATIVE]);
+    const r = await call(client, "link_issue_project", {
+      agentId: "a1",
+      projectKey: "PROJ",
+      access: "write",
+      ...extra,
+    });
+    expect(r.isError).toBeTruthy();
+    expect(rows).toHaveLength(0);
+  });
+
+  it("rejects PR statuses on a read link", async () => {
+    const { client, rows } = await setup([NATIVE]);
+    for (const extra of [{ onPullRequestOpened: "In Review" }, { onPullRequestMerged: "Done" }]) {
+      const r = await call(client, "link_issue_project", {
+        agentId: "a1",
+        projectKey: "PROJ",
+        access: "read",
+        ...extra,
+      });
+      expect(r.isError).toBeTruthy();
+      expect(text(r)).toMatch(/write access/);
+    }
+    expect(rows).toHaveLength(0);
+  });
+
+  it("describes the PR statuses as control-plane moves", async () => {
+    const { client } = await setup([NATIVE]);
+    const { tools } = await client.listTools();
+    const d = tools.find((t) => t.name === "link_issue_project")!.description!;
+    expect(d).toMatch(/onPullRequestOpened/);
+    expect(d).toMatch(/not gated by allowedTransitions/);
+  });
 });

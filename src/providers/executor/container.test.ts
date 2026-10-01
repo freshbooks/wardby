@@ -724,6 +724,49 @@ describe("ContainerExecutor", () => {
     ]);
   });
 
+  describe("originating issue on the pull request", () => {
+    const issueUrl = (provider: string, key: string) =>
+      provider === "jira" ? `https://example.atlassian.net/browse/${key}` : undefined;
+
+    it("passes the run's issue key and url to finalizeChanges", async () => {
+      const created = await harness({ issueProvider: "jira", issueKey: "PROJ-123" }, IMAGE, undefined, undefined, {
+        issueUrl,
+      });
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.issue).toEqual({
+        key: "PROJ-123",
+        url: "https://example.atlassian.net/browse/PROJ-123",
+        trackerName: "Jira",
+      });
+    });
+
+    it("keeps the key but omits the url when the tracker is unconfigured or the url is not https", async () => {
+      for (const extra of [{}, { issueUrl: () => "http://example.atlassian.net/browse/PROJ-123" }]) {
+        const created = await harness(
+          { issueProvider: "jira", issueKey: "PROJ-123" },
+          IMAGE,
+          undefined,
+          undefined,
+          extra,
+        );
+        await created.executor.start("run-1");
+        expect(created.vcs.lastFinalizeDetails?.issue).toEqual({ key: "PROJ-123", trackerName: "Jira" });
+      }
+    });
+
+    it("omits the issue for a malformed key or a run without one", async () => {
+      for (const overrides of [
+        { issueProvider: "jira", issueKey: "proj-1" },
+        { issueProvider: null, issueKey: null },
+        {},
+      ]) {
+        const created = await harness(overrides, IMAGE, undefined, undefined, { issueUrl });
+        await created.executor.start("run-1");
+        expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("issue");
+      }
+    });
+  });
+
   describe("continuation status notifications (notifyContinuationStarted/Finished lifecycle hooks)", () => {
     it("notifies started once workspace is obtained, and finished with 'succeeded' on the success path", async () => {
       const created = await harness();

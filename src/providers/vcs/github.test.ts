@@ -1,7 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
 import { decodeJwt } from "jose";
 import { describe, expect, it, vi } from "vitest";
-import { GitHubAppClient, pullRequestBody, type PullRequestInput } from "./github.js";
+import { ISSUE_KEY } from "../issue-tracker/types.js";
+import { GitHubAppClient, PR_ISSUE_KEY, pullRequestBody, pullRequestTitle, type PullRequestInput } from "./github.js";
 
 const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 const NOW = new Date("2026-09-06T12:00:00.000Z");
@@ -773,5 +774,89 @@ describe("pullRequestBody packages section", () => {
     const body = pullRequestBody(input);
     expect(body).toContain("Did the thing.");
     expect(body).not.toContain("<details>");
+  });
+});
+
+describe("pull request issue reference", () => {
+  const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
+  const issue = { key: "PROJ-123", url: "https://example.atlassian.net/browse/PROJ-123", trackerName: "Jira" };
+
+  it("names the tracker only when one is given", () => {
+    const body = pullRequestBody({ ...base, issue: { key: issue.key, url: issue.url } });
+    expect(body.split("\n\n")[1]).toBe("Resolves issue [PROJ-123](https://example.atlassian.net/browse/PROJ-123)");
+  });
+
+  it("drops a tracker name that is not a plain word or two", () => {
+    for (const trackerName of ["", "  ", "[x](http://evil)", "Jira\n# x", "a".repeat(41)]) {
+      const body = pullRequestBody({ ...base, issue: { ...issue, trackerName } });
+      expect(body.split("\n\n")[1]).toBe("Resolves issue [PROJ-123](https://example.atlassian.net/browse/PROJ-123)");
+    }
+  });
+
+  it("keeps its key pattern in step with the issue trackers' ISSUE_KEY", () => {
+    expect(PR_ISSUE_KEY.source).toBe(ISSUE_KEY.source);
+    expect(PR_ISSUE_KEY.flags).toBe(ISSUE_KEY.flags);
+  });
+
+  it("prefixes the title with the key, keeping the model tag after it", () => {
+    expect(pullRequestTitle({ ...base, issue })).toBe("[PROJ-123] Wardby run run-1");
+    expect(pullRequestTitle({ ...base, tag: "fix-login", issue })).toBe("[PROJ-123] [fix-login] Wardby run run-1");
+    expect(pullRequestTitle({ ...base, tag: "fix-login" })).toBe("[fix-login] Wardby run run-1");
+  });
+
+  it("puts the issue link first, right after the hidden run marker", () => {
+    const body = pullRequestBody({ ...base, summary: "Did it.", issue });
+    expect(body.split("\n\n").slice(0, 3)).toEqual([
+      "<!-- wardby:run-1 -->",
+      "Resolves Jira issue [PROJ-123](https://example.atlassian.net/browse/PROJ-123)",
+      "Did it.",
+    ]);
+    expect(pullRequestBody({ ...base, summary: "Did it." })).not.toContain("Resolves");
+  });
+
+  it("drops a malformed key from both title and body", () => {
+    for (const key of ["proj-1", "PROJ-0", "PROJ-1\n# x", "[PROJ-1]", "PROJ", "a b-1"]) {
+      expect(pullRequestTitle({ ...base, issue: { key, url: issue.url } })).toBe("Wardby run run-1");
+      expect(pullRequestBody({ ...base, issue: { key, url: issue.url } })).not.toContain("Resolves");
+    }
+  });
+
+  it("keeps the title prefix but omits the link when the url is missing or not https", () => {
+    for (const url of [
+      undefined,
+      "http://example.atlassian.net/browse/PROJ-123",
+      "javascript:alert(1)",
+      "https://x/a b",
+    ]) {
+      const input = { ...base, issue: { key: "PROJ-123", url } };
+      expect(pullRequestTitle(input)).toBe("[PROJ-123] Wardby run run-1");
+      expect(pullRequestBody(input)).not.toContain("Resolves");
+    }
+  });
+
+  it("still re-finds the run's existing PR (lookup keys on the run marker, not the title)", async () => {
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) return tokenResponse();
+      if (url.includes("/pulls?")) {
+        return json([
+          {
+            number: 7,
+            html_url: "https://github.com/openai/example/pull/7",
+            draft: true,
+            title: "Something a person renamed",
+            body: "<!-- wardby:run-1 -->\n\nResolves Jira issue [PROJ-123](https://example.atlassian.net/browse/PROJ-123)",
+          },
+        ]);
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url} ${init?.method}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    await expect(client.createOrFindDraftPullRequest({ ...base, issue })).resolves.toMatchObject({ number: 7 });
+    await expect(
+      client.createOrFindDraftPullRequest({ ...base, issue: { key: "OTHER-9", url: issue.url } }),
+    ).resolves.toMatchObject({ number: 7 });
   });
 });

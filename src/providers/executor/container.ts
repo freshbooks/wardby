@@ -46,6 +46,7 @@ import type { ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { ContinuationOutcome, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
+import { ISSUE_KEY, ISSUE_TRACKER_NAMES, type IssueTrackerProvider } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 
 const containerLog = logger.child({ module: "container-executor" });
@@ -104,6 +105,9 @@ export interface ContainerRunSnapshot {
   collectExclude: unknown;
   /** Revision-in-place: set when this run continues another run's branch/PR. See preflight(). */
   rootCodingRunId: string | null;
+  /** The issue that triggered this run (CodingRun.issueProvider/issueKey); null when none. */
+  issueProvider?: string | null;
+  issueKey?: string | null;
   budgetUsd: number;
   /** The agent's own per-run budget; `budgetUsd` is less when its budget group had less left. */
   agentBudgetUsd?: number;
@@ -189,6 +193,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       protectedPaths: row.codingRun.protectedPaths,
       collectExclude: row.codingRun.collectExclude,
       rootCodingRunId: row.codingRun.rootCodingRunId,
+      issueProvider: row.codingRun.issueProvider,
+      issueKey: row.codingRun.issueKey,
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       agentBudgetUsd: Number(row.agent.budgetUsd),
       budgetGroupName: row.agent.budgetGroup?.name ?? null,
@@ -444,6 +450,8 @@ export interface ContainerExecutorOptions {
    * reporting failure must never fail the run itself.
    */
   registryReport?: (runId: string) => Promise<RegistryReport>;
+  /** Browse URL for an issue of a tracker provider (composition wires the issue-tracker registry); undefined when unconfigured. */
+  issueUrl?: (provider: string, key: string) => string | undefined;
   /**
    * Repository authorization: every run is checked, before its workspace is
    * prepared, against the agent owner's current GitHub access (or a recorded
@@ -770,6 +778,28 @@ export class ContainerExecutor implements Executor {
     if (!decision.ok) throw new RepoAccessError(`repo_access_${decision.reason}`);
   }
 
+  /** The originating issue for the PR title/body: control-plane data from the CodingRun row, key re-validated. */
+  private issueFor(run: ContainerRunSnapshot): { issue?: { key: string; url?: string; trackerName?: string } } {
+    const { issueProvider, issueKey } = run;
+    if (!issueProvider || !issueKey || !ISSUE_KEY.test(issueKey)) return {};
+    let url: string | undefined;
+    try {
+      url = this.options.issueUrl?.(issueProvider, issueKey);
+    } catch {
+      url = undefined;
+    }
+    const trackerName = Object.hasOwn(ISSUE_TRACKER_NAMES, issueProvider)
+      ? ISSUE_TRACKER_NAMES[issueProvider as IssueTrackerProvider]
+      : undefined;
+    return {
+      issue: {
+        key: issueKey,
+        ...(url?.startsWith("https://") ? { url } : {}),
+        ...(trackerName ? { trackerName } : {}),
+      },
+    };
+  }
+
   private preflight(run: ContainerRunSnapshot): VcsPrepareInput {
     try {
       if (run.status !== "pending" && run.status !== "running") throw new Error("coding_run_status_invalid");
@@ -910,6 +940,7 @@ export class ContainerExecutor implements Executor {
         tests: output.tests,
         tag: output.tag,
         ...report,
+        ...this.issueFor(current),
       });
       const result = this.resultFor(output, current, finalized.outcome, finalized);
       await this.options.store.complete(run.runId, "succeeded", result);

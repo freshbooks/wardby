@@ -464,6 +464,23 @@ describe("JiraIssueTracker", () => {
       });
     });
 
+    it("posts a remote link with its globalId", async () => {
+      const { tracker, calls } = fake((c) =>
+        c.method === "POST" && c.path === "/rest/api/3/issue/PROJ-1/remotelink"
+          ? json({ id: 10, self: "https://x/remotelink/10" }, 201)
+          : undefined,
+      );
+      await tracker.addRemoteLink("PROJ-1", {
+        globalId: "wardby:pr:github:o/r#4",
+        url: "https://github.com/o/r/pull/4",
+        title: "o/r#4",
+      });
+      expect(calls[0].body).toEqual({
+        globalId: "wardby:pr:github:o/r#4",
+        object: { url: "https://github.com/o/r/pull/4", title: "o/r#4" },
+      });
+    });
+
     it("reads a property's value, null on 404", async () => {
       const { tracker, calls } = fake((c) => {
         if (c.path === "/rest/api/3/issue/PROJ-1/properties/wardby.state")

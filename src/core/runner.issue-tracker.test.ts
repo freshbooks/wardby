@@ -60,6 +60,7 @@ function fakeTracker(): IssueTracker {
     editFields: vi.fn(),
     linkTypes: vi.fn(),
     linkIssues: vi.fn(),
+    addRemoteLink: vi.fn(),
     getProperty: vi.fn(),
     setProperty: vi.fn(),
     getIssue: vi.fn(),

@@ -15,6 +15,10 @@ interface FakeBudget {
   group?: Record<string, any>;
   /** Rows the group-spend query sees (agentId, status, costUsd, startedAt, heartbeatAt, codingRun). */
   groupRuns?: Record<string, any>[];
+  /** Existing runs by id (for walking a parent chain): { id: { parentRunId } }. */
+  ancestors?: Record<string, { parentRunId: string | null }>;
+  /** Runs that have a RunIssueStatus: { runId: issueKey }. */
+  issueRuns?: Record<string, string>;
 }
 
 function fakeDb(
@@ -32,6 +36,7 @@ function fakeDb(
   const db: any = {
     agent: {
       findUnique: async ({ where }: any) => (where.id === agent.id ? agent : null),
+      findUniqueOrThrow: async () => agent,
       update: async () => agent,
     },
     run: {
@@ -40,10 +45,25 @@ function fakeDb(
         runs.push(row);
         return row;
       },
+      findUnique: async ({ where }: any) => {
+        const row = runs.find((r) => r.id === where.id) ?? (budget.ancestors ?? {})[where.id];
+        return row ? { parentRunId: row.parentRunId ?? null } : null;
+      },
+      findUniqueOrThrow: async ({ where }: any) => {
+        const row = (budget.ancestors ?? {})[where.id];
+        if (!row) throw new Error(`no run ${where.id}`);
+        return { id: where.id, agentId: agent.id, startedAt: new Date(0), costUsd: 0, ...row };
+      },
       findMany: async ({ where }: any) =>
-        (budget.groupRuns ?? []).filter(
-          (r) => where.agentId?.in.includes(r.agentId) && r.startedAt >= where.startedAt.gte,
-        ),
+        where.parentRunId
+          ? Object.entries(budget.ancestors ?? {})
+              .filter(([, r]) => where.parentRunId.in.includes(r.parentRunId))
+              .map(([id]) => ({ id }))
+          : where.id?.in
+            ? where.id.in.map(() => ({ costUsd: 0 }))
+            : (budget.groupRuns ?? []).filter(
+                (r) => where.agentId?.in.includes(r.agentId) && r.startedAt >= where.startedAt.gte,
+              ),
       updateMany: async ({ where, data }: any) => {
         let count = 0;
         for (const run of runs) {
@@ -52,6 +72,12 @@ function fakeDb(
           count += 1;
         }
         return { count };
+      },
+    },
+    runIssueStatus: {
+      findUnique: async ({ where }: any) => {
+        const key = (budget.issueRuns ?? {})[where.runId];
+        return key ? { provider: "jira", issueKey: key } : null;
       },
     },
     codingRun: {
@@ -629,6 +655,78 @@ describe("dispatchRun", () => {
     await vi.waitFor(() => expect(state.runs[0].status).toBe("failed"));
     expect(state.runs[0].id).toBe(result?.run.id);
     expect(state.runs[0].error).toBe("launcher unavailable");
+  });
+
+  describe("issue inheritance", () => {
+    function codingAgent() {
+      return {
+        ...nativeAgent(),
+        kind: "coding",
+        budgetUsd: 1.25,
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/wardby",
+          baseRef: "main",
+          defaultTask: "Do it",
+          timeoutSec: 900,
+          protectedPaths: [],
+        },
+      };
+    }
+    const executor = { async start() {}, async stop() {} };
+
+    it("a child of an issue-triggered run gets the issue", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [], { ancestors: { parent: { parentRunId: null } }, issueRuns: { parent: "OPS-7" } });
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, parentRunId: "parent" });
+      expect(state.codingRuns[0]).toMatchObject({ issueProvider: "jira", issueKey: "OPS-7" });
+    });
+
+    it("a grandchild inherits through the chain", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [], {
+        ancestors: { mid: { parentRunId: "top" }, top: { parentRunId: null } },
+        issueRuns: { top: "OPS-8" },
+      });
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, parentRunId: "mid" });
+      expect(state.codingRuns[0]).toMatchObject({ issueProvider: "jira", issueKey: "OPS-8" });
+    });
+
+    it("a tree with no issue leaves it null", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [], { ancestors: { mid: { parentRunId: "top" }, top: { parentRunId: null } } });
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, parentRunId: "mid" });
+      expect(state.codingRuns[0]).toMatchObject({ issueProvider: null, issueKey: null });
+    });
+
+    it("a continuation keeps the prior run's issue when its own tree has none", async () => {
+      const agent = codingAgent();
+      const prior = {
+        runId: "root_run",
+        repository: "openai/wardby",
+        baseRef: "main",
+        headRef: "wardby/run-root_run",
+        rootCodingRunId: null,
+        issueProvider: "jira",
+        issueKey: "OPS-9",
+        result: {
+          schemaVersion: 1,
+          outcome: "pull_request_opened",
+          repository: "openai/wardby",
+          baseRef: "main",
+          headRef: "wardby/run-root_run",
+          commitSha: "a".repeat(40),
+          pullRequestUrl: "https://github.com/openai/wardby/pull/22",
+          pullRequestNumber: 22,
+          summary: "Opened the PR",
+          tests: [],
+          usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+        },
+      };
+      const state = fakeDb(agent, [prior]);
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, continuesCodingRunId: "root_run" });
+      expect(state.codingRuns.at(-1)).toMatchObject({ issueProvider: "jira", issueKey: "OPS-9" });
+    });
   });
 
   describe("revision-in-place (continuesCodingRunId)", () => {

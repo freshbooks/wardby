@@ -543,6 +543,7 @@ export class GitVcsProvider implements VcsProvider {
       tag: details?.tag,
       packages: details?.packages,
       packageRefusals: details?.packageRefusals,
+      ...(details?.issue ? { issue: details.issue } : {}),
     });
     return {
       outcome: prepared.continuation ? "pull_request_updated" : "pull_request_opened",

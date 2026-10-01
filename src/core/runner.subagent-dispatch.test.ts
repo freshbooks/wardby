@@ -154,6 +154,7 @@ function fakeDb(
         return [];
       }) as any,
     },
+    runIssueStatus: { findUnique: (async () => null) as any },
     agentTool: { findMany: (async () => []) as any },
     agentSecret: { findFirst: (async () => null) as any },
     agentDatastore: { findFirst: (async () => null) as any },

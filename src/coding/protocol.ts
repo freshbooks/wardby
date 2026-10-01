@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 export const CODING_PROTOCOL_VERSION = 1 as const;
+/** The code host every coding run's repository and pull request live on (see pullRequestUrlSchema); the one place to change when another is added. */
+export const CODING_CODE_PROVIDER = "github";
 export const MAX_CODING_ARTIFACT_BYTES = 64 * 1024;
 export const MAX_CODING_TASK_BYTES = 16 * 1024;
 export const MAX_CODING_SUMMARY_BYTES = 8 * 1024;
