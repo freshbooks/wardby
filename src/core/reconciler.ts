@@ -49,7 +49,10 @@ import { closeOrphanedIssueStatuses } from "./issue-status.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
 
-export type ReconcilerDb = Pick<PrismaClient, "run" | "runHostCheck" | "runHostStatus" | "runIssueStatus">;
+export type ReconcilerDb = Pick<
+  PrismaClient,
+  "run" | "runHostCheck" | "runHostStatus" | "runIssueStatus" | "agentIssueProject"
+>;
 
 /**
  * How long after a run finishes before its still-open check counts as

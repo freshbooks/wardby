@@ -330,7 +330,12 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     // Best effort: show which Jira account wardby acts as; never blocks startup.
     void providers.issueTrackers?.jira?.identity().then(
       ({ accountId, displayName, accountType }) =>
-        mcpLog.info({ accountId, displayName, accountType }, "Jira acting as"),
+        accountType === "atlassian"
+          ? mcpLog.error(
+              { accountId, displayName, accountType },
+              "Jira token belongs to a person's account; wardby refuses to act and the Jira ingress answers 503 until a service account token is configured",
+            )
+          : mcpLog.info({ accountId, displayName, accountType }, "Jira acting as"),
       (err: unknown) =>
         mcpLog.warn(
           { err: err instanceof Error ? err.message : String(err) },
