@@ -93,9 +93,9 @@ describe("outcomeBody", () => {
   });
   it("links the pull requests a coding sub-run opened or updated", () => {
     const body = outcomeBody(run("succeeded"), REPO, [
-      { outcome: "pull_request_opened", repository: REPO, pullRequestNumber: 73 },
-      { outcome: "pull_request_updated", repository: REPO, pullRequestNumber: 68 },
-      { outcome: "pull_request_opened", repository: "other/repo", pullRequestNumber: 5 },
+      { outcome: "pull_request_opened", repository: REPO, pullRequestNumber: 73, codeProvider: "github" },
+      { outcome: "pull_request_updated", repository: REPO, pullRequestNumber: 68, codeProvider: "github" },
+      { outcome: "pull_request_opened", repository: "other/repo", pullRequestNumber: 5, codeProvider: "github" },
     ]);
     expect(body).toContain("✅ Opened #73");
     expect(body).toContain("Pushed changes to #68");
@@ -258,7 +258,7 @@ describe("outcomeBody", () => {
 
   it("still links a pull request a failed run managed to open", () => {
     const body = outcomeBody(run("failed"), REPO, [
-      { outcome: "pull_request_opened", repository: REPO, pullRequestNumber: 80 },
+      { outcome: "pull_request_opened", repository: REPO, pullRequestNumber: 80, codeProvider: "github" },
     ]);
     expect(body).toMatch(/^❌ /);
     expect(body).toContain("Opened #80");
@@ -329,7 +329,10 @@ describe("completeHostStatus", () => {
     const h = host();
     const d = db({
       row: row(),
-      children: [child({ outcome: "pull_request_opened", repository: REPO, pullRequestNumber: 73 }), child(null)],
+      children: [
+        child({ outcome: "pull_request_opened", repository: REPO, pullRequestNumber: 73, codeProvider: "github" }),
+        child(null),
+      ],
     });
     await completeHostStatus(d as never, finished, { github: h });
     expect(d.run.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { parentRunId: "r1" } }));
@@ -496,7 +499,12 @@ describe("collectRunOutcome", () => {
             status: "succeeded",
             error: null,
             codingRun: {
-              result: { outcome: "pull_request_opened", repository: "o/r", pullRequestNumber: 4 },
+              result: {
+                outcome: "pull_request_opened",
+                repository: "o/r",
+                pullRequestNumber: 4,
+                codeProvider: "github",
+              },
               failureCategory: null,
               services: [],
             },
@@ -506,7 +514,9 @@ describe("collectRunOutcome", () => {
       },
     } as never;
     const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
-    expect(out.pullRequests).toEqual([{ outcome: "pull_request_opened", repository: "o/r", pullRequestNumber: 4 }]);
+    expect(out.pullRequests).toEqual([
+      { outcome: "pull_request_opened", repository: "o/r", pullRequestNumber: 4, codeProvider: "github", runId: "c1" },
+    ]);
     expect(out.failedChildren.map((c) => c.id)).toEqual(["c2"]);
     expect(out.budgetSentence).toBeUndefined();
   });

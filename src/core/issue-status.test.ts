@@ -20,6 +20,7 @@ function tracker(): IssueTracker {
     editFields: vi.fn(),
     linkTypes: vi.fn(),
     linkIssues: vi.fn(),
+    addRemoteLink: vi.fn(),
     getProperty: vi.fn(),
     setProperty: vi.fn(),
     getIssue: vi.fn(),
@@ -41,6 +42,12 @@ function db(
 ) {
   return {
     agentIssueProject: { findUnique: vi.fn(async () => link) },
+    issuePullRequest: {
+      findUnique: vi.fn(async () => null),
+      create: vi.fn(async () => undefined),
+      update: vi.fn(async () => undefined),
+    },
+    codingRun: { findMany: vi.fn(async () => []) },
     runIssueStatus: {
       findUnique: vi.fn(async () => row),
       updateMany: vi.fn(async () => ({ count: 1 })),
@@ -339,5 +346,139 @@ describe("closeOrphanedIssueStatuses", () => {
     await closeOrphanedIssueStatuses(d, undefined, NOW);
     await closeOrphanedIssueStatuses(d, {}, NOW);
     expect((d as any).runIssueStatus.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("completeIssueStatus bridging pull requests to the issue", () => {
+  const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-9", completedAt: null };
+  const finished = { id: "r1", status: "succeeded", finalText: "ok" } as never;
+  const child = (outcome = "pull_request_opened") => ({
+    id: "child-1",
+    status: "succeeded",
+    error: null,
+    codingRun: {
+      failureCategory: null,
+      services: null,
+      result: {
+        outcome,
+        repository: "o/r",
+        pullRequestNumber: 4,
+        pullRequestUrl: "https://github.com/o/r/pull/4",
+      },
+    },
+  });
+  const withChild = (c = child()) => ({ findMany: vi.fn(async () => [c]) });
+  const writeLink = (extra: Record<string, unknown> = {}) => ({
+    access: "write",
+    commentVisibilityRole: null,
+    onPullRequestOpened: null,
+    ...extra,
+  });
+
+  it("records the pair, links it on the issue and moves the status", async () => {
+    const t = tracker();
+    (t.transitionTo as any).mockResolvedValue({ transitionId: "1", toStatus: "In Review" });
+    const d = db(row, { id: "r1", agentId: "a1" }, withChild(), writeLink({ onPullRequestOpened: "In Review" }));
+    await completeIssueStatus(d, finished, { jira: t });
+    expect((d as any).issuePullRequest.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          issueProvider: "jira",
+          issueKey: "PROJ-1",
+          codeProvider: "github",
+          repository: "o/r",
+          number: 4,
+          url: "https://github.com/o/r/pull/4",
+          agentId: "a1",
+          openedByRunId: "child-1",
+        }),
+      }),
+    );
+    expect(t.addRemoteLink).toHaveBeenCalledWith("PROJ-1", {
+      globalId: "wardby:pr:github:o/r#4",
+      url: "https://github.com/o/r/pull/4",
+      title: "o/r#4",
+    });
+    expect(t.transitionTo).toHaveBeenCalledWith("PROJ-1", "In Review");
+  });
+
+  it("does not transition on an updated pull request", async () => {
+    const t = tracker();
+    const d = db(
+      row,
+      { id: "r1", agentId: "a1" },
+      withChild(child("pull_request_updated")),
+      writeLink({ onPullRequestOpened: "In Review" }),
+    );
+    await completeIssueStatus(d, finished, { jira: t });
+    expect(t.addRemoteLink).toHaveBeenCalled();
+    expect(t.transitionTo).not.toHaveBeenCalled();
+  });
+
+  it("does nothing for a read link or an unlinked agent", async () => {
+    for (const link of [writeLink({ access: "read" }), null]) {
+      const t = tracker();
+      const d = db(row, { id: "r1", agentId: "a1" }, withChild(), link);
+      await completeIssueStatus(d, finished, { jira: t });
+      expect((d as any).issuePullRequest.create).not.toHaveBeenCalled();
+      expect(t.addRemoteLink).not.toHaveBeenCalled();
+      expect(t.transitionTo).not.toHaveBeenCalled();
+    }
+  });
+
+  it("notes a refused move in the comment, keeps the footer last, and still completes", async () => {
+    const t = tracker();
+    (t.transitionTo as any).mockRejectedValue(new Error("nope"));
+    const d = db(row, { id: "r1", agentId: "a1" }, withChild(), writeLink({ onPullRequestOpened: "In Review" }));
+    await completeIssueStatus(d, finished, { jira: t });
+    const md = (t.editComment as any).mock.calls[0][2].markdown as string;
+    expect(md).toContain('Could not move PROJ-1 to "In Review"');
+    expect(md).not.toContain("nope");
+    expect(md.trimEnd().split("\n").pop()).toMatch(/^_wardby run `r1`_$/);
+    expect(isStatusComment(adfToText(markdownToAdf(md)))).toBe(true);
+    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+  });
+
+  it("survives a failing store or remote link", async () => {
+    const t = tracker();
+    (t.addRemoteLink as any).mockRejectedValue(new Error("x"));
+    const d = db(row, { id: "r1", agentId: "a1" }, withChild(), writeLink());
+    (d as any).issuePullRequest.findUnique.mockRejectedValue(new Error("db"));
+    await completeIssueStatus(d, finished, { jira: t });
+    expect(t.editComment).toHaveBeenCalled();
+    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+  });
+
+  it("does not bridge a PR whose coding run continued another issue's pull request", async () => {
+    const t = tracker();
+    const d = db(
+      row,
+      { id: "r1", agentId: "a1" },
+      withChild(child("pull_request_updated")),
+      writeLink({ onPullRequestOpened: "In Review" }),
+    );
+    (d as any).codingRun.findMany.mockResolvedValue([
+      { runId: "child-1", rootCodingRun: { issueProvider: "jira", issueKey: "PROJ-9" } },
+    ]);
+    await completeIssueStatus(d, finished, { jira: t });
+    expect((d as any).codingRun.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { runId: { in: ["child-1"] } } }),
+    );
+    expect((d as any).issuePullRequest.create).not.toHaveBeenCalled();
+    expect(t.addRemoteLink).not.toHaveBeenCalled();
+    expect(t.transitionTo).not.toHaveBeenCalled();
+    expect(t.editComment).toHaveBeenCalled();
+    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+  });
+
+  it("bridges a continuation of this issue's own pull request, or of one with no issue", async () => {
+    for (const root of [{ issueProvider: "jira", issueKey: "PROJ-1" }, { issueProvider: null, issueKey: null }, null]) {
+      const t = tracker();
+      const d = db(row, { id: "r1", agentId: "a1" }, withChild(child("pull_request_updated")), writeLink());
+      (d as any).codingRun.findMany.mockResolvedValue([{ runId: "child-1", rootCodingRun: root }]);
+      await completeIssueStatus(d, finished, { jira: t });
+      expect((d as any).issuePullRequest.create).toHaveBeenCalled();
+      expect(t.addRemoteLink).toHaveBeenCalled();
+    }
   });
 });

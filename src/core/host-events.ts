@@ -7,9 +7,11 @@
  */
 import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
+import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { CodeReviewHost, HostEvent, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
+import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
 import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { composeTaskOverride } from "./untrusted-content.js";
@@ -32,6 +34,8 @@ export type HostEventDb = Pick<
   | "task"
   | "webhook"
   | "budgetGroup"
+  | "issuePullRequest"
+  | "agentIssueProject"
   | "$transaction"
   | "$queryRaw"
 >;
@@ -44,6 +48,8 @@ export interface RouteHostEventDeps {
   mentionHandle: string;
   /** Re-checks each link's authorization, and a mention author's own permission, before anything runs. */
   repoAccess: RepoAccessGate;
+  /** Issue trackers for moving/commenting on the issue a closed PR was opened for; absent → pr_closed is ignored. */
+  issueTrackers?: IssueTrackerRegistry;
 }
 
 export interface RouteResult {
@@ -248,6 +254,16 @@ const reviewTargets = (links: LinkRow[]): ReviewTarget[] =>
 
 export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps): Promise<RouteResult> {
   const none: RouteResult = { runIds: [], followUps: [] };
+  if (event.kind === "pr_closed") {
+    // Bookkeeping only: no agent runs, so no repository link is consulted.
+    await handlePullRequestClosed(deps.db, deps.issueTrackers, {
+      codeProvider: event.provider,
+      repository: event.repository,
+      number: event.prNumber,
+      merged: event.merged,
+    });
+    return none;
+  }
   const host = deps.hosts[event.provider];
   if (!host) return none;
   const links = (await deps.db.agentRepository.findMany({

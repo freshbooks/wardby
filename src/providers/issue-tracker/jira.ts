@@ -286,6 +286,22 @@ export class JiraIssueTracker implements IssueTracker {
     );
   }
 
+  async addRemoteLink(
+    key: string,
+    input: { globalId: string; url: string; title: string; status?: { resolved: boolean } },
+  ): Promise<void> {
+    await this.ready();
+    await this.client.request(
+      "POST",
+      `/rest/api/3/issue/${key}/remotelink`,
+      {
+        globalId: input.globalId,
+        object: { url: input.url, title: input.title, ...(input.status ? { status: input.status } : {}) },
+      },
+      { allowEmpty: true },
+    );
+  }
+
   async getProperty(key: string, property: string): Promise<unknown> {
     await this.ready();
     try {

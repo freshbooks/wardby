@@ -28,6 +28,7 @@ import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } 
 import { PrismaExecutionKindResolver, RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
 import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
+import { buildIssueTrackers } from "../issue-tracker/index.js";
 import { buildReviewHosts } from "../review-host/index.js";
 
 const compositionLog = logger.child({ module: "executor-composition" });
@@ -128,6 +129,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       },
     });
   }
+  const issueTrackers = buildIssueTrackers(env);
   const concurrency = loadCodingConcurrencyConfig(env);
   // The release hook needs the composed RoutingExecutor, which only exists
   // after the ContainerExecutor it wraps is built. The closure reads
@@ -149,6 +151,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
     repoAccess: options.repoAccess ?? createRepoAccessGate({ db: options.db, hosts: buildReviewHosts(env) }),
+    issueUrl: (provider, key) => (provider === "jira" ? issueTrackers.jira?.issueUrl(key) : undefined),
     registryReport: async (runId) => {
       const rows = await options.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
       return summarizeRegistryFetches(rows);

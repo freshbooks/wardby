@@ -39,6 +39,7 @@ function tracker(): IssueTracker {
     editFields: vi.fn(),
     linkTypes: vi.fn(),
     linkIssues: vi.fn(),
+    addRemoteLink: vi.fn(),
     getProperty: vi.fn(),
     setProperty: vi.fn(),
     getIssue: vi.fn(async (key: string) => ({ key, projectKey: projectOf(key), summary: "S" }) as never),

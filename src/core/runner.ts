@@ -162,6 +162,7 @@ export type RunnerDb = Pick<
   | "runHostStatus"
   | "hostIdentity"
   | "agentIssueProject"
+  | "issuePullRequest"
   | "runIssueStatus"
 >;
 

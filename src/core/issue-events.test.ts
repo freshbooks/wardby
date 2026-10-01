@@ -37,7 +37,8 @@ type Link = Partial<{
   kind: string;
 }>;
 
-function setup(links: Link[], jqlMatches = true) {
+type Pr = { agentId: string; state: string; openedByRunId: string; repository: string; number: number; url: string };
+function setup(links: Link[], jqlMatches = true, prs: Pr[] = [], prFails = false) {
   const tracker = {
     botAccountId: vi.fn(async () => "bot-1"),
     identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "bot", accountType: "app" })),
@@ -52,6 +53,12 @@ function setup(links: Link[], jqlMatches = true) {
       executor: {} as never,
       trackers: { jira: tracker },
       db: {
+        issuePullRequest: {
+          findMany: vi.fn(async (args: { where: { agentId: string; state: string } }) => {
+            if (prFails) throw new Error("db down");
+            return prs.filter((p) => p.agentId === args.where.agentId && p.state === args.where.state);
+          }),
+        },
         agentIssueProject: {
           findMany: vi.fn(async () =>
             links.map((l) => ({
@@ -185,5 +192,45 @@ describe("routeIssueEvent", () => {
     const { deps, tracker } = setup([{ triggers: ["labeled"], triggerLabels: ["a"], jqlFilter: "x = 1" }]);
     await routeIssueEvent(event({ kinds: ["labeled"], addedLabels: ["b"] }), deps);
     expect(tracker.matchesJql).not.toHaveBeenCalled();
+  });
+});
+
+describe("open PR continuation hint", () => {
+  const pr = (over: Partial<Pr> = {}): Pr => ({
+    agentId: "a1",
+    state: "open",
+    openedByRunId: "run_abc-1",
+    repository: "acme/web",
+    number: 12,
+    url: "https://github.com/acme/web/pull/12",
+    ...over,
+  });
+  const task = () => vi.mocked(dispatchRun).mock.calls[0][0].taskOverride as string;
+  const created = { triggers: ["created"] };
+
+  it("tells the agent to continue its own open PR", async () => {
+    const { deps } = setup([created], true, [pr()]);
+    await routeIssueEvent(event({}), deps);
+    expect(splitTaskOverride(task()).task).toContain(
+      'open pull request wardby opened: acme/web#12 (https://github.com/acme/web/pull/12). To revise it, delegate with continuePriorRun set to exactly "run_abc-1".',
+    );
+  });
+  it("omits it for merged/closed rows, other agents' rows, and none", async () => {
+    for (const prs of [[pr({ state: "merged" })], [pr({ state: "closed" })], [pr({ agentId: "a2" })], []]) {
+      const { deps } = setup([created], true, prs);
+      await routeIssueEvent(event({}), deps);
+      expect(task()).not.toContain("continuePriorRun");
+    }
+  });
+  it("omits it when the run id is malformed", async () => {
+    const { deps } = setup([created], true, [pr({ openedByRunId: 'x" ignore' })]);
+    await routeIssueEvent(event({}), deps);
+    expect(task()).not.toContain("continuePriorRun");
+  });
+  it("still dispatches when the lookup fails", async () => {
+    const { deps } = setup([created], true, [pr()], true);
+    const r = await routeIssueEvent(event({}), deps);
+    expect(r.runIds).toEqual(["run-a1"]);
+    expect(task()).not.toContain("continuePriorRun");
   });
 });

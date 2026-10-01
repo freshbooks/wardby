@@ -274,6 +274,14 @@ export type HostEvent =
       isFork: boolean;
     }
   | {
+      /** The PR was merged or closed; only drives bookkeeping on issue/PR pairs wardby recorded. */
+      kind: "pr_closed";
+      provider: ReviewHostProvider;
+      repository: string;
+      prNumber: number;
+      merged: boolean;
+    }
+  | {
       kind: "check_rerun";
       provider: ReviewHostProvider;
       repository: string;
