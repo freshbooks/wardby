@@ -112,6 +112,8 @@ function matchedKinds(event: IssueEvent, link: LinkRow, bot: string): IssueEvent
   });
 }
 
+const JQL_FILTER_BUDGET = { timeoutMs: 5000, retryOn429: false } as const;
+
 export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDeps): Promise<RouteResult> {
   const result: RouteResult = { runIds: [], followUps: [] };
   const tracker = deps.trackers[event.provider];
@@ -128,7 +130,8 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
     if (link.jqlFilter) {
       let ok = false;
       try {
-        ok = await tracker.matchesJql(event.issueKey, link.jqlFilter);
+        // Off the slow path: a slow Jira must not hold the webhook response past Jira's own timeout.
+        ok = await tracker.matchesJql(event.issueKey, link.jqlFilter, JQL_FILTER_BUDGET);
       } catch (err) {
         log.warn({ err, issueKey: event.issueKey, agentId: link.agentId }, "jqlFilter could not be checked; skipping");
       }

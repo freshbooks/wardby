@@ -50,7 +50,7 @@ export interface FailedChild {
   services?: string[];
 }
 
-const runLine = (runId: string): string => `<sub>wardby run \`${runId}\`</sub>`;
+export const runLine = (runId: string): string => `<sub>wardby run \`${runId}\`</sub>`;
 
 export function workingBody(runId: string): string {
   return `👀 Working on it.\n\n${runLine(runId)}`;
