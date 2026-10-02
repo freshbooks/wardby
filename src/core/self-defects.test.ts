@@ -108,6 +108,7 @@ describe("fileSelfDefect", () => {
     expect(input.fingerprint).toBe("self:a1:failed:engine_error");
     expect(input.create.issueType).toBe("Bug");
     expect(input.create.summary).toBe('wardby agent "nightly": failed (engine_error)');
+    expect(input.footerMarkdown).toBe("_wardby agent a1_");
     expect(input.create.descriptionMarkdown).toContain("run1");
     expect(input.create.descriptionMarkdown).toContain("2026-10-02T12:00:00.000Z");
     expect(input.seenAgainMarkdown).toContain("Run run1 ended failed at 2026-10-02T12:00:00.000Z.");

@@ -228,6 +228,19 @@ describe("fileIssue", () => {
     expect(rows[0].lastSeenAt.getTime()).toBeGreaterThan(new Date("2026-09-02").getTime());
   });
 
+  it("keeps the footer as the last line, below the regression line", async () => {
+    const { db } = fakeDb([row()]);
+    const tracker = fakeTracker({ getIssue: vi.fn(async (k: string) => view(k, "done")) });
+    await fileIssue({ db }, input(tracker, { footerMarkdown: "_wardby agent a1_" }));
+    expect(tracker.createIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        descriptionMarkdown:
+          "It broke.\n\nRegression of [OPS-1](https://your-site.atlassian.net/browse/OPS-1).\n\n_wardby agent a1_",
+      }),
+      TRACKER_CALL_OPTIONS,
+    );
+  });
+
   it("files a regression for a Done match: new issue relates to the old, old untouched", async () => {
     const { db, rows } = fakeDb([row()]);
     const tracker = fakeTracker({ getIssue: vi.fn(async (k: string) => view(k, "done")) });

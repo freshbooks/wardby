@@ -75,6 +75,8 @@ export interface FileIssueInput {
   fingerprint?: string | null;
   /** Everything but the project, which comes from the link. */
   create: Omit<CreateIssueInput, "projectKey">;
+  /** Appended after the description (and after any "Regression of" line), so it stays the last line. */
+  footerMarkdown?: string;
   /** Posted on the existing issue when the fingerprint is seen again. */
   seenAgainMarkdown: string;
   /** false: only a seen-again update may happen; a create or regression returns issue_cap_reached. Default true. */
@@ -135,7 +137,13 @@ export async function fileIssue(
     if (link.provider !== tracker.provider) {
       return { error: "invalid_arguments", message: "The link and tracker providers differ." };
     }
-    const createInput: CreateIssueInput = { ...input.create, projectKey: link.projectKey };
+    const withFooter = (markdown: string): string =>
+      input.footerMarkdown ? `${markdown}\n\n${input.footerMarkdown}` : markdown;
+    const createInput: CreateIssueInput = {
+      ...input.create,
+      projectKey: link.projectKey,
+      descriptionMarkdown: withFooter(input.create.descriptionMarkdown),
+    };
     const fingerprint = input.fingerprint ?? undefined;
     const createAllowed = input.createAllowed ?? true;
     if (fingerprint === undefined) {
@@ -203,7 +211,9 @@ export async function fileIssue(
           regressionOf
             ? {
                 ...createInput,
-                descriptionMarkdown: `${createInput.descriptionMarkdown}\n\nRegression of ${regressionOfUrl?.startsWith("https://") ? `[${regressionOf}](${regressionOfUrl})` : regressionOf}.`,
+                descriptionMarkdown: withFooter(
+                  `${input.create.descriptionMarkdown}\n\nRegression of ${regressionOfUrl?.startsWith("https://") ? `[${regressionOf}](${regressionOfUrl})` : regressionOf}.`,
+                ),
               }
             : createInput,
           TRACKER_CALL_OPTIONS,

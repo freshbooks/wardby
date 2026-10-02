@@ -690,7 +690,7 @@ async function createIssue(a: z.infer<typeof CreateIssueArgs>, ctx: IssueToolCon
       create: {
         issueType: a.issueType,
         summary: a.summary,
-        descriptionMarkdown: `${a.description}\n\n${agentFooter(ctx.agentId)}`,
+        descriptionMarkdown: a.description,
         ...(a.labels ? { labels: a.labels } : {}),
         ...(a.priority ? { priority: a.priority } : {}),
         ...(a.components ? { components: a.components } : {}),
@@ -698,6 +698,7 @@ async function createIssue(a: z.infer<typeof CreateIssueArgs>, ctx: IssueToolCon
         ...(a.customFields ? { customFields: a.customFields } : {}),
         properties: { [propertyKey(ctx.agentId, "created")]: { runId: creation.runId } },
       },
+      footerMarkdown: agentFooter(ctx.agentId),
       seenAgainMarkdown: `${agentFooter(ctx.agentId)} reported this again.`,
       createAllowed: !atCap,
     });

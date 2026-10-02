@@ -231,8 +231,6 @@ async function attempt(
     `- Finished: ${finished}`,
     "",
     "Filed by wardby itself. The run's error text is not included; see the run in wardby for details.",
-    "",
-    agentFooter(agent.id),
   ].join("\n");
 
   const file = opts.fileIssue ?? ((input: FileIssueInput) => fileIssue({ db }, input));
@@ -249,6 +247,7 @@ async function attempt(
       descriptionMarkdown: description,
       properties: { [propertyKey(agent.id, "self-defect")]: { runId: run.id } },
     },
+    footerMarkdown: agentFooter(agent.id),
     seenAgainMarkdown: `Run ${run.id} ended ${run.status} at ${finished}.\n\n${agentFooter(agent.id)}`,
   });
   if ("error" in result) {
