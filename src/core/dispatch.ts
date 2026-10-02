@@ -148,6 +148,10 @@ const RETRYABLE_SQLSTATES = new Set(["40001", "40P01"]);
  *   (Prisma 7) -- Prisma 6's engine put 40001 at meta.code, still accepted;
  * - at COMMIT (e.g. SSI write skew): an unwrapped DriverAdapterError, no
  *   code or meta, with the SQLSTATE at cause.originalCode.
+ * Also a unique violation (P2002) on WorkItem: concurrent first dispatches
+ * attributed to one new issue each insert its WorkItem, and Postgres reports
+ * the loser as 23505 rather than 40001. The retry finds the committed row.
+ * Unique violations on other models are real errors and are not retried.
  *
  * @internal Exported only for the real-PostgreSQL tests.
  */
@@ -157,9 +161,10 @@ export function isSerializationConflict(err: unknown): boolean {
     name?: unknown;
     code?: unknown;
     cause?: { originalCode?: unknown };
-    meta?: { code?: unknown; driverAdapterError?: { cause?: { originalCode?: unknown } } };
+    meta?: { code?: unknown; modelName?: unknown; driverAdapterError?: { cause?: { originalCode?: unknown } } };
   };
   if (candidate.code === "P2034") return true;
+  if (candidate.code === "P2002") return candidate.meta?.modelName === "WorkItem";
   if (candidate.code === "P2010") {
     const sqlState = candidate.meta?.driverAdapterError?.cause?.originalCode;
     return (typeof sqlState === "string" && RETRYABLE_SQLSTATES.has(sqlState)) || candidate.meta?.code === "40001";
