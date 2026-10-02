@@ -7,4 +7,8 @@ export default tseslint.config(
   js.configs.recommended,
   tseslint.configs.recommended,
   reactHooks.configs.flat.recommended,
+  {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: { globals: { URL: "readonly", process: "readonly", console: "readonly" } },
+  },
 );
