@@ -574,6 +574,8 @@ async function executeTrackedRun(
   });
 
   if (loaded.kind === "coding") {
+    // Deliberately no self-defect here: a missing coding executor is a deployment config error, which would
+    // file one defect per opted-in coding agent rather than describe that agent's failure.
     return finishRun(db, runId, {
       status: "failed",
       error: CODING_EXECUTOR_NOT_CONFIGURED,

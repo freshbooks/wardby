@@ -7,7 +7,8 @@
  *
  *   fingerprint  self:<agentId>:<status>:<category>
  *   category     CodingRun.failureCategory, else the leading `code:` token of
- *                Run.error, else "unknown" — never the error's free text
+ *                Run.error, else "unknown" — only ever a closed-shape token
+ *                (lower-case letters/underscore), never the error's free text
  *
  * Fails closed: the agent needs a live write link to defectProjectKey whose
  * creatableIssueTypes includes defectIssueType; otherwise it logs and skips.
@@ -38,7 +39,12 @@ export const SELF_DEFECT_STATUSES: ReadonlySet<string> = new Set(["failed", "los
 /** How long a caller waits for the filing; past this it carries on in the background (and still only logs). */
 export const SELF_DEFECT_WAIT_MS = 15_000;
 const SUMMARY_MAX_LENGTH = 255;
-const CATEGORY_PATTERN = /^[a-z][a-z0-9_.-]{0,63}$/;
+/**
+ * What a category may look like to be published in the issue and fingerprint: lower-case letters and underscores,
+ * at most 32. No digits, dots or dashes, so secret-shaped (ghp_…, sk-ant-…), host-shaped (db.internal.corp) and
+ * id-shaped (run-8f3a…) prefixes never reach Jira and fingerprints stay a small closed set.
+ */
+const CATEGORY_PATTERN = /^[a-z][a-z_]{0,31}$/;
 
 export type SelfDefectDb = Pick<PrismaClient, "agent" | "agentIssueProject" | "codingRun" | "$transaction">;
 
@@ -57,10 +63,13 @@ export interface SelfDefectOptions {
   waitMs?: number;
 }
 
-/** The leading `code:` token of a run error (lower-cased), or "unknown". Never any of the free text after it. */
+/**
+ * The leading `code:` token of a run error (lower-cased) when it is a safe category (CATEGORY_PATTERN), else
+ * "unknown". Never any of the free text after it.
+ */
 export function errorClass(error: string | null | undefined): string {
-  const match = /^([A-Za-z][A-Za-z0-9_.-]{0,63}):/.exec(error ?? "");
-  return match ? match[1].toLowerCase() : "unknown";
+  const match = /^([^:\s]{1,64}):/.exec(error ?? "");
+  return safeCategory(match?.[1]) ?? "unknown";
 }
 
 export function selfDefectFingerprint(agentId: string, status: string, category: string): string {

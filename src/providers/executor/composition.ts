@@ -135,7 +135,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   // after the ContainerExecutor it wraps is built. The closure reads
   // `composed` only when a run finishes, which is after this function returns.
   const coding = new ContainerExecutor({
-    store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent }),
+    store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent, issueTrackers }),
     jobs,
     vcs,
     sessions,

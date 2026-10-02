@@ -75,6 +75,13 @@ describe("errorClass", () => {
     expect(errorClass("")).toBe("unknown");
     expect(errorClass(null)).toBe("unknown");
   });
+  it("is unknown for secret-, host- or id-shaped prefixes", () => {
+    expect(errorClass("ghp_abc123: bad credentials")).toBe("unknown");
+    expect(errorClass("sk-ant-api03-xyz: rejected")).toBe("unknown");
+    expect(errorClass("db.internal.corp: connection refused")).toBe("unknown");
+    expect(errorClass("run-8f3a9c: gone")).toBe("unknown");
+    expect(errorClass(`${"a".repeat(40)}: long`)).toBe("unknown");
+  });
 });
 
 describe("selfDefectFingerprint", () => {
@@ -116,6 +123,14 @@ describe("fileSelfDefect", () => {
       fileIssue,
     });
     expect(fileIssue.mock.calls[0][0].fingerprint).toBe("self:a1:lost:provider_auth");
+  });
+
+  it("ignores an unsafe coding failure category", async () => {
+    const fileIssue = filer();
+    await fileSelfDefect(fakeDb({ failureCategory: "run-8f3a" }), { jira: tracker }, run({ error: "orphaned: x" }), {
+      fileIssue,
+    });
+    expect(fileIssue.mock.calls[0][0].fingerprint).toBe("self:a1:failed:orphaned");
   });
 
   it("files lost and budget_exhausted runs too", async () => {

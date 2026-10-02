@@ -49,6 +49,8 @@ import { closeOrphanedIssueStatuses } from "./issue-status.js";
 import { fileSelfDefect } from "./self-defects.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
+/** A pass waits this long per self-defect, then moves on; the filing finishes (or logs) in the background. */
+const SELF_DEFECT_WAIT = { waitMs: 2_000 };
 
 export type ReconcilerDb = Pick<
   PrismaClient,
@@ -238,7 +240,12 @@ export async function reconcileOnce(
       });
       lost += result.count;
       if (result.count > 0)
-        await fileSelfDefect(db, issueTrackers, { ...run, status: "lost", error: reason, finishedAt: now });
+        await fileSelfDefect(
+          db,
+          issueTrackers,
+          { ...run, status: "lost", error: reason, finishedAt: now },
+          SELF_DEFECT_WAIT,
+        );
       continue;
     }
 
@@ -249,7 +256,12 @@ export async function reconcileOnce(
     lost += result.count;
     // Only after this pass made the row lost (not when another instance won the race); bounded, never throws.
     if (result.count > 0)
-      await fileSelfDefect(db, issueTrackers, { ...run, status: "lost", error: reason, finishedAt: now });
+      await fileSelfDefect(
+        db,
+        issueTrackers,
+        { ...run, status: "lost", error: reason, finishedAt: now },
+        SELF_DEFECT_WAIT,
+      );
   }
   await closeOrphanedHostChecks(db, reviewHosts, now);
   await closeOrphanedHostStatuses(db, reviewHosts, now);
