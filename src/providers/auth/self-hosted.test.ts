@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../core/db.js";
 import { decodeJwt, SignJWT } from "jose";
-import { SelfHostedAuthProvider } from "./self-hosted.js";
+import { SelfHostedAuthProvider, redirectMatches } from "./self-hosted.js";
 import { IdentityService, DAY } from "../../mcp/auth/self-hosted/credentials.js";
 import { authCommand } from "../../mcp/auth/self-hosted/cli.js";
 import { PostgresRateLimiter } from "../../mcp/auth/self-hosted/rate-limit.js";
@@ -272,5 +272,42 @@ describe.skipIf(!process.env.DATABASE_URL)("secure self-hosted OAuth (PostgreSQL
     await provider.cleanup();
     await expect(db.oAuthClient.findUnique({ where: { clientId: abandoned.clientId } })).resolves.toBeNull();
     await expect(db.oAuthClient.findUnique({ where: { clientId: f.client.clientId } })).resolves.not.toBeNull();
+  });
+  it("accepts loopback redirects that differ only in port (RFC 8252)", async () => {
+    const loopbackClient = await provider.registerClient({
+      redirectUris: ["http://127.0.0.1:1/callback"],
+    });
+    clients.push(loopbackClient.clientId);
+    const params = {
+      clientId: loopbackClient.clientId,
+      redirectUri: "http://127.0.0.1:53123/callback",
+      codeChallenge: createHash("sha256").update("verifier").digest("base64url"),
+      codeChallengeMethod: "S256" as const,
+      resource: uri,
+      scope: "agents:read",
+      state: "state",
+    };
+    const request = await provider.handleAuthorize(params);
+    expect(request.interactionId).toBeDefined();
+    const storedRequest = await db.oAuthAuthorizationRequest.findUnique({
+      where: { id: request.interactionId },
+    });
+    expect(storedRequest?.redirectUri).toBe("http://127.0.0.1:53123/callback");
+  });
+});
+
+describe("redirectMatches (RFC 8252 loopback)", () => {
+  const registered = ["http://127.0.0.1:1/callback", "https://app.example/cb"];
+  it.each([
+    ["http://127.0.0.1:53123/callback", true],
+    ["http://127.0.0.1/callback", true],
+    ["https://app.example/cb", true],
+    ["http://127.0.0.1:53123/other", false],
+    ["http://127.0.0.1:53123/callback?x=1", false],
+    ["http://localhost:53123/callback", false],
+    ["https://127.0.0.1:53123/callback", false],
+    ["https://app.example:8443/cb", false],
+  ])("%s -> %s", (requested, expected) => {
+    expect(redirectMatches(registered, requested)).toBe(expected);
   });
 });

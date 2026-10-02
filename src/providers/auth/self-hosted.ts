@@ -24,6 +24,41 @@ export type {
   TokenResult,
 } from "./authorization-server.js";
 
+const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+
+/**
+ * Whether `requested` is one of a client's registered redirect URIs. A native
+ * app's loopback redirect may differ from its registration only in port: it
+ * listens on whatever port the OS hands it (RFC 8252 §7.3). Everything else —
+ * scheme, host, path, query — must match exactly.
+ */
+export function redirectMatches(registered: readonly string[], requested: string): boolean {
+  if (registered.includes(requested)) return true;
+  let want: URL;
+  try {
+    want = new URL(requested);
+  } catch {
+    return false;
+  }
+  if (want.protocol !== "http:" || !LOOPBACK_HOSTS.includes(want.hostname)) return false;
+  return registered.some((value) => {
+    try {
+      const have = new URL(value);
+      return (
+        have.protocol === "http:" &&
+        have.hostname === want.hostname &&
+        have.pathname === want.pathname &&
+        have.search === want.search &&
+        !want.username &&
+        !want.password &&
+        !want.hash
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
 function validRedirect(value: string): boolean {
   try {
     const u = new URL(value);
@@ -31,7 +66,7 @@ function validRedirect(value: string): boolean {
       !value.includes("#") &&
       !u.username &&
       !u.password &&
-      (u.protocol === "https:" || (u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname)))
+      (u.protocol === "https:" || (u.protocol === "http:" && LOOPBACK_HOSTS.includes(u.hostname)))
     );
   } catch {
     return false;
@@ -122,7 +157,10 @@ export class SelfHostedAuthProvider implements AuthProvider {
     if (p.resource !== this.config.canonicalUri) throw new Error("Invalid resource.");
     const client = await this.db.oAuthClient.findUnique({ where: { clientId: p.clientId } });
     const metadata = client?.metadata as { redirect_uris?: string[]; grant_types?: string[] } | undefined;
-    if (!metadata?.redirect_uris?.includes(p.redirectUri) || !metadata.grant_types?.includes("authorization_code"))
+    if (
+      !redirectMatches(metadata?.redirect_uris ?? [], p.redirectUri) ||
+      !metadata?.grant_types?.includes("authorization_code")
+    )
       throw new Error("Invalid client or redirect.");
     const scope = limitScope(p.scope, SCOPES_SUPPORTED);
     const request = await this.db.oAuthAuthorizationRequest.create({
