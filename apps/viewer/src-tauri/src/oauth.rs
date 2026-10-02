@@ -23,11 +23,20 @@ pub const REGISTRATION_REDIRECT: &str = "http://127.0.0.1/callback";
 /// HTTP client for all OAuth traffic: no redirects (a token endpoint must not
 /// bounce credentials elsewhere) and bounded time.
 pub fn http_client() -> Result<reqwest::Client, AppError> {
+    build_client(client_builder().timeout(Duration::from_secs(30)))
+}
+
+/// The shared client settings (no redirects, user agent, rustls) without a
+/// total timeout, so callers choose their own: the event stream is long-lived
+/// and must not be cut off by a per-request deadline.
+pub fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
         .user_agent(concat!("wardby-viewer/", env!("CARGO_PKG_VERSION")))
-        .build()
+}
+
+pub fn build_client(b: reqwest::ClientBuilder) -> Result<reqwest::Client, AppError> {
+    b.build()
         .map_err(|_| AppError::Network("could not build HTTP client".to_string()))
 }
 
@@ -162,17 +171,19 @@ const MAX_EXPIRES_IN_SECS: u64 = 24 * 60 * 60;
 /// Upper bound on any metadata, registration or token response body.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-async fn read_capped(mut resp: reqwest::Response) -> Result<Vec<u8>, AppError> {
+async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, AppError> {
+    read_capped_to(resp, MAX_BODY_BYTES).await
+}
+
+/// Reads a whole body, failing once it would exceed `max` bytes.
+pub async fn read_capped_to(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, AppError> {
     let too_big = || AppError::Protocol("response too large".to_string());
-    if resp
-        .content_length()
-        .is_some_and(|n| n > MAX_BODY_BYTES as u64)
-    {
+    if resp.content_length().is_some_and(|n| n > max as u64) {
         return Err(too_big());
     }
     let mut body = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
-        if body.len() + chunk.len() > MAX_BODY_BYTES {
+        if body.len() + chunk.len() > max {
             return Err(too_big());
         }
         body.extend_from_slice(&chunk);

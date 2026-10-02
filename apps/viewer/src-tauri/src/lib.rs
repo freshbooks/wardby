@@ -1,4 +1,6 @@
+pub mod api;
 pub mod error;
+pub mod events;
 pub mod loopback;
 pub mod oauth;
 pub mod servers;
