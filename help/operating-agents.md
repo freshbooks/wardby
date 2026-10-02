@@ -24,7 +24,9 @@ powerful execution model that can safely produce the desired outcome.
 Before a run starts, Wardby reserves its allowed spend. The reservation is
 constrained by the agent's own budget, any shared budget group, and any
 sub-agent run tree. See [Budget troubleshooting](troubleshooting/budgets.md)
-when a run is refused for lack of budget.
+when a run is refused for lack of budget, and
+[Attribute agent spend to issues](cost-attribution.md) to see what runs cost
+per issue, epic, project, agent, or model.
 
 For the full lifecycle and the controls applied to every managed run, read
 [`README.md`](../README.md).
