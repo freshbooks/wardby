@@ -89,7 +89,8 @@ export function issueTaskText(
       `Triggered by: ${matched.map((k) => describeKind(event, k, link)).join("; ")} (by ${actor})`,
       `Issue: ${issueUrl}`,
     ].join("\n"),
-    "Use jira_get_issue to read the issue; reply with jira_comment.",
+    "Use jira_get_issue to read the issue. Your final answer is posted on this issue for you when you finish, so " +
+      "do not also post it with jira_comment; use jira_comment only for other issues or progress notes on long work.",
   ];
   // Control-plane data from stored rows (validated at write time), never issue text.
   for (const pr of openPrs.filter((p) => RUN_ID_RE.test(p.openedByRunId))) {

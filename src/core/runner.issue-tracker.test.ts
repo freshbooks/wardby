@@ -384,6 +384,7 @@ describe("jira_* built-ins in the native run loop", () => {
     await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
     expect(tracker.editComment).toHaveBeenCalledWith("PROJ-1", "900", {
       markdown: expect.stringContaining("Triaged."),
+      issueKeyProjects: ["PROJ"],
     });
     expect(state.status!.completedAt).toBeInstanceOf(Date);
   });

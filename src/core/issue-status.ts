@@ -229,6 +229,8 @@ export async function completeIssueStatus(
       const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
         budgetSentence,
         noPullRequestText: "Done.",
+        // One comment per request: this status comment carries the agent's answer.
+        replyAsAnswer: true,
       });
       // Notes and spend go above the footer, which must stay the last line.
       body = withSpend(withSpend(outcome, notes.join("\n")), await spendLine(db, run.id));
@@ -240,11 +242,14 @@ export async function completeIssueStatus(
     }
     const markdown = toJiraMarkdown(body);
     let commentId = status.commentId;
-    if (commentId) await tracker.editComment(status.issueKey, commentId, { markdown });
+    // Keys in the issue's own project (e.g. a related issue the reply names) become smart links.
+    const issueKeyProjects = writable ? [project] : [];
+    if (commentId) await tracker.editComment(status.issueKey, commentId, { markdown, issueKeyProjects });
     else if (writable) {
       commentId = (
         await tracker.comment(status.issueKey, {
           markdown,
+          issueKeyProjects,
           ...(link.commentVisibilityRole ? { visibilityRole: link.commentVisibilityRole } : {}),
         })
       ).id;

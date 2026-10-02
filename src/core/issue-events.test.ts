@@ -139,6 +139,8 @@ describe("routeIssueEvent", () => {
     await routeIssueEvent(event({ kinds: ["mention"], comment: { id: "9", body: "@wardby fix it" } }), deps);
     const { taskOverride } = vi.mocked(dispatchRun).mock.calls[0][0] as { taskOverride: string };
     expect(splitTaskOverride(taskOverride).task).toContain("@wardby fix it");
+    // One comment per request: the answer is posted for the agent, so it must not post it too.
+    expect(splitTaskOverride(taskOverride).task).toContain("do not also post it with jira_comment");
   });
   it("requires the JQL filter to match", async () => {
     const { deps, tracker } = setup([{ triggers: ["created"], jqlFilter: "priority = High" }], false);

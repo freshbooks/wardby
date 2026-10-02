@@ -731,6 +731,34 @@ describe("JiraIssueTracker issue creation and attachments", () => {
     ).rejects.toMatchObject({ code: "tracker_invalid_request" });
   });
 
+  it("getIssue lists issue links from this issue's side", async () => {
+    const relates = { name: "Relates", inward: "relates to", outward: "relates to" };
+    const blocks = { name: "Blocks", inward: "is blocked by", outward: "blocks" };
+    const { tracker, calls } = fake((c) =>
+      c.path === "/rest/api/3/myself"
+        ? undefined
+        : json({
+            key: "KAN-1",
+            fields: {
+              issuelinks: [
+                { type: relates, outwardIssue: { key: "KAN-9", fields: { summary: "Old", status: { name: "Done" } } } },
+                {
+                  type: blocks,
+                  inwardIssue: { key: "OPS-2", fields: { summary: "Infra", status: { name: "To Do" } } },
+                },
+                { type: blocks, outwardIssue: {} },
+              ],
+            },
+          }),
+    );
+    const v = await tracker.getIssue("KAN-1", { maxComments: 0, agentMarker: "a" });
+    expect(calls[0].path).toContain("issuelinks");
+    expect(v.links).toEqual([
+      { relation: "relates to", key: "KAN-9", summary: "Old", status: "Done" },
+      { relation: "is blocked by", key: "OPS-2", summary: "Infra", status: "To Do" },
+    ]);
+  });
+
   it("getIssue exposes statusCategory and the 20 most recent attachments", async () => {
     const attachment = Array.from({ length: 25 }, (_, i) => ({
       id: String(i),
