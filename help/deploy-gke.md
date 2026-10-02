@@ -30,9 +30,11 @@ The deployment process is:
 4. Run `HOSTNAME=wardby.example.com deploy/gke/up.sh`, then verify DNS,
    certificate issuance, database IAM bootstrap, and service health.
 
-After upgrading an existing deployment, re-run the database grants bootstrap so
-the proxy role can write tables a release adds, such as per-model usage for
-[cost attribution](cost-attribution.md).
+When a release changes `deploy/gke/database-grants.sql`, re-run the database
+grants bootstrap **before** deploying that release, so the proxy role can
+already write the tables and columns it adds (such as per-model usage for
+[cost attribution](cost-attribution.md), or a run's live turn count). Until the
+grants are applied, the coding proxy's writes are refused and coding runs fail.
 
 Claude Code's two-container executor is currently Docker-only; Kubernetes
 coding workers use the Codex path. Configure an identity provider and GitHub

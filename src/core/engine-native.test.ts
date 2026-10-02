@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../providers/index.js";
-import type { EngineRunContext, StepRunner } from "../providers/engine/types.js";
+import type { EngineProgress, EngineRunContext, StepRunner } from "../providers/engine/types.js";
 import { NativeEngine } from "./engine-native.js";
 
 /** Records each step's JSON result; on a later run replays it without calling fn. */
@@ -505,5 +505,67 @@ describe("NativeEngine", () => {
     expect(result.status).toBe("budget_exhausted");
     expect(calls.slice(0, 3)).toEqual(["turn:1:estimate", "turn:1:llm", "turn:1:tool:0"]);
     expect(calls).toContain("winddown:estimate");
+  });
+
+  it("reports absolute cumulative progress after every completed model turn", async () => {
+    const llm = scriptedLlm(
+      [
+        [
+          { type: "tool_call", id: "c1", name: "getWeather", argsJson: '{"city":"Boston"}' },
+          { type: "done", stopReason: "tool_calls", usage: { inputTokens: 9, outputTokens: 2, costUsd: 11 } },
+        ],
+        [
+          { type: "text", delta: "It is 72F in Boston." },
+          { type: "done", stopReason: "stop", usage: { inputTokens: 20, outputTokens: 6, costUsd: 26 } },
+        ],
+      ],
+      (usage) => usage.inputTokens + usage.outputTokens,
+      (messages) => messages.reduce((sum, m) => sum + m.content.length, 0),
+    );
+    const progress: EngineProgress[] = [];
+    const ctx = makeContext({ llm, onProgress: async (p) => void progress.push(p) });
+
+    const result = await new NativeEngine().run(ctx);
+
+    expect(result.status).toBe("succeeded");
+    expect(progress).toEqual([
+      { turns: 1, usage: { tokensIn: 9, tokensOut: 2, costUsd: 11 } },
+      { turns: 2, usage: { tokensIn: 29, tokensOut: 8, costUsd: 37 } },
+    ]);
+  });
+
+  it("re-reports the same absolute progress on a replay, so a re-write is harmless", async () => {
+    const scripts = (): LlmStreamEvent[][] => [
+      [
+        { type: "tool_call", id: "c1", name: "getWeather", argsJson: "{}" },
+        { type: "done", stopReason: "tool_calls", usage: { inputTokens: 9, outputTokens: 2, costUsd: 11 } },
+      ],
+      [
+        { type: "text", delta: "done" },
+        { type: "done", stopReason: "stop", usage: { inputTokens: 20, outputTokens: 6, costUsd: 26 } },
+      ],
+    ];
+    const price = (usage: { inputTokens: number; outputTokens: number }) => usage.inputTokens + usage.outputTokens;
+    const count = (messages: { content: string }[]) => messages.reduce((sum, m) => sum + m.content.length, 0);
+    const record = new Map<string, unknown>();
+    const first: EngineProgress[] = [];
+    const replayed: EngineProgress[] = [];
+
+    await new NativeEngine().run(
+      makeContext({
+        llm: scriptedLlm(scripts(), price, count),
+        step: recordingStepRunner(record, []),
+        onProgress: async (p) => void first.push(p),
+      }),
+    );
+    await new NativeEngine().run(
+      makeContext({
+        llm: scriptedLlm([], price, count),
+        step: recordingStepRunner(record, []),
+        onProgress: async (p) => void replayed.push(p),
+      }),
+    );
+
+    expect(replayed).toEqual(first);
   });
 });

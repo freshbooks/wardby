@@ -97,6 +97,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     expect(run.tokensIn).toBe(10);
     expect(run.tokensOut).toBe(4);
     expect(Number(run.costUsd)).toBe(0.00005);
+    // One completed proxied call (completed twice, idempotently) is one turn.
+    expect(run.turns).toBe(1);
   });
 
   describe("per-model usage (RunModelUsage)", () => {

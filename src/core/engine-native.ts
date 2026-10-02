@@ -157,6 +157,10 @@ export class NativeEngine implements Engine {
       }
 
       cumulative = addUsage(cumulative, turn.usage);
+      await ctx.onProgress?.({
+        turns,
+        usage: { tokensIn: cumulative.tokensIn, tokensOut: cumulative.tokensOut, costUsd: cumulative.costUsd },
+      });
       lastCacheRatio = turn.usage.inputTokens > 0 ? turn.usage.cachedInputTokens / turn.usage.inputTokens : 0;
 
       if (turn.budgetExceededMidStream) {

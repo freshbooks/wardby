@@ -259,11 +259,13 @@ export class PrismaProxyLedger implements ProxyLedger {
         `;
       const [updatedRun] = await tx.$queryRaw<{ id: string }[]>`
           UPDATE "Run" AS r
-          SET "tokensIn" = totals."tokensIn", "tokensOut" = totals."tokensOut", "costUsd" = totals."costUsd"
+          SET "tokensIn" = totals."tokensIn", "tokensOut" = totals."tokensOut", "costUsd" = totals."costUsd",
+              "turns" = totals."turns"
           FROM (
             SELECT s."runId", COALESCE(SUM(q."inputTokens"), 0)::integer AS "tokensIn",
                    COALESCE(SUM(q."outputTokens"), 0)::integer AS "tokensOut",
-                   COALESCE(SUM(q."actualCostUsd"), 0) AS "costUsd"
+                   COALESCE(SUM(q."actualCostUsd"), 0) AS "costUsd",
+                   COUNT(*)::integer AS "turns"
             FROM "CodingProxySession" s
             JOIN "CodingProxyRequest" q ON q."sessionId" = s."id" AND q."status" = 'completed'
             WHERE s."id" = ${prior.sessionId}

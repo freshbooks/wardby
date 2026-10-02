@@ -122,11 +122,11 @@ Proxy sidecar (`--private-ip`, listening on `127.0.0.1:5432`, dialing out to
 the instance on 3307), which is what actually holds the IAM credential; the
 application code just connects to localhost.
 
-| Identity      | Google service account   | Kubernetes service account | Database role                                                                                                                                                       |
-| ------------- | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                                                                                               |
-| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — only `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut` and `costUsd` on `Run`, and read only its `id` |
-| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables                                                                                         |
+| Identity      | Google service account   | Kubernetes service account | Database role                                                                                                                                                                |
+| ------------- | ------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                                                                                                        |
+| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — only `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id` |
+| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables                                                                                                  |
 
 `database-grants.sql` grants each privilege set to a `NOLOGIN` group role
 (`wardby_app`, `wardby_proxy`) rather than to the IAM users directly, then
@@ -134,8 +134,12 @@ grants the IAM users membership. `bootstrap-database-iam.sh` applies that file
 as the built-in owner, from a short-lived Job inside the cluster (the instance
 has no public address to reach from outside it), in one transaction: a
 statement the database refuses leaves nothing applied. Run it again whenever
-`database-grants.sql` changes. Grants on named tables apply only once the
-migrations have created them, which is why a brand-new project runs it twice.
+`database-grants.sql` changes, before deploying the release that needs the new
+grants: `bootstrap-database-iam.sh --check`, then `bootstrap-database-iam.sh`,
+then `up.sh`. A release deployed ahead of its grants fails with "permission
+denied" wherever it uses one it doesn't have yet. Grants on named tables apply
+only once the migrations have created them, which is why a brand-new project
+runs it twice.
 
 A brand-new project, in order:
 

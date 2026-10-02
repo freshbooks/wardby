@@ -339,6 +339,7 @@ model Run {
   issueStatus      RunIssueStatus?
   attribution      RunAttribution?
   modelUsage       RunModelUsage[]
+  serviceStatuses  CodingRunServiceStatus[]
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -514,6 +515,37 @@ model CodingService {
   updatedAt     DateTime @updatedAt
 
   @@unique([name, version])
+}
+
+enum CodingServiceState {
+  pending
+  probing
+  ready
+  failed
+}
+
+/// Live start-up state of one coding-run service (one row per run x
+/// service), written by the job launcher as it observes the service, for
+/// display only (the viewer). The run's CodingRun.services
+/// snapshot says what was started; this says how far each one got.
+/// `attempts` is the readiness probes made so far, known only where wardby
+/// runs the probe itself (Docker); `reason` is a fixed identifier
+/// (image_unavailable, start_failed, exited, probe_failed, timed_out),
+/// never probe output.
+model CodingRunServiceStatus {
+  id        String             @id @default(cuid())
+  runId     String
+  run       Run                @relation(fields: [runId], references: [id], onDelete: Cascade)
+  name      String
+  state     CodingServiceState @default(pending)
+  attempts  Int?
+  reason    String?
+  readyAt   DateTime?
+  failedAt  DateTime?
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  @@unique([runId, name])
 }
 
 enum CodingProxySessionStatus {

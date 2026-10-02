@@ -11,6 +11,7 @@ import {
 } from "../../config/providers.js";
 import { summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { drainCodingQueue } from "../../core/coding-queue.js";
+import { prismaServiceStateReporter } from "../../core/coding-service-status.js";
 import { logger } from "../../core/logger.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
 import { CodingProxy } from "../coding-proxy/proxy.js";
@@ -65,6 +66,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     ledger: new PrismaProxyLedger(options.db),
     credentials: new EnvironmentCredentialResolver(env),
   });
+  const onServiceState = prismaServiceStateReporter(options.db);
   let jobs: WorkspaceJobLauncher;
   if (providerConfig.jobs === "kubernetes") {
     if (!isRegistryDigest(config.workerImage)) {
@@ -93,6 +95,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     const api = options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: kubernetes.context });
     const workerImage = config.workerImage;
     jobs = new KubernetesJobLauncher({
+      onServiceState,
       api,
       config: kubernetes,
       workspaceRoot,
@@ -114,6 +117,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   } else {
     const stateRoot = resolve(config.stateRoot ?? resolve(tmpdir(), "wardby-docker-jobs"));
     jobs = new DockerJobLauncher({
+      onServiceState,
       stateRoot,
       workspaceRoot,
       proxyContainer: proxyContainer as string,

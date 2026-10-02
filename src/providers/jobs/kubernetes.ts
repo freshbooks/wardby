@@ -65,6 +65,12 @@ import {
 import { claudeToolSetup } from "./claude-tool-setup.js";
 import { readProxyWitness } from "./kubernetes-witness.js";
 import { safeExtract } from "./safe-extract.js";
+import {
+  reportServiceState,
+  type ServiceFailureReason,
+  type ServiceState,
+  type ServiceStateReporter,
+} from "./service-state.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
@@ -219,6 +225,26 @@ const FATAL_WAITING_REASONS = new Set([
   "CreateContainerError",
   "CrashLoopBackOff",
 ]);
+const IMAGE_WAITING_REASONS = new Set(["ErrImagePull", "ImagePullBackOff", "InvalidImageName"]);
+
+/**
+ * A service sidecar's start-up state as the pod status shows it. The kubelet runs the startup
+ * probe, so attempt counts are unknown here; checks mirror waitForKeeper's own failure rules.
+ */
+function observedServiceState(status: V1ContainerStatus | undefined): {
+  state: ServiceState;
+  reason?: ServiceFailureReason;
+} {
+  if (status === undefined) return { state: "pending" };
+  if ((status.restartCount ?? 0) > 0) return { state: "failed", reason: "probe_failed" };
+  const waiting = status.state?.waiting?.reason ?? "";
+  if (IMAGE_WAITING_REASONS.has(waiting)) return { state: "failed", reason: "image_unavailable" };
+  if (FATAL_WAITING_REASONS.has(waiting)) return { state: "failed", reason: "start_failed" };
+  if (status.state?.terminated !== undefined) return { state: "failed", reason: "exited" };
+  if (status.started === true) return { state: "ready" };
+  if (status.state?.running !== undefined) return { state: "probing" };
+  return { state: "pending" };
+}
 const CAPABILITY = /^rrp_[A-Za-z0-9_-]{16,512}$/;
 const TOKEN = /^[a-f0-9]{20}$/;
 const WORKSPACE_STORAGE = `${STORAGE_ROOT}/workspace`;
@@ -277,6 +303,8 @@ export interface KubernetesJobLauncherOptions {
    */
   enforcementExecTimeoutMs?: number;
   createArchive?: (directory: string) => { stream: Readable; done: Promise<number> }; // default: host `tar`
+  /** Display-only observer of each service sidecar's start-up state (the viewer); its errors are ignored. */
+  onServiceState?: ServiceStateReporter;
   onWarning?: (message: string) => void;
 }
 
@@ -782,6 +810,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     await this.createIfMissing(() => this.api.createPod(this.namespace, pod));
     await this.waitForKeeper(
       names,
+      spec.runId,
       (spec.services ?? []).map((service) => service.name),
       spec.provider === "claude-code",
     );
@@ -832,14 +861,27 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
-  private async waitForKeeper(names: RunNames, serviceNames: readonly string[], toolRunner = false): Promise<void> {
+  private async waitForKeeper(
+    names: RunNames,
+    runId: string,
+    serviceNames: readonly string[],
+    toolRunner = false,
+  ): Promise<void> {
     const started = this.now();
+    const reported = new Map<string, string>();
+    const report = async (name: string, observed: { state: ServiceState; reason?: ServiceFailureReason }) => {
+      const key = `${observed.state}:${observed.reason ?? ""}`;
+      if (reported.get(name) === key) return;
+      reported.set(name, key);
+      await reportServiceState(this.options.onServiceState, { runId, name, ...observed });
+    };
     for (;;) {
       const pod = await this.api.readPod(this.namespace, names.pod);
       if (!pod || pod.status?.phase === "Failed") throw new Error("kubernetes_pod_start_failed");
       const statuses = pod.status?.containerStatuses ?? [];
       const initStatuses = pod.status?.initContainerStatuses ?? [];
       const sidecar = (name: string) => initStatuses.find((status) => status.name === serviceContainerName(name));
+      for (const name of serviceNames) await report(name, observedServiceState(sidecar(name)));
       // A service sidecar that restarted (its startup probe gave up), can't be pulled or created, or
       // exited will never let the keeper start. Name the service rather than a generic start failure.
       const failedService = serviceNames.find((name) => {
@@ -870,7 +912,11 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       ) {
         throw new Error("kubernetes_pod_start_failed");
       }
-      if (keeper?.ready === true) return;
+      if (keeper?.ready === true) {
+        // Native sidecars start in order before the keeper, so a ready keeper means every service started.
+        for (const name of serviceNames) await report(name, { state: "ready" });
+        return;
+      }
       if (this.now() - started >= this.readyTimeoutMs) {
         if (toolRunner && toolStatus?.started !== true) {
           throw new Error("kubernetes_tool_runner_unready");
@@ -878,7 +924,10 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
         // At the bound, a service that never passed its startup probe (still pulling, still starting)
         // is why the keeper never started.
         const waiting = serviceNames.find((name) => sidecar(name)?.started !== true);
-        if (waiting !== undefined) throw serviceUnreadyError(waiting);
+        if (waiting !== undefined) {
+          await report(waiting, { state: "failed", reason: "timed_out" });
+          throw serviceUnreadyError(waiting);
+        }
         throw new Error("kubernetes_pod_start_timeout");
       }
       await this.sleep(READY_POLL_MS);

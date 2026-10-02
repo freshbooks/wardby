@@ -290,4 +290,22 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
 
     await db.run.update({ where: { id: parent.id }, data: { status: "succeeded", finishedAt: new Date() } });
   });
+
+  it("sub-agent: a running root whose group is the binding limit leaves its coding child the true remainder", async () => {
+    const g = await group("tree-bind", 5);
+    const parentAgent = await nativeAgent("tree-bind-parent", 10, g);
+    const child = await codingAgent("tree-bind-child", 10, g);
+    // The root is mid-run and has spent $2 live; its group's $5 daily cap binds, not its own $10.
+    const parent = await db.run.create({ data: { agentId: parentAgent, status: "running", costUsd: 2 } });
+
+    const result = await dispatchRun({ db, executor, agentId: child, trigger: "subagent", parentRunId: parent.id });
+
+    // $5 - $2 = $3, with the root's $2 counted once.
+    expect(await reservedUsd(result!.run.id)).toBeCloseTo(3, 6);
+
+    await db.run.updateMany({
+      where: { id: { in: [parent.id, result!.run.id] } },
+      data: { status: "cancelled", finishedAt: new Date() },
+    });
+  });
 });
