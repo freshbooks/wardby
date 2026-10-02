@@ -148,6 +148,7 @@ function harness(opts: { links: FakeLink[]; status?: FakeStatus; script: LlmStre
         );
       },
     },
+    $queryRaw: async () => [{ usd: null }],
     runIssueStatus: {
       findUnique: async ({ where }: any) =>
         state.status && state.status.runId === where.runId ? { ...state.status } : null,

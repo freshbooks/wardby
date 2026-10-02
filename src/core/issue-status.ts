@@ -4,7 +4,7 @@
  * Same lifecycle as host-status.ts (GitHub mentions), reusing its outcome
  * text. Best effort throughout: nothing here throws.
  */
-import type { Prisma, PrismaClient } from "#prisma";
+import { Prisma, type PrismaClient } from "#prisma";
 import { projectOf, type IssueTrackerProvider, type IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import { collectRunOutcome, outcomeBody, runLine, workingBody, type FinishedRun } from "./host-status.js";
 import { recordPullRequests } from "./issue-bridge.js";
@@ -18,7 +18,7 @@ const ORPHAN_BATCH = 20;
 
 export type IssueStatusDb = Pick<
   PrismaClient,
-  "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest" | "codingRun"
+  "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest" | "codingRun" | "$queryRaw"
 >;
 
 export function toJiraMarkdown(text: string): string {
@@ -38,13 +38,47 @@ export function issueStatusRow(
   return { runId, provider: "jira", issueKey: event.issueKey, visibilityRole };
 }
 
-/** "Agent spend: $0.0123" for the run plus its direct children; "" if unavailable. */
-async function spendLine(db: IssueStatusDb, runId: string): Promise<string> {
+export function formatSpendLine(input: {
+  treeUsd: number;
+  issueUsd: number | null;
+  models: Array<{ model: string; costUsd: number }>;
+}): string {
+  const parts = [`Agent spend: $${input.treeUsd.toFixed(4)} this run`];
+  if (input.issueUsd !== null) parts.push(`$${input.issueUsd.toFixed(4)} on this issue so far`);
+  if (input.models.length > 0) parts.push(input.models.map((m) => `${m.model} $${m.costUsd.toFixed(4)}`).join(", "));
+  return parts.join(" · ");
+}
+
+/** The whole run tree under `runId` (every depth), the issue's total across all its runs, and the tree's models. */
+export async function spendLine(db: IssueStatusDb, runId: string): Promise<string> {
   try {
-    const own = await db.run.findUnique({ where: { id: runId }, select: { costUsd: true } });
-    const children = await db.run.aggregate({ where: { parentRunId: runId }, _sum: { costUsd: true } });
-    const total = Number(own?.costUsd ?? 0) + Number(children._sum.costUsd ?? 0);
-    return Number.isFinite(total) ? `Agent spend: $${total.toFixed(4)}` : "";
+    const tree = Prisma.sql`
+      WITH RECURSIVE tree AS (
+        SELECT "id" FROM "Run" WHERE "id" = ${runId}
+        UNION ALL
+        SELECT r."id" FROM "Run" r JOIN tree t ON r."parentRunId" = t."id"
+      )`;
+    const [treeTotal, issueTotal, models] = await Promise.all([
+      db.$queryRaw<
+        { usd: string | null }[]
+      >`${tree} SELECT SUM(r."costUsd")::text AS usd FROM "Run" r JOIN tree t ON r."id" = t."id"`,
+      db.$queryRaw<{ usd: string | null }[]>`
+        SELECT SUM(r."costUsd")::text AS usd
+        FROM "RunAttribution" a
+        JOIN "Run" r ON r."id" = a."runId"
+        WHERE a."workItemId" = (SELECT "workItemId" FROM "RunAttribution" WHERE "runId" = ${runId})`,
+      db.$queryRaw<{ model: string; usd: string }[]>`${tree}
+        SELECT u."model", SUM(u."costUsd")::text AS usd
+        FROM "RunModelUsage" u JOIN tree t ON u."runId" = t."id"
+        GROUP BY u."model" ORDER BY SUM(u."costUsd") DESC`,
+    ]);
+    const treeUsd = Number(treeTotal[0]?.usd ?? 0);
+    if (!Number.isFinite(treeUsd)) return "";
+    return formatSpendLine({
+      treeUsd,
+      issueUsd: issueTotal[0]?.usd == null ? null : Number(issueTotal[0].usd),
+      models: models.map((m) => ({ model: m.model, costUsd: Number(m.usd) })),
+    });
   } catch (err) {
     log.warn({ err, runId }, "could not compute the agent spend for the issue comment");
     return "";
