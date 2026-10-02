@@ -22,13 +22,16 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 describe.skipIf(!process.env.DATABASE_URL)("viewer NOTIFY triggers (PostgreSQL)", () => {
   const listener = new pg.Client({ connectionString: process.env.DATABASE_URL });
   const got: ViewerEvent[] = [];
+  const raw: string[] = [];
   const events = () => got.filter(mine);
 
   beforeAll(async () => {
     await listener.connect();
     listener.on("notification", (m) => {
-      const parsed = ViewerEventSchema.parse(JSON.parse(m.payload!));
-      got.push(parsed);
+      // Foreign processes share the channel on a shared DB: ignore what is not ours.
+      const parsed = ViewerEventSchema.safeParse(JSON.parse(m.payload!));
+      if (parsed.success) got.push(parsed.data);
+      raw.push(m.payload!);
     });
     await listener.query("LISTEN wardby_viewer");
   });
@@ -75,5 +78,20 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer NOTIFY triggers (PostgreSQL)"
     await db.runIssueStatus.create({ data: { runId, provider: "jira", issueKey: "NTF-1" } });
     await waitFor(() => events().some((e) => e.kind === "outcome"), 2000);
     expect(events().find((e) => e.kind === "outcome")).toMatchObject({ source: "issue_status" });
+  });
+
+  it("keeps finishedAt in UTC under a non-UTC session time zone", async () => {
+    const instant = new Date("2031-06-15T08:30:45.678Z");
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe("SET LOCAL TIME ZONE 'America/New_York'");
+      await tx.run.update({ where: { id: runId }, data: { finishedAt: instant } });
+    });
+    await waitFor(() => events().some((e) => e.kind === "run" && e.finishedAt === instant.toISOString()), 2000);
+  });
+
+  it("emits only schema-valid payloads for the fixture run", () => {
+    const own = raw.map((p) => JSON.parse(p) as { runId?: string }).filter((p) => p.runId === runId);
+    expect(own.length).toBeGreaterThan(0);
+    for (const p of own) expect(ViewerEventSchema.safeParse(p).success).toBe(true);
   });
 });
