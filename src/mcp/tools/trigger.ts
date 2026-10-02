@@ -29,6 +29,12 @@
  * gets 404, not another principal's final text/cost.
  */
 import { dispatchRun } from "../../core/dispatch.js";
+import {
+  AttributionError,
+  explicitAttribution,
+  RESPONSE_PATH_SNAPSHOT_BUDGET,
+  type AttributionIntent,
+} from "../../core/attribution.js";
 import { CodingBaseRefSchema, CodingTaskOverrideSchema } from "../../coding/protocol.js";
 import { z } from "zod";
 import type { WardbyMcpServer } from "../server.js";
@@ -47,6 +53,7 @@ const TriggerAgentSchema = z
     agentId: z.string().trim().min(1).max(128),
     task: CodingTaskOverrideSchema.optional(),
     baseRef: CodingBaseRefSchema.optional(),
+    issue: z.unknown().optional(),
   })
   .strict();
 
@@ -107,7 +114,17 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: { agentId: { type: "string" }, task: { type: "string" }, baseRef: { type: "string" } },
+      properties: {
+        agentId: { type: "string" },
+        task: { type: "string" },
+        baseRef: { type: "string" },
+        issue: {
+          type: "object",
+          description: "Count this run's cost toward an issue in a project the agent is linked to.",
+          properties: { provider: { type: "string", enum: ["jira"] }, key: { type: "string" } },
+          required: ["provider", "key"],
+        },
+      },
       required: ["agentId"],
     },
     handler: async (rawArgs: unknown, ctx) => {
@@ -122,6 +139,24 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         throw new McpError(400, "Task and baseRef overrides are only valid for coding agents.");
       }
 
+      // Refused before any run exists: an invalid or unlinked issue is never
+      // silently dropped into an unattributed run.
+      let attribution: AttributionIntent | undefined;
+      if (args.issue !== undefined) {
+        try {
+          attribution = await explicitAttribution(
+            ctx.db,
+            ctx.providers.issueTrackers,
+            agent.id,
+            args.issue,
+            RESPONSE_PATH_SNAPSHOT_BUDGET,
+          );
+        } catch (err) {
+          if (err instanceof AttributionError) throw new McpError(400, err.message);
+          throw err;
+        }
+      }
+
       const dispatched = await dispatchRun({
         db: ctx.db,
         executor: ctx.providers.executor,
@@ -129,6 +164,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         trigger: "manual",
         codingTask: args.task,
         codingBaseRef: args.baseRef,
+        attribution,
         task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
         triggeredById: ctx.principal.id,
         // Re-checked through the transaction: a concurrent revoke or

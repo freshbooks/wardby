@@ -52,6 +52,31 @@ function makeContext(overrides: Partial<EngineRunContext> & { llm: LlmProvider }
 }
 
 describe("NativeEngine", () => {
+  it("accumulates cached-input and cache-write tokens across turns", async () => {
+    const usage = { inputTokens: 1000, cachedInputTokens: 800, cacheWriteTokens: 100, outputTokens: 50, costUsd: 0.01 };
+    const llm = scriptedLlm(
+      [
+        [
+          { type: "tool_call", id: "c1", name: "t", argsJson: "{}" },
+          { type: "done", stopReason: "tool_calls", usage },
+        ],
+        [
+          { type: "text", delta: "done" },
+          { type: "done", stopReason: "stop", usage },
+        ],
+      ],
+      () => 0.01,
+      () => 10,
+    );
+    const result = await new NativeEngine().run(makeContext({ llm }));
+    expect(result.usage).toMatchObject({
+      tokensIn: 2000,
+      tokensOut: 100,
+      cachedInputTokens: 1600,
+      cacheWriteTokens: 200,
+    });
+  });
+
   it("terminates succeeded after a tool-call -> result -> final-answer sequence", async () => {
     const llm = scriptedLlm(
       [

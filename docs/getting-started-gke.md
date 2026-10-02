@@ -255,11 +255,11 @@ through the Cloud SQL Auth Proxy, via Workload Identity from one Kubernetes
 service account. What each may do inside the database comes from a `NOLOGIN`
 group role in `deploy/gke/database-grants.sql`:
 
-| Workload      | Google service account   | Kubernetes service account | May do                                                                                                                                                                          |
-| ------------- | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table, including the durable executor's in schema `dbos`; never change a schema                                                                  |
-| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: only its budget ledger — `CodingProxySession`/`CodingProxyRequest`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id` |
-| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` and `dbos schema` can alter and create tables                                                                  |
+| Workload      | Google service account   | Kubernetes service account | May do                                                                                                                                                                                          |
+| ------------- | ------------------------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table, including the durable executor's in schema `dbos`; never change a schema                                                                                  |
+| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: only its budget ledger — `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id` |
+| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` and `dbos schema` can alter and create tables                                                                                  |
 
 `deploy/gke/bootstrap-database-iam.sh` applies the grants as the built-in
 owner, from a short-lived Job inside the cluster. Run it whenever
@@ -303,6 +303,12 @@ own role, for every privilege `database-grants.sql` gives `wardby_proxy`
 (`deploy/gke/proxy-grant-checks.mjs`), and stops with the list of missing
 grants instead of letting the proxy fail registry requests with "permission
 denied".
+
+After upgrading an existing deployment to a release with cost attribution,
+re-run `bootstrap-database-iam.sh` so the coding proxy can record per-model
+usage for coding runs (used by the `cost_report` tool's `model` grouping).
+Until then coding runs still work, but their per-model breakdown isn't
+recorded.
 
 `bootstrap-database-iam.sh --check` runs the grants inside a transaction that
 is then rolled back, and reports success or the exact statement the database

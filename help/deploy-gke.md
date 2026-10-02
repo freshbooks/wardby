@@ -30,6 +30,10 @@ The deployment process is:
 4. Run `HOSTNAME=wardby.example.com deploy/gke/up.sh`, then verify DNS,
    certificate issuance, database IAM bootstrap, and service health.
 
+After upgrading an existing deployment, re-run the database grants bootstrap so
+the proxy role can write tables a release adds, such as per-model usage for
+[cost attribution](cost-attribution.md).
+
 Claude Code's two-container executor is currently Docker-only; Kubernetes
 coding workers use the Codex path. Configure an identity provider and GitHub
 App before allowing people to use the public endpoint.

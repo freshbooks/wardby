@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { handleWebhookIngress } from "./ingress.js";
 import { createWebhook } from "../../core/webhooks.js";
 import type { Executor } from "../../providers/executor/types.js";
@@ -136,5 +136,158 @@ describe("webhook ingress", () => {
       executor,
     );
     expect(result).toEqual({ status: 400, body: { error: "invalid_task" } });
+  });
+
+  it("accepts an optional wardbyIssue and attributes the run to it", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    const created: unknown[] = [];
+    db.agentIssueProject = { findUnique: async () => ({ agentId: "a1" }) };
+    db.workItem = { findUnique: async () => null, upsert: async () => ({ id: "wi1", parentKey: null }) };
+    db.runAttribution = { findUnique: async () => null, create: async (a: unknown) => created.push(a) };
+    db.runIssueStatus = { findUnique: async () => null };
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { wardbyIssue: { provider: "jira", key: "PAY-241" } } },
+      db,
+      executor,
+    );
+    expect(result.status).toBe(202);
+    expect(created).toEqual([
+      { data: { runId: expect.any(String), workItemId: "wi1", parentKeyAtRun: null, source: "explicit" } },
+    ]);
+  });
+
+  it("corrects a lowercase wardbyIssue key and attributes the run to the uppercase issue", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    const upserts: Array<{ where: unknown }> = [];
+    db.agentIssueProject = { findUnique: async () => ({ agentId: "a1" }) };
+    db.workItem = {
+      findUnique: async () => null,
+      upsert: async (a: { where: unknown }) => (upserts.push(a), { id: "wi1", parentKey: null }),
+    };
+    db.runAttribution = { findUnique: async () => null, create: async () => ({}) };
+    db.runIssueStatus = { findUnique: async () => null };
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { wardbyIssue: { provider: "jira", key: "pay-241" } } },
+      db,
+      executor,
+    );
+    expect(result.status).toBe(202);
+    expect(upserts.map((u) => u.where)).toEqual([{ provider_key: { provider: "jira", key: "PAY-241" } }]);
+  });
+
+  it("rejects a wardbyIssue the agent is not linked to with 400 invalid_issue, creating no run", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    db.agentIssueProject = { findUnique: async () => null };
+    const runCreate = vi.spyOn(db.run, "create");
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { wardbyIssue: { provider: "jira", key: "PAY-241" } } },
+      db,
+      executor,
+    );
+    expect(result).toEqual({
+      status: 400,
+      body: { error: "invalid_issue", error_description: expect.stringMatching(/not linked/) },
+    });
+    expect(runCreate).not.toHaveBeenCalled();
+  });
+
+  it("ignores a forwarded payload's top-level issue object (e.g. a GitHub issues event): 202, unattributed", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    const created: unknown[] = [];
+    const linkLookup = vi.fn(async () => null);
+    db.agentIssueProject = { findUnique: linkLookup };
+    db.runAttribution = { findUnique: async () => null, create: async (a: unknown) => created.push(a) };
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      {
+        headers: { "x-webhook-secret": secret },
+        body: { action: "opened", issue: { number: 7, title: "Bug", user: { login: "octocat" } } },
+      },
+      db,
+      executor,
+    );
+    expect(result.status).toBe(202);
+    expect(linkLookup).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
+  });
+
+  it("rejects a malformed wardbyIssue with 400 invalid_issue", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    const runCreate = vi.spyOn(db.run, "create");
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { wardbyIssue: { provider: "jira", key: "not a key" } } },
+      db,
+      executor,
+    );
+    expect(result).toEqual({
+      status: 400,
+      // Names the webhook's own field, not trigger_agent's `issue`.
+      body: { error: "invalid_issue", error_description: "wardbyIssue.key must be an issue key such as PROJ-123." },
+    });
+    expect(runCreate).not.toHaveBeenCalled();
+  });
+
+  it("names wardbyIssue.provider when the provider is unknown", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { wardbyIssue: { provider: "trello", key: "PAY-241" } } },
+      db,
+      executor,
+    );
+    expect(result).toMatchObject({
+      status: 400,
+      body: { error: "invalid_issue", error_description: expect.stringMatching(/^wardbyIssue\.provider must be/) },
+    });
+  });
+
+  it("snapshots a wardbyIssue within the response-path budget (2 s, no 429 retry)", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    db.agentIssueProject = { findUnique: async () => ({ agentId: "a1" }) };
+    db.workItem = { findUnique: async () => null, upsert: async () => ({ id: "wi1", parentKey: null }) };
+    db.runAttribution = { findUnique: async () => null, create: async () => ({}) };
+    db.runIssueStatus = { findUnique: async () => null };
+    const snapshotIssue = vi.fn(async (key: string) => ({ key, scopeKey: "PAY", url: `https://jira.example/${key}` }));
+    const trackers = { jira: { snapshotIssue } } as any;
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { wardbyIssue: { provider: "jira", key: "PAY-241" } } },
+      db,
+      executor,
+      trackers,
+    );
+    expect(result.status).toBe(202);
+    expect(snapshotIssue).toHaveBeenCalledWith("PAY-241", { timeoutMs: 2000, retryOn429: false });
+  });
+
+  it("checks the secret before the wardbyIssue: a wrong secret with a bad or unlinked issue is 401, not 400", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    const linkLookup = vi.fn(async () => null);
+    db.agentIssueProject = { findUnique: linkLookup };
+    const { id } = await createWebhook("a1", "p1", db);
+    for (const wardbyIssue of [
+      { provider: "jira", key: "PAY-241" },
+      { provider: "nope", key: "??" },
+    ]) {
+      const result = await handleWebhookIngress(
+        id,
+        { headers: { "x-webhook-secret": "wrong" }, body: { wardbyIssue } },
+        db,
+        executor,
+      );
+      expect(result).toEqual({ status: 401, body: { error: "invalid_secret" } });
+    }
+    expect(linkLookup).not.toHaveBeenCalled();
   });
 });

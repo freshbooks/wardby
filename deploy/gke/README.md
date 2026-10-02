@@ -122,11 +122,11 @@ Proxy sidecar (`--private-ip`, listening on `127.0.0.1:5432`, dialing out to
 the instance on 3307), which is what actually holds the IAM credential; the
 application code just connects to localhost.
 
-| Identity      | Google service account   | Kubernetes service account | Database role                                                                                                                                                |
-| ------------- | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                                                                                        |
-| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — only `CodingProxySession`/`CodingProxyRequest`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id` |
-| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables                                                                                  |
+| Identity      | Google service account   | Kubernetes service account | Database role                                                                                                                                                                |
+| ------------- | ------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                                                                                                        |
+| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — only `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id` |
+| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables                                                                                                  |
 
 `database-grants.sql` grants each privilege set to a `NOLOGIN` group role
 (`wardby_app`, `wardby_proxy`) rather than to the IAM users directly, then
@@ -180,6 +180,11 @@ The bootstrap has two modes:
   owner password the pods already use also applies the grants, so nothing
   already running is disturbed. A brand-new deployment never has a password
   to give it.
+
+Re-run it after upgrading an existing deployment to a release that lets the
+coding proxy write per-model usage (`RunModelUsage`, used by the `cost_report`
+tool's `model` grouping). Until then coding runs still work, but their
+per-model breakdown isn't recorded.
 
 Either mode takes `--check`: the grants run inside a transaction that is
 rolled back, and the bootstrap reports success or the exact refusal while

@@ -9,5 +9,7 @@ export { JiraIssueTracker, agentFooter } from "./jira.js";
 /** One tracker per configured provider; empty when Jira isn't configured (the jira_* tools are then never offered). */
 export function buildIssueTrackers(env: NodeJS.ProcessEnv = process.env): IssueTrackerRegistry {
   const jira = loadJiraConfig(env);
-  return jira ? { jira: new JiraIssueTracker(new JiraClient(jira), jira.siteUrl) } : {};
+  return jira
+    ? { jira: new JiraIssueTracker(new JiraClient(jira), jira.siteUrl, { epicLinkField: jira.epicLinkField }) }
+    : {};
 }
