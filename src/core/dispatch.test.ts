@@ -1062,6 +1062,7 @@ describe("isSerializationConflict", () => {
     ["legacy P2010 with meta.code 40001", { code: "P2010", meta: { code: "40001" } }],
     ["commit-time DriverAdapterError 40001", { name: "DriverAdapterError", cause: { originalCode: "40001" } }],
     ["commit-time DriverAdapterError 40P01", { name: "DriverAdapterError", cause: { originalCode: "40P01" } }],
+    ["a concurrent first insert of the same WorkItem", { code: "P2002", meta: { modelName: "WorkItem" } }],
   ])("retries %s", (_label, err) => {
     expect(isSerializationConflict(err)).toBe(true);
   });
@@ -1070,6 +1071,7 @@ describe("isSerializationConflict", () => {
     ["null", null],
     ["a string", "40001"],
     ["a unique violation", { code: "P2002" }],
+    ["a unique violation on another model", { code: "P2002", meta: { modelName: "Run" } }],
     ["P2010 for another SQLSTATE", adapterP2010("23505")],
     ["P2010 without adapter details", { code: "P2010", meta: {} }],
     ["DriverAdapterError for another SQLSTATE", { name: "DriverAdapterError", cause: { originalCode: "23505" } }],
