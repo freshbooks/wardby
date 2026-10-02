@@ -30,9 +30,15 @@ type Slot = Arc<tokio::sync::Mutex<Option<Arc<Session>>>>;
 
 #[derive(Default)]
 pub struct AppState {
-    /// One slot per server (normalized URL). Building a session holds only that
-    /// server's slot, so a slow server never blocks another, and two callers
-    /// can never both spend the same refresh token. Slots are never removed.
+    /// One slot per server (normalized URL). The slot's mutex is that server's
+    /// AUTH LOCK: every session-lifecycle and Keychain-ownership step for the
+    /// server (build from the Keychain, sign-in commit + install, sign-out,
+    /// removal, dead-grant cleanup) runs holding it, so they are totally
+    /// ordered and a stale session can never write over, or delete, a newer
+    /// token. Lock order: auth lock -> a session's refresh lock (`revoke` waits
+    /// on it), never the reverse; the refresh path itself never takes the auth
+    /// lock. Per-server, so a slow server never blocks another. Slots are never
+    /// removed.
     slots: std::sync::Mutex<HashMap<String, Slot>>,
     /// The current event stream and the server it belongs to.
     events: std::sync::Mutex<Option<(String, EventsHandle)>>,
@@ -91,33 +97,41 @@ impl AppState {
             .clone()
     }
 
-    /// Drops everything held for a server: its stream and its session, which is
-    /// revoked (after any in-flight refresh has finished persisting) so it can
-    /// never write the Keychain again. Callers delete the Keychain item after.
-    async fn forget(&self, server_url: &str) {
+    /// Ends a server's session under its auth lock: stops its stream, revokes
+    /// the session (after any in-flight refresh has finished persisting, so it
+    /// can never write the Keychain again), then runs `delete` (the Keychain
+    /// delete) before any other step for this server can start.
+    async fn end_session<F>(&self, server_url: &str, delete: F) -> Result<(), AppError>
+    where
+        F: FnOnce(&str) -> Result<(), AppError> + Send + 'static,
+    {
+        let slot = self.slot(server_url);
+        let mut g = slot.lock().await;
         self.stop_stream_for(server_url);
-        let taken = self.slot(server_url).lock().await.take();
-        if let Some(s) = taken {
+        if let Some(s) = g.take() {
             s.revoke().await;
         }
+        let url = server_url.to_string();
+        tokio::task::spawn_blocking(move || delete(&url))
+            .await
+            .map_err(|_| AppError::Keychain("keychain task failed".to_string()))?
     }
 
     /// A session whose grant is dead (refresh refused): forget it and delete the
-    /// stale Keychain item, so the server shows as signed out. Does nothing if
-    /// the session has already been replaced.
+    /// stale Keychain item, so the server shows as signed out. All under the auth
+    /// lock, and only if the slot still holds this very session: if a re-sign-in
+    /// replaced it, its newly committed token is left alone.
     async fn drop_dead<F>(&self, session: &Arc<Session>, delete: F)
     where
         F: FnOnce(&str) -> Result<(), AppError> + Send + 'static,
     {
         let url = session.server_url().to_string();
-        {
-            let slot = self.slot(&url);
-            let mut g = slot.lock().await;
-            if !g.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, session)) {
-                return;
-            }
-            *g = None;
+        let slot = self.slot(&url);
+        let mut g = slot.lock().await;
+        if !g.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, session)) {
+            return;
         }
+        *g = None;
         self.stop_stream_for(&url);
         session.revoke().await;
         let _ = tokio::task::spawn_blocking(move || delete(&url)).await;
@@ -141,11 +155,36 @@ impl AppState {
         Ok(session)
     }
 
-    async fn install_session(&self, session: Session) {
+    /// Finishes a sign-in under the auth lock: revokes the session being
+    /// replaced (so its in-flight refresh finishes, and can never persist an
+    /// old-grant token over the new one), re-checks via `check` that the server
+    /// is still saved, writes the FIRST refresh token to the store, and installs
+    /// the new session.
+    async fn commit_sign_in<C>(
+        &self,
+        session: Session,
+        refresh: String,
+        store: Arc<dyn RefreshStore>,
+        check: C,
+    ) -> Result<(), AppError>
+    where
+        C: FnOnce() -> Result<(), AppError> + Send + 'static,
+    {
         let url = session.server_url().to_string();
-        *self.slot(&url).lock().await = Some(Arc::new(session));
-        // A stream started with an older session must restart on this one.
+        let slot = self.slot(&url);
+        let mut g = slot.lock().await;
         self.stop_stream_for(&url);
+        if let Some(old) = g.take() {
+            old.revoke().await;
+        }
+        tokio::task::spawn_blocking(move || {
+            check()?;
+            store.set(&refresh)
+        })
+        .await
+        .map_err(|_| AppError::Keychain("keychain task failed".to_string()))??;
+        *g = Some(Arc::new(session));
+        Ok(())
     }
 
     /// Runs one sign-in per server at a time, as its own task so
@@ -316,8 +355,8 @@ fn find_server(list: &[ServerConfig], url: &str) -> Result<ServerConfig, AppErro
 
 struct SignedIn {
     session: Session,
-    /// The client id used (registered just now, or the saved one).
-    client_id: String,
+    /// The first refresh token, to be committed (not yet stored anywhere).
+    refresh: String,
 }
 
 type Hook = Box<dyn FnOnce(&str) -> Result<(), AppError> + Send>;
@@ -329,14 +368,11 @@ struct SignInHooks {
     on_registered: Hook,
     /// Opens the authorize URL in the system browser.
     open: Hook,
-    /// Persists the first refresh token (and re-checks the server still exists).
-    /// Runs on a blocking thread.
-    commit: Hook,
 }
 
 /// Discover, register if needed, send the user to the system browser, wait for
-/// the loopback callback, exchange the code, keep the FIRST refresh token via
-/// `commit`, and return the session.
+/// the loopback callback, exchange the code, and return the session with the
+/// FIRST refresh token, which the caller commits via `commit_sign_in`.
 async fn sign_in_flow(
     server_url: &str,
     saved_client_id: Option<String>,
@@ -375,13 +411,8 @@ async fn sign_in_flow(
         .refresh_token
         .clone()
         .ok_or_else(|| AppError::Protocol("server issued no refresh token".to_string()))?;
-    let commit = hooks.commit;
-    tokio::task::spawn_blocking(move || commit(&refresh))
-        .await
-        .map_err(|_| AppError::Keychain("keychain task failed".to_string()))??;
-
     let session = Session::new(server_url, auth, &client_id, store, Some(tokens))?;
-    Ok(SignedIn { session, client_id })
+    Ok(SignedIn { session, refresh })
 }
 
 /// A session for a server that is already signed in (Keychain holds its
@@ -468,15 +499,7 @@ pub async fn remove_server(
         Ok(())
     })?;
     state.cancel_sign_in(&url);
-    state.forget(&url).await;
-    delete_refresh_token(&url).await
-}
-
-async fn delete_refresh_token(url: &str) -> Result<(), AppError> {
-    let url = url.to_string();
-    tokio::task::spawn_blocking(move || servers::keychain_delete(&url))
-        .await
-        .map_err(|_| AppError::Keychain("keychain task failed".to_string()))?
+    state.end_session(&url, servers::keychain_delete).await
 }
 
 #[tauri::command]
@@ -492,9 +515,6 @@ pub async fn sign_in(
         let url = url.clone();
         async move {
             let st = app.state::<AppState>();
-            // An existing session shares this Keychain entry: end it first so it
-            // cannot write an older rotated token over the new one.
-            st.forget(&url).await;
             let hooks = SignInHooks {
                 on_registered: {
                     let (app, url) = (app.clone(), url.clone());
@@ -512,28 +532,29 @@ pub async fn sign_in(
                         })
                     })
                 },
-                commit: {
-                    let (app, url) = (app.clone(), url.clone());
-                    Box::new(move |refresh| {
-                        let st = app.state::<AppState>();
-                        let _g = st.config.lock().unwrap_or_else(|e| e.into_inner());
-                        find_server(&load_servers(&app)?, &url).map_err(|_| removed_error())?;
-                        servers::keychain_set(&url, refresh)
-                    })
-                },
             };
             let store: Arc<dyn RefreshStore> = Arc::new(KeychainStore::new(&url));
-            let signed =
-                sign_in_flow(&url, cfg.client_id.clone(), hooks, store, SIGN_IN_TIMEOUT).await?;
-            debug_assert!(!signed.client_id.is_empty());
-            st.install_session(signed.session).await;
-            if find_server(&load_servers(&app)?, &url).is_err() {
-                // Removed while the last step ran: leave nothing behind.
-                st.forget(&url).await;
-                delete_refresh_token(&url).await?;
-                return Err(removed_error());
-            }
-            Ok(())
+            let signed = sign_in_flow(
+                &url,
+                cfg.client_id.clone(),
+                hooks,
+                store.clone(),
+                SIGN_IN_TIMEOUT,
+            )
+            .await?;
+            // The server may have been removed during the browser step.
+            let check = {
+                let (app, url) = (app.clone(), url.clone());
+                move || {
+                    let st = app.state::<AppState>();
+                    let _g = st.config.lock().unwrap_or_else(|e| e.into_inner());
+                    find_server(&load_servers(&app)?, &url)
+                        .map(|_| ())
+                        .map_err(|_| removed_error())
+                }
+            };
+            st.commit_sign_in(signed.session, signed.refresh, store, check)
+                .await
         }
     };
     state.single_flight(&url, fut).await
@@ -550,12 +571,8 @@ async fn sign_out_with<F>(state: &AppState, url: &str, delete: F) -> Result<(), 
 where
     F: FnOnce(&str) -> Result<(), AppError> + Send + 'static,
 {
-    // Revoke first (waits out any in-flight refresh), delete after.
-    state.forget(url).await;
-    let url = url.to_string();
-    tokio::task::spawn_blocking(move || delete(&url))
-        .await
-        .map_err(|_| AppError::Keychain("keychain task failed".to_string()))?
+    // Revoke (waits out any in-flight refresh), then delete, under the auth lock.
+    state.end_session(url, delete).await
 }
 
 #[tauri::command]
@@ -680,7 +697,7 @@ pub async fn fetch_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::test_support::MemStore;
+    use crate::api::test_support::{MemStore, auth_for};
     use std::sync::atomic::{AtomicBool, Ordering};
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -823,14 +840,13 @@ mod tests {
     type TestHook = Box<dyn FnOnce(&str) -> Result<(), AppError> + Send>;
 
     fn hooks(open: impl FnOnce(&str) -> Result<(), AppError> + Send + 'static) -> SignInHooks {
-        hooks_with(Box::new(|_| Ok(())), Box::new(open), Box::new(|_| Ok(())))
+        hooks_with(Box::new(|_| Ok(())), Box::new(open))
     }
 
-    fn hooks_with(on_registered: TestHook, open: TestHook, commit: TestHook) -> SignInHooks {
+    fn hooks_with(on_registered: TestHook, open: TestHook) -> SignInHooks {
         SignInHooks {
             on_registered,
             open,
-            commit,
         }
     }
 
@@ -883,7 +899,7 @@ mod tests {
         let issuer = format!("{}/mcp", s.uri());
         let registered = Arc::new(std::sync::Mutex::new(None::<String>));
         let (r1, r2) = (registered.clone(), registered.clone());
-        let (c_store, c_store2) = (store.clone(), store.clone());
+        let c_store2 = store.clone();
         let browser = fake_browser(issuer);
         let out = sign_in_flow(
             &s.uri(),
@@ -900,16 +916,22 @@ mod tests {
                     assert!(c_store2.token.lock().unwrap().is_none());
                     browser(u)
                 }),
-                Box::new(move |rt| c_store.set(rt)),
             ),
             store.clone(),
             Duration::from_secs(10),
         )
         .await
         .unwrap();
-        assert_eq!(out.client_id, "reg-id");
-        assert_eq!(store.token.lock().unwrap().as_deref(), Some("RT1"));
+        assert_eq!(out.refresh, "RT1");
         assert_eq!(out.session.server_url(), s.uri());
+        // The flow itself stores nothing; the commit does, under the auth lock.
+        assert!(store.token.lock().unwrap().is_none());
+        let st = AppState::default();
+        st.commit_sign_in(out.session, out.refresh, store.clone(), || Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(store.token.lock().unwrap().as_deref(), Some("RT1"));
+        assert!(st.slot(&s.uri()).lock().await.is_some());
     }
 
     #[tokio::test]
@@ -1059,7 +1081,6 @@ mod tests {
                     Ok(())
                 }),
                 Box::new(|_| Ok(())),
-                Box::new(|_| Ok(())),
             ),
             MemStore::with("x"),
             Duration::from_millis(150),
@@ -1085,35 +1106,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_commit_stores_nothing() {
+    async fn failed_commit_stores_nothing_and_installs_nothing() {
         let s = MockServer::start().await;
-        mount_server(&s, true).await;
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token": "AT1", "token_type": "Bearer",
-                "refresh_token": "RT1", "expires_in": 3600
-            })))
-            .mount(&s)
-            .await;
+        let st = AppState::default();
         let store = Arc::new(MemStore::default());
-        let issuer = format!("{}/mcp", s.uri());
-        let err = sign_in_flow(
-            &s.uri(),
-            Some("cid".into()),
-            hooks_with(
-                Box::new(|_| Ok(())),
-                Box::new(fake_browser(issuer)),
-                Box::new(|_| Err(removed_error())),
-            ),
-            store.clone(),
-            Duration::from_secs(10),
-        )
-        .await
-        .err()
-        .unwrap();
+        let session =
+            Session::new(&s.uri(), auth_for(&s.uri()), "cid", store.clone(), None).unwrap();
+        let err = st
+            .commit_sign_in(
+                session,
+                "RT1".into(),
+                store.clone(),
+                || Err(removed_error()),
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(err, AppError::Protocol(m) if m == "server was removed"));
         assert!(store.token.lock().unwrap().is_none());
+        assert!(st.slot(&s.uri()).lock().await.is_none());
     }
 
     #[test]
@@ -1298,5 +1308,105 @@ mod tests {
         .await;
         assert!(got.unwrap().is_ok());
         slow_build.abort();
+    }
+
+    #[tokio::test]
+    async fn re_sign_in_revokes_the_replaced_session_so_its_refresh_cannot_win() {
+        let s = MockServer::start().await;
+        mount_server(&s, true).await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(400))
+                    .set_body_json(json!({
+                        "access_token": "AT-old", "token_type": "Bearer",
+                        "refresh_token": "RT-old-rotated", "expires_in": 3600
+                    })),
+            )
+            .expect(1)
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/admin/api/graph"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&s)
+            .await;
+        let st = AppState::default();
+        let store = MemStore::with("RT-old");
+        // Built from the old Keychain token during the browser step.
+        let old = st
+            .session_for(&s.uri(), Some("cid"), store.clone())
+            .await
+            .unwrap();
+        let inflight = {
+            let old = old.clone();
+            tokio::spawn(async move { old.get_json("/admin/api/graph").await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let new = Session::new(&s.uri(), auth_for(&s.uri()), "cid", store.clone(), None).unwrap();
+        st.commit_sign_in(new, "RT-new".into(), store.clone(), || Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(store.token.lock().unwrap().as_deref(), Some("RT-new"));
+        let _ = inflight.await;
+        assert_eq!(store.token.lock().unwrap().as_deref(), Some("RT-new"));
+        assert!(matches!(
+            old.get_json("/admin/api/graph").await,
+            Err(AppError::NotSignedIn)
+        ));
+        let slot = st.slot(&s.uri());
+        let g = slot.lock().await;
+        assert!(!Arc::ptr_eq(g.as_ref().unwrap(), &old));
+    }
+
+    #[tokio::test]
+    async fn sign_out_vs_a_concurrent_rebuild_leaves_the_store_empty() {
+        let s = MockServer::start().await;
+        mount_server(&s, true).await;
+        for _ in 0..10 {
+            let st = AppState::default();
+            let store = MemStore::with("rt");
+            let wipe = store.clone();
+            let uri = s.uri();
+            let (out, built) = tokio::join!(
+                sign_out_with(&st, &uri, move |_| {
+                    *wipe.token.lock().unwrap() = None;
+                    Ok(())
+                }),
+                st.session_for(&uri, Some("cid"), store.clone()),
+            );
+            out.unwrap();
+            drop(built);
+            assert!(store.token.lock().unwrap().is_none());
+            // Whatever order they ran in, no live session is left behind.
+            assert!(st.slot(&s.uri()).lock().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_session_cleanup_never_deletes_a_concurrently_committed_token() {
+        let s = MockServer::start().await;
+        mount_server(&s, true).await;
+        for _ in 0..10 {
+            let st = AppState::default();
+            let store = MemStore::with("rt");
+            let old = st
+                .session_for(&s.uri(), Some("cid"), store.clone())
+                .await
+                .unwrap();
+            let new =
+                Session::new(&s.uri(), auth_for(&s.uri()), "cid", store.clone(), None).unwrap();
+            let wipe = store.clone();
+            let (_, committed) = tokio::join!(
+                st.drop_dead(&old, move |_| {
+                    *wipe.token.lock().unwrap() = None;
+                    Ok(())
+                }),
+                st.commit_sign_in(new, "RT-new".into(), store.clone(), || Ok(())),
+            );
+            committed.unwrap();
+            assert_eq!(store.token.lock().unwrap().as_deref(), Some("RT-new"));
+        }
     }
 }
