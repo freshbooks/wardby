@@ -76,8 +76,11 @@ A Server-Sent Events stream (`text/event-stream`) of live changes. Frames:
 | `event: resync`                                  | The live-event connection was lost and restored. Events may have been missed.                  |
 | `: ping`                                         | Comment sent every 15 seconds to keep the connection open.                                     |
 
-Event payloads are small. They identify what changed and carry status and
-cost, but not final text; fetch `/admin/api/runs/<id>` for detail.
+Event payloads are small and never include final text; fetch
+`/admin/api/runs/<id>` for detail. A `run` event carries the run's status,
+turn and token counts, cost and finish time. A `service` event carries the
+service name, its state and the attempt count. An `outcome` event carries only
+the run id and the outcome source, so refetch the run to see what changed.
 
 **There is no replay.** Load `/admin/api/graph` first, then apply events. On
 `resync`, and on every reconnect, refetch `/admin/api/graph` rather than
