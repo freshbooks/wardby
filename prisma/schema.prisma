@@ -524,7 +524,7 @@ enum CodingServiceState {
 
 /// Live start-up state of one coding-run service (one row per run x
 /// service), written by the job launcher as it observes the service, for
-/// display only (the viewer, get_run). The run's CodingRun.services
+/// display only (the viewer). The run's CodingRun.services
 /// snapshot says what was started; this says how far each one got.
 /// `attempts` is the readiness probes made so far, known only where wardby
 /// runs the probe itself (Docker); `reason` is a fixed identifier

@@ -1,7 +1,8 @@
 /**
  * Display-only observation of coding-run service start-up (docs/coding-services.md): launchers
- * report each service's state as they see it, for the viewer and get_run. Never part of the
- * launch's own control flow: a reporter error is swallowed, and nothing waits on the result.
+ * report each service's state as they see it, for the viewer. Never part of the launch's own
+ * control flow: a reporter error is swallowed. The launcher does await each report inline,
+ * though, so a reporter must be fast.
  */
 
 export type ServiceState = "pending" | "probing" | "ready" | "failed";

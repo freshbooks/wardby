@@ -447,7 +447,7 @@ export interface DockerJobLauncherOptions {
    * DEFAULT_SERVICE_READY_TIMEOUT_MS). Start-up never runs past the run's own deadline either.
    */
   serviceReadyTimeoutMs?: number;
-  /** Display-only observer of each service's start-up state (the viewer, get_run); its errors are ignored. */
+  /** Display-only observer of each service's start-up state (the viewer); its errors are ignored. */
   onServiceState?: ServiceStateReporter;
   /** Optional observer invoked after provisioning fails but before resources are cleaned up. */
   onProvisionFailure?: (context: { runId: string; keeperContainer: string }) => Promise<void>;

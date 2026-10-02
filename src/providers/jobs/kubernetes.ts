@@ -303,7 +303,7 @@ export interface KubernetesJobLauncherOptions {
    */
   enforcementExecTimeoutMs?: number;
   createArchive?: (directory: string) => { stream: Readable; done: Promise<number> }; // default: host `tar`
-  /** Display-only observer of each service sidecar's start-up state (the viewer, get_run); its errors are ignored. */
+  /** Display-only observer of each service sidecar's start-up state (the viewer); its errors are ignored. */
   onServiceState?: ServiceStateReporter;
   onWarning?: (message: string) => void;
 }

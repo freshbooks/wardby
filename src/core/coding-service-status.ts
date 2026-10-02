@@ -1,6 +1,6 @@
 /**
  * Persists launcher-observed coding-run service states (CodingRunServiceStatus, one row per
- * run x service) for the viewer and get_run. Composed into the job launchers by
+ * run x service) for the viewer. Composed into the job launchers by
  * providers/executor/composition.ts; launchers call it through reportServiceState, which drops
  * its errors.
  */
