@@ -121,7 +121,13 @@
               "type": "string"
             },
             "source": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "pull_request",
+                "host_status",
+                "issue_status",
+                "host_check"
+              ]
             }
           },
           "required": [

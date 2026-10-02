@@ -151,7 +151,12 @@ export const ViewerEventSchema = z.discriminatedUnion("kind", [
     state: z.enum(["pending", "probing", "ready", "failed"]),
     attempts: z.number().int().nullable(),
   }),
-  z.object({ kind: z.literal("outcome"), runId: z.string(), source: z.string() }),
+  z.object({
+    kind: z.literal("outcome"),
+    runId: z.string(),
+    /** Which table changed (the viewer NOTIFY trigger names them). */
+    source: z.enum(["pull_request", "host_status", "issue_status", "host_check"]),
+  }),
 ]);
 
 export type RunTriggerInfo = z.infer<typeof RunTriggerSchema>;
