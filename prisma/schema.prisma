@@ -54,6 +54,10 @@ model Agent {
   repositories AgentRepository[]
   issueProjects AgentIssueProject[]
 
+  /// Self-defects opt-in: the Jira project and issue type wardby files the agent's own failures into. Both or neither.
+  defectProjectKey String?
+  defectIssueType  String?
+
   // Phase 7: at most one budget group. Null = uncapped beyond its own budgetUsd.
   budgetGroupId String?
   budgetGroup   BudgetGroup? @relation(fields: [budgetGroupId], references: [id])
@@ -1157,12 +1161,35 @@ model AgentIssueProject {
   onPullRequestOpened   String?
   /// Status to move the issue to when a pull request for it merges. Null = none.
   onPullRequestMerged   String?
+  /// Issue type names (case-insensitive) jira_create_issue may create. Empty = creation off.
+  creatableIssueTypes   String[] @default([])
+  /// Cap on issues one run may create in this project. Null = no cap.
+  maxNewIssuesPerRun    Int?
   authorizedById        String
   authorizedAt          DateTime @default(now())
   createdAt             DateTime @default(now())
 
   @@unique([agentId, provider, projectKey])
   @@index([provider, projectKey])
+}
+
+/// Dedupe record: an issue wardby created for a fingerprint (several over time — regressions).
+model IssueFingerprint {
+  id              String   @id @default(cuid())
+  issueProvider   String
+  projectKey      String
+  /// sha256 hex of the agent- or control-plane-supplied fingerprint (raw value never stored).
+  fingerprintHash String
+  issueKey        String
+  agentId         String
+  createdByRunId  String?
+  seenCount       Int      @default(1)
+  firstSeenAt     DateTime @default(now())
+  lastSeenAt      DateTime @default(now())
+
+  @@unique([issueProvider, issueKey])
+  @@index([issueProvider, projectKey, fingerprintHash])
+  @@index([createdByRunId])
 }
 
 /// A pull request wardby opened for a tracker issue (the Jira -> code bridge). Provider-neutral on both sides.
