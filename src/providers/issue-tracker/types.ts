@@ -104,19 +104,33 @@ export interface IssueTrackerIdentity {
   accountType: string;
 }
 
+/**
+ * Bounds one tracker call for callers on a latency budget (e.g. inside a database transaction).
+ * `timeoutMs` caps the WHOLE call, every request it makes included; with `retryOn429: false` a 429 fails
+ * at once instead of sleeping for Retry-After, so the call cannot outlive `timeoutMs`.
+ */
+export interface TrackerCallOptions {
+  timeoutMs?: number;
+  retryOn429?: boolean;
+}
+
 export interface IssueTracker {
   readonly provider: IssueTrackerProvider;
   /** The bot's own accountId (cached after the first call). */
   botAccountId(): Promise<string>;
   /** The account the credential acts as, from the same cached call as botAccountId. */
   identity(): Promise<IssueTrackerIdentity>;
-  getIssue(key: string, opts: { maxComments: number; agentMarker: string }): Promise<IssueView>;
+  getIssue(key: string, opts: { maxComments: number; agentMarker: string } & TrackerCallOptions): Promise<IssueView>;
   /** The project the issue is in now; an old key (kept as an alias after a move) resolves to its new project. */
   issueProject(key: string): Promise<string>;
   search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult>;
   /** Whether issue `key` matches `jql` (used for a link's jqlFilter). Callers on a latency budget pass a short timeout and no 429 retry. */
-  matchesJql(key: string, jql: string, opts?: { timeoutMs?: number; retryOn429?: boolean }): Promise<boolean>;
-  comment(key: string, input: { markdown: string; visibilityRole?: string }): Promise<{ id: string; url: string }>;
+  matchesJql(key: string, jql: string, opts?: TrackerCallOptions): Promise<boolean>;
+  comment(
+    key: string,
+    input: { markdown: string; visibilityRole?: string },
+    opts?: TrackerCallOptions,
+  ): Promise<{ id: string; url: string }>;
   editComment(key: string, commentId: string, input: { markdown: string }): Promise<void>;
   /** The comment's author accountId and plain text (uncapped: only for ownership checks, never shown to a model), or null when it doesn't exist. */
   readComment(key: string, commentId: string): Promise<{ authorId: string | null; body: string } | null>;
@@ -129,8 +143,8 @@ export interface IssueTracker {
   editableFields(key: string): Promise<string[]>;
   /** Sets fields: labels (string[]), components (names), priority (name), customfield_N (raw JSON value). */
   editFields(key: string, fields: Record<string, unknown>): Promise<void>;
-  linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>>;
-  linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void>;
+  linkTypes(opts?: TrackerCallOptions): Promise<Array<{ name: string; inward: string; outward: string }>>;
+  linkIssues(input: { type: string; inwardKey: string; outwardKey: string }, opts?: TrackerCallOptions): Promise<void>;
   /** Adds (or, for an existing globalId, updates) a web link on the issue: Jira's remote link, shown under "Web links". */
   addRemoteLink(
     key: string,
@@ -144,7 +158,7 @@ export interface IssueTracker {
   /** Create-screen fields for one issue type (by id). */
   fieldMeta(projectKey: string, issueTypeId: string): Promise<CreateMetaField[]>;
   /** Creates an issue; missing required fields (without defaults) fail with tracker_invalid_request naming them. */
-  createIssue(input: CreateIssueInput): Promise<{ key: string; url: string }>;
+  createIssue(input: CreateIssueInput, opts?: TrackerCallOptions): Promise<{ key: string; url: string }>;
   /** First `maxBytes` of a text-like attachment, decoded as UTF-8; other types fail with tracker_invalid_request. */
   readAttachmentText(
     id: string,

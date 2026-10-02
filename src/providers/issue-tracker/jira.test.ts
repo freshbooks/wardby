@@ -626,6 +626,87 @@ describe("JiraIssueTracker issue creation and attachments", () => {
     expect(calls.some((c) => c.method === "POST")).toBe(false);
   });
 
+  describe("call budget (TrackerCallOptions)", () => {
+    /** Each request takes `delayMs` unless its abort signal fires first; records which paths were requested. */
+    function slow(delayMs: number, respond: (path: string, method: string) => Response) {
+      const paths: string[] = [];
+      const signals: (AbortSignal | undefined)[] = [];
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const path = `${url.pathname}${url.search}`;
+        if (path === "/rest/api/3/myself") return json({ accountId: "bot-1", accountType: "app" });
+        paths.push(`${init?.method ?? "GET"} ${path}`);
+        signals.push(init?.signal ?? undefined);
+        await new Promise<void>((resolve, reject) => {
+          const t = setTimeout(resolve, delayMs);
+          init?.signal?.addEventListener("abort", () => {
+            clearTimeout(t);
+            reject(new Error("aborted"));
+          });
+        });
+        return respond(path, init?.method ?? "GET");
+      });
+      const sleep = vi.fn(async () => undefined);
+      const client = new JiraClient(
+        { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
+        { fetch: fetchMock as unknown as typeof fetch, sleep },
+      );
+      return { tracker: new JiraIssueTracker(client, SITE), paths, sleep };
+    }
+    const metaResponse = (path: string, method: string) =>
+      method === "POST"
+        ? json({ id: "1", key: "KAN-9" }, 201)
+        : path.includes("/issuetypes/")
+          ? json({ fields: [], total: 0 })
+          : json({ issueTypes: [{ id: "10001", name: "Bug", subtask: false }], total: 1 });
+
+    it("bounds the whole createIssue call, not each request: it gives up before the POST", async () => {
+      const { tracker, paths } = slow(40, metaResponse);
+      const started = Date.now();
+      await expect(
+        tracker.createIssue(
+          { projectKey: "KAN", issueType: "Bug", summary: "s", descriptionMarkdown: "d" },
+          { timeoutMs: 60, retryOn429: false },
+        ),
+      ).rejects.toMatchObject({ code: "tracker_api_error" });
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(paths.some((p) => p.startsWith("POST"))).toBe(false);
+    });
+
+    it("completes within a sufficient budget", async () => {
+      const { tracker } = slow(5, metaResponse);
+      await expect(
+        tracker.createIssue(
+          { projectKey: "KAN", issueType: "Bug", summary: "s", descriptionMarkdown: "d" },
+          { timeoutMs: 5_000, retryOn429: false },
+        ),
+      ).resolves.toEqual({ key: "KAN-9", url: `${SITE}/browse/KAN-9` });
+    });
+
+    it("with retryOn429: false, a 429 fails at once instead of sleeping", async () => {
+      const { tracker, paths, sleep } = slow(0, () => json({}, 429, { "retry-after": "5" }));
+      await expect(
+        tracker.comment("KAN-1", { markdown: "x" }, { timeoutMs: 1_000, retryOn429: false }),
+      ).rejects.toMatchObject({ code: "tracker_rate_limited" });
+      await expect(tracker.linkTypes({ retryOn429: false })).rejects.toMatchObject({ code: "tracker_rate_limited" });
+      await expect(
+        tracker.linkIssues({ type: "Relates", inwardKey: "KAN-1", outwardKey: "KAN-2" }, { retryOn429: false }),
+      ).rejects.toMatchObject({ code: "tracker_rate_limited" });
+      await expect(
+        tracker.getIssue("KAN-1", { maxComments: 0, agentMarker: "", retryOn429: false }),
+      ).rejects.toMatchObject({ code: "tracker_rate_limited" });
+      expect(sleep).not.toHaveBeenCalled();
+      expect(paths).toHaveLength(4);
+    });
+
+    it("bounds getIssue", async () => {
+      const { tracker } = slow(1_000, () => json({}));
+      await expect(tracker.getIssue("KAN-1", { maxComments: 0, agentMarker: "", timeoutMs: 30 })).rejects.toMatchObject(
+        { code: "tracker_api_error" },
+      );
+    });
+  });
+
   it("createIssue rejects an unknown issue type", async () => {
     const { tracker } = fake(meta);
     await expect(

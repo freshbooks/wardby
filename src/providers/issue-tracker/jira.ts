@@ -5,7 +5,7 @@
  * jira_edit_own_comment knows a comment is this agent's.
  */
 import { adfToText, markdownToAdf } from "./adf.js";
-import type { JiraClient } from "./jira-client.js";
+import type { JiraClient, RequestOptions } from "./jira-client.js";
 import {
   IssueTrackerError,
   type CreateIssueInput,
@@ -19,6 +19,7 @@ import {
   type IssueTracker,
   type IssueTrackerIdentity,
   type IssueView,
+  type TrackerCallOptions,
 } from "./types.js";
 
 const ISSUE_FIELDS =
@@ -56,6 +57,47 @@ const person = (v: unknown): IssuePerson | null => {
 };
 
 /** Jira reports locales as "en_US"; Accept-Language wants BCP-47 ("en-US"). Anything malformed keeps the default. */
+/**
+ * One call's budget (TrackerCallOptions): each request gets what is left of `timeoutMs`, and awaits that
+ * are not requests (the cached identity) are abandoned at the deadline. Without `timeoutMs`, a no-op.
+ */
+function callBudget(opts: TrackerCallOptions = {}) {
+  const deadline = opts.timeoutMs === undefined ? undefined : Date.now() + opts.timeoutMs;
+  const timedOut = () => new IssueTrackerError("tracker_api_error", "The Jira call timed out.");
+  const left = (): number | undefined => {
+    if (deadline === undefined) return undefined;
+    const ms = deadline - Date.now();
+    if (ms <= 0) throw timedOut();
+    return ms;
+  };
+  return {
+    request(extra: RequestOptions = {}): RequestOptions {
+      const ms = left();
+      return {
+        ...extra,
+        ...(ms !== undefined ? { timeoutMs: ms } : {}),
+        ...(opts.retryOn429 !== undefined ? { retryOn429: opts.retryOn429 } : {}),
+      };
+    },
+    async within<T>(p: Promise<T>): Promise<T> {
+      const ms = left();
+      if (ms === undefined) return p;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          p,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(timedOut()), ms);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+type CallBudget = ReturnType<typeof callBudget>;
+
 function localeToLanguageTag(locale: unknown): string {
   if (typeof locale !== "string") return "en-US";
   const m = /^([a-z]{2,3})(?:[_-]([A-Za-z]{2}|\d{3}))?$/.exec(locale.trim());
@@ -100,8 +142,8 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   /** Refuses to act when the token belongs to a person; a failed identity() propagates and is not cached. */
-  private async ready(): Promise<void> {
-    if ((await this.identity()).accountType === "atlassian") {
+  private async ready(budget: CallBudget = callBudget()): Promise<void> {
+    if ((await budget.within(this.identity())).accountType === "atlassian") {
       throw new IssueTrackerError("tracker_permission_denied", PERSONAL_ACCOUNT_MESSAGE);
     }
   }
@@ -114,11 +156,15 @@ export class JiraIssueTracker implements IssueTracker {
     return `${this.siteUrl}/browse/${key}`;
   }
 
-  async getIssue(key: string, opts: { maxComments: number; agentMarker: string }): Promise<IssueView> {
-    await this.ready();
+  async getIssue(
+    key: string,
+    opts: { maxComments: number; agentMarker: string } & TrackerCallOptions,
+  ): Promise<IssueView> {
+    const budget = callBudget(opts);
+    await this.ready(budget);
     const [raw, bot] = await Promise.all([
-      this.client.request<Json>("GET", `/rest/api/3/issue/${key}?fields=${ISSUE_FIELDS}`),
-      this.botAccountId(),
+      this.client.request<Json>("GET", `/rest/api/3/issue/${key}?fields=${ISSUE_FIELDS}`, undefined, budget.request()),
+      budget.within(this.botAccountId()),
     ]);
     const f = obj(raw.fields);
     const commentBlock = obj(f.comment);
@@ -217,12 +263,19 @@ export class JiraIssueTracker implements IssueTracker {
   async comment(
     key: string,
     input: { markdown: string; visibilityRole?: string },
+    opts?: TrackerCallOptions,
   ): Promise<{ id: string; url: string }> {
-    await this.ready();
-    const r = await this.client.request<Json>("POST", `/rest/api/3/issue/${key}/comment`, {
-      body: markdownToAdf(input.markdown),
-      ...(input.visibilityRole ? { visibility: { type: "role", value: input.visibilityRole } } : {}),
-    });
+    const budget = callBudget(opts);
+    await this.ready(budget);
+    const r = await this.client.request<Json>(
+      "POST",
+      `/rest/api/3/issue/${key}/comment`,
+      {
+        body: markdownToAdf(input.markdown),
+        ...(input.visibilityRole ? { visibility: { type: "role", value: input.visibilityRole } } : {}),
+      },
+      budget.request(),
+    );
     if (typeof r.id !== "string") throw new IssueTrackerError("tracker_invalid_response");
     return { id: r.id, url: `${this.issueUrl(key)}?focusedCommentId=${r.id}` };
   }
@@ -300,9 +353,10 @@ export class JiraIssueTracker implements IssueTracker {
     await this.client.request("PUT", `/rest/api/3/issue/${key}`, { fields: body }, { allowEmpty: true });
   }
 
-  async linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>> {
-    await this.ready();
-    const r = await this.client.request<Json>("GET", "/rest/api/3/issueLinkType");
+  async linkTypes(opts?: TrackerCallOptions): Promise<Array<{ name: string; inward: string; outward: string }>> {
+    const budget = callBudget(opts);
+    await this.ready(budget);
+    const r = await this.client.request<Json>("GET", "/rest/api/3/issueLinkType", undefined, budget.request());
     return (Array.isArray(r.issueLinkTypes) ? r.issueLinkTypes : []).map(obj).map((t) => ({
       name: str(t.name),
       inward: str(t.inward),
@@ -310,8 +364,12 @@ export class JiraIssueTracker implements IssueTracker {
     }));
   }
 
-  async linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void> {
-    await this.ready();
+  async linkIssues(
+    input: { type: string; inwardKey: string; outwardKey: string },
+    opts?: TrackerCallOptions,
+  ): Promise<void> {
+    const budget = callBudget(opts);
+    await this.ready(budget);
     await this.client.request(
       "POST",
       "/rest/api/3/issueLink",
@@ -320,7 +378,7 @@ export class JiraIssueTracker implements IssueTracker {
         inwardIssue: { key: input.inwardKey },
         outwardIssue: { key: input.outwardKey },
       },
-      { allowEmpty: true },
+      budget.request({ allowEmpty: true }),
     );
   }
 
@@ -362,10 +420,15 @@ export class JiraIssueTracker implements IssueTracker {
   }
 
   /** Pages a createmeta endpoint (startAt/maxResults/total), capped. */
-  private async pagedMeta(path: string, listKey: string): Promise<Json[]> {
+  private async pagedMeta(path: string, listKey: string, budget: CallBudget): Promise<Json[]> {
     const out: Json[] = [];
     for (let page = 0, startAt = 0; page < META_MAX_PAGES; page++) {
-      const r = await this.client.request<Json>("GET", `${path}?startAt=${startAt}&maxResults=${META_PAGE_SIZE}`);
+      const r = await this.client.request<Json>(
+        "GET",
+        `${path}?startAt=${startAt}&maxResults=${META_PAGE_SIZE}`,
+        undefined,
+        budget.request(),
+      );
       const items = Array.isArray(r[listKey]) ? r[listKey].map(obj) : [];
       out.push(...items);
       startAt += items.length;
@@ -375,11 +438,15 @@ export class JiraIssueTracker implements IssueTracker {
     return out;
   }
 
-  async createMeta(projectKey: string): Promise<{ issueTypes: CreateMetaIssueType[] }> {
-    await this.ready();
+  async createMeta(
+    projectKey: string,
+    budget: CallBudget = callBudget(),
+  ): Promise<{ issueTypes: CreateMetaIssueType[] }> {
+    await this.ready(budget);
     const items = await this.pagedMeta(
       `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
       "issueTypes",
+      budget,
     );
     return {
       issueTypes: items
@@ -388,11 +455,16 @@ export class JiraIssueTracker implements IssueTracker {
     };
   }
 
-  async fieldMeta(projectKey: string, issueTypeId: string): Promise<CreateMetaField[]> {
-    await this.ready();
+  async fieldMeta(
+    projectKey: string,
+    issueTypeId: string,
+    budget: CallBudget = callBudget(),
+  ): Promise<CreateMetaField[]> {
+    await this.ready(budget);
     const items = await this.pagedMeta(
       `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes/${encodeURIComponent(issueTypeId)}`,
       "fields",
+      budget,
     );
     return items
       .filter((f) => str(f.fieldId) !== "")
@@ -410,10 +482,13 @@ export class JiraIssueTracker implements IssueTracker {
       });
   }
 
-  async createIssue(input: CreateIssueInput): Promise<{ key: string; url: string }> {
-    await this.ready();
+  async createIssue(input: CreateIssueInput, opts?: TrackerCallOptions): Promise<{ key: string; url: string }> {
+    const budget = callBudget(opts);
+    await this.ready(budget);
     const wanted = input.issueType.trim().toLowerCase();
-    const type = (await this.createMeta(input.projectKey)).issueTypes.find((t) => t.name.toLowerCase() === wanted);
+    const type = (await this.createMeta(input.projectKey, budget)).issueTypes.find(
+      (t) => t.name.toLowerCase() === wanted,
+    );
     if (!type)
       throw new IssueTrackerError(
         "tracker_invalid_request",
@@ -441,7 +516,7 @@ export class JiraIssueTracker implements IssueTracker {
     if (input.priority) fields.priority = { name: input.priority };
     if (input.components) fields.components = input.components.map((name) => ({ name }));
     if (input.parentKey) fields.parent = { key: input.parentKey };
-    const missing = (await this.fieldMeta(input.projectKey, type.id))
+    const missing = (await this.fieldMeta(input.projectKey, type.id, budget))
       .filter((f) => f.required && !f.hasDefault && !ALWAYS_SUPPLIED.has(f.fieldId) && fields[f.fieldId] === undefined)
       .map((f) => f.name || f.fieldId);
     if (missing.length > 0)
@@ -450,10 +525,12 @@ export class JiraIssueTracker implements IssueTracker {
         `Required fields are missing for ${type.name} in ${input.projectKey}: ${missing.join(", ")}.`,
       );
     const properties = Object.entries(input.properties ?? {}).map(([key, value]) => ({ key, value }));
-    const r = await this.client.request<Json>("POST", "/rest/api/3/issue", {
-      fields,
-      ...(properties.length > 0 ? { properties } : {}),
-    });
+    const r = await this.client.request<Json>(
+      "POST",
+      "/rest/api/3/issue",
+      { fields, ...(properties.length > 0 ? { properties } : {}) },
+      budget.request(),
+    );
     if (typeof r.key !== "string" || !r.key) throw new IssueTrackerError("tracker_invalid_response");
     return { key: r.key, url: this.issueUrl(r.key) };
   }

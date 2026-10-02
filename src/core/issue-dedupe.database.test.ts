@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "./db.js";
-import { fileIssue, fingerprintHash } from "./issue-dedupe.js";
+import { BUSY_RESULT, dedupeLockKey, fileIssue, fingerprintHash } from "./issue-dedupe.js";
 import type { IssueTracker, IssueView } from "../providers/issue-tracker/types.js";
 
 const db = createPrismaClient();
@@ -61,5 +61,39 @@ describe("fileIssue (PostgreSQL)", () => {
     const rows = await db.issueFingerprint.findMany({ where: { projectKey } });
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ fingerprintHash: fingerprintHash("svc:Err:frame"), seenCount: 4 });
+  });
+
+  it("answers busy when the fingerprint's lock is held past the lock timeout, and creates nothing", async () => {
+    const t = tracker();
+    const fingerprint = "svc:Busy:frame";
+    const key = dedupeLockKey("jira", projectKey, fingerprintHash(fingerprint));
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => (locked = r));
+    const holder = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${key})`;
+      locked();
+      await held;
+    });
+    await isLocked;
+    try {
+      const res = await fileIssue(
+        { db, lockTimeoutMs: 200 },
+        {
+          agentId: "dd-agent-busy",
+          link: { provider: "jira", projectKey, access: "write" },
+          tracker: t,
+          fingerprint,
+          create: { issueType: "Bug", summary: "s", descriptionMarkdown: "d" },
+          seenAgainMarkdown: "again",
+        },
+      );
+      expect(res).toEqual(BUSY_RESULT);
+      expect(t.createIssue).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await holder;
+    }
   });
 });
