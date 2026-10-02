@@ -53,6 +53,10 @@ function fakeTracker(): IssueTracker {
   return {
     provider: "jira",
     botAccountId: vi.fn(async () => "bot-1"),
+    createMeta: vi.fn(),
+    fieldMeta: vi.fn(),
+    createIssue: vi.fn(),
+    readAttachmentText: vi.fn(),
     identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "wardby", accountType: "app" })),
     transitions: vi.fn(),
     transitionTo: vi.fn(),

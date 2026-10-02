@@ -8,7 +8,12 @@ import { adfToText, markdownToAdf } from "./adf.js";
 import type { JiraClient } from "./jira-client.js";
 import {
   IssueTrackerError,
+  type CreateIssueInput,
+  type CreateMetaField,
+  type CreateMetaIssueType,
+  type IssueAttachmentView,
   type IssueCommentView,
+  type IssueStatusCategory,
   type IssuePerson,
   type IssueSearchResult,
   type IssueTracker,
@@ -16,9 +21,15 @@ import {
   type IssueView,
 } from "./types.js";
 
-const ISSUE_FIELDS = "project,summary,description,status,issuetype,priority,labels,assignee,reporter,comment";
+const ISSUE_FIELDS =
+  "project,summary,description,status,issuetype,priority,labels,assignee,reporter,comment,attachment";
 const MAX_DESCRIPTION = 20_000;
 const MAX_COMMENT = 4_000;
+const MAX_ATTACHMENTS = 20;
+const META_PAGE_SIZE = 50;
+const META_MAX_PAGES = 10;
+/** Required fields wardby always supplies itself in a create call. */
+const ALWAYS_SUPPLIED = new Set(["project", "issuetype"]);
 const PERSONAL_ACCOUNT_MESSAGE =
   "wardby's Jira token belongs to a person's account; use a service account (see docs/jira-agents.md).";
 
@@ -50,6 +61,22 @@ function localeToLanguageTag(locale: unknown): string {
   const m = /^([a-z]{2,3})(?:[_-]([A-Za-z]{2}|\d{3}))?$/.exec(locale.trim());
   return m ? (m[2] ? `${m[1]}-${m[2].toUpperCase()}` : m[1]) : "en-US";
 }
+
+const statusCategory = (v: unknown): IssueStatusCategory => {
+  const key = str(obj(obj(v).statusCategory).key);
+  return key === "new" || key === "done" ? key : "indeterminate";
+};
+
+const isTextMime = (mime: string): boolean => {
+  const m = mime.split(";")[0].trim().toLowerCase();
+  return (
+    m.startsWith("text/") ||
+    m === "application/json" ||
+    m === "application/xml" ||
+    m === "application/x-ndjson" ||
+    m.endsWith("+json")
+  );
+};
 
 export class JiraIssueTracker implements IssueTracker {
   readonly provider = "jira" as const;
@@ -121,6 +148,7 @@ export class JiraIssueTracker implements IssueTracker {
       summary: str(f.summary),
       description: adfToText(f.description, MAX_DESCRIPTION),
       status: str(obj(f.status).name),
+      statusCategory: statusCategory(f.status),
       issueType: str(obj(f.issuetype).name),
       priority: str(obj(f.priority).name) || null,
       labels: Array.isArray(f.labels) ? f.labels.filter((l): l is string => typeof l === "string") : [],
@@ -130,6 +158,16 @@ export class JiraIssueTracker implements IssueTracker {
       comments,
       // True when non-status comments were omitted (the window cut some, or Jira returned only part of them).
       commentsTruncated: visible.length > comments.length || total > all.length,
+      attachments: (Array.isArray(f.attachment) ? f.attachment : [])
+        .map(obj)
+        .filter((a) => str(a.id) !== "")
+        .slice(0, MAX_ATTACHMENTS)
+        .map((a): IssueAttachmentView => ({
+          id: str(a.id),
+          filename: str(a.filename),
+          mimeType: str(a.mimeType),
+          size: typeof a.size === "number" ? a.size : 0,
+        })),
     };
   }
 
@@ -321,5 +359,120 @@ export class JiraIssueTracker implements IssueTracker {
     await this.client.request("PUT", `/rest/api/3/issue/${key}/properties/${encodeURIComponent(property)}`, value, {
       allowEmpty: true,
     });
+  }
+
+  /** Pages a createmeta endpoint (startAt/maxResults/total), capped. */
+  private async pagedMeta(path: string, listKey: string): Promise<Json[]> {
+    const out: Json[] = [];
+    for (let page = 0, startAt = 0; page < META_MAX_PAGES; page++) {
+      const r = await this.client.request<Json>("GET", `${path}?startAt=${startAt}&maxResults=${META_PAGE_SIZE}`);
+      const items = Array.isArray(r[listKey]) ? r[listKey].map(obj) : [];
+      out.push(...items);
+      startAt += items.length;
+      if (items.length === 0 || (typeof r.total === "number" ? startAt >= r.total : items.length < META_PAGE_SIZE))
+        break;
+    }
+    return out;
+  }
+
+  async createMeta(projectKey: string): Promise<{ issueTypes: CreateMetaIssueType[] }> {
+    await this.ready();
+    const items = await this.pagedMeta(
+      `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes`,
+      "issueTypes",
+    );
+    return {
+      issueTypes: items
+        .filter((t) => str(t.id) !== "")
+        .map((t) => ({ id: str(t.id), name: str(t.name), subtask: t.subtask === true })),
+    };
+  }
+
+  async fieldMeta(projectKey: string, issueTypeId: string): Promise<CreateMetaField[]> {
+    await this.ready();
+    const items = await this.pagedMeta(
+      `/rest/api/3/issue/createmeta/${encodeURIComponent(projectKey)}/issuetypes/${encodeURIComponent(issueTypeId)}`,
+      "fields",
+    );
+    return items
+      .filter((f) => str(f.fieldId) !== "")
+      .map((f) => {
+        const allowed = Array.isArray(f.allowedValues)
+          ? f.allowedValues.map((v) => str(obj(v).name) || str(obj(v).value) || str(obj(v).id)).filter(Boolean)
+          : [];
+        return {
+          fieldId: str(f.fieldId),
+          name: str(f.name),
+          required: f.required === true,
+          hasDefault: f.hasDefaultValue === true,
+          ...(allowed.length > 0 ? { allowedValues: allowed } : {}),
+        };
+      });
+  }
+
+  async createIssue(input: CreateIssueInput): Promise<{ key: string; url: string }> {
+    await this.ready();
+    const wanted = input.issueType.trim().toLowerCase();
+    const type = (await this.createMeta(input.projectKey)).issueTypes.find((t) => t.name.toLowerCase() === wanted);
+    if (!type)
+      throw new IssueTrackerError(
+        "tracker_invalid_request",
+        `Issue type "${input.issueType}" is not available in project ${input.projectKey}.`,
+      );
+    const fields: Record<string, unknown> = {
+      project: { key: input.projectKey },
+      issuetype: { id: type.id },
+      summary: input.summary,
+      description: markdownToAdf(input.descriptionMarkdown),
+    };
+    if (input.labels) fields.labels = input.labels;
+    if (input.priority) fields.priority = { name: input.priority };
+    if (input.components) fields.components = input.components.map((name) => ({ name }));
+    if (input.parentKey) fields.parent = { key: input.parentKey };
+    for (const [id, value] of Object.entries(input.customFields ?? {})) fields[id] = value;
+    const missing = (await this.fieldMeta(input.projectKey, type.id))
+      .filter((f) => f.required && !f.hasDefault && !ALWAYS_SUPPLIED.has(f.fieldId) && fields[f.fieldId] === undefined)
+      .map((f) => f.name || f.fieldId);
+    if (missing.length > 0)
+      throw new IssueTrackerError(
+        "tracker_invalid_request",
+        `Required fields are missing for ${type.name} in ${input.projectKey}: ${missing.join(", ")}.`,
+      );
+    const properties = Object.entries(input.properties ?? {}).map(([key, value]) => ({ key, value }));
+    const r = await this.client.request<Json>("POST", "/rest/api/3/issue", {
+      fields,
+      ...(properties.length > 0 ? { properties } : {}),
+    });
+    if (typeof r.key !== "string" || !r.key) throw new IssueTrackerError("tracker_invalid_response");
+    return { key: r.key, url: this.issueUrl(r.key) };
+  }
+
+  async readAttachmentText(
+    id: string,
+    maxBytes: number,
+  ): Promise<{ filename: string; mimeType: string; text: string; truncated: boolean }> {
+    await this.ready();
+    const meta = await this.client.request<Json>("GET", `/rest/api/3/attachment/${encodeURIComponent(id)}`);
+    const filename = str(meta.filename);
+    const mimeType = str(meta.mimeType);
+    if (!isTextMime(mimeType))
+      throw new IssueTrackerError(
+        "tracker_invalid_request",
+        `Attachment "${filename}" is ${mimeType || "of unknown type"}; only text-like attachments can be read.`,
+      );
+    const size = typeof meta.size === "number" ? meta.size : null;
+    const cap = Math.max(1, Math.floor(maxBytes));
+    if (size === 0) return { filename, mimeType, text: "", truncated: false };
+    // redirect=false: Jira serves the bytes itself (206 with Range) instead of a 303 to the media host.
+    const bytes = await this.client.requestBytes(
+      `/rest/api/3/attachment/content/${encodeURIComponent(id)}?redirect=false`,
+      { maxBytes: cap },
+    );
+    return {
+      filename,
+      mimeType,
+      text: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
+      truncated: size === null ? bytes.length >= cap : size > cap,
+    };
   }
 }

@@ -41,6 +41,10 @@ type Pr = { agentId: string; state: string; openedByRunId: string; repository: s
 function setup(links: Link[], jqlMatches = true, prs: Pr[] = [], prFails = false) {
   const tracker = {
     botAccountId: vi.fn(async () => "bot-1"),
+    createMeta: vi.fn(),
+    fieldMeta: vi.fn(),
+    createIssue: vi.fn(),
+    readAttachmentText: vi.fn(),
     identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "bot", accountType: "app" })),
     matchesJql: vi.fn(async () => jqlMatches),
     issueUrl: (k: string) => `https://s/browse/${k}`,

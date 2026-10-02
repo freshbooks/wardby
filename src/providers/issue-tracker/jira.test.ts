@@ -524,3 +524,212 @@ describe("JiraIssueTracker", () => {
     });
   });
 });
+
+describe("JiraIssueTracker issue creation and attachments", () => {
+  const types = {
+    startAt: 0,
+    total: 2,
+    issueTypes: [
+      { id: "10001", name: "Bug", subtask: false },
+      { id: "10002", name: "Sub-task", subtask: true },
+    ],
+  };
+  const fieldsPage = (fields: unknown[]) => ({ startAt: 0, total: fields.length, fields });
+  const bugFields = [
+    { fieldId: "summary", name: "Summary", required: true, hasDefaultValue: false },
+    { fieldId: "issuetype", name: "Issue Type", required: true, hasDefaultValue: false },
+    { fieldId: "customfield_10050", name: "Environment", required: true, hasDefaultValue: false },
+    { fieldId: "priority", name: "Priority", required: true, hasDefaultValue: true, allowedValues: [{ name: "High" }] },
+    { fieldId: "labels", name: "Labels", required: false, hasDefaultValue: false },
+  ];
+  const meta = (c: { path: string }) =>
+    c.path.startsWith("/rest/api/3/issue/createmeta/KAN/issuetypes/10001")
+      ? json(fieldsPage(bugFields))
+      : c.path.startsWith("/rest/api/3/issue/createmeta/KAN/issuetypes")
+        ? json(types)
+        : undefined;
+
+  it("createMeta and fieldMeta map the paged responses", async () => {
+    const { tracker } = fake(meta);
+    expect(await tracker.createMeta("KAN")).toEqual({
+      issueTypes: [
+        { id: "10001", name: "Bug", subtask: false },
+        { id: "10002", name: "Sub-task", subtask: true },
+      ],
+    });
+    const fields = await tracker.fieldMeta("KAN", "10001");
+    expect(fields.find((f) => f.fieldId === "priority")).toEqual({
+      fieldId: "priority",
+      name: "Priority",
+      required: true,
+      hasDefault: true,
+      allowedValues: ["High"],
+    });
+    expect(fields.find((f) => f.fieldId === "labels")).not.toHaveProperty("allowedValues");
+  });
+
+  it("pages createmeta until total is reached", async () => {
+    const { tracker, calls } = fake((c) => {
+      if (c.path === "/rest/api/3/myself") return undefined;
+      const start = Number(new URL(`${SITE}${c.path}`).searchParams.get("startAt"));
+      const issueTypes = Array.from({ length: start === 0 ? 50 : 3 }, (_, i) => ({
+        id: String(start + i),
+        name: `T${start + i}`,
+      }));
+      return json({ startAt: start, total: 53, issueTypes });
+    });
+    expect((await tracker.createMeta("KAN")).issueTypes).toHaveLength(53);
+    expect(calls.map((c) => c.path)).toEqual([
+      "/rest/api/3/issue/createmeta/KAN/issuetypes?startAt=0&maxResults=50",
+      "/rest/api/3/issue/createmeta/KAN/issuetypes?startAt=50&maxResults=50",
+    ]);
+  });
+
+  it("createIssue resolves the type case-insensitively and posts fields plus properties", async () => {
+    const { tracker, calls } = fake((c) => (c.method === "POST" ? json({ id: "1", key: "KAN-9" }, 201) : meta(c)));
+    const r = await tracker.createIssue({
+      projectKey: "KAN",
+      issueType: "bug",
+      summary: "Crash",
+      descriptionMarkdown: "details",
+      labels: ["a"],
+      priority: "High",
+      components: ["api"],
+      parentKey: "KAN-1",
+      customFields: { customfield_10050: "prod" },
+      properties: { "wardby.fp": { h: "x" } },
+    });
+    expect(r).toEqual({ key: "KAN-9", url: `${SITE}/browse/KAN-9` });
+    const post = calls.find((c) => c.method === "POST")!;
+    expect(post.path).toBe("/rest/api/3/issue");
+    expect(post.body).toEqual({
+      fields: {
+        project: { key: "KAN" },
+        issuetype: { id: "10001" },
+        summary: "Crash",
+        description: markdownToAdf("details"),
+        labels: ["a"],
+        priority: { name: "High" },
+        components: [{ name: "api" }],
+        parent: { key: "KAN-1" },
+        customfield_10050: "prod",
+      },
+      properties: [{ key: "wardby.fp", value: { h: "x" } }],
+    });
+  });
+
+  it("createIssue lists missing required fields (no default) and does not POST", async () => {
+    const { tracker, calls } = fake(meta);
+    await expect(
+      tracker.createIssue({ projectKey: "KAN", issueType: "Bug", summary: "s", descriptionMarkdown: "d" }),
+    ).rejects.toMatchObject({ code: "tracker_invalid_request", message: expect.stringContaining("Environment") });
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("createIssue rejects an unknown issue type", async () => {
+    const { tracker } = fake(meta);
+    await expect(
+      tracker.createIssue({ projectKey: "KAN", issueType: "Epic", summary: "s", descriptionMarkdown: "d" }),
+    ).rejects.toMatchObject({ code: "tracker_invalid_request" });
+  });
+
+  it("getIssue exposes statusCategory and a capped attachment list", async () => {
+    const attachment = Array.from({ length: 25 }, (_, i) => ({
+      id: String(i),
+      filename: `f${i}.log`,
+      mimeType: "text/plain",
+      size: 10,
+    }));
+    const { tracker } = fake((c) =>
+      c.path === "/rest/api/3/myself"
+        ? undefined
+        : json({
+            key: "KAN-1",
+            fields: { status: { name: "Done", statusCategory: { key: "done" } }, attachment },
+          }),
+    );
+    const v = await tracker.getIssue("KAN-1", { maxComments: 5, agentMarker: "a" });
+    expect(v.statusCategory).toBe("done");
+    expect(v.attachments).toHaveLength(20);
+    expect(v.attachments[0]).toEqual({ id: "0", filename: "f0.log", mimeType: "text/plain", size: 10 });
+  });
+
+  const attachmentFake = (mimeType: string, size: number, content: (c: Call) => Response) =>
+    fake((c) =>
+      c.path === "/rest/api/3/attachment/7"
+        ? json({ id: "7", filename: "app.log", mimeType, size })
+        : c.path.startsWith("/rest/api/3/attachment/content/7")
+          ? content(c)
+          : undefined,
+    );
+
+  it("readAttachmentText requests a Range with redirect=false and flags truncation", async () => {
+    let auth: string | null = null;
+    const { tracker, calls } = attachmentFake("text/plain", 100, (c) => {
+      auth = c.authorization;
+      return new Response("hello wörld", { status: 206 });
+    });
+    const r = await tracker.readAttachmentText("7", 12);
+    expect(r).toEqual({ filename: "app.log", mimeType: "text/plain", text: "hello wörld", truncated: true });
+    expect(calls.at(-1)!.path).toBe("/rest/api/3/attachment/content/7?redirect=false");
+    expect(auth).toBe("Bearer tok");
+  });
+
+  it("readAttachmentText caps client-side when the server ignores Range", async () => {
+    const { tracker } = attachmentFake("application/json", 20, () => new Response("0123456789ABCDEFGHIJ"));
+    const r = await tracker.readAttachmentText("7", 10);
+    expect(r.text).toBe("0123456789");
+    expect(r.truncated).toBe(true);
+    const whole = await attachmentFake(
+      "application/vnd.api+json",
+      5,
+      () => new Response("hello"),
+    ).tracker.readAttachmentText("7", 10);
+    expect(whole).toMatchObject({ text: "hello", truncated: false });
+  });
+
+  it("readAttachmentText sends the Range header", async () => {
+    const ranges: (string | null)[] = [];
+    const client = new JiraClient(
+      { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
+      {
+        fetch: (async (url: string, init?: RequestInit) => {
+          ranges.push(new Headers(init?.headers).get("range"));
+          return new Response("abc", { status: 206 });
+        }) as unknown as typeof fetch,
+      },
+    );
+    await client.requestBytes("/x", { maxBytes: 3 });
+    expect(ranges).toEqual(["bytes=0-2"]);
+  });
+
+  it("readAttachmentText refuses non-text types without fetching content", async () => {
+    const { tracker, calls } = attachmentFake("image/png", 10, () => new Response("x"));
+    await expect(tracker.readAttachmentText("7", 10)).rejects.toMatchObject({ code: "tracker_invalid_request" });
+    expect(calls.some((c) => c.path.includes("content"))).toBe(false);
+  });
+
+  it("follows a 303 only to an Atlassian host and without the Jira credential", async () => {
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const mk = (location: string) =>
+      new JiraClient(
+        { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
+        {
+          fetch: (async (url: string, init?: RequestInit) => {
+            seen.push({ url, auth: new Headers(init?.headers).get("authorization") });
+            return url.startsWith(SITE)
+              ? new Response(null, { status: 303, headers: { location } })
+              : new Response("media", { status: 200 });
+          }) as unknown as typeof fetch,
+        },
+      );
+    const ok = await mk("https://api.media.atlassian.com/file/1").requestBytes("/x", { maxBytes: 10 });
+    expect(Buffer.from(ok).toString()).toBe("media");
+    expect(seen[1]).toEqual({ url: "https://api.media.atlassian.com/file/1", auth: null });
+    seen.length = 0;
+    await expect(mk("https://evil.example.com/x").requestBytes("/x", { maxBytes: 10 })).rejects.toMatchObject({
+      code: "tracker_invalid_response",
+    });
+    expect(seen).toHaveLength(1);
+  });
+});
