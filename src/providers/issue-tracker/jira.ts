@@ -171,10 +171,12 @@ export class JiraIssueTracker implements IssueTracker {
     const all = Array.isArray(commentBlock.comments) ? commentBlock.comments.map(obj) : [];
     // wardby's own status comments ("Working on it" / outcome) are not issue context and mislead agents; drop
     // them (bot-authored only) before windowing so they do not crowd out real comments.
-    const visible = all.filter(
-      (c) => !(person(c.author)?.accountId === bot && isStatusComment(adfToText(c.body, Infinity))),
-    );
-    const recent = visible.slice(-opts.maxComments);
+    // maxComments 0 (e.g. dedupe's status check): convert no comment at all (slice(-0) would keep them all).
+    const wantComments = opts.maxComments > 0;
+    const visible = wantComments
+      ? all.filter((c) => !(person(c.author)?.accountId === bot && isStatusComment(adfToText(c.body, Infinity))))
+      : all;
+    const recent = wantComments ? visible.slice(-opts.maxComments) : [];
     const comments: IssueCommentView[] = recent.map((c) => {
       const author = person(c.author);
       const full = adfToText(c.body, Infinity);

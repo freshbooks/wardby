@@ -166,6 +166,9 @@ describe("JiraIssueTracker", () => {
       }
       return undefined;
     });
+    const none = await tracker.getIssue("PROJ-1", { maxComments: 0, agentMarker: "agent-7" });
+    expect(none.comments).toEqual([]);
+    expect(none.commentsTruncated).toBe(true);
     const issue = await tracker.getIssue("PROJ-1", { maxComments: 2, agentMarker: "agent-7" });
     expect(issue).toMatchObject({
       key: "PROJ-1",

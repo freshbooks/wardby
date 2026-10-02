@@ -237,6 +237,50 @@ describe("fileIssue", () => {
     expect(again).toMatchObject({ outcome: "seen_again", issueKey: "OPS-100", seenCount: 2 });
   });
 
+  describe("createAllowed: false (caller at its creation cap)", () => {
+    const CAP = { error: "issue_cap_reached", message: expect.stringMatching(/OPS/) };
+
+    it("still records a seen-again update on an open match", async () => {
+      const { db, rows } = fakeDb([row()]);
+      const tracker = fakeTracker();
+      expect(await fileIssue({ db }, input(tracker, { createAllowed: false }))).toMatchObject({
+        outcome: "seen_again",
+        issueKey: "OPS-1",
+        seenCount: 3,
+      });
+      expect(tracker.comment).toHaveBeenCalledTimes(1);
+      expect(rows[0].seenCount).toBe(3);
+      expect(tracker.createIssue).not.toHaveBeenCalled();
+    });
+
+    it("refuses without creating when there is no match", async () => {
+      const { db, rows } = fakeDb();
+      const tracker = fakeTracker();
+      expect(await fileIssue({ db }, input(tracker, { createAllowed: false }))).toEqual(CAP);
+      expect(tracker.createIssue).not.toHaveBeenCalled();
+      expect(rows).toHaveLength(0);
+    });
+
+    it("refuses without filing a regression for a Done match", async () => {
+      const { db, rows } = fakeDb([row()]);
+      const tracker = fakeTracker({ getIssue: vi.fn(async (k: string) => view(k, "done")) });
+      expect(await fileIssue({ db }, input(tracker, { createAllowed: false }))).toEqual(CAP);
+      expect(tracker.createIssue).not.toHaveBeenCalled();
+      expect(tracker.linkIssues).not.toHaveBeenCalled();
+      expect(tracker.comment).not.toHaveBeenCalled();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].seenCount).toBe(2);
+    });
+
+    it("refuses without a fingerprint", async () => {
+      const { db } = fakeDb();
+      const tracker = fakeTracker();
+      expect(await fileIssue({ db }, input(tracker, { createAllowed: false, fingerprint: null }))).toEqual(CAP);
+      expect(tracker.createIssue).not.toHaveBeenCalled();
+      expect(db.$transaction).not.toHaveBeenCalled();
+    });
+  });
+
   it("matches a link type named relates case-insensitively", async () => {
     const { db } = fakeDb([row()]);
     const tracker = fakeTracker({

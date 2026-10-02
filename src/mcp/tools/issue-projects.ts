@@ -96,7 +96,7 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
       "creatableIssueTypes (write access only): the issue type names (case-insensitive, at most 20) the agent may create issues " +
       "of in this project; it fails closed too: empty or omitted means the agent cannot create issues here. " +
       "maxNewIssuesPerRun (write access only, optional integer 1-1000): the most issues one run may create in this project; " +
-      "omitted means no cap.",
+      "omitted means no cap. The cap is best-effort across resumed or concurrent attempts of the same run.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

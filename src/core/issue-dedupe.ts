@@ -11,6 +11,10 @@
  *                                          old one ("Relates"), old untouched
  *                                                            ("regression")
  *
+ * With createAllowed: false (a caller at its creation cap) only the
+ * seen-again update happens; where it would create (or file a regression)
+ * it returns { error: "issue_cap_reached" } and makes no tracker write.
+ *
  * Concurrency: a Postgres advisory transaction lock on (provider, project,
  * hash) serialises find -> decide -> tracker call -> row write, so concurrent
  * calls with one fingerprint create at most one issue. Every tracker call in
@@ -69,6 +73,8 @@ export interface FileIssueInput {
   create: Omit<CreateIssueInput, "projectKey">;
   /** Posted on the existing issue when the fingerprint is seen again. */
   seenAgainMarkdown: string;
+  /** false: only a seen-again update may happen; a create or regression returns issue_cap_reached. Default true. */
+  createAllowed?: boolean;
 }
 
 export type FileIssueOutcome = "created" | "seen_again" | "regression";
@@ -79,6 +85,9 @@ export const BUSY_RESULT = {
   error: "busy",
   message: "another sighting of this fingerprint is being filed; try again",
 } as const;
+
+/** Thrown inside the transaction to abort a create the caller disallowed (nothing was written). */
+class CreateNotAllowed extends Error {}
 
 export function fingerprintHash(fingerprint: string): string {
   return createHash("sha256").update(fingerprint, "utf8").digest("hex");
@@ -111,7 +120,9 @@ export async function fileIssue(
     }
     const createInput: CreateIssueInput = { ...input.create, projectKey: link.projectKey };
     const fingerprint = input.fingerprint ?? undefined;
+    const createAllowed = input.createAllowed ?? true;
     if (fingerprint === undefined) {
+      if (!createAllowed) return capReached(link.projectKey);
       const created = await tracker.createIssue(createInput);
       return { outcome: "created", issueKey: created.key, url: created.url, seenCount: 1 };
     }
@@ -160,6 +171,7 @@ export async function fileIssue(
           }
         }
 
+        if (!createAllowed) throw new CreateNotAllowed();
         const created = await tracker.createIssue(
           regressionOf
             ? {
@@ -211,11 +223,19 @@ export async function fileIssue(
       }
       return completed;
     }
+    if (err instanceof CreateNotAllowed) return capReached(link.projectKey);
     if (isLockTimeout(err)) return { ...BUSY_RESULT };
     if (err instanceof IssueTrackerError) return { error: err.code, message: err.message };
     log.warn({ err, agentId: input.agentId, projectKey: link.projectKey }, "issue dedupe failed");
     return { error: "internal_error", message: "Filing the issue failed." };
   }
+}
+
+function capReached(projectKey: string): { error: string; message: string } {
+  return {
+    error: "issue_cap_reached",
+    message: `This run has reached its limit of new issues in ${projectKey} (maxNewIssuesPerRun); nothing was created.`,
+  };
 }
 
 /** The issue as it is now, or null when it no longer exists. */

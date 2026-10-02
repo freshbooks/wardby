@@ -1074,9 +1074,12 @@ describe("jira_create_issue", () => {
     });
   });
 
-  it("refuses when the run has no creation context", async () => {
+  it("refuses when the run has no creation context, before any tracker call", async () => {
     const t = creatingTracker();
-    expect(await call("jira_create_issue", ARGS, ctx(t))).toMatchObject({ error: "not_available" });
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "PROJ-1" }, ctx(t))).toMatchObject({
+      error: "not_available",
+    });
+    expect(t.issueProject).not.toHaveBeenCalled();
     expect(t.createIssue).not.toHaveBeenCalled();
   });
 
@@ -1098,6 +1101,53 @@ describe("jira_create_issue", () => {
       expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "issue_cap_reached" });
       expect(t.createIssue).toHaveBeenCalledTimes(1);
       expect(file).toHaveBeenCalledTimes(3);
+    });
+
+    it("at the cap, lets a fingerprinted call through without create permission, and seen-again does not count", async () => {
+      const t = creatingTracker();
+      const { c, file } = creating(t, [capped(1), READ_LINK]);
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ outcome: "created" });
+      expect(file.mock.calls[0][0].createAllowed).toBe(true);
+      file.mockResolvedValueOnce({ outcome: "seen_again", issueKey: "PROJ-7", url: "u", seenCount: 4 });
+      file.mockResolvedValueOnce({ outcome: "seen_again", issueKey: "PROJ-7", url: "u", seenCount: 5 });
+      for (const seenCount of [4, 5]) {
+        expect(await call("jira_create_issue", { ...ARGS, fingerprint: "f" }, c)).toMatchObject({
+          outcome: "seen_again",
+          seenCount,
+        });
+      }
+      expect(file.mock.calls[1][0].createAllowed).toBe(false);
+      expect(file.mock.calls[2][0].createAllowed).toBe(false);
+      // At the cap fileIssue itself refuses a would-be create (no match, or a Done match).
+      file.mockResolvedValueOnce({ error: "issue_cap_reached", message: "limit" });
+      expect(await call("jira_create_issue", { ...ARGS, fingerprint: "g" }, c)).toMatchObject({
+        error: "issue_cap_reached",
+      });
+      // Without a fingerprint, refused before fileIssue.
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "issue_cap_reached" });
+      expect(file).toHaveBeenCalledTimes(4);
+      expect(t.createIssue).toHaveBeenCalledTimes(1);
+    });
+
+    it("at the cap, a real fileIssue refuses no-match and Done-match creates without a tracker create", async () => {
+      const t = creatingTracker();
+      const { c } = creating(t, [capped(0), READ_LINK]);
+      const tx = {
+        $executeRaw: vi.fn(async () => 0),
+        issueFingerprint: { findFirst: vi.fn(async () => null), create: vi.fn(), update: vi.fn() },
+      };
+      const db = { $transaction: vi.fn(async (fn: (x: typeof tx) => unknown) => fn(tx)) };
+      c.creation!.fileIssue = (input) => fileIssue({ db: db as never }, input);
+      expect(await call("jira_create_issue", { ...ARGS, fingerprint: "f" }, c)).toMatchObject({
+        error: "issue_cap_reached",
+      });
+      tx.issueFingerprint.findFirst.mockResolvedValue({ id: "r1", issueKey: "PROJ-3", seenCount: 1 } as never);
+      vi.mocked(t.getIssue).mockResolvedValue({ key: "PROJ-3", projectKey: "PROJ", statusCategory: "done" } as never);
+      expect(await call("jira_create_issue", { ...ARGS, fingerprint: "f" }, c)).toMatchObject({
+        error: "issue_cap_reached",
+      });
+      expect(t.createIssue).not.toHaveBeenCalled();
+      expect(tx.issueFingerprint.create).not.toHaveBeenCalled();
     });
 
     it("does not count failed creates", async () => {
