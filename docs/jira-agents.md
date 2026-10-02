@@ -394,12 +394,20 @@ A run is attributed when:
 
 - a Jira event on an issue started it;
 - it reviews or answers a mention on a pull request wardby opened for an issue;
-- `trigger_agent` or a webhook named an `issue`
-  (`{ "provider": "jira", "key": "PROJ-123" }`) in a project the agent is
-  linked to. A key in a project the agent isn't linked to is refused
-  (`trigger_agent` returns an error; a webhook answers `400 invalid_issue`);
+- `trigger_agent` named an `issue`, or a webhook call's JSON body named a
+  `wardbyIssue` (both `{ "provider": "jira", "key": "PROJ-123" }`), in a
+  project the agent is linked to. A malformed key, or a key in a project the
+  agent isn't linked to, is refused (`trigger_agent` returns an error; a
+  webhook answers `400 invalid_issue`). A webhook ignores a top-level `issue`
+  field, so payloads forwarded from GitHub or Jira, which carry their own
+  `issue` object, still run unattributed;
 - its parent run is attributed (sub-agents and coding runs inherit, and cannot
   change it).
+
+When a run is attributed to an issue, whatever the source, coding runs it
+starts name that issue in their pull request's title and body. The issue total
+in a Jira comment's spend line covers every run attributed to that issue,
+whichever agent ran it.
 
 When a run starts, wardby records the issue's parent (its epic) as it is at
 that moment. Moving an issue to another epic later leaves earlier runs under
