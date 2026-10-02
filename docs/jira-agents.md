@@ -157,20 +157,20 @@ Example arguments:
 }
 ```
 
-| Argument                | Meaning                                                                                                                                                  |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `access`                | `read` or `write`. Comments and event triggers need `write`.                                                                                             |
-| `triggers`              | Any of `created`, `transitioned`, `labeled`, `assigned`, `mention`.                                                                                      |
-| `triggerStatuses`       | Required for `transitioned`: the target statuses (case-insensitive).                                                                                     |
-| `triggerLabels`         | Required for `labeled`: labels whose addition triggers the agent.                                                                                        |
-| `trustedAccountIds`     | Required for `mention` and `assigned`: Jira account ids whose mentions and assignments may trigger the agent. Find an id in a person's Jira profile URL. |
-| `jqlFilter`             | Optional. Only issues matching this JQL trigger the agent. If wardby cannot evaluate it, the event is skipped.                                           |
-| `commentVisibilityRole` | Optional. Restrict the agent's comments to a project role.                                                                                               |
-| `allowedTransitions`    | Write access only. Target status names `jira_transition` may move issues to (case-insensitive). Empty means the tool refuses.                            |
-| `writableFields`        | Write access only. Field ids `jira_update_fields` may change: `labels`, `components`, `priority`, or `customfield_N`. Empty means the tool refuses.      |
-| `allowedLinkTypes`      | Write access only. Issue link type names `jira_link_issues` may create (case-insensitive, at most 20). Empty means the tool refuses.                     |
-| `creatableIssueTypes`   | Write access only. Issue type names `jira_create_issue` may create (case-insensitive, at most 20). Empty means creation is off.                          |
-| `maxNewIssuesPerRun`    | Write access only, optional integer 1-1000. The most issues one run may create in this project. Omit (null) for no cap.                                  |
+| Argument                | Meaning                                                                                                                                                                                                        |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `access`                | `read` or `write`. Comments and event triggers need `write`.                                                                                                                                                   |
+| `triggers`              | Any of `created`, `transitioned`, `labeled`, `assigned`, `mention`.                                                                                                                                            |
+| `triggerStatuses`       | Required for `transitioned`: the target statuses (case-insensitive).                                                                                                                                           |
+| `triggerLabels`         | Required for `labeled`: labels whose addition triggers the agent.                                                                                                                                              |
+| `trustedAccountIds`     | Required for `mention` and `assigned`: Jira account ids whose mentions and assignments may trigger the agent. Find an id in a person's Jira profile URL.                                                       |
+| `jqlFilter`             | Optional. Only issues matching this JQL trigger the agent. If wardby cannot evaluate it, the event is skipped.                                                                                                 |
+| `commentVisibilityRole` | Optional. Restrict the agent's comments to a project role.                                                                                                                                                     |
+| `allowedTransitions`    | Write access only. Target status names `jira_transition` may move issues to (case-insensitive). Empty means the tool refuses.                                                                                  |
+| `writableFields`        | Write access only. Field ids `jira_update_fields` may change: `labels`, `components`, `priority`, or `customfield_N`. Empty means the tool refuses.                                                            |
+| `allowedLinkTypes`      | Write access only. Issue link type names `jira_link_issues` may create (case-insensitive, at most 20). Empty means the tool refuses.                                                                           |
+| `creatableIssueTypes`   | Write access only. Issue type names `jira_create_issue` may create (case-insensitive, at most 20), e.g. Bug or Task: issue types are site-specific, so check the project's types. Empty means creation is off. |
+| `maxNewIssuesPerRun`    | Write access only, optional integer 1-1000. The most issues one run may create in this project (each sub-agent run has its own count). Omit (null) for no cap.                                                 |
 
 The tool names `jira_get_issue`, `jira_search`, `jira_comment`,
 `jira_edit_own_comment`, `jira_list_transitions`, `jira_transition`,
@@ -246,10 +246,10 @@ Notes:
 
 Two more tools are available to linked agents.
 
-| Tool                   | What it does                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `jira_create_issue`    | Args `projectKey`, `issueType`, `summary`, `description` (Markdown), and optionally `labels`, `priority`, `components`, `parentKey`, `customFields`, `fingerprint`. Creates an issue with a footer naming the agent. Returns `outcome` (`created`, `seen_again` or `regression`), `issueKey`, `url` and `seenCount`.                                                   |
-| `jira_read_attachment` | Args `issueKey`, `attachmentId` (ids are listed by `jira_get_issue`), optional `maxBytes` (1-200000, default 50000). Returns the filename, MIME type, the first `maxBytes` of text and `truncated`. Reads only text-like attachments (logs, text, JSON, CSV) on an issue in a project the agent is linked to; other types and attachments on other issues are refused. |
+| Tool                   | What it does                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jira_create_issue`    | Args `projectKey`, `issueType`, `summary`, `description` (Markdown), and optionally `labels`, `priority`, `components`, `parentKey`, `customFields`, `fingerprint`. Creates an issue with a footer naming the agent. Returns `outcome` (`created`, `seen_again` or `regression`), `issueKey`, `url` and `seenCount`.                                                                                                                     |
+| `jira_read_attachment` | Args `issueKey`, `attachmentId` (`jira_get_issue` lists the issue's 20 most recent attachments with their ids; only those can be read), optional `maxBytes` (1-200000, default 50000). Returns the filename, MIME type, the first `maxBytes` of text and `truncated`. Reads only text-like attachments (logs, text, JSON, CSV) on an issue in a project the agent is linked to; other types and attachments on other issues are refused. |
 
 Rules for `jira_create_issue`:
 
@@ -257,11 +257,13 @@ Rules for `jira_create_issue`:
   link's `creatableIssueTypes`. Like the other allowlists it fails closed:
   empty means the tool refuses.
 - Every `customFields` key must be in the link's `writableFields`.
-- `parentKey` (to create a subtask) must be in a project the agent is linked
-  to.
+- `parentKey` (to create a subtask) must be in a project the agent has a
+  `write` link to, both by its key and where Jira says the issue lives now, so
+  a read-only project never gets a new subtask.
 - **`maxNewIssuesPerRun`** is optional; with no value there is no cap. When
-  set, it limits the issues one run creates in that project (counted per
-  project, best effort across resumed attempts of the same run). At the cap
+  set, it limits the issues one run creates in that project (counted per run
+  and project, best effort across resumed attempts of the same run). The count
+  is per run, not per run tree: each sub-agent run has its own. At the cap
   only "seen again" updates go through; a call that would create an issue is
   refused.
 
@@ -272,11 +274,12 @@ repeatedly. wardby stores only a hash of it, in its own database; the value is
 never sent to Jira. Per project:
 
 - No earlier issue for the fingerprint: a new issue is created (`created`).
-- The earlier issue is still open: wardby adds a "Seen again (xN)" comment
+- The earlier issue is still open: wardby adds a "Seen again (×N)" comment
   there instead of creating anything (`seen_again`). These do not count
   against `maxNewIssuesPerRun`.
-- The earlier issue is Done: a new issue is created and linked to the old one
-  with a `Relates` link (`regression`). The old issue is left untouched.
+- The earlier issue is Done: a new issue is created (`regression`); its
+  description names the old issue, and it is linked to it with `Relates` if
+  the site has that link type. The old issue is left untouched.
 - If another sighting of the same fingerprint is being filed at that moment
   (a burst), the call returns a `busy` error; the agent can retry.
 
@@ -308,13 +311,17 @@ Wardby can file its own failures. Set `defectProjectKey` and `defectIssueType`
 together (both or neither) on an agent with `create_agent` or `update_agent`;
 pass both as null on `update_agent` to turn it off. It is per-agent opt-in.
 When a run of that agent ends `failed`, `lost` or `budget_exhausted` (coding
-runs included), wardby files an issue in that project with no model involved.
+runs included, as well as runs that time out in the coding queue or that the
+executor fails to start), wardby files an issue in that project with no model
+involved.
 
 - The agent needs a live `write` link to the project whose
   `creatableIssueTypes` includes the issue type. This is checked when filing;
   without it nothing is filed (and the run itself is unaffected).
-- The title and description contain the run id, the status and a short
-  failure category (or `unknown`), never raw error text.
+- The summary is `wardby agent "<name>": <status> (<category>)`, where the
+  category is a short failure category (left out when it is `unknown`). The
+  description adds the run id, agent id, status, category and finish time.
+  Neither contains raw error text.
 - Issues are deduped by agent, status and category, so a repeating failure
   becomes "Seen again" comments on one open issue; after it is Done, the next
   failure files a linked regression.
@@ -471,7 +478,8 @@ the prompt, since each run spends the agent's budget.
 A scheduled agent that reads recent errors from your logs and files one issue
 per distinct problem. You need a read-only custom tool that searches your
 logs (for example, a wrapper around your log platform's search API with a
-secret attached), and a `write` link with `creatableIssueTypes: ["Bug"]`,
+secret attached), and a `write` link with `creatableIssueTypes` listing the
+issue type to file (e.g. Bug or Task; check the project's types),
 optionally `maxNewIssuesPerRun` (for example 5) to bound a noisy night.
 
 Set a schedule with `set_schedule`, then use a system prompt like:
@@ -479,7 +487,7 @@ Set a schedule with `set_schedule`, then use a system prompt like:
 ```text
 Search the last hour of error logs with the log search tool. Group errors by
 service, exception type and top stack frame. For each group, call
-jira_create_issue in project PROJ with issueType Bug, a short summary, and a
+jira_create_issue in project PROJ with issueType Bug (use your project's type), a short summary, and a
 description with the count, the affected service and a short redacted
 excerpt. Set fingerprint to "<service>|<exception type>|<top frame>".
 Never put secrets, tokens, personal data or raw message text in the
@@ -493,8 +501,9 @@ linked regression. Keep the tool read-only and its output bounded.
 
 ## Recipe: self-defects
 
-Link the agent with `access: "write"` and `creatableIssueTypes: ["Bug"]`,
-then opt it in:
+Link the agent with `access: "write"` and `creatableIssueTypes` listing the
+type to file (e.g. Bug or Task; issue types are site-specific, so check the
+project's types), then opt it in with that same type:
 
 ```json
 { "agentId": "<agent id>", "defectProjectKey": "PROJ", "defectIssueType": "Bug" }
