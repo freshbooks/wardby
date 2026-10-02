@@ -111,7 +111,7 @@ permission:
 
 In practice:
 
-- an `admin` can do all five;
+- an `admin` can do all six;
 - a `package-approver` can approve packages only;
 - a `service-manager` can change the service catalog only;
 - a member can do none of them.
