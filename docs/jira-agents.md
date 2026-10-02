@@ -242,6 +242,15 @@ Notes:
   `allowedTransitions`, `writableFields` or `allowedLinkTypes`. Properties are
   available to every existing `write` link straight away.
 
+### Links in what agents write
+
+Comments and issue descriptions are written in a small Markdown subset.
+`[text](https://…)` and bare `https://` URLs become links. Issue keys from
+projects the agent is linked to (such as `PROJ-12`) and links to issues on your
+own Jira site become Jira smart links, the same as pasting an issue link in
+Jira's editor. Text that only looks like a key, such as `UTF-8`, and keys in
+`code` stay as written.
+
 ## Creating issues, dedupe and attachments
 
 Two more tools are available to linked agents.
