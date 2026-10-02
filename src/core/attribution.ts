@@ -8,6 +8,8 @@
  */
 import type { Prisma, PrismaClient } from "#prisma";
 import {
+  ISSUE_KEY,
+  ISSUE_TRACKER_PROVIDERS,
   projectOf,
   type IssueSnapshot,
   type IssueTrackerProvider,
@@ -218,4 +220,49 @@ export async function linkedPullRequestAttribution(
   const issue = await linkedPullRequestIssue(db, pr);
   if (!issue) return undefined;
   return { source: "linked_pr", item: await resolveWorkItem(db, trackers, issue.provider, issue.key, opts) };
+}
+
+/** A refusal whose message is safe to return to the caller. */
+export class AttributionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AttributionError";
+  }
+}
+
+/**
+ * An issue a caller names on trigger_agent or a webhook. It decides whose
+ * cost this run counts toward, so it must be well formed and in a project the
+ * agent is linked to (AgentIssueProject) — otherwise the dispatch is refused.
+ */
+export async function validateExplicitIssue(
+  db: Pick<PrismaClient, "agentIssueProject">,
+  agentId: string,
+  issue: unknown,
+): Promise<{ provider: IssueTrackerProvider; key: string }> {
+  const candidate = issue && typeof issue === "object" ? (issue as { provider?: unknown; key?: unknown }) : {};
+  const provider = candidate.provider;
+  const key = candidate.key;
+  if (typeof provider !== "string" || !ISSUE_TRACKER_PROVIDERS.includes(provider as IssueTrackerProvider)) {
+    throw new AttributionError(`issue.provider must be one of: ${ISSUE_TRACKER_PROVIDERS.join(", ")}.`);
+  }
+  if (typeof key !== "string" || !ISSUE_KEY.test(key)) {
+    throw new AttributionError("issue.key must be an issue key such as PROJ-123.");
+  }
+  const link = await db.agentIssueProject.findUnique({
+    where: { agentId_provider_projectKey: { agentId, provider, projectKey: projectOf(key) } },
+    select: { agentId: true },
+  });
+  if (!link) throw new AttributionError(`This agent is not linked to ${provider} project ${projectOf(key)}.`);
+  return { provider: provider as IssueTrackerProvider, key };
+}
+
+export async function explicitAttribution(
+  db: Pick<PrismaClient, "agentIssueProject" | "workItem">,
+  trackers: IssueTrackerRegistry | undefined,
+  agentId: string,
+  issue: unknown,
+): Promise<AttributionIntent> {
+  const { provider, key } = await validateExplicitIssue(db, agentId, issue);
+  return { source: "explicit", item: await resolveWorkItem(db, trackers, provider, key) };
 }

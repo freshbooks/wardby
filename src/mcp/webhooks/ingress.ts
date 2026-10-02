@@ -6,6 +6,7 @@
  */
 import type { PrismaClient } from "#prisma";
 import type { Executor } from "../../providers/executor/types.js";
+import type { IssueTrackerRegistry } from "../../providers/issue-tracker/types.js";
 import { resolveWebhookRun } from "../../core/webhooks.js";
 import { CodingTaskOverrideSchema } from "../../coding/protocol.js";
 
@@ -34,6 +35,7 @@ export async function handleWebhookIngress(
   req: WebhookIngressRequest,
   db: PrismaClient,
   executor: Executor,
+  issueTrackers?: IssueTrackerRegistry,
 ): Promise<WebhookIngressResult> {
   const secret = extractSecret(req);
   if (!secret) {
@@ -45,11 +47,16 @@ export async function handleWebhookIngress(
     return { status: 400, body: { error: "invalid_task" } };
   }
 
-  const result = await resolveWebhookRun(webhookId, secret, db, executor, codingTask);
+  const result = await resolveWebhookRun(webhookId, secret, db, executor, codingTask, {
+    issue: req.body.issue,
+    issueTrackers,
+  });
   if (result.ok) {
     return { status: 202, body: { runId: result.runId } };
   }
   switch (result.reason) {
+    case "invalid_issue":
+      return { status: 400, body: { error: "invalid_issue", error_description: result.message } };
     case "not_found":
       return { status: 404, body: { error: "not_found" } };
     case "invalid_secret":

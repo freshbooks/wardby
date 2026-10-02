@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { handleWebhookIngress } from "./ingress.js";
 import { createWebhook } from "../../core/webhooks.js";
 import type { Executor } from "../../providers/executor/types.js";
@@ -136,5 +136,43 @@ describe("webhook ingress", () => {
       executor,
     );
     expect(result).toEqual({ status: 400, body: { error: "invalid_task" } });
+  });
+
+  it("accepts an optional issue and attributes the run to it", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    const created: unknown[] = [];
+    db.agentIssueProject = { findUnique: async () => ({ agentId: "a1" }) };
+    db.workItem = { findUnique: async () => null, upsert: async () => ({ id: "wi1", parentKey: null }) };
+    db.runAttribution = { findUnique: async () => null, create: async (a: unknown) => created.push(a) };
+    db.runIssueStatus = { findUnique: async () => null };
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { issue: { provider: "jira", key: "PAY-241" } } },
+      db,
+      executor,
+    );
+    expect(result.status).toBe(202);
+    expect(created).toEqual([
+      { data: { runId: expect.any(String), workItemId: "wi1", parentKeyAtRun: null, source: "explicit" } },
+    ]);
+  });
+
+  it("rejects an issue the agent is not linked to with 400 invalid_issue, creating no run", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    db.agentIssueProject = { findUnique: async () => null };
+    const runCreate = vi.spyOn(db.run, "create");
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { issue: { provider: "jira", key: "PAY-241" } } },
+      db,
+      executor,
+    );
+    expect(result).toEqual({
+      status: 400,
+      body: { error: "invalid_issue", error_description: expect.stringMatching(/not linked/) },
+    });
+    expect(runCreate).not.toHaveBeenCalled();
   });
 });

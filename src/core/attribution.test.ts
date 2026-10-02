@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { IssueTrackerError, type IssueTracker, type IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import {
+  AttributionError,
+  explicitAttribution,
+  validateExplicitIssue,
   linkedPullRequestAttribution,
   linkedPullRequestIssue,
   resolveWorkItem,
@@ -147,5 +150,52 @@ describe("linkedPullRequestAttribution", () => {
   it("is undefined when the PR is unlinked", async () => {
     const db = { issuePullRequest: { findFirst: vi.fn(async () => null) }, workItem: {} };
     expect(await linkedPullRequestAttribution(db as never, undefined, pr)).toBeUndefined();
+  });
+});
+
+describe("validateExplicitIssue", () => {
+  const linked = { agentIssueProject: { findUnique: vi.fn(async () => ({ agentId: "a" })) } };
+  const unlinked = { agentIssueProject: { findUnique: vi.fn(async () => null) } };
+
+  it("accepts a well-formed key in a project the agent is linked to", async () => {
+    await expect(validateExplicitIssue(linked as never, "a", { provider: "jira", key: "PAY-241" })).resolves.toEqual({
+      provider: "jira",
+      key: "PAY-241",
+    });
+    expect(linked.agentIssueProject.findUnique).toHaveBeenCalledWith({
+      where: { agentId_provider_projectKey: { agentId: "a", provider: "jira", projectKey: "PAY" } },
+      select: { agentId: true },
+    });
+  });
+
+  it.each([
+    [{ provider: "jira", key: "pay-241" }],
+    [{ provider: "jira", key: "PAY-0" }],
+    [{ provider: "jira" }],
+    [{ provider: "linear", key: "ENG-1" }],
+    ["PAY-241"],
+  ])("rejects malformed input %j", async (issue) => {
+    await expect(validateExplicitIssue(linked as never, "a", issue)).rejects.toBeInstanceOf(AttributionError);
+  });
+
+  it("rejects a project the agent is not linked to", async () => {
+    await expect(validateExplicitIssue(unlinked as never, "a", { provider: "jira", key: "PAY-241" })).rejects.toThrow(
+      /not linked/,
+    );
+  });
+});
+
+describe("explicitAttribution", () => {
+  it("resolves the work item for a linked issue", async () => {
+    const db = {
+      agentIssueProject: { findUnique: vi.fn(async () => ({ agentId: "a" })) },
+      workItem: { findUnique: vi.fn(async () => null) },
+    };
+    await expect(
+      explicitAttribution(db as never, undefined, "a", { provider: "jira", key: "PAY-241" }),
+    ).resolves.toEqual({
+      source: "explicit",
+      item: { provider: "jira", key: "PAY-241", scopeKey: "PAY", snapshot: null },
+    });
   });
 });
