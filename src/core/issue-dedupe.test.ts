@@ -77,6 +77,7 @@ function view(key: string, statusCategory: IssueView["statusCategory"], projectK
     comments: [],
     commentsTruncated: false,
     attachments: [],
+    links: [],
   };
 }
 

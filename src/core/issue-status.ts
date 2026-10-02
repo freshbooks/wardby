@@ -242,11 +242,14 @@ export async function completeIssueStatus(
     }
     const markdown = toJiraMarkdown(body);
     let commentId = status.commentId;
-    if (commentId) await tracker.editComment(status.issueKey, commentId, { markdown });
+    // Keys in the issue's own project (e.g. a related issue the reply names) become smart links.
+    const issueKeyProjects = writable ? [project] : [];
+    if (commentId) await tracker.editComment(status.issueKey, commentId, { markdown, issueKeyProjects });
     else if (writable) {
       commentId = (
         await tracker.comment(status.issueKey, {
           markdown,
+          issueKeyProjects,
           ...(link.commentVisibilityRole ? { visibilityRole: link.commentVisibilityRole } : {}),
         })
       ).id;

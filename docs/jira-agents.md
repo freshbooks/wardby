@@ -15,7 +15,7 @@ Jira Cloud only. One Jira site per wardby deployment.
   service account is @-mentioned in a comment). Event triggers need write
   access.
 - **Tools.** Linked agents get these tools, limited to their linked projects:
-  `jira_get_issue` (summary, description, status, recent comments),
+  `jira_get_issue` (summary, description, status, recent comments, issue links),
   `jira_search` (JQL, scoped to the linked projects), `jira_comment`, and
   `jira_edit_own_comment` (only comments that agent posted earlier). On a
   read-only link the two comment tools are refused. Write links also get the

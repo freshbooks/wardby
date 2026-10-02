@@ -12,6 +12,7 @@ import {
   type CreateMetaField,
   type CreateMetaIssueType,
   type IssueAttachmentView,
+  type IssueLinkView,
   projectOf,
   type IssueCommentView,
   type IssueStatusCategory,
@@ -25,8 +26,9 @@ import {
 } from "./types.js";
 
 const ISSUE_FIELDS =
-  "project,summary,description,status,issuetype,priority,labels,assignee,reporter,comment,attachment";
+  "project,summary,description,status,issuetype,priority,labels,assignee,reporter,comment,attachment,issuelinks";
 const MAX_DESCRIPTION = 20_000;
+const MAX_LINKS = 20;
 const MAX_COMMENT = 4_000;
 /** An issue view lists (and jira_read_attachment can read) only the most recent this many attachments. */
 const MAX_ATTACHMENTS = 20;
@@ -226,6 +228,21 @@ export class JiraIssueTracker implements IssueTracker {
           mimeType: str(a.mimeType),
           size: typeof a.size === "number" ? a.size : 0,
         })),
+      links: (Array.isArray(f.issuelinks) ? f.issuelinks : [])
+        .map(obj)
+        .flatMap((l): IssueLinkView[] => {
+          const type = obj(l.type);
+          const [other, relation] = l.outwardIssue
+            ? [obj(l.outwardIssue), str(type.outward)]
+            : [obj(l.inwardIssue), str(type.inward)];
+          const key = str(other.key);
+          if (!key) return [];
+          const of = obj(other.fields);
+          return [
+            { relation: relation || str(type.name), key, summary: str(of.summary), status: str(obj(of.status).name) },
+          ];
+        })
+        .slice(0, MAX_LINKS),
     };
   }
 

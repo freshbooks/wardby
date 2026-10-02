@@ -223,7 +223,10 @@ describe("completeIssueStatus", () => {
     const t = tracker();
     const d = db({ runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null });
     await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "All done" }, { jira: t });
-    expect(t.editComment).toHaveBeenCalledWith("PROJ-1", "c-1", { markdown: expect.stringContaining("All done") });
+    expect(t.editComment).toHaveBeenCalledWith("PROJ-1", "c-1", {
+      markdown: expect.stringContaining("All done"),
+      issueKeyProjects: ["PROJ"],
+    });
     expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
       where: { runId: "r1" },
       data: { commentId: "c-1", completedAt: expect.any(Date) },
@@ -358,6 +361,7 @@ describe("closeOrphanedIssueStatuses", () => {
     await closeOrphanedIssueStatuses(d, { jira: t }, NOW);
     expect(t.comment).toHaveBeenCalledWith("PROJ-1", {
       markdown: expect.stringMatching(/^❌ Interrupted before it finished/),
+      issueKeyProjects: ["PROJ"],
       visibilityRole: "Dev",
     });
     expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({

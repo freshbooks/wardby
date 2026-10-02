@@ -632,6 +632,7 @@ describe("reconcileOnce orphaned issue status comments", () => {
 
     expect(tracker.editComment).toHaveBeenCalledWith("PROJ-1", "900", {
       markdown: expect.stringMatching(/^❌ Interrupted before it finished/),
+      issueKeyProjects: ["PROJ"],
     });
     expect(row.completedAt).toBeInstanceOf(Date);
   });

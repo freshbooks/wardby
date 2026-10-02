@@ -41,6 +41,16 @@ export interface IssueView {
   commentsTruncated: boolean;
   /** Capped list; contents are read with readAttachmentText. Filenames are untrusted. */
   attachments: IssueAttachmentView[];
+  /** Issue links (e.g. "relates to PROJ-9"), capped. Summaries are untrusted issue text. */
+  links: IssueLinkView[];
+}
+
+export interface IssueLinkView {
+  /** How this issue relates to the other, as Jira words it from this side ("relates to", "is blocked by"). */
+  relation: string;
+  key: string;
+  summary: string;
+  status: string;
 }
 
 export type IssueStatusCategory = "new" | "indeterminate" | "done";

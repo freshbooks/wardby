@@ -165,8 +165,26 @@ describe("handleIssueTrackerTool", () => {
       key: "PROJ-12",
       projectKey: "PROJ",
       summary: "S",
+      links: [],
     });
     expect(t.getIssue).toHaveBeenCalledWith("PROJ-12", { maxComments: 10, agentMarker: "a1" });
+  });
+
+  it("jira_get_issue describes only links into linked projects and counts the rest", async () => {
+    const t = tracker();
+    (t.getIssue as any).mockResolvedValueOnce({
+      key: "PROJ-12",
+      projectKey: "PROJ",
+      summary: "S",
+      links: [
+        { relation: "relates to", key: "PROJ-9", summary: "Old", status: "Done" },
+        { relation: "blocks", key: "SECRET-1", summary: "Hidden", status: "To Do" },
+      ],
+    });
+    const out = await call("jira_get_issue", { issueKey: "PROJ-12" }, ctx(t));
+    expect(out.links).toEqual([{ relation: "relates to", key: "PROJ-9", summary: "Old", status: "Done" }]);
+    expect(out.otherLinks).toBe(1);
+    expect(JSON.stringify(out)).not.toContain("SECRET");
   });
 
   it("jira_search scopes the JQL to the linked projects", async () => {
