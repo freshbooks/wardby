@@ -17,6 +17,10 @@
  * whose volume the fingerprint dedupe already bounds (one open issue per
  * agent/status/category).
  *
+ * Filed by whichever write made the run's row terminal (its update count says so, so a run files once): the
+ * runner, the container store, the reconciler, the coding queue's timeout, a failed executor start
+ * (markRunFailedFromExecutorError) and DBOS recovery's mark-failed.
+ *
  * Best effort and never throws. No recursion: this is only ever called after a
  * run's row is final, outside any run, and a failure to file only logs — it
  * never fails a run, so it can never trigger another filing.
@@ -61,6 +65,25 @@ export interface SelfDefectOptions {
   /** Injected for tests; defaults to issue-dedupe's fileIssue on `db`. */
   fileIssue?: (input: FileIssueInput) => Promise<FileIssueResult>;
   waitMs?: number;
+}
+
+/**
+ * Where a write that ends a run files its self-defect: the database to read the run and file through, and the
+ * configured issue trackers. Absent, or with no tracker configured, the write files nothing and makes no extra query.
+ */
+export interface SelfDefectSink {
+  db: SelfDefectDb & Pick<PrismaClient, "run">;
+  issueTrackers?: IssueTrackerRegistry;
+  /** Injected for tests; the wait defaults to SELF_DEFECT_SHORT_WAIT_MS. */
+  options?: SelfDefectOptions;
+}
+
+/** The bound for callers on a dispatch, queue or executor path: past it the filing carries on detached. */
+export const SELF_DEFECT_SHORT_WAIT_MS = 2_000;
+
+/** True when at least one issue tracker is configured (no Jira site configured yields an empty registry). */
+export function hasIssueTrackers(trackers: IssueTrackerRegistry | undefined): trackers is IssueTrackerRegistry {
+  return !!trackers && Object.values(trackers).some(Boolean);
 }
 
 /**
@@ -111,6 +134,33 @@ export async function fileSelfDefect(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * For a write that just made `runId` terminal (its update count said so, so this files once): reads the final row
+ * and files its self-defect, waiting at most SELF_DEFECT_SHORT_WAIT_MS. No-op, with no query, without a configured
+ * tracker. Never throws.
+ */
+export async function fileSelfDefectForRun(
+  sink: SelfDefectSink | undefined,
+  runId: string,
+): Promise<FileIssueResult | null> {
+  if (!sink || !hasIssueTrackers(sink.issueTrackers)) return null;
+  let row: SelfDefectRun | null;
+  try {
+    row = await sink.db.run.findUnique({
+      where: { id: runId },
+      select: { id: true, agentId: true, status: true, error: true, finishedAt: true },
+    });
+  } catch (err) {
+    log.warn({ err, runId }, "could not read the run to file its self-defect");
+    return null;
+  }
+  if (!row) return null;
+  return fileSelfDefect(sink.db, sink.issueTrackers, row, {
+    waitMs: SELF_DEFECT_SHORT_WAIT_MS,
+    ...sink.options,
+  });
 }
 
 async function attempt(

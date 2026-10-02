@@ -799,6 +799,7 @@ async function executeTrackedRun(
           const dispatched = await dispatchRun({
             db,
             executor: providers.executor,
+            selfDefects: { db, issueTrackers },
             agentId: edge.childAgentId,
             trigger: "subagent",
             codingTask: args.task,

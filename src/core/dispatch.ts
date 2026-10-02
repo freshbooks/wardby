@@ -26,6 +26,7 @@ import {
 } from "../coding/services/wording.js";
 import { effectiveBudgetForRun, MIN_RESERVATION_USD, type BudgetConstraint } from "./budget-groups.js";
 import { logger } from "./logger.js";
+import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
 
 const dispatchLog = logger.child({ module: "dispatch" });
 
@@ -81,6 +82,8 @@ export interface DispatchRunOptions {
    * can observe them (e.g. RunHostCheck, see core/host-events.ts).
    */
   afterPersist?: (tx: DispatchTx, run: Run) => Promise<void>;
+  /** Files a self-defect when the executor fails to start the run and this marks it failed. Optional. */
+  selfDefects?: SelfDefectSink;
   /**
    * Who the run is visible to besides the agent owner (Run.triggeredById,
    * resource-sharing grants spec §3.5): the trigger_agent caller, a
@@ -170,8 +173,9 @@ export async function markRunFailedFromExecutorError(
   db: Pick<DispatchDb, "run">,
   runId: string,
   err: unknown,
+  selfDefects?: SelfDefectSink,
 ): Promise<void> {
-  await db.run.updateMany({
+  const updated = await db.run.updateMany({
     where: { id: runId, status: { in: ["pending", "running"] } },
     data: {
       status: "failed",
@@ -179,6 +183,8 @@ export async function markRunFailedFromExecutorError(
       finishedAt: new Date(),
     },
   });
+  // Only the call that made the row failed files (the duplicate call matches zero rows); bounded, never throws.
+  if (updated.count > 0) await fileSelfDefectForRun(selfDefects, runId);
 }
 
 /**
@@ -641,7 +647,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     try {
       await options.executor.start(persisted.run.id);
     } catch (err) {
-      await markRunFailedFromExecutorError(options.db, persisted.run.id, err).catch((err2) =>
+      await markRunFailedFromExecutorError(options.db, persisted.run.id, err, options.selfDefects).catch((err2) =>
         dispatchLog.error({ err: err2, runId: persisted.run.id }, "failed to persist executor start failure"),
       );
     }

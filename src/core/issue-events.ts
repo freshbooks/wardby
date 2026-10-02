@@ -178,6 +178,7 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
+        selfDefects: { db: deps.db, issueTrackers: deps.trackers },
         agentId: link.agentId,
         trigger: "host_event",
         taskOverride: issueTaskText(event, matched, tracker.issueUrl(event.issueKey), link, openPrs),

@@ -16,6 +16,7 @@ import { tryAcquireLease } from "./lease.js";
 import { prisma as defaultDb } from "./db.js";
 import { LEASE_RENEW_INTERVAL_MS, LEASE_TTL_MS, TICK_INTERVAL_MS } from "./timing.js";
 import { logger } from "./logger.js";
+import type { SelfDefectSink } from "./self-defects.js";
 
 const schedulerLog = logger.child({ module: "scheduler" });
 
@@ -56,11 +57,13 @@ export async function claimDueRun(
   executor: Executor,
   agentId: string,
   now: Date,
+  selfDefects?: SelfDefectSink,
 ): Promise<string | null> {
   const dispatched = await dispatchRun({
     db,
     executor,
     agentId,
+    selfDefects,
     trigger: "scheduled",
     now,
     lockAgent: true,
@@ -93,6 +96,8 @@ export interface SchedulerOptions {
    * failing hook cannot stop scheduled agents from firing.
    */
   onLeaderTick?: () => Promise<void>;
+  /** Files a self-defect when a scheduled run's executor fails to start it. Optional. */
+  selfDefects?: SelfDefectSink;
 }
 
 export interface SchedulerHandle {
@@ -126,7 +131,7 @@ export function startScheduler(options: SchedulerOptions): SchedulerHandle {
     const due = await findDueCandidates(db, now());
     for (const agent of due) {
       try {
-        const runId = await claimDueRun(db, options.executor, agent.id, now());
+        const runId = await claimDueRun(db, options.executor, agent.id, now(), options.selfDefects);
         if (runId) {
           log(`firing agent "${agent.name}" -> run ${runId}`);
         }

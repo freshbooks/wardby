@@ -125,6 +125,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       const dispatched = await dispatchRun({
         db: ctx.db,
         executor: ctx.providers.executor,
+        selfDefects: { db: ctx.db, issueTrackers: ctx.providers.issueTrackers },
         agentId: agent.id,
         trigger: "manual",
         codingTask: args.task,

@@ -11,6 +11,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
+import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import { dispatchRun } from "./dispatch.js";
 import { atLeast, effectiveAccess } from "./grants.js";
 
@@ -92,6 +93,8 @@ export async function resolveWebhookRun(
   db: PrismaClient,
   executor: Executor,
   codingTask?: string,
+  /** Configured issue trackers: a run whose executor fails to start files a self-defect. Optional. */
+  issueTrackers?: IssueTrackerRegistry,
 ): Promise<ResolveWebhookRunResult> {
   const webhook = await db.webhook.findUnique({ where: { id } });
   if (!webhook) return { ok: false, reason: "not_found" };
@@ -108,6 +111,7 @@ export async function resolveWebhookRun(
   const dispatched = await dispatchRun({
     db,
     executor,
+    selfDefects: { db, issueTrackers },
     agentId: agent.id,
     trigger: "webhook",
     // Coding agents keep the existing per-agent opt-in (allowWebhookTaskOverride);

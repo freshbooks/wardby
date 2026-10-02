@@ -171,6 +171,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         { headers, body: body as Record<string, unknown> },
         opts.auth.db,
         opts.auth.providers.executor,
+        opts.auth.providers.issueTrackers,
       );
       sendJson(res, result.status, result.body);
       return;

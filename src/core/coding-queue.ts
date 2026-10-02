@@ -18,6 +18,7 @@ import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import { markRunFailedFromExecutorError } from "./dispatch.js";
 import { logger } from "./logger.js";
+import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
 
 const queueLog = logger.child({ module: "coding-queue" });
 
@@ -31,6 +32,8 @@ export interface DrainCodingQueueOptions {
   maxConcurrent: number;
   queueTimeoutSec: number;
   now?: () => Date;
+  /** Files a self-defect for each run this drain fails (queue timeout or start failure). Optional. */
+  selfDefects?: SelfDefectSink;
 }
 
 export interface DrainCodingQueueResult {
@@ -61,7 +64,11 @@ export async function drainCodingQueue(options: DrainCodingQueueOptions): Promis
       await tx.codingRun.update({ where: { runId }, data: { failureCategory: CODING_QUEUE_TIMEOUT_ERROR } });
       return true;
     });
-    if (didTimeOut) timedOut += 1;
+    if (didTimeOut) {
+      timedOut += 1;
+      // Only this drain made the row failed (a concurrent drain matched zero rows); bounded, never throws.
+      await fileSelfDefectForRun(options.selfDefects, runId);
+    }
   }
 
   const active = await db.codingRun.count({
@@ -85,7 +92,7 @@ export async function drainCodingQueue(options: DrainCodingQueueOptions): Promis
     void Promise.resolve()
       .then(() => executor.start(runId))
       .catch((err) =>
-        markRunFailedFromExecutorError(db, runId, err).catch((err2) =>
+        markRunFailedFromExecutorError(db, runId, err, options.selfDefects).catch((err2) =>
           queueLog.error({ err: err2, runId }, "failed to persist queued-run start failure"),
         ),
       );

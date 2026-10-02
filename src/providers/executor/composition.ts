@@ -162,6 +162,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
         executor: composed,
         maxConcurrent: concurrency.maxConcurrent,
         queueTimeoutSec: concurrency.queueTimeoutSec,
+        selfDefects: { db: options.db, issueTrackers },
       }).catch((err: unknown) => {
         // Never throws: the next scheduler tick drains again.
         compositionLog.warn({ err }, "coding queue drain after a released slot failed");

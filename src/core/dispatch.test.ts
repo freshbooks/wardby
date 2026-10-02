@@ -9,6 +9,7 @@ import {
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
 } from "../coding/services/wording.js";
 import { dispatchRun, isSerializationConflict, type DispatchDb } from "./dispatch.js";
+import type { SelfDefectSink } from "./self-defects.js";
 
 interface FakeBudget {
   /** The agent's budget group (ids must match agent.budgetGroupId). */
@@ -655,6 +656,53 @@ describe("dispatchRun", () => {
     await vi.waitFor(() => expect(state.runs[0].status).toBe("failed"));
     expect(state.runs[0].id).toBe(result?.run.id);
     expect(state.runs[0].error).toBe("launcher unavailable");
+  });
+
+  it("files a self-defect when executor start rejects and it marks the run failed", async () => {
+    const state = fakeDb(nativeAgent());
+    const fileIssue = vi.fn(async () => ({ outcome: "created" as const, issueKey: "OPS-1", url: "u", seenCount: 1 }));
+    const selfDefects = {
+      db: {
+        run: {
+          findUnique: async ({ where }: any) => {
+            const r = state.runs.find((x: any) => x.id === where.id);
+            return r
+              ? { id: r.id, agentId: "agent_1", status: r.status, error: r.error, finishedAt: r.finishedAt }
+              : null;
+          },
+        },
+        agent: {
+          findUnique: async () => ({ id: "agent_1", name: "a", defectProjectKey: "OPS", defectIssueType: "Bug" }),
+        },
+        agentIssueProject: {
+          findUnique: async () => ({
+            agentId: "agent_1",
+            provider: "jira",
+            projectKey: "OPS",
+            access: "write",
+            commentVisibilityRole: null,
+            creatableIssueTypes: ["Bug"],
+          }),
+        },
+        codingRun: { findUnique: async () => null },
+        $transaction: vi.fn(),
+      },
+      issueTrackers: { jira: { provider: "jira" } },
+      options: { fileIssue },
+    } as unknown as SelfDefectSink;
+    await dispatchRun({
+      db: state.db,
+      executor: {
+        async start() {
+          throw new Error("launcher unavailable");
+        },
+        async stop() {},
+      },
+      agentId: "agent_1",
+      selfDefects,
+    });
+    await vi.waitFor(() => expect(fileIssue).toHaveBeenCalledTimes(1));
+    expect((fileIssue.mock.calls[0] as unknown[])[0]).toMatchObject({ fingerprint: "self:agent_1:failed:unknown" });
   });
 
   describe("issue inheritance", () => {
