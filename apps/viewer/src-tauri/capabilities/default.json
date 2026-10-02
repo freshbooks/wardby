@@ -9,6 +9,7 @@
     "allow-add-server",
     "allow-remove-server",
     "allow-sign-in",
+    "allow-cancel-sign-in",
     "allow-sign-out",
     "allow-connect",
     "allow-disconnect",

@@ -7,6 +7,7 @@ fn main() {
             "add_server",
             "remove_server",
             "sign_in",
+            "cancel_sign_in",
             "sign_out",
             "connect",
             "disconnect",

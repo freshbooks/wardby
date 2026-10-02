@@ -65,6 +65,8 @@ struct State {
     /// A rotated refresh token that could not be written to the store. The
     /// stored one is already spent, so the next refresh must use this.
     unsaved_refresh: Option<String>,
+    /// Set by `revoke`: this session must never refresh or write the store again.
+    revoked: bool,
 }
 
 pub struct Session {
@@ -156,6 +158,7 @@ impl Session {
                     expires_at: t.expires_at,
                 }),
                 unsaved_refresh: None,
+                revoked: false,
             })),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
@@ -163,6 +166,23 @@ impl Session {
 
     pub fn server_url(&self) -> &str {
         &self.server_url
+    }
+
+    /// Ends the session for good (sign-out, removal, replacement). Waits for any
+    /// in-flight refresh to finish persisting its rotated token (the refresh
+    /// holds the lock until then), then makes every later use `NotSignedIn`.
+    /// The caller deletes the store entry afterwards, so a refresh can never
+    /// write the token back after the delete.
+    pub async fn revoke(&self) {
+        let _guard = self.refresh_lock.lock().await;
+        let mut g = lock_state(&self.state);
+        g.revoked = true;
+        g.access = None;
+        g.unsaved_refresh = None;
+    }
+
+    fn is_revoked(&self) -> bool {
+        lock_state(&self.state).revoked
     }
 
     pub(crate) fn stream_client(&self) -> &reqwest::Client {
@@ -189,6 +209,9 @@ impl Session {
     /// gets the lock next finds them and reuses them.
     async fn token_after(&self, rejected: Option<&str>) -> Result<String, AppError> {
         let guard = self.refresh_lock.clone().lock_owned().await;
+        if self.is_revoked() {
+            return Err(AppError::NotSignedIn);
+        }
         if let Some((tok, fresh)) = self.current()
             && fresh
             && Some(tok.as_str()) != rejected
@@ -204,7 +227,13 @@ impl Session {
         // that was issued but never kept would lock the user out.
         tokio::spawn(async move {
             let _guard = guard;
-            let unsaved = lock_state(&state).unsaved_refresh.clone();
+            let unsaved = {
+                let g = lock_state(&state);
+                if g.revoked {
+                    return Err(AppError::NotSignedIn);
+                }
+                g.unsaved_refresh.clone()
+            };
             let r = run_refresh(&http, &auth, &client_id, &store, unsaved).await?;
             let token = r.tokens.access_token.clone();
             {

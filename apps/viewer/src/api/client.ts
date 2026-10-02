@@ -13,6 +13,7 @@ export type AppErrorKind =
   | "protocol"
   | "denied"
   | "timeout"
+  | "cancelled"
   | "needs_client_id"
   | "keychain"
   | "storage"
@@ -64,6 +65,9 @@ export const removeServer = (url: string) => invoke<void>("remove_server", { url
 
 /** Opens the system browser and resolves once sign-in completes (up to 5 minutes). */
 export const signIn = (url: string) => invoke<void>("sign_in", { url });
+
+/** Aborts a pending sign-in for the server (its `signIn` call rejects with kind "cancelled"). */
+export const cancelSignIn = (url: string) => invoke<void>("cancel_sign_in", { url });
 
 export const signOut = (url: string) => invoke<void>("sign_out", { url });
 

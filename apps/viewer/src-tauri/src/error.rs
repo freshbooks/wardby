@@ -16,6 +16,8 @@ pub enum AppError {
     Denied,
     #[error("timed out waiting for sign-in")]
     Timeout,
+    #[error("sign-in was cancelled")]
+    Cancelled,
     #[error("this server needs a client id")]
     NeedsClientId,
     #[error("keychain error: {0}")]
@@ -36,6 +38,7 @@ impl AppError {
             AppError::Protocol(_) => "protocol",
             AppError::Denied => "denied",
             AppError::Timeout => "timeout",
+            AppError::Cancelled => "cancelled",
             AppError::NeedsClientId => "needs_client_id",
             AppError::Keychain(_) => "keychain",
             AppError::Storage(_) => "storage",

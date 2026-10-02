@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   addServer,
+  cancelSignIn,
   connect,
   disconnect,
   fetchGraph,
@@ -36,6 +37,7 @@ describe("command wrappers", () => {
     await addServer("Dev", "https://d.example");
     await removeServer("https://w.example");
     await signIn("https://w.example");
+    await cancelSignIn("https://w.example");
     await signOut("https://w.example");
     await connect("https://w.example");
     await disconnect();
@@ -47,6 +49,7 @@ describe("command wrappers", () => {
       ["add_server", { name: "Dev", url: "https://d.example", clientId: null }],
       ["remove_server", { url: "https://w.example" }],
       ["sign_in", { url: "https://w.example" }],
+      ["cancel_sign_in", { url: "https://w.example" }],
       ["sign_out", { url: "https://w.example" }],
       ["connect", { url: "https://w.example" }],
       ["disconnect"],

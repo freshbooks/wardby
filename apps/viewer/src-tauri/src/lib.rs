@@ -17,6 +17,7 @@ pub fn run() {
             commands::add_server,
             commands::remove_server,
             commands::sign_in,
+            commands::cancel_sign_in,
             commands::sign_out,
             commands::connect,
             commands::disconnect,
