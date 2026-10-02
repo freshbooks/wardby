@@ -93,8 +93,19 @@ export const BUSY_RESULT = {
 /** Thrown inside the transaction to abort a create the caller disallowed (nothing was written). */
 class CreateNotAllowed extends Error {}
 
+/**
+ * The part of a fingerprint that identifies it: letters and digits only, lower-cased (Unicode-normalised),
+ * so a model's small slips in case, punctuation or spacing ("checkout-api" vs "checkoutapi") still match.
+ */
+export function normalizeFingerprint(fingerprint: string): string {
+  return fingerprint
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
 export function fingerprintHash(fingerprint: string): string {
-  return createHash("sha256").update(fingerprint, "utf8").digest("hex");
+  return createHash("sha256").update(normalizeFingerprint(fingerprint), "utf8").digest("hex");
 }
 
 /** A stable signed 64-bit advisory-lock key for one (provider, project, hash). */
@@ -137,6 +148,9 @@ export async function fileIssue(
         error: "invalid_arguments",
         message: `fingerprint must be 1-${FINGERPRINT_MAX_LENGTH} characters.`,
       };
+    }
+    if (normalizeFingerprint(fingerprint) === "") {
+      return { error: "invalid_arguments", message: "fingerprint must contain letters or digits." };
     }
     const fpHash = fingerprintHash(fingerprint);
     hash = fpHash;

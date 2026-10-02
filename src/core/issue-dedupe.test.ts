@@ -157,6 +157,21 @@ describe("fingerprintHash / dedupeLockKey", () => {
     expect(key).not.toBe(dedupeLockKey("jira", "WEB", fingerprintHash(FP)));
     expect(key >= -(2n ** 63n) && key < 2n ** 63n).toBe(true);
   });
+  it("ignores case, punctuation and spacing, but not letters or digits", () => {
+    const base = fingerprintHash("checkout-api:NullPointerException:CartService.total");
+    expect(fingerprintHash("checkoutapi:NullPointerException:CartService.total")).toBe(base);
+    expect(fingerprintHash("Checkout API | nullpointerexception | cartservice total")).toBe(base);
+    expect(fingerprintHash("checkout-api:NullPointerException:CartService.totals")).not.toBe(base);
+    expect(fingerprintHash("Ünïcode-Ä")).toBe(fingerprintHash("ünïcodeä"));
+  });
+  it("rejects a fingerprint with no letters or digits, without touching the tracker", async () => {
+    const { db } = fakeDb([]);
+    const tracker = fakeTracker();
+    const res = await fileIssue({ db }, input(tracker, { fingerprint: "--- :: ---" }));
+    expect(res).toMatchObject({ error: "invalid_arguments" });
+    expect(tracker.createIssue).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
 });
 
 describe("fileIssue", () => {

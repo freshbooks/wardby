@@ -271,7 +271,10 @@ Rules for `jira_create_issue`:
 
 Pass a `fingerprint` (1-200 characters) to avoid filing the same problem
 repeatedly. wardby stores only a hash of it, in its own database; the value is
-never sent to Jira. Per project:
+never sent to Jira. Matching ignores case, punctuation and spacing, so
+`checkout-api:NullPointerException` and `checkoutapi nullpointerexception` are
+the same fingerprint; only letters and digits count, and a fingerprint must
+contain some. Per project:
 
 - No earlier issue for the fingerprint: a new issue is created (`created`).
 - The earlier issue is still open: wardby adds a "Seen again (×N)" comment
