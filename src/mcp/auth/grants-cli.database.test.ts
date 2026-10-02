@@ -145,7 +145,7 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby grants CLI (PostgreSQL)", () 
   });
 
   it("migration-report runs after the migration too, reading the grants and consent stamps", async () => {
-    for (const sql of migrationFiles((name) => name === GRANTS_MIGRATION)) await client.query(sql);
+    for (const sql of migrationFiles((name) => name >= GRANTS_MIGRATION)) await client.query(sql);
     await client.query(`
       INSERT INTO "ResourceGrant" ("id", "resourceType", "resourceId", "granteeKind", "granteeKey", "level", "updatedAt")
       VALUES ('orphan', 'agent', 'deleted-agent', 'everyone', 'everyone', 'read', now());

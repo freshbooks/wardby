@@ -288,6 +288,80 @@ describe("issue project tools", () => {
     expect(rows[0]).toMatchObject({ allowedTransitions: [], writableFields: [], allowedLinkTypes: [] });
   });
 
+  it("stores creatableIssueTypes (trimmed, de-duplicated) and maxNewIssuesPerRun, and lists them", async () => {
+    const { client, rows } = await setup([{ ...NATIVE, ownerId: "admin1" }]);
+    const r = await call(client, "link_issue_project", {
+      agentId: "a1",
+      projectKey: "PROJ",
+      access: "write",
+      creatableIssueTypes: [" Bug ", "bug", "Task"],
+      maxNewIssuesPerRun: 5,
+    });
+    expect(r.isError).toBeFalsy();
+    expect(rows[0]).toMatchObject({ creatableIssueTypes: ["Bug", "Task"], maxNewIssuesPerRun: 5 });
+    const listed = JSON.parse(text(await call(client, "list_issue_projects", { agentId: "a1" }))) as {
+      issueProjects: { creatableIssueTypes: string[]; maxNewIssuesPerRun: number | null }[];
+    };
+    expect(listed.issueProjects[0]).toMatchObject({ creatableIssueTypes: ["Bug", "Task"], maxNewIssuesPerRun: 5 });
+  });
+
+  it("defaults creation off and no cap, and clears both on a re-link without them", async () => {
+    const { client, rows } = await setup([NATIVE]);
+    await call(client, "link_issue_project", { agentId: "a1", projectKey: "PROJ", access: "write" });
+    expect(rows[0]).toMatchObject({ creatableIssueTypes: [], maxNewIssuesPerRun: null });
+    await call(client, "link_issue_project", {
+      agentId: "a1",
+      projectKey: "PROJ",
+      access: "write",
+      creatableIssueTypes: ["Bug"],
+      maxNewIssuesPerRun: 3,
+    });
+    await call(client, "link_issue_project", { agentId: "a1", projectKey: "PROJ", access: "write" });
+    expect(rows[0]).toMatchObject({ creatableIssueTypes: [], maxNewIssuesPerRun: null });
+  });
+
+  it.each([
+    ["a blank issue type", { creatableIssueTypes: ["  "] }],
+    ["an over-long issue type", { creatableIssueTypes: ["x".repeat(101)] }],
+    ["more than 20 issue types", { creatableIssueTypes: Array.from({ length: 21 }, (_, i) => `Type ${i}`) }],
+    ["a zero cap", { maxNewIssuesPerRun: 0 }],
+    ["a cap over 1000", { maxNewIssuesPerRun: 1001 }],
+    ["a fractional cap", { maxNewIssuesPerRun: 1.5 }],
+  ])("rejects %s", async (_n, extra) => {
+    const { client, rows } = await setup([NATIVE]);
+    const r = await call(client, "link_issue_project", {
+      agentId: "a1",
+      projectKey: "PROJ",
+      access: "write",
+      ...extra,
+    });
+    expect(r.isError).toBeTruthy();
+    expect(rows).toHaveLength(0);
+  });
+
+  it("rejects creation settings on a read link", async () => {
+    const { client, rows } = await setup([NATIVE]);
+    for (const extra of [{ creatableIssueTypes: ["Bug"] }, { maxNewIssuesPerRun: 5 }]) {
+      const r = await call(client, "link_issue_project", {
+        agentId: "a1",
+        projectKey: "PROJ",
+        access: "read",
+        ...extra,
+      });
+      expect(r.isError).toBeTruthy();
+      expect(text(r)).toMatch(/write access/);
+    }
+    expect(rows).toHaveLength(0);
+  });
+
+  it("describes issue creation as fail-closed", async () => {
+    const { client } = await setup([NATIVE]);
+    const { tools } = await client.listTools();
+    const d = tools.find((t) => t.name === "link_issue_project")!.description!;
+    expect(d).toMatch(/creatableIssueTypes/);
+    expect(d).toMatch(/maxNewIssuesPerRun/);
+  });
+
   it("describes the allowlists as fail-closed", async () => {
     const { client } = await setup([NATIVE]);
     const { tools } = await client.listTools();

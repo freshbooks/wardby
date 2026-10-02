@@ -759,12 +759,14 @@ async function scheduler(args: string[]): Promise<void> {
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config, repoAccess });
   await executor.launch?.();
   const reconciler = startReconciler({ db: prisma, executor, reviewHosts, issueTrackers });
+  const selfDefects = { db: prisma, issueTrackers };
   const sched = startScheduler({
     executor,
     db: prisma,
     scope,
+    selfDefects,
     onLeaderTick: async () => {
-      await drainCodingQueue({ db: prisma, executor, ...concurrency });
+      await drainCodingQueue({ db: prisma, executor, ...concurrency, selfDefects });
     },
   });
 

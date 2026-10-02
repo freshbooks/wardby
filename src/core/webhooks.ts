@@ -132,6 +132,7 @@ export async function resolveWebhookRun(
   const dispatched = await dispatchRun({
     db,
     executor,
+    selfDefects: { db, issueTrackers: opts.issueTrackers },
     agentId: agent.id,
     trigger: "webhook",
     attribution,

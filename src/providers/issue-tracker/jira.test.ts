@@ -12,6 +12,7 @@ type Call = {
   body: unknown;
   authorization: string | null;
   acceptLanguage: string | null;
+  range: string | null;
 };
 
 function fake(handler: (c: Call) => Response | undefined) {
@@ -24,6 +25,7 @@ function fake(handler: (c: Call) => Response | undefined) {
       path: `${url.pathname}${url.search}`,
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
       authorization: new Headers(init?.headers).get("authorization"),
+      range: new Headers(init?.headers).get("range"),
       acceptLanguage: new Headers(init?.headers).get("accept-language"),
     };
     languages.push(call.acceptLanguage);
@@ -166,6 +168,9 @@ describe("JiraIssueTracker", () => {
       }
       return undefined;
     });
+    const none = await tracker.getIssue("PROJ-1", { maxComments: 0, agentMarker: "agent-7" });
+    expect(none.comments).toEqual([]);
+    expect(none.commentsTruncated).toBe(true);
     const issue = await tracker.getIssue("PROJ-1", { maxComments: 2, agentMarker: "agent-7" });
     expect(issue).toMatchObject({
       key: "PROJ-1",
@@ -194,6 +199,18 @@ describe("JiraIssueTracker", () => {
       body: { type: "doc", version: 1 },
       visibility: { type: "role", value: "Developers" },
     });
+  });
+
+  it("turns the given projects' issue keys and this site's issue URLs into smart links", async () => {
+    const { tracker, calls } = fake((c) =>
+      c.method === "POST" && c.path === "/rest/api/3/issue/PROJ-1/comment" ? json({ id: "56" }) : undefined,
+    );
+    await tracker.comment("PROJ-1", { markdown: `Filed PROJ-2, see ${SITE}/browse/OPS-3`, issueKeyProjects: ["PROJ"] });
+    const cards = JSON.stringify(calls[0].body).match(/"inlineCard","attrs":\{"url":"[^"]+"/g);
+    expect(cards).toEqual([
+      `"inlineCard","attrs":{"url":"${SITE}/browse/PROJ-2"`,
+      `"inlineCard","attrs":{"url":"${SITE}/browse/OPS-3"`,
+    ]);
   });
 
   it("searches with the enhanced JQL endpoint and reports truncation", async () => {
@@ -522,6 +539,384 @@ describe("JiraIssueTracker", () => {
         tracker.linkIssues({ type: "Blocks", inwardKey: "PROJ-2", outwardKey: "PROJ-1" }),
       ).resolves.toBeUndefined();
     });
+  });
+});
+
+describe("JiraIssueTracker issue creation and attachments", () => {
+  const types = {
+    startAt: 0,
+    total: 2,
+    issueTypes: [
+      { id: "10001", name: "Bug", subtask: false },
+      { id: "10002", name: "Sub-task", subtask: true },
+    ],
+  };
+  const fieldsPage = (fields: unknown[]) => ({ startAt: 0, total: fields.length, fields });
+  const bugFields = [
+    { fieldId: "summary", name: "Summary", required: true, hasDefaultValue: false },
+    { fieldId: "issuetype", name: "Issue Type", required: true, hasDefaultValue: false },
+    { fieldId: "customfield_10050", name: "Environment", required: true, hasDefaultValue: false },
+    { fieldId: "priority", name: "Priority", required: true, hasDefaultValue: true, allowedValues: [{ name: "High" }] },
+    { fieldId: "labels", name: "Labels", required: false, hasDefaultValue: false },
+  ];
+  const meta = (c: { path: string }) =>
+    c.path.startsWith("/rest/api/3/issue/createmeta/KAN/issuetypes/10001")
+      ? json(fieldsPage(bugFields))
+      : c.path.startsWith("/rest/api/3/issue/createmeta/KAN/issuetypes")
+        ? json(types)
+        : undefined;
+
+  it("createMeta and fieldMeta map the paged responses", async () => {
+    const { tracker } = fake(meta);
+    expect(await tracker.createMeta("KAN")).toEqual({
+      issueTypes: [
+        { id: "10001", name: "Bug", subtask: false },
+        { id: "10002", name: "Sub-task", subtask: true },
+      ],
+    });
+    const fields = await tracker.fieldMeta("KAN", "10001");
+    expect(fields.find((f) => f.fieldId === "priority")).toEqual({
+      fieldId: "priority",
+      name: "Priority",
+      required: true,
+      hasDefault: true,
+      allowedValues: ["High"],
+    });
+    expect(fields.find((f) => f.fieldId === "labels")).not.toHaveProperty("allowedValues");
+  });
+
+  it("pages createmeta until total is reached", async () => {
+    const { tracker, calls } = fake((c) => {
+      if (c.path === "/rest/api/3/myself") return undefined;
+      const start = Number(new URL(`${SITE}${c.path}`).searchParams.get("startAt"));
+      const issueTypes = Array.from({ length: start === 0 ? 50 : 3 }, (_, i) => ({
+        id: String(start + i),
+        name: `T${start + i}`,
+      }));
+      return json({ startAt: start, total: 53, issueTypes });
+    });
+    expect((await tracker.createMeta("KAN")).issueTypes).toHaveLength(53);
+    expect(calls.map((c) => c.path)).toEqual([
+      "/rest/api/3/issue/createmeta/KAN/issuetypes?startAt=0&maxResults=50",
+      "/rest/api/3/issue/createmeta/KAN/issuetypes?startAt=50&maxResults=50",
+    ]);
+  });
+
+  it("createIssue resolves the type case-insensitively and posts fields plus properties", async () => {
+    const { tracker, calls } = fake((c) => (c.method === "POST" ? json({ id: "1", key: "KAN-9" }, 201) : meta(c)));
+    const r = await tracker.createIssue({
+      projectKey: "KAN",
+      issueType: "bug",
+      summary: "Crash",
+      descriptionMarkdown: "details",
+      labels: ["a"],
+      priority: "High",
+      components: ["api"],
+      parentKey: "KAN-1",
+      customFields: { customfield_10050: "prod" },
+      properties: { "wardby.fp": { h: "x" } },
+    });
+    expect(r).toEqual({ key: "KAN-9", url: `${SITE}/browse/KAN-9` });
+    const post = calls.find((c) => c.method === "POST")!;
+    expect(post.path).toBe("/rest/api/3/issue");
+    expect(post.body).toEqual({
+      fields: {
+        project: { key: "KAN" },
+        issuetype: { id: "10001" },
+        summary: "Crash",
+        description: markdownToAdf("details"),
+        labels: ["a"],
+        priority: { name: "High" },
+        components: [{ name: "api" }],
+        parent: { key: "KAN-1" },
+        customfield_10050: "prod",
+      },
+      properties: [{ key: "wardby.fp", value: { h: "x" } }],
+    });
+  });
+
+  it("createIssue lists missing required fields (no default) and does not POST", async () => {
+    const { tracker, calls } = fake(meta);
+    await expect(
+      tracker.createIssue({ projectKey: "KAN", issueType: "Bug", summary: "s", descriptionMarkdown: "d" }),
+    ).rejects.toMatchObject({ code: "tracker_invalid_request", message: expect.stringContaining("Environment") });
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  describe("call budget (TrackerCallOptions)", () => {
+    /** Each request takes `delayMs` unless its abort signal fires first; records which paths were requested. */
+    function slow(delayMs: number, respond: (path: string, method: string) => Response) {
+      const paths: string[] = [];
+      const signals: (AbortSignal | undefined)[] = [];
+      const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const path = `${url.pathname}${url.search}`;
+        if (path === "/rest/api/3/myself") return json({ accountId: "bot-1", accountType: "app" });
+        paths.push(`${init?.method ?? "GET"} ${path}`);
+        signals.push(init?.signal ?? undefined);
+        await new Promise<void>((resolve, reject) => {
+          const t = setTimeout(resolve, delayMs);
+          init?.signal?.addEventListener("abort", () => {
+            clearTimeout(t);
+            reject(new Error("aborted"));
+          });
+        });
+        return respond(path, init?.method ?? "GET");
+      });
+      const sleep = vi.fn(async () => undefined);
+      const client = new JiraClient(
+        { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
+        { fetch: fetchMock as unknown as typeof fetch, sleep },
+      );
+      return { tracker: new JiraIssueTracker(client, SITE), paths, sleep };
+    }
+    const metaResponse = (path: string, method: string) =>
+      method === "POST"
+        ? json({ id: "1", key: "KAN-9" }, 201)
+        : path.includes("/issuetypes/")
+          ? json({ fields: [], total: 0 })
+          : json({ issueTypes: [{ id: "10001", name: "Bug", subtask: false }], total: 1 });
+
+    it("bounds the whole createIssue call, not each request: it gives up before the POST", async () => {
+      const { tracker, paths } = slow(40, metaResponse);
+      const started = Date.now();
+      await expect(
+        tracker.createIssue(
+          { projectKey: "KAN", issueType: "Bug", summary: "s", descriptionMarkdown: "d" },
+          { timeoutMs: 60, retryOn429: false },
+        ),
+      ).rejects.toMatchObject({ code: "tracker_api_error" });
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(paths.some((p) => p.startsWith("POST"))).toBe(false);
+    });
+
+    it("completes within a sufficient budget", async () => {
+      const { tracker } = slow(5, metaResponse);
+      await expect(
+        tracker.createIssue(
+          { projectKey: "KAN", issueType: "Bug", summary: "s", descriptionMarkdown: "d" },
+          { timeoutMs: 5_000, retryOn429: false },
+        ),
+      ).resolves.toEqual({ key: "KAN-9", url: `${SITE}/browse/KAN-9` });
+    });
+
+    it("with retryOn429: false, a 429 fails at once instead of sleeping", async () => {
+      const { tracker, paths, sleep } = slow(0, () => json({}, 429, { "retry-after": "5" }));
+      await expect(
+        tracker.comment("KAN-1", { markdown: "x" }, { timeoutMs: 1_000, retryOn429: false }),
+      ).rejects.toMatchObject({ code: "tracker_rate_limited" });
+      await expect(tracker.linkTypes({ retryOn429: false })).rejects.toMatchObject({ code: "tracker_rate_limited" });
+      await expect(
+        tracker.linkIssues({ type: "Relates", inwardKey: "KAN-1", outwardKey: "KAN-2" }, { retryOn429: false }),
+      ).rejects.toMatchObject({ code: "tracker_rate_limited" });
+      await expect(
+        tracker.getIssue("KAN-1", { maxComments: 0, agentMarker: "", retryOn429: false }),
+      ).rejects.toMatchObject({ code: "tracker_rate_limited" });
+      expect(sleep).not.toHaveBeenCalled();
+      expect(paths).toHaveLength(4);
+    });
+
+    it("bounds getIssue", async () => {
+      const { tracker } = slow(1_000, () => json({}));
+      await expect(tracker.getIssue("KAN-1", { maxComments: 0, agentMarker: "", timeoutMs: 30 })).rejects.toMatchObject(
+        { code: "tracker_api_error" },
+      );
+    });
+  });
+
+  it("createIssue rejects an unknown issue type", async () => {
+    const { tracker } = fake(meta);
+    await expect(
+      tracker.createIssue({ projectKey: "KAN", issueType: "Epic", summary: "s", descriptionMarkdown: "d" }),
+    ).rejects.toMatchObject({ code: "tracker_invalid_request" });
+  });
+
+  it("getIssue exposes statusCategory and the 20 most recent attachments", async () => {
+    const attachment = Array.from({ length: 25 }, (_, i) => ({
+      id: String(i),
+      filename: `f${i}.log`,
+      mimeType: "text/plain",
+      size: 10,
+    }));
+    const { tracker } = fake((c) =>
+      c.path === "/rest/api/3/myself"
+        ? undefined
+        : json({
+            key: "KAN-1",
+            fields: { status: { name: "Done", statusCategory: { key: "done" } }, attachment },
+          }),
+    );
+    const v = await tracker.getIssue("KAN-1", { maxComments: 5, agentMarker: "a" });
+    expect(v.statusCategory).toBe("done");
+    expect(v.attachments).toHaveLength(20);
+    // Jira lists oldest first: the five oldest are the ones left out.
+    expect(v.attachments[0]).toEqual({ id: "5", filename: "f5.log", mimeType: "text/plain", size: 10 });
+    expect(v.attachments[19].id).toBe("24");
+  });
+
+  const attachmentFake = (mimeType: string, size: number, content: (c: Call) => Response) =>
+    fake((c) =>
+      c.path === "/rest/api/3/attachment/7"
+        ? json({ id: "7", filename: "app.log", mimeType, size })
+        : c.path.startsWith("/rest/api/3/attachment/content/7")
+          ? content(c)
+          : undefined,
+    );
+
+  it("readAttachmentText requests a Range with redirect=false and flags truncation", async () => {
+    let auth: string | null = null;
+    const { tracker, calls } = attachmentFake("text/plain", 100, (c) => {
+      auth = c.authorization;
+      return new Response("hello wörld", { status: 206 });
+    });
+    const r = await tracker.readAttachmentText("7", 12);
+    expect(r).toEqual({ filename: "app.log", mimeType: "text/plain", text: "hello wörld", truncated: true });
+    expect(calls.at(-1)!.path).toBe("/rest/api/3/attachment/content/7?redirect=false");
+    expect(auth).toBe("Bearer tok");
+  });
+
+  it("readAttachmentText asks for a Range only when the file is larger than the cap", async () => {
+    let range: string | null | undefined;
+    const small = attachmentFake("text/plain", 110, (c) => {
+      range = c.range;
+      return new Response("x".repeat(110));
+    });
+    expect(await small.tracker.readAttachmentText("7", 50_000)).toMatchObject({ truncated: false });
+    expect(range).toBeNull();
+    const large = attachmentFake("text/plain", 100, (c) => {
+      range = c.range;
+      return new Response("hello", { status: 206 });
+    });
+    await large.tracker.readAttachmentText("7", 5);
+    expect(range).toBe("bytes=0-4");
+  });
+
+  it("readAttachmentText caps client-side when the server ignores Range", async () => {
+    const { tracker } = attachmentFake("application/json", 20, () => new Response("0123456789ABCDEFGHIJ"));
+    const r = await tracker.readAttachmentText("7", 10);
+    expect(r.text).toBe("0123456789");
+    expect(r.truncated).toBe(true);
+    const whole = await attachmentFake(
+      "application/vnd.api+json",
+      5,
+      () => new Response("hello"),
+    ).tracker.readAttachmentText("7", 10);
+    expect(whole).toMatchObject({ text: "hello", truncated: false });
+  });
+
+  it("readAttachmentText sends the Range header", async () => {
+    const ranges: (string | null)[] = [];
+    const client = new JiraClient(
+      { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
+      {
+        fetch: (async (url: string, init?: RequestInit) => {
+          ranges.push(new Headers(init?.headers).get("range"));
+          return new Response("abc", { status: 206 });
+        }) as unknown as typeof fetch,
+      },
+    );
+    await client.requestBytes("/x", { maxBytes: 3 });
+    expect(ranges).toEqual(["bytes=0-2"]);
+  });
+
+  it("readAttachmentText refuses non-text types without fetching content", async () => {
+    const { tracker, calls } = attachmentFake("image/png", 10, () => new Response("x"));
+    await expect(tracker.readAttachmentText("7", 10)).rejects.toMatchObject({ code: "tracker_invalid_request" });
+    expect(calls.some((c) => c.path.includes("content"))).toBe(false);
+  });
+
+  it("follows a 303 only to an Atlassian host and without the Jira credential", async () => {
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const mk = (location: string) =>
+      new JiraClient(
+        { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
+        {
+          fetch: (async (url: string, init?: RequestInit) => {
+            seen.push({ url, auth: new Headers(init?.headers).get("authorization") });
+            return new URL(url).origin === new URL(SITE).origin
+              ? new Response(null, { status: 303, headers: { location } })
+              : new Response("media", { status: 200 });
+          }) as unknown as typeof fetch,
+        },
+      );
+    const ok = await mk("https://api.media.atlassian.com/file/1").requestBytes("/x", { maxBytes: 10 });
+    expect(Buffer.from(ok).toString()).toBe("media");
+    expect(seen[1]).toEqual({ url: "https://api.media.atlassian.com/file/1", auth: null });
+    seen.length = 0;
+    await expect(mk("https://evil.example.com/x").requestBytes("/x", { maxBytes: 10 })).rejects.toMatchObject({
+      code: "tracker_invalid_response",
+    });
+    expect(seen).toHaveLength(1);
+  });
+
+  it.each([
+    ["project", { project: { key: "OTHER" } }],
+    ["issuetype", { issuetype: { id: "1" } }],
+    ["security", { security: { id: "1" } }],
+    ["reporter", { reporter: { id: "x" } }],
+    ["customfield_abc", { customfield_abc: 1 }],
+  ])("createIssue rejects customFields key %s without posting", async (key, customFields) => {
+    const { tracker, calls } = fake((c) => (c.method === "POST" ? json({ key: "KAN-9" }, 201) : meta(c)));
+    await expect(
+      tracker.createIssue({
+        projectKey: "KAN",
+        issueType: "Bug",
+        summary: "s",
+        descriptionMarkdown: "d",
+        customFields,
+      }),
+    ).rejects.toMatchObject({ code: "tracker_invalid_request", message: expect.stringContaining(key) });
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("createIssue needs a parent for a sub-task type, before any POST", async () => {
+    const { tracker, calls } = fake((c) => (c.method === "POST" ? json({ key: "KAN-9" }, 201) : meta(c)));
+    await expect(
+      tracker.createIssue({ projectKey: "KAN", issueType: "Sub-task", summary: "s", descriptionMarkdown: "d" }),
+    ).rejects.toMatchObject({ code: "tracker_invalid_request", message: expect.stringContaining("need a parent") });
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  const redirecting = (hops: string[]) => {
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const client = new JiraClient(
+      { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
+      {
+        fetch: (async (url: string, init?: RequestInit) => {
+          const n = seen.length;
+          seen.push({ url, auth: new Headers(init?.headers).get("authorization") });
+          return n < hops.length
+            ? new Response(null, { status: 303, headers: { location: hops[n] } })
+            : new Response("ok", { status: 200 });
+        }) as unknown as typeof fetch,
+      },
+    );
+    return { client, seen };
+  };
+
+  it.each([
+    "https://evilatlassian.net/x",
+    "https://atlassian.net.evil.com/x",
+    "https://user@evil.com/x",
+    "http://x.atlassian.net/x",
+    "https://10.0.0.1/x",
+    "https://[::1]/x",
+  ])("refuses a download redirect to %s", async (location) => {
+    const { client, seen } = redirecting([location]);
+    await expect(client.requestBytes("/x", { maxBytes: 10 })).rejects.toMatchObject({
+      code: "tracker_invalid_response",
+    });
+    expect(seen).toHaveLength(1);
+  });
+
+  it("drops the credential on every hop after the first and gives up after too many redirects", async () => {
+    const chain = redirecting(["https://a.atlassian.com/1", "https://b.atlassian.com/2"]);
+    expect(Buffer.from(await chain.client.requestBytes("/x", { maxBytes: 10 })).toString()).toBe("ok");
+    expect(chain.seen.map((r) => r.auth)).toEqual(["Bearer tok", null, null]);
+    const loop = redirecting(Array.from({ length: 10 }, (_, i) => `https://h${i}.atlassian.com/`));
+    await expect(loop.client.requestBytes("/x", { maxBytes: 10 })).rejects.toMatchObject({ code: "tracker_api_error" });
+    expect(loop.seen.slice(1).every((r) => r.auth === null)).toBe(true);
+    expect(loop.seen.length).toBeLessThanOrEqual(5);
   });
 });
 

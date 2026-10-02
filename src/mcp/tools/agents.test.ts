@@ -1540,6 +1540,97 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  describe("self-defect settings", () => {
+    async function setup(seed: FakeAgentSeed[] = []) {
+      const db = fakeDb(seed);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+      registerAgentTools(mcp);
+      return connectClient(mcp);
+    }
+    const body = (result: Awaited<ReturnType<Client["callTool"]>>) =>
+      JSON.parse((result.content as { text: string }[])[0].text);
+    const base = { name: "reviewer", systemPrompt: "s", model: "claude-sonnet-5", budgetUsd: 1 };
+    const seed: FakeAgentSeed = {
+      id: "a1",
+      name: "reviewer",
+      systemPrompt: "s",
+      model: "claude-sonnet-5",
+      budgetUsd: 1,
+      maxTurns: 10,
+      schedule: null,
+      timezone: "UTC",
+      ownerId: "p1",
+      tools: [],
+    };
+
+    it("create_agent stores both, and neither by default", async () => {
+      const client = await setup();
+      const set = await client.callTool({
+        name: "create_agent",
+        arguments: { ...base, defectProjectKey: "OPS", defectIssueType: " Bug " },
+      });
+      expect(set.isError).toBeFalsy();
+      expect(body(set)).toMatchObject({ defectProjectKey: "OPS", defectIssueType: "Bug" });
+      const plain = await client.callTool({ name: "create_agent", arguments: { ...base, name: "other" } });
+      expect(body(plain).defectProjectKey).toBeUndefined();
+      await client.close();
+    });
+
+    it.each([
+      ["only a project key", { defectProjectKey: "OPS" }],
+      ["only an issue type", { defectIssueType: "Bug" }],
+      ["a lower-case project key", { defectProjectKey: "ops", defectIssueType: "Bug" }],
+      ["a blank issue type", { defectProjectKey: "OPS", defectIssueType: "  " }],
+      ["an over-long issue type", { defectProjectKey: "OPS", defectIssueType: "x".repeat(101) }],
+      ["null on create", { defectProjectKey: null, defectIssueType: null }],
+    ])("create_agent rejects %s", async (_n, extra) => {
+      const client = await setup();
+      const result = await client.callTool({ name: "create_agent", arguments: { ...base, ...extra } });
+      expect(result.isError).toBe(true);
+      await client.close();
+    });
+
+    it("update_agent sets both, then clears both with null", async () => {
+      const client = await setup([seed]);
+      const set = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", defectProjectKey: "OPS", defectIssueType: "Bug" },
+      });
+      expect(set.isError).toBeFalsy();
+      expect(body(set)).toMatchObject({ defectProjectKey: "OPS", defectIssueType: "Bug" });
+      const cleared = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", defectProjectKey: null, defectIssueType: null },
+      });
+      expect(cleared.isError).toBeFalsy();
+      expect(body(cleared)).toMatchObject({ defectProjectKey: null, defectIssueType: null });
+      await client.close();
+    });
+
+    it.each([
+      ["only one", { defectProjectKey: "OPS" }],
+      ["a key with a null type", { defectProjectKey: "OPS", defectIssueType: null }],
+      ["a bad key", { defectProjectKey: "9x", defectIssueType: "Bug" }],
+    ])("update_agent rejects %s", async (_n, extra) => {
+      const client = await setup([seed]);
+      const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", ...extra } });
+      expect(result.isError).toBe(true);
+      await client.close();
+    });
+
+    it("documents the write-link requirement", async () => {
+      const client = await setup();
+      const { tools } = await client.listTools();
+      for (const name of ["create_agent", "update_agent"]) {
+        const tool = tools.find((t) => t.name === name)!;
+        const d = JSON.stringify(tool.inputSchema);
+        expect(d).toMatch(/creatableIssueTypes/);
+      }
+      await client.close();
+    });
+  });
+
   describe("effort", () => {
     async function setup(seed: FakeAgentSeed[] = []) {
       const db = fakeDb(seed);

@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "./db.js";
 import type { Executor } from "../providers/executor/types.js";
 import { findDueCandidates, claimDueRun, markRunFailedFromExecutorError, type SchedulerDb } from "./scheduler.js";
+import type { SelfDefectSink } from "./self-defects.js";
 
 const executor: Executor = {
   async start() {},
@@ -131,6 +132,73 @@ describe("markRunFailedFromExecutorError", () => {
 
     expect(runs[0].status).toBe("succeeded");
     expect(runs[0].error).toBeNull();
+  });
+
+  function selfDefectSink(runs: FakeRun[], trackers: Record<string, unknown> = { jira: { provider: "jira" } }) {
+    const fileIssue = vi.fn(async () => ({ outcome: "created" as const, issueKey: "OPS-1", url: "u", seenCount: 1 }));
+    const findRun = vi.fn(async ({ where }: any) => {
+      const r = runs.find((x) => x.id === where.id);
+      return r ? { ...r, agentId: "a1" } : null;
+    });
+    const sink = {
+      db: {
+        run: { findUnique: findRun },
+        agent: {
+          findUnique: vi.fn(async () => ({
+            id: "a1",
+            name: "nightly",
+            defectProjectKey: "OPS",
+            defectIssueType: "Bug",
+          })),
+        },
+        agentIssueProject: {
+          findUnique: vi.fn(async () => ({
+            agentId: "a1",
+            provider: "jira",
+            projectKey: "OPS",
+            access: "write",
+            commentVisibilityRole: null,
+            creatableIssueTypes: ["Bug"],
+          })),
+        },
+        codingRun: { findUnique: vi.fn(async () => null) },
+        $transaction: vi.fn(),
+      },
+      issueTrackers: trackers,
+      options: { fileIssue },
+    } as unknown as SelfDefectSink;
+    return { sink, fileIssue, findRun };
+  }
+
+  it("files a self-defect when it made the run failed", async () => {
+    const runs: FakeRun[] = [{ id: "r1", status: "pending", error: null, finishedAt: null }];
+    const { sink, fileIssue } = selfDefectSink(runs);
+
+    await markRunFailedFromExecutorError(fakeRunDb(runs), "r1", new Error("boom"), sink);
+
+    expect(fileIssue).toHaveBeenCalledTimes(1);
+    expect((fileIssue.mock.calls[0] as unknown[])[0]).toMatchObject({ fingerprint: "self:a1:failed:unknown" });
+  });
+
+  it("files nothing when the run was already terminal", async () => {
+    const runs: FakeRun[] = [{ id: "r1", status: "failed", error: "x", finishedAt: new Date() }];
+    const { sink, fileIssue, findRun } = selfDefectSink(runs);
+
+    await markRunFailedFromExecutorError(fakeRunDb(runs), "r1", new Error("again"), sink);
+
+    expect(fileIssue).not.toHaveBeenCalled();
+    expect(findRun).not.toHaveBeenCalled();
+  });
+
+  it("makes no extra query without a configured tracker", async () => {
+    const runs: FakeRun[] = [{ id: "r1", status: "pending", error: null, finishedAt: null }];
+    const { sink, fileIssue, findRun } = selfDefectSink(runs, {});
+
+    await markRunFailedFromExecutorError(fakeRunDb(runs), "r1", new Error("boom"), sink);
+
+    expect(runs[0].status).toBe("failed");
+    expect(findRun).not.toHaveBeenCalled();
+    expect(fileIssue).not.toHaveBeenCalled();
   });
 });
 

@@ -36,6 +36,8 @@ type LinkArgs = {
   allowedLinkTypes?: string[];
   onPullRequestOpened?: string;
   onPullRequestMerged?: string;
+  creatableIssueTypes?: string[];
+  maxNewIssuesPerRun?: number;
 };
 
 /** Trimmed names, 1-100 characters each, de-duplicated case-insensitively (first spelling kept). */
@@ -90,7 +92,11 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
       "not allowlisted: any write link may set them. " +
       "onPullRequestOpened / onPullRequestMerged (write access only, optional): the status name to move the issue to when a " +
       "pull request wardby opened for it opens or merges. These are control-plane moves, not model actions, and are not gated " +
-      "by allowedTransitions; the name is matched in the Jira service account's language, and omitting one means no move.",
+      "by allowedTransitions; the name is matched in the Jira service account's language, and omitting one means no move. " +
+      "creatableIssueTypes (write access only): the issue type names (case-insensitive, at most 20) the agent may create issues " +
+      "of in this project; it fails closed too: empty or omitted means the agent cannot create issues here. " +
+      "maxNewIssuesPerRun (write access only, optional integer 1-1000): the most issues one run may create in this project; " +
+      "omitted means no cap. The cap is best-effort across resumed or concurrent attempts of the same run.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -114,6 +120,8 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
         allowedLinkTypes: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 20 },
         onPullRequestOpened: { type: "string", minLength: 1, maxLength: 100 },
         onPullRequestMerged: { type: "string", minLength: 1, maxLength: 100 },
+        creatableIssueTypes: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 20 },
+        maxNewIssuesPerRun: { type: "integer", minimum: 1, maximum: 1000 },
       },
       required: ["agentId", "projectKey", "access"],
     },
@@ -140,6 +148,18 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
       const allowedTransitions = nameList("allowedTransitions", args.allowedTransitions);
       const allowedLinkTypes = nameList("allowedLinkTypes", args.allowedLinkTypes);
       if (allowedLinkTypes.length > 20) throw new McpError(400, "allowedLinkTypes takes at most 20 entries");
+      const creatableIssueTypes = nameList("creatableIssueTypes", args.creatableIssueTypes);
+      if (creatableIssueTypes.length > 20) throw new McpError(400, "creatableIssueTypes takes at most 20 entries");
+      const maxNewIssuesPerRun = args.maxNewIssuesPerRun ?? null;
+      if (
+        maxNewIssuesPerRun !== null &&
+        (!Number.isInteger(maxNewIssuesPerRun) || maxNewIssuesPerRun < 1 || maxNewIssuesPerRun > 1000)
+      ) {
+        throw new McpError(400, "maxNewIssuesPerRun must be an integer from 1 to 1000");
+      }
+      if ((creatableIssueTypes.length > 0 || maxNewIssuesPerRun !== null) && args.access !== "write") {
+        throw new McpError(400, "creatableIssueTypes and maxNewIssuesPerRun need write access.");
+      }
       const writableFields = [...new Set(args.writableFields ?? [])];
       if (writableFields.some((f) => !WRITABLE_FIELD.test(f))) {
         throw new McpError(400, "invalid writableFields entry (labels, components, priority, or customfield_NNNNN)");
@@ -181,6 +201,8 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
         allowedLinkTypes,
         onPullRequestOpened,
         onPullRequestMerged,
+        creatableIssueTypes,
+        maxNewIssuesPerRun,
         authorizedById: ctx.principal.id,
         authorizedAt: new Date(),
       };

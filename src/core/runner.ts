@@ -62,8 +62,11 @@ import {
   ISSUE_TRACKER_TOOL_NAMES,
   handleIssueTrackerTool,
   type IssueProjectLink,
+  type RunCreationCounter,
 } from "./issue-tracker-tools.js";
 import { completeIssueStatus } from "./issue-status.js";
+import { fileIssue } from "./issue-dedupe.js";
+import { fileSelfDefect } from "./self-defects.js";
 import { recordNativeModelUsage } from "./model-usage.js";
 import { trackRun } from "./in-flight-runs.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
@@ -166,6 +169,7 @@ export type RunnerDb = Pick<
   | "agentIssueProject"
   | "issuePullRequest"
   | "runIssueStatus"
+  | "issueFingerprint"
 >;
 
 /** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */
@@ -204,6 +208,8 @@ function toIssueProjectLink(row: {
   allowedTransitions?: string[] | null;
   writableFields?: string[] | null;
   allowedLinkTypes?: string[] | null;
+  creatableIssueTypes?: string[] | null;
+  maxNewIssuesPerRun?: number | null;
 }): IssueProjectLink {
   return {
     provider: "jira",
@@ -214,6 +220,9 @@ function toIssueProjectLink(row: {
     allowedTransitions: row.allowedTransitions ?? [],
     writableFields: row.writableFields ?? [],
     allowedLinkTypes: row.allowedLinkTypes ?? [],
+    creatableIssueTypes: row.creatableIssueTypes ?? [],
+    // No built-in cap: absent (an older pinned load) means none, like null.
+    maxNewIssuesPerRun: row.maxNewIssuesPerRun ?? null,
   };
 }
 
@@ -247,8 +256,17 @@ export class RunCancelledError extends Error {
  * the race, the winner's if it did not.
  */
 async function finishRun(db: RunnerDb, runId: string, data: Prisma.RunUpdateManyMutationInput): Promise<Run> {
-  await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data });
-  return db.run.findUniqueOrThrow({ where: { id: runId } });
+  return (await finishRunClaimed(db, runId, data)).run;
+}
+
+/** finishRun, also saying whether this call made the row terminal (false: something else finished it first). */
+async function finishRunClaimed(
+  db: RunnerDb,
+  runId: string,
+  data: Prisma.RunUpdateManyMutationInput,
+): Promise<{ run: Run; claimed: boolean }> {
+  const updated = await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data });
+  return { run: await db.run.findUniqueOrThrow({ where: { id: runId } }), claimed: updated.count > 0 };
 }
 
 /**
@@ -558,6 +576,8 @@ async function executeTrackedRun(
   });
 
   if (loaded.kind === "coding") {
+    // Deliberately no self-defect here: a missing coding executor is a deployment config error, which would
+    // file one defect per opted-in coding agent rather than describe that agent's failure.
     return finishRun(db, runId, {
       status: "failed",
       error: CODING_EXECUTOR_NOT_CONFIGURED,
@@ -574,6 +594,9 @@ async function executeTrackedRun(
     const toolsByName = new Map(Object.entries(loaded.toolsByName));
     const secretsAccessor = buildSecretsAccessor(loaded.agentId, providers.secrets, db);
     const sharedDatastoreAccessor = buildSharedDatastoreAccessor(loaded.agentId, providers.datastore, db);
+    // jira_create_issue's per-run cap counter: shared by every tool call of this attempt (a resumed attempt
+    // starts a fresh one, floored by the run's recorded fingerprint creates).
+    const issueCreationCounters = new Map<string, RunCreationCounter>();
 
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
@@ -643,6 +666,13 @@ async function executeTrackedRun(
               where: { agentId_provider_projectKey: { agentId: loaded.agentId, provider: "jira", projectKey } },
             });
             return row ? toIssueProjectLink(row) : null;
+          },
+          creation: {
+            runId,
+            counters: issueCreationCounters,
+            fileIssue: (input) => fileIssue({ db }, input),
+            recordedCreates: (projectKey) =>
+              db.issueFingerprint.count({ where: { createdByRunId: runId, issueProvider: "jira", projectKey } }),
           },
         });
       }
@@ -771,6 +801,7 @@ async function executeTrackedRun(
           const dispatched = await dispatchRun({
             db,
             executor: providers.executor,
+            selfDefects: { db, issueTrackers },
             agentId: edge.childAgentId,
             trigger: "subagent",
             codingTask: args.task,
@@ -914,7 +945,7 @@ async function executeTrackedRun(
       step,
     });
 
-    const finished = await finishRun(db, runId, {
+    const { run: finished, claimed } = await finishRunClaimed(db, runId, {
       status: engineResult.status,
       tokensIn: engineResult.usage.tokensIn,
       tokensOut: engineResult.usage.tokensOut,
@@ -929,6 +960,9 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
+    // filed twice. Bounded and never throws.
+    if (claimed) await fileSelfDefect(db, issueTrackers, finished);
     return finished;
   } catch (err) {
     // Defensive backstop: the engine is expected to catch its own errors
@@ -936,7 +970,7 @@ async function executeTrackedRun(
     // (a real bug, or tool-loading failing outside the per-tool try above)
     // must still never leave the run dangling in "running". A cancellation
     // is not a failure: it carries the operator's own reason.
-    const finished = await finishRun(db, runId, {
+    const { run: finished, claimed } = await finishRunClaimed(db, runId, {
       status: err instanceof RunCancelledError ? "cancelled" : "failed",
       error: err instanceof Error ? err.message : String(err),
       finishedAt: new Date(),
@@ -944,6 +978,9 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
+    // filed twice. Bounded and never throws.
+    if (claimed) await fileSelfDefect(db, issueTrackers, finished);
     return finished;
   }
 }

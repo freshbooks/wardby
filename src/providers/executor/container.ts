@@ -19,6 +19,8 @@ import {
   protectedPathSentence,
 } from "../../coding/protected-path-wording.js";
 import { budgetSentence } from "../../core/budget-wording.js";
+import { fileSelfDefect } from "../../core/self-defects.js";
+import type { IssueTrackerRegistry } from "../issue-tracker/types.js";
 import {
   classifyProviderFailure,
   providerClassOfCategory,
@@ -165,8 +167,28 @@ export interface CodingFailureAudit {
 export class PrismaContainerExecutionStore implements ContainerExecutionStore {
   constructor(
     private readonly db: PrismaClient,
-    private readonly options: { maxConcurrent?: number } = {},
+    private readonly options: {
+      maxConcurrent?: number;
+      /** Configured issue trackers: a coding run this store ends failed/lost/budget_exhausted files a self-defect. */
+      issueTrackers?: IssueTrackerRegistry;
+    } = {},
   ) {}
+
+  /** Best effort (bounded, never throws): only called by the write that made the row terminal, so it files once. */
+  private async selfDefect(run: {
+    id: string;
+    agentId: string;
+    status: string;
+    error: string | null;
+    finishedAt: Date;
+  }) {
+    if (this.hasTrackers) await fileSelfDefect(this.db, this.options.issueTrackers, run);
+  }
+
+  /** An empty registry (no Jira site configured) means no self-defect queries at all. */
+  private get hasTrackers(): boolean {
+    return Object.values(this.options.issueTrackers ?? {}).some(Boolean);
+  }
 
   async load(runId: string): Promise<ContainerRunSnapshot | null> {
     const row = await this.db.run.findUnique({
@@ -325,11 +347,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
   }
 
   async complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void> {
-    await this.db.$transaction(async (tx) => {
+    const finishedAt = new Date();
+    const finished = await this.db.$transaction(async (tx) => {
       const run = await tx.run.findUnique({ where: { id: runId }, include: { codingRun: true } });
       if (!run?.codingRun) throw new Error("coding_run_not_found");
       if (TERMINAL_STATUSES.has(run.status)) {
-        if (run.codingRun.result && stableJson(run.codingRun.result) === stableJson(result)) return;
+        if (run.codingRun.result && stableJson(run.codingRun.result) === stableJson(result)) return null;
         throw new Error("coding_run_terminal_conflict");
       }
       await tx.codingRun.update({
@@ -341,12 +364,16 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         data: {
           status,
           finalText: result.summary,
-          finishedAt: new Date(),
+          finishedAt,
           heartbeatAt: new Date(),
           error: null,
         },
       });
+      return { id: runId, agentId: run.agentId };
     });
+    if (finished && status === "budget_exhausted") {
+      await this.selfDefect({ ...finished, status, error: null, finishedAt });
+    }
   }
 
   async terminate(
@@ -355,18 +382,25 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     error: string,
     audit?: CodingFailureAudit,
   ): Promise<void> {
-    await this.db.$transaction(async (tx) => {
+    const finishedAt = new Date();
+    const agentId = await this.db.$transaction(async (tx) => {
       const updated = await tx.run.updateMany({
         where: { id: runId, status: { in: ["pending", "running"] } },
-        data: { status, error, finishedAt: new Date(), heartbeatAt: new Date() },
+        data: { status, error, finishedAt, heartbeatAt: new Date() },
       });
-      if (updated.count && audit) {
+      if (!updated.count) return null;
+      if (audit) {
         await tx.codingRun.update({
           where: { runId },
           data: { failureCategory: audit.failureCategory, diagnosticId: audit.diagnosticId },
         });
       }
+      if (!this.hasTrackers) return null;
+      const row = await tx.run.findUnique({ where: { id: runId }, select: { agentId: true } });
+      return row?.agentId ?? null;
     });
+    // After commit, so the failure category is readable; cancelled/refused are skipped inside fileSelfDefect.
+    if (agentId) await this.selfDefect({ id: runId, agentId, status, error, finishedAt });
   }
 }
 

@@ -10,6 +10,7 @@ import {
 } from "../coding/services/wording.js";
 import type { AttributionIntent } from "./attribution.js";
 import { dispatchRun, isSerializationConflict, type DispatchDb } from "./dispatch.js";
+import type { SelfDefectSink } from "./self-defects.js";
 
 interface FakeBudget {
   /** The agent's budget group (ids must match agent.budgetGroupId). */
@@ -695,6 +696,53 @@ describe("dispatchRun", () => {
     expect(state.runs[0].error).toBe("launcher unavailable");
   });
 
+  it("files a self-defect when executor start rejects and it marks the run failed", async () => {
+    const state = fakeDb(nativeAgent());
+    const fileIssue = vi.fn(async () => ({ outcome: "created" as const, issueKey: "OPS-1", url: "u", seenCount: 1 }));
+    const selfDefects = {
+      db: {
+        run: {
+          findUnique: async ({ where }: any) => {
+            const r = state.runs.find((x: any) => x.id === where.id);
+            return r
+              ? { id: r.id, agentId: "agent_1", status: r.status, error: r.error, finishedAt: r.finishedAt }
+              : null;
+          },
+        },
+        agent: {
+          findUnique: async () => ({ id: "agent_1", name: "a", defectProjectKey: "OPS", defectIssueType: "Bug" }),
+        },
+        agentIssueProject: {
+          findUnique: async () => ({
+            agentId: "agent_1",
+            provider: "jira",
+            projectKey: "OPS",
+            access: "write",
+            commentVisibilityRole: null,
+            creatableIssueTypes: ["Bug"],
+          }),
+        },
+        codingRun: { findUnique: async () => null },
+        $transaction: vi.fn(),
+      },
+      issueTrackers: { jira: { provider: "jira" } },
+      options: { fileIssue },
+    } as unknown as SelfDefectSink;
+    await dispatchRun({
+      db: state.db,
+      executor: {
+        async start() {
+          throw new Error("launcher unavailable");
+        },
+        async stop() {},
+      },
+      agentId: "agent_1",
+      selfDefects,
+    });
+    await vi.waitFor(() => expect(fileIssue).toHaveBeenCalledTimes(1));
+    expect((fileIssue.mock.calls[0] as unknown[])[0]).toMatchObject({ fingerprint: "self:agent_1:failed:unknown" });
+  });
+
   describe("issue inheritance", () => {
     function codingAgent() {
       return {
@@ -1062,6 +1110,7 @@ describe("isSerializationConflict", () => {
     ["legacy P2010 with meta.code 40001", { code: "P2010", meta: { code: "40001" } }],
     ["commit-time DriverAdapterError 40001", { name: "DriverAdapterError", cause: { originalCode: "40001" } }],
     ["commit-time DriverAdapterError 40P01", { name: "DriverAdapterError", cause: { originalCode: "40P01" } }],
+    ["a concurrent first insert of the same WorkItem", { code: "P2002", meta: { modelName: "WorkItem" } }],
   ])("retries %s", (_label, err) => {
     expect(isSerializationConflict(err)).toBe(true);
   });
@@ -1070,6 +1119,7 @@ describe("isSerializationConflict", () => {
     ["null", null],
     ["a string", "40001"],
     ["a unique violation", { code: "P2002" }],
+    ["a unique violation on another model", { code: "P2002", meta: { modelName: "Run" } }],
     ["P2010 for another SQLSTATE", adapterP2010("23505")],
     ["P2010 without adapter details", { code: "P2010", meta: {} }],
     ["DriverAdapterError for another SQLSTATE", { name: "DriverAdapterError", cause: { originalCode: "23505" } }],

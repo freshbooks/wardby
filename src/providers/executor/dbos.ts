@@ -19,6 +19,7 @@ import type { DbosConfig } from "../../config/providers.js";
 import type { StepRunner } from "../engine/types.js";
 import { executeRun, RunCancelledError, type NativeRunProviders, type RunnerDb } from "../../core/runner.js";
 import { markRunFailedFromExecutorError } from "../../core/dispatch.js";
+import type { SelfDefectSink } from "../../core/self-defects.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
 import { logger } from "../../core/logger.js";
@@ -158,6 +159,11 @@ export class DbosExecutor implements Executor {
     await DBOS.shutdown({ workflowCompletionTimeoutMS: 5_000 });
   }
 
+  /** Where a run this executor marks failed files its self-defect (no-op without a configured issue tracker). */
+  private get selfDefects(): SelfDefectSink {
+    return { db: this.db, issueTrackers: this.providers.issueTrackers };
+  }
+
   async start(runId: string): Promise<void> {
     if (!this.launched) await this.launch();
     await this.db.run.updateMany({
@@ -188,7 +194,7 @@ export class DbosExecutor implements Executor {
       // the same failure — dispatchRun's own `.catch` around `start()` calls
       // it too — which is harmless precisely because it is conditional and
       // idempotent: the second call matches zero rows.
-      await markRunFailedFromExecutorError(this.db, runId, err);
+      await markRunFailedFromExecutorError(this.db, runId, err, this.selfDefects);
       throw err;
     }
   }
@@ -267,10 +273,8 @@ export class DbosExecutor implements Executor {
         return { state: "terminal" };
       case "mark-failed":
         this.resumeAttempts.delete(handle.runId);
-        await this.db.run.updateMany({
-          where: { id: handle.runId, status: { in: ["pending", "running"] } },
-          data: { status: "failed", error: decision.error, finishedAt: new Date() },
-        });
+        // Conditional (only a pending/running row), so a self-defect is filed only when this made the run failed.
+        await markRunFailedFromExecutorError(this.db, handle.runId, decision.error, this.selfDefects);
         return { state: "terminal" };
       case "lost":
         this.resumeAttempts.delete(handle.runId);
