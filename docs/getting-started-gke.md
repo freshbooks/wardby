@@ -263,8 +263,12 @@ group role in `deploy/gke/database-grants.sql`:
 
 `deploy/gke/bootstrap-database-iam.sh` applies the grants as the built-in
 owner, from a short-lived Job inside the cluster. Run it whenever
-`database-grants.sql` changes, and as part of the orders below. The grants run
-in one transaction, so a statement the database refuses leaves nothing applied.
+`database-grants.sql` changes, before deploying the release that needs the new
+grants (`bootstrap-database-iam.sh --check`, then `bootstrap-database-iam.sh`,
+then `up.sh`), and as part of the orders below. A release deployed ahead of its
+grants fails with "permission denied" wherever it uses one it doesn't have yet.
+The grants run in one transaction, so a statement the database refuses leaves
+nothing applied.
 
 The built-in owner is not a Terraform resource: `bootstrap-database-iam.sh`
 creates it if it's missing, sets a one-time password on it through the Cloud
