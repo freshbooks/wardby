@@ -25,7 +25,11 @@ Jira Cloud only. One Jira site per wardby deployment.
 - **Status comments.** When an event starts a run, wardby posts a short
   "working on it" comment on the issue and edits it with the outcome when the
   run ends, including a line such as `Agent spend: $0.0123` for the run and
-  its direct sub-runs. Every agent comment ends with a footer naming the agent.
+  its direct sub-runs. That one comment is the reply: when the run succeeds
+  it shows the agent's final answer, so the agent is told not to post the
+  answer again with `jira_comment` (it uses `jira_comment` only for other
+  issues or progress notes). If your agent's system prompt tells it to reply
+  with `jira_comment`, remove that line, or each request gets two comments. Every agent comment ends with a footer naming the agent.
   If the agent is unlinked from the project while a run is in flight, the
   final edit says `Stopped reporting: this agent is no longer linked to PROJ.`;
   if its link is changed to `read`, it says the link is now read-only. Either

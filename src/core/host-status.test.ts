@@ -91,6 +91,16 @@ describe("outcomeBody", () => {
     const body = outcomeBody(run("succeeded", "hi"), REPO, [], [], { noPullRequestText: "Done." });
     expect(body).toMatch(/^✅ Done\.\n\n> hi/);
   });
+  it("shows the reply itself, capped, when it is the answer", () => {
+    expect(outcomeBody(run("succeeded", "Filed it."), REPO, [], [], { replyAsAnswer: true })).toMatch(
+      /^✅ Filed it\.\n\n/,
+    );
+    const long = outcomeBody(run("succeeded", "x".repeat(2500)), REPO, [], [], { replyAsAnswer: true });
+    expect(long).toContain(`✅ ${"x".repeat(2000)}…`);
+    expect(
+      outcomeBody(run("succeeded", null), REPO, [], [], { replyAsAnswer: true, noPullRequestText: "Done." }),
+    ).toMatch(/^✅ Done\./);
+  });
   it("links the pull requests a coding sub-run opened or updated", () => {
     const body = outcomeBody(run("succeeded"), REPO, [
       { outcome: "pull_request_opened", repository: REPO, pullRequestNumber: 73, codeProvider: "github" },

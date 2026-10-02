@@ -95,9 +95,11 @@ function pullRequestOutcome(result: unknown): PullRequestOutcome | null {
 }
 
 /** The agent's reply as a quote, cut to MAX_REPLY_CHARS, with @-mentions defused so nobody is pinged. */
+const cutReply = (text: string): string =>
+  text.length > MAX_REPLY_CHARS ? `${text.slice(0, MAX_REPLY_CHARS)}…` : text;
+
 function quoteReply(text: string): string {
-  const cut = text.length > MAX_REPLY_CHARS ? `${text.slice(0, MAX_REPLY_CHARS)}…` : text;
-  return cut
+  return cutReply(text)
     .replace(/@(?=[\w-])/g, "@​")
     .split("\n")
     .map((line) => `> ${line}`)
@@ -109,7 +111,12 @@ export function outcomeBody(
   repository: string,
   pullRequests: PullRequestOutcome[],
   failedChildren: FailedChild[] = [],
-  opts: { budgetSentence?: string; noPullRequestText?: string } = {},
+  opts: {
+    budgetSentence?: string;
+    noPullRequestText?: string;
+    /** The agent's reply IS the answer (no separate reply comment): shown as written, not quoted. */
+    replyAsAnswer?: boolean;
+  } = {},
 ): string {
   const links = pullRequests.map((pr) => {
     const ref =
@@ -179,6 +186,7 @@ export function outcomeBody(
     return `❌ ${lines.join(" ")}${partial}${quoted}\n\n${footer}`;
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
+  if (opts.replyAsAnswer && reply) return `✅ ${cutReply(reply)}\n\n${footer}`;
   return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}\n\n${footer}`;
 }
 

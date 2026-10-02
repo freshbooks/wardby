@@ -229,6 +229,8 @@ export async function completeIssueStatus(
       const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
         budgetSentence,
         noPullRequestText: "Done.",
+        // One comment per request: this status comment carries the agent's answer.
+        replyAsAnswer: true,
       });
       // Notes and spend go above the footer, which must stay the last line.
       body = withSpend(withSpend(outcome, notes.join("\n")), await spendLine(db, run.id));

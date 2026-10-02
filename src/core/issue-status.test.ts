@@ -229,14 +229,22 @@ describe("completeIssueStatus", () => {
       data: { commentId: "c-1", completedAt: expect.any(Date) },
     });
   });
-  it('says "Done." on Jira when the run opened no pull request', async () => {
+  it("shows the agent's answer itself on Jira (one comment per request), unquoted", async () => {
     const t = tracker();
     const d = db({ runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null });
-    await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "Triaged" }, { jira: t });
+    await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "Done. Triaged as a bug." }, { jira: t });
+    const { markdown } = (t.editComment as any).mock.calls[0][2];
+    expect(markdown).toMatch(/^✅ Done\. Triaged as a bug\./);
+    expect(markdown).not.toContain("Done. Done.");
+    expect(markdown).not.toContain("> ");
+    expect(markdown).not.toContain("Finished without");
+  });
+  it('says "Done." on Jira when the run finished without a reply', async () => {
+    const t = tracker();
+    const d = db({ runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null });
+    await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: null }, { jira: t });
     const { markdown } = (t.editComment as any).mock.calls[0][2];
     expect(markdown).toMatch(/^✅ Done\./);
-    expect(markdown).toContain("Triaged");
-    expect(markdown).not.toContain("Finished without");
   });
   it("shows the tree, issue and model spend above the footer, which stays last", async () => {
     const t = tracker();
@@ -278,7 +286,7 @@ describe("completeIssueStatus", () => {
     await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
     const { markdown } = (t.editComment as any).mock.calls[0][2];
     expect(markdown).not.toContain("Agent spend");
-    expect(markdown).toMatch(/^✅ Done\./);
+    expect(markdown).toMatch(/^✅ ok/);
     expect(markdown).toContain("wardby run `r1`");
   });
   it("leaves a comment-less row to the working-status follow-up unless postIfMissing", async () => {
