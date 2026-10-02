@@ -14,6 +14,7 @@ import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
 import { KubernetesConflictError } from "./kubernetes-api.js";
 import { KubernetesJobLauncher, hostTarArchive, type KubernetesJobLauncherOptions } from "./kubernetes.js";
 import { kubernetesRunNames } from "./kubernetes-isolation.js";
+import type { ServiceStateUpdate } from "./service-state.js";
 import type { JobHandle, JobSpec } from "./types.js";
 
 const IMAGE = `localhost:5001/wardby-coding-worker@sha256:${"a".repeat(64)}`;
@@ -27,6 +28,7 @@ afterEach(async () => {
 async function harness(
   runId = "run-k8s-test",
   options: { runtimeClassName?: string; priorityClassName?: string } = {},
+  launcherOptions: Partial<KubernetesJobLauncherOptions> = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "wardby-k8s-launcher-"));
   roots.push(root);
@@ -129,6 +131,7 @@ async function harness(
     sleep: async () => {},
     createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
     onWarning: (m) => warnings.push(m),
+    ...launcherOptions,
   });
   const finish = async (_handle: JobHandle, _r?: unknown) =>
     setPod((pod) => {
@@ -1649,5 +1652,73 @@ describe("coding-run services", () => {
     });
     stuckInInit(g, sidecarStatus({ started: true, ready: true }));
     await expect(launcher.launch({ ...g.spec, services: [POSTGRES] })).rejects.toThrow("kubernetes_pod_start_timeout");
+  });
+
+  describe("service state reporting", () => {
+    function reporting() {
+      const updates: ServiceStateUpdate[] = [];
+      return { updates, onServiceState: async (update: ServiceStateUpdate) => void updates.push(update) };
+    }
+
+    it("reports pending, then ready once the keeper (after every native sidecar) is ready", async () => {
+      const { updates, onServiceState } = reporting();
+      const h = await harness("run-svc-report", {}, { onServiceState });
+      await h.launcher.launch({ ...h.spec, services: [POSTGRES] });
+      expect(updates).toEqual([
+        { runId: "run-svc-report", name: "postgres", state: "pending" },
+        { runId: "run-svc-report", name: "postgres", state: "ready" },
+      ]);
+    });
+
+    it.each([
+      ["probe_failed", { restartCount: 1 }],
+      ["image_unavailable", { state: { waiting: { reason: "ImagePullBackOff" } } }],
+      ["start_failed", { state: { waiting: { reason: "CreateContainerConfigError" } } }],
+      ["exited", { state: { terminated: { exitCode: 1, reason: "Error" } } }],
+    ] as const)("reports failed with reason %s", async (reason, over) => {
+      const { updates, onServiceState } = reporting();
+      const h = await harness(`run-svc-report-${reason.replace("_", "-")}`, {}, { onServiceState });
+      stuckInInit(h, sidecarStatus(over));
+      await expect(h.launcher.launch({ ...h.spec, services: [POSTGRES] })).rejects.toThrow(
+        "coding_service_unready:postgres",
+      );
+      expect(updates.at(-1)).toMatchObject({ name: "postgres", state: "failed", reason });
+    });
+
+    it("never lets a throwing reporter replace the launcher's own error", async () => {
+      const onServiceState = async () => {
+        throw new Error("reporter_boom");
+      };
+      const h = await harness("run-svc-report-throws", {}, { onServiceState });
+      stuckInInit(h, sidecarStatus({ state: { waiting: { reason: "ImagePullBackOff" } } }));
+      await expect(h.launcher.launch({ ...h.spec, services: [POSTGRES] })).rejects.toThrow(
+        /^coding_service_unready:postgres$/,
+      );
+    });
+
+    it("reports probing, then timed_out when the pod-start bound is reached", async () => {
+      const { updates, onServiceState } = reporting();
+      const g = await harness("run-svc-report-slow");
+      let clock = 0;
+      const launcher = new KubernetesJobLauncher({
+        onWarning: () => {},
+        api: g.api,
+        config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+        workspaceRoot: g.workspaceRoot,
+        resolveCapability: async () => CAPABILITY,
+        now: () => clock,
+        sleep: async (ms) => void (clock += ms),
+        readyTimeoutMs: 1_000,
+        onServiceState,
+      });
+      stuckInInit(g, sidecarStatus());
+      await expect(launcher.launch({ ...g.spec, services: [POSTGRES] })).rejects.toThrow(
+        "coding_service_unready:postgres",
+      );
+      expect(updates).toEqual([
+        { runId: "run-svc-report-slow", name: "postgres", state: "probing" },
+        { runId: "run-svc-report-slow", name: "postgres", state: "failed", reason: "timed_out" },
+      ]);
+    });
   });
 });
