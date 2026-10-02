@@ -17,6 +17,7 @@ export default tseslint.config(
       "src/generated/**",
       "**/coverage/**",
       "spikes/**",
+      "apps/**",
       ".claude/**",
     ],
   },
