@@ -144,7 +144,6 @@ export class JiraClient {
         const piece = value.subarray(0, opts.maxBytes - total);
         chunks.push(piece);
         total += piece.length;
-        if (piece.length < value.length) await reader.cancel();
       }
       if (reader && total >= opts.maxBytes) await reader.cancel().catch(() => undefined);
     } catch {

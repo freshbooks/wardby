@@ -419,17 +419,28 @@ export class JiraIssueTracker implements IssueTracker {
         "tracker_invalid_request",
         `Issue type "${input.issueType}" is not available in project ${input.projectKey}.`,
       );
-    const fields: Record<string, unknown> = {
+    const fields: Record<string, unknown> = {};
+    for (const [id, value] of Object.entries(input.customFields ?? {})) {
+      if (!/^customfield_\d+$/.test(id))
+        throw new IssueTrackerError(
+          "tracker_invalid_request",
+          `customFields may only set customfield_N fields; "${id}" is not allowed.`,
+        );
+      fields[id] = value;
+    }
+    if (type.subtask && !input.parentKey)
+      throw new IssueTrackerError("tracker_invalid_request", `Sub-task issues need a parent (${type.name}).`);
+    // Core fields are applied last so nothing above can override them.
+    Object.assign(fields, {
       project: { key: input.projectKey },
       issuetype: { id: type.id },
       summary: input.summary,
       description: markdownToAdf(input.descriptionMarkdown),
-    };
+    });
     if (input.labels) fields.labels = input.labels;
     if (input.priority) fields.priority = { name: input.priority };
     if (input.components) fields.components = input.components.map((name) => ({ name }));
     if (input.parentKey) fields.parent = { key: input.parentKey };
-    for (const [id, value] of Object.entries(input.customFields ?? {})) fields[id] = value;
     const missing = (await this.fieldMeta(input.projectKey, type.id))
       .filter((f) => f.required && !f.hasDefault && !ALWAYS_SUPPLIED.has(f.fieldId) && fields[f.fieldId] === undefined)
       .map((f) => f.name || f.fieldId);

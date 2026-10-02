@@ -732,4 +732,74 @@ describe("JiraIssueTracker issue creation and attachments", () => {
     });
     expect(seen).toHaveLength(1);
   });
+
+  it.each([
+    ["project", { project: { key: "OTHER" } }],
+    ["issuetype", { issuetype: { id: "1" } }],
+    ["security", { security: { id: "1" } }],
+    ["reporter", { reporter: { id: "x" } }],
+    ["customfield_abc", { customfield_abc: 1 }],
+  ])("createIssue rejects customFields key %s without posting", async (key, customFields) => {
+    const { tracker, calls } = fake((c) => (c.method === "POST" ? json({ key: "KAN-9" }, 201) : meta(c)));
+    await expect(
+      tracker.createIssue({
+        projectKey: "KAN",
+        issueType: "Bug",
+        summary: "s",
+        descriptionMarkdown: "d",
+        customFields,
+      }),
+    ).rejects.toMatchObject({ code: "tracker_invalid_request", message: expect.stringContaining(key) });
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("createIssue needs a parent for a sub-task type, before any POST", async () => {
+    const { tracker, calls } = fake((c) => (c.method === "POST" ? json({ key: "KAN-9" }, 201) : meta(c)));
+    await expect(
+      tracker.createIssue({ projectKey: "KAN", issueType: "Sub-task", summary: "s", descriptionMarkdown: "d" }),
+    ).rejects.toMatchObject({ code: "tracker_invalid_request", message: expect.stringContaining("need a parent") });
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  const redirecting = (hops: string[]) => {
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const client = new JiraClient(
+      { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
+      {
+        fetch: (async (url: string, init?: RequestInit) => {
+          const n = seen.length;
+          seen.push({ url, auth: new Headers(init?.headers).get("authorization") });
+          return n < hops.length
+            ? new Response(null, { status: 303, headers: { location: hops[n] } })
+            : new Response("ok", { status: 200 });
+        }) as unknown as typeof fetch,
+      },
+    );
+    return { client, seen };
+  };
+
+  it.each([
+    "https://evilatlassian.net/x",
+    "https://atlassian.net.evil.com/x",
+    "https://user@evil.com/x",
+    "http://x.atlassian.net/x",
+    "https://10.0.0.1/x",
+    "https://[::1]/x",
+  ])("refuses a download redirect to %s", async (location) => {
+    const { client, seen } = redirecting([location]);
+    await expect(client.requestBytes("/x", { maxBytes: 10 })).rejects.toMatchObject({
+      code: "tracker_invalid_response",
+    });
+    expect(seen).toHaveLength(1);
+  });
+
+  it("drops the credential on every hop after the first and gives up after too many redirects", async () => {
+    const chain = redirecting(["https://a.atlassian.com/1", "https://b.atlassian.com/2"]);
+    expect(Buffer.from(await chain.client.requestBytes("/x", { maxBytes: 10 })).toString()).toBe("ok");
+    expect(chain.seen.map((r) => r.auth)).toEqual(["Bearer tok", null, null]);
+    const loop = redirecting(Array.from({ length: 10 }, (_, i) => `https://h${i}.atlassian.com/`));
+    await expect(loop.client.requestBytes("/x", { maxBytes: 10 })).rejects.toMatchObject({ code: "tracker_api_error" });
+    expect(loop.seen.slice(1).every((r) => r.auth === null)).toBe(true);
+    expect(loop.seen.length).toBeLessThanOrEqual(5);
+  });
 });
