@@ -556,9 +556,12 @@ export class JiraIssueTracker implements IssueTracker {
     const cap = Math.max(1, Math.floor(maxBytes));
     if (size === 0) return { filename, mimeType, text: "", truncated: false };
     // redirect=false: Jira serves the bytes itself (206 with Range) instead of a 303 to the media host.
+    // A Range reaching past the end of the file is answered with a Content-Length of the requested
+    // length and the connection is then cut short, so only ask for a range when the file is larger.
+    const whole = size !== null && size <= cap;
     const bytes = await this.client.requestBytes(
       `/rest/api/3/attachment/content/${encodeURIComponent(id)}?redirect=false`,
-      { maxBytes: cap },
+      whole ? { maxBytes: size, range: false } : { maxBytes: cap },
     );
     return {
       filename,

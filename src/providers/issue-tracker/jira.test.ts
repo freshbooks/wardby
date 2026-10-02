@@ -12,6 +12,7 @@ type Call = {
   body: unknown;
   authorization: string | null;
   acceptLanguage: string | null;
+  range: string | null;
 };
 
 function fake(handler: (c: Call) => Response | undefined) {
@@ -24,6 +25,7 @@ function fake(handler: (c: Call) => Response | undefined) {
       path: `${url.pathname}${url.search}`,
       body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
       authorization: new Headers(init?.headers).get("authorization"),
+      range: new Headers(init?.headers).get("range"),
       acceptLanguage: new Headers(init?.headers).get("accept-language"),
     };
     languages.push(call.acceptLanguage);
@@ -759,6 +761,22 @@ describe("JiraIssueTracker issue creation and attachments", () => {
     expect(r).toEqual({ filename: "app.log", mimeType: "text/plain", text: "hello wörld", truncated: true });
     expect(calls.at(-1)!.path).toBe("/rest/api/3/attachment/content/7?redirect=false");
     expect(auth).toBe("Bearer tok");
+  });
+
+  it("readAttachmentText asks for a Range only when the file is larger than the cap", async () => {
+    let range: string | null | undefined;
+    const small = attachmentFake("text/plain", 110, (c) => {
+      range = c.range;
+      return new Response("x".repeat(110));
+    });
+    expect(await small.tracker.readAttachmentText("7", 50_000)).toMatchObject({ truncated: false });
+    expect(range).toBeNull();
+    const large = attachmentFake("text/plain", 100, (c) => {
+      range = c.range;
+      return new Response("hello", { status: 206 });
+    });
+    await large.tracker.readAttachmentText("7", 5);
+    expect(range).toBe("bytes=0-4");
   });
 
   it("readAttachmentText caps client-side when the server ignores Range", async () => {

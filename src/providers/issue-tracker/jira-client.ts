@@ -83,16 +83,19 @@ export class JiraClient {
   }
 
   /**
-   * GET returning at most `maxBytes` of the raw body (attachment content). Sends `Range` and caps
-   * client-side too, in case the server ignores it. Redirects are never followed with the credential:
+   * GET returning at most `maxBytes` of the raw body (attachment content). Sends `Range` (unless
+   * `range: false`) and caps client-side too, in case the server ignores it. Redirects are never followed with the credential:
    * a 3xx is followed only to an https Atlassian host and without Authorization.
    */
-  async requestBytes(path: string, opts: { maxBytes: number; timeoutMs?: number }): Promise<Uint8Array> {
+  async requestBytes(
+    path: string,
+    opts: { maxBytes: number; timeoutMs?: number; range?: boolean },
+  ): Promise<Uint8Array> {
     const headers: Record<string, string> = {
       authorization: this.authorization,
       accept: "*/*",
       "accept-language": this.language,
-      range: `bytes=0-${Math.max(opts.maxBytes, 1) - 1}`,
+      ...(opts.range === false ? {} : { range: `bytes=0-${Math.max(opts.maxBytes, 1) - 1}` }),
     };
     let url = `${this.cfg.apiBaseUrl}${path}`;
     let res: Response | undefined;
