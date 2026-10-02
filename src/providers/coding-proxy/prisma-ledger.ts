@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient } from "#prisma";
+import { logger } from "../../core/logger.js";
 import type {
   CreateProxySessionInput,
   PricingSnapshot,
@@ -11,6 +12,8 @@ import type {
   ReserveProxyRequestInput,
   ReserveProxyRequestResult,
 } from "./types.js";
+
+const log = logger.child({ module: "coding-proxy-ledger" });
 
 export type PrismaProxyLedgerDb = Pick<PrismaClient, "$transaction" | "$queryRaw" | "$executeRaw">;
 type PrismaProxyLedgerTx = Pick<Prisma.TransactionClient, "$queryRaw" | "$executeRaw">;
@@ -269,26 +272,37 @@ export class PrismaProxyLedger implements ProxyLedger {
           WHERE r."id" = totals."runId"
         `;
       // Per-model usage (RunModelUsage), recomputed for this request's model and set, never incremented.
-      await tx.$executeRaw`
-          INSERT INTO "RunModelUsage"
-            ("runId", "model", "freshInputTokens", "cachedInputTokens", "cacheWriteTokens", "outputTokens", "costUsd")
-          SELECT s."runId", q."model",
-                 COALESCE(SUM(COALESCE(q."inputTokens", 0) - COALESCE(q."cachedInputTokens", 0)), 0)::integer,
-                 COALESCE(SUM(q."cachedInputTokens"), 0)::integer,
-                 COALESCE(SUM(q."cacheWriteTokens"), 0)::integer,
-                 COALESCE(SUM(q."outputTokens"), 0)::integer,
-                 COALESCE(SUM(q."actualCostUsd"), 0)
-          FROM "CodingProxySession" s
-          JOIN "CodingProxyRequest" q ON q."sessionId" = s."id" AND q."status" = 'completed'
-          WHERE s."id" = ${prior.sessionId} AND q."model" = ${prior.model}
-          GROUP BY s."runId", q."model"
-          ON CONFLICT ("runId", "model") DO UPDATE SET
-            "freshInputTokens" = EXCLUDED."freshInputTokens",
-            "cachedInputTokens" = EXCLUDED."cachedInputTokens",
-            "cacheWriteTokens" = EXCLUDED."cacheWriteTokens",
-            "outputTokens" = EXCLUDED."outputTokens",
-            "costUsd" = EXCLUDED."costUsd"
-        `;
+      // Best effort inside a savepoint: Run totals and the ledger are the budget truth, so a failed
+      // write here (e.g. a role without the RunModelUsage grant) must never fail the completion.
+      await tx.$executeRaw`SAVEPOINT run_model_usage`;
+      try {
+        await tx.$executeRaw`
+            INSERT INTO "RunModelUsage"
+              ("runId", "model", "freshInputTokens", "cachedInputTokens", "cacheWriteTokens", "outputTokens", "costUsd")
+            SELECT s."runId", q."model",
+                   COALESCE(SUM(COALESCE(q."inputTokens", 0) - COALESCE(q."cachedInputTokens", 0)), 0)::integer,
+                   COALESCE(SUM(q."cachedInputTokens"), 0)::integer,
+                   COALESCE(SUM(q."cacheWriteTokens"), 0)::integer,
+                   COALESCE(SUM(q."outputTokens"), 0)::integer,
+                   COALESCE(SUM(q."actualCostUsd"), 0)
+            FROM "CodingProxySession" s
+            JOIN "CodingProxyRequest" q ON q."sessionId" = s."id" AND q."status" = 'completed'
+            WHERE s."id" = ${prior.sessionId} AND q."model" = ${prior.model}
+            GROUP BY s."runId", q."model"
+            ON CONFLICT ("runId", "model") DO UPDATE SET
+              "freshInputTokens" = EXCLUDED."freshInputTokens",
+              "cachedInputTokens" = EXCLUDED."cachedInputTokens",
+              "cacheWriteTokens" = EXCLUDED."cacheWriteTokens",
+              "outputTokens" = EXCLUDED."outputTokens",
+              "costUsd" = EXCLUDED."costUsd"
+          `;
+        await tx.$executeRaw`RELEASE SAVEPOINT run_model_usage`;
+      } catch (err) {
+        await tx.$executeRaw`ROLLBACK TO SAVEPOINT run_model_usage`;
+        const code =
+          (err as { code?: unknown; meta?: { code?: unknown } }).meta?.code ?? (err as { code?: unknown }).code;
+        log.warn({ sessionId: prior.sessionId, model: prior.model, code }, "could not record the run's model usage");
+      }
       const request = await requestById(tx, requestId);
       if (!request) throw new Error("proxy_completion_not_persisted");
       return request;

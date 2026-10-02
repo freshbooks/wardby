@@ -208,5 +208,33 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       expect(after).toEqual(before);
       expect(after.outputTokens).toBe(70);
     });
+
+    it("never fails a completion when the per-model write fails", async () => {
+      // A trigger that rejects only this test's model makes the RunModelUsage write fail (like a missing grant).
+      const failModel = `fail-model-${suffix}`;
+      const fn = `fail_rmu_${suffix.replaceAll("-", "_")}`;
+      await db.$executeRawUnsafe(
+        `CREATE FUNCTION "${fn}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW."model" = '${failModel}' THEN RAISE EXCEPTION 'denied'; END IF; RETURN NEW; END $$`,
+      );
+      await db.$executeRawUnsafe(
+        `CREATE TRIGGER "${fn}" BEFORE INSERT OR UPDATE ON "RunModelUsage" FOR EACH ROW EXECUTE FUNCTION "${fn}"()`,
+      );
+      try {
+        const before = await db.run.findUniqueOrThrow({ where: { id: uRun } });
+        const id = await reserveOn("f1", failModel);
+        const done = await ledger.complete(id, u(100, 0, 0, 5), 0.001, 200);
+        expect(done.status).toBe("completed");
+        const run = await db.run.findUniqueOrThrow({ where: { id: uRun } });
+        expect(run.tokensIn).toBe(before.tokensIn + 100);
+        expect(Number(run.costUsd)).toBeCloseTo(Number(before.costUsd) + 0.001, 6);
+        expect(await db.runModelUsage.count({ where: { runId: uRun, model: failModel } })).toBe(0);
+        // The transaction stays usable: other models still record afterwards.
+        const rows = await db.runModelUsage.count({ where: { runId: uRun } });
+        expect(rows).toBe(2);
+      } finally {
+        await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${fn}" ON "RunModelUsage"`);
+        await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${fn}"()`);
+      }
+    });
   });
 });
