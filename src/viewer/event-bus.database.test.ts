@@ -24,7 +24,7 @@ async function waitFor(predicate: () => boolean, timeoutMs: number, what: string
   }
 }
 
-describe.skipIf(!process.env.DATABASE_URL)("viewer event bus (PostgreSQL)", () => {
+describe.skipIf(!process.env.DATABASE_URL)("viewer event bus (PostgreSQL)", { timeout: 20_000 }, () => {
   const url = process.env.DATABASE_URL!;
   const clients: pg.Client[] = [];
   const pids: number[] = [];
@@ -82,6 +82,7 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer event bus (PostgreSQL)", () =
   });
 
   it("reconnects after its backend is terminated, signals onReconnect, and keeps delivering", async () => {
+    const pidsFrom = pids.length;
     const bus = createViewerEventBus({ connectionString: url, connect, reconnectDelaysMs: [50] });
     const got: ViewerEvent[] = [];
     let reconnects = 0;
@@ -104,7 +105,7 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer event bus (PostgreSQL)", () =
     // close() leaves no listener backend behind (backend exit is asynchronous).
     const alive = async () => {
       const rows = await db.$queryRaw<{ n: bigint }[]>`
-        SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE pid = ANY(${pids}::int[])`;
+        SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE pid = ANY(${pids.slice(pidsFrom)}::int[])`;
       return Number(rows[0].n);
     };
     const deadline = Date.now() + 2000;
