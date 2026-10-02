@@ -57,6 +57,16 @@ impl Access {
     }
 }
 
+/// Mutable session state, shared with the refresh task so the new tokens are
+/// installed before the refresh lock is released.
+#[derive(Default)]
+struct State {
+    access: Option<Access>,
+    /// A rotated refresh token that could not be written to the store. The
+    /// stored one is already spent, so the next refresh must use this.
+    unsaved_refresh: Option<String>,
+}
+
 pub struct Session {
     server_url: String,
     auth: AuthServer,
@@ -64,25 +74,40 @@ pub struct Session {
     http: reqwest::Client,
     stream_http: reqwest::Client,
     store: Arc<dyn RefreshStore>,
-    access: std::sync::Mutex<Option<Access>>,
+    state: Arc<std::sync::Mutex<State>>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
-/// Reads the stored refresh token, spends it, and persists the rotated one.
-/// Runs to completion even if the caller is dropped: a rotated token that was
-/// issued but never stored would lock the user out.
+fn lock_state(state: &std::sync::Mutex<State>) -> std::sync::MutexGuard<'_, State> {
+    state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+struct Refreshed {
+    tokens: Tokens,
+    /// Set when the rotated refresh token could not be stored.
+    persist_error: Option<AppError>,
+}
+
+/// Spends the refresh token (the in-memory unsaved one if any, else the stored
+/// one) and persists the rotated one.
 async fn run_refresh(
-    http: reqwest::Client,
-    auth: AuthServer,
-    client_id: String,
-    store: Arc<dyn RefreshStore>,
-) -> Result<Tokens, AppError> {
-    let s = store.clone();
-    let stored = tokio::task::spawn_blocking(move || s.get())
-        .await
-        .map_err(|_| AppError::Keychain("keychain task failed".to_string()))??;
-    let refresh_token = stored.ok_or(AppError::NotSignedIn)?;
-    let tokens = match oauth::refresh(&http, &auth, &client_id, &refresh_token).await {
+    http: &reqwest::Client,
+    auth: &AuthServer,
+    client_id: &str,
+    store: &Arc<dyn RefreshStore>,
+    unsaved: Option<String>,
+) -> Result<Refreshed, AppError> {
+    let refresh_token = match unsaved {
+        Some(t) => t,
+        None => {
+            let s = store.clone();
+            tokio::task::spawn_blocking(move || s.get())
+                .await
+                .map_err(|_| AppError::Keychain("keychain task failed".to_string()))??
+                .ok_or(AppError::NotSignedIn)?
+        }
+    };
+    let tokens = match oauth::refresh(http, auth, client_id, &refresh_token).await {
         Ok(t) => t,
         // The grant is gone (revoked, expired, or already spent): sign in again.
         Err(AppError::Http {
@@ -90,14 +115,19 @@ async fn run_refresh(
         }) => return Err(AppError::NotSignedIn),
         Err(e) => return Err(e),
     };
-    // Persist the rotated token BEFORE the new access token is used anywhere.
+    let mut persist_error = None;
     if let Some(new_rt) = tokens.refresh_token.clone() {
         let s = store.clone();
-        tokio::task::spawn_blocking(move || s.set(&new_rt))
-            .await
-            .map_err(|_| AppError::Keychain("keychain task failed".to_string()))??;
+        persist_error = match tokio::task::spawn_blocking(move || s.set(&new_rt)).await {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(_) => Some(AppError::Keychain("keychain task failed".to_string())),
+        };
     }
-    Ok(tokens)
+    Ok(Refreshed {
+        tokens,
+        persist_error,
+    })
 }
 
 impl Session {
@@ -120,9 +150,12 @@ impl Session {
             http,
             stream_http,
             store,
-            access: std::sync::Mutex::new(initial.map(|t| Access {
-                token: t.access_token,
-                expires_at: t.expires_at,
+            state: Arc::new(std::sync::Mutex::new(State {
+                access: initial.map(|t| Access {
+                    token: t.access_token,
+                    expires_at: t.expires_at,
+                }),
+                unsaved_refresh: None,
             })),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
@@ -146,13 +179,14 @@ impl Session {
     }
 
     fn current(&self) -> Option<(String, bool)> {
-        let g = self.access.lock().unwrap_or_else(|e| e.into_inner());
-        g.as_ref().map(|a| (a.token.clone(), a.fresh()))
+        let g = lock_state(&self.state);
+        g.access.as_ref().map(|a| (a.token.clone(), a.fresh()))
     }
 
     /// Returns a usable access token, refreshing if `rejected` was refused by
-    /// the server (or is absent/expired). Refreshes are serialised: whoever
-    /// gets the lock second finds the new token already installed and reuses it.
+    /// the server (or is absent/expired). Refreshes are serialised, and the
+    /// holder installs the new tokens before releasing the lock, so whoever
+    /// gets the lock next finds them and reuses them.
     async fn token_after(&self, rejected: Option<&str>) -> Result<String, AppError> {
         let guard = self.refresh_lock.clone().lock_owned().await;
         if let Some((tok, fresh)) = self.current()
@@ -161,27 +195,41 @@ impl Session {
         {
             return Ok(tok);
         }
-        let task = tokio::spawn(run_refresh(
-            self.http.clone(),
-            self.auth.clone(),
-            self.client_id.clone(),
-            self.store.clone(),
-        ));
-        // Hold the lock inside the refresh itself so a dropped caller cannot
-        // release it while the token endpoint call is still in flight.
-        let tokens = tokio::spawn(async move {
+        let http = self.http.clone();
+        let auth = self.auth.clone();
+        let client_id = self.client_id.clone();
+        let store = self.store.clone();
+        let state = self.state.clone();
+        // Runs to completion even if this caller is dropped: a rotated token
+        // that was issued but never kept would lock the user out.
+        tokio::spawn(async move {
             let _guard = guard;
-            task.await
-                .map_err(|_| AppError::Network("refresh task failed".to_string()))?
+            let unsaved = lock_state(&state).unsaved_refresh.clone();
+            let r = run_refresh(&http, &auth, &client_id, &store, unsaved).await?;
+            let token = r.tokens.access_token.clone();
+            {
+                let mut g = lock_state(&state);
+                g.access = Some(Access {
+                    token: r.tokens.access_token,
+                    expires_at: r.tokens.expires_at,
+                });
+                if r.persist_error.is_some() {
+                    if r.tokens.refresh_token.is_some() {
+                        g.unsaved_refresh = r.tokens.refresh_token;
+                    }
+                } else {
+                    g.unsaved_refresh = None;
+                }
+            }
+            match r.persist_error {
+                // Surfaced once, to the caller that triggered the refresh; the
+                // new tokens are installed, so later calls proceed normally.
+                Some(e) => Err(e),
+                None => Ok(token),
+            }
         })
         .await
-        .map_err(|_| AppError::Network("refresh task failed".to_string()))??;
-        let token = tokens.access_token.clone();
-        *self.access.lock().unwrap_or_else(|e| e.into_inner()) = Some(Access {
-            token: tokens.access_token,
-            expires_at: tokens.expires_at,
-        });
-        Ok(token)
+        .map_err(|_| AppError::Network("refresh task failed".to_string()))?
     }
 
     /// Sends a request with the bearer token; on 401 refreshes once and retries
@@ -219,9 +267,7 @@ impl Session {
             .await?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(AppError::Http {
-                status: status.as_u16(),
-            });
+            return Err(AppError::from_status(status.as_u16()));
         }
         let body = oauth::read_capped_to(resp, MAX_API_BODY_BYTES).await?;
         serde_json::from_slice(&body)
@@ -239,12 +285,14 @@ pub(crate) mod test_support {
     pub(crate) struct MemStore {
         pub token: std::sync::Mutex<Option<String>>,
         pub writes: AtomicUsize,
+        pub fail_set: std::sync::atomic::AtomicBool,
     }
     impl MemStore {
         pub fn with(token: &str) -> Arc<Self> {
             Arc::new(Self {
                 token: std::sync::Mutex::new(Some(token.to_string())),
                 writes: AtomicUsize::new(0),
+                fail_set: Default::default(),
             })
         }
     }
@@ -253,6 +301,9 @@ pub(crate) mod test_support {
             Ok(self.token.lock().unwrap().clone())
         }
         fn set(&self, t: &str) -> Result<(), AppError> {
+            if self.fail_set.load(Ordering::SeqCst) {
+                return Err(AppError::Keychain("write failed".to_string()));
+            }
             self.writes.fetch_add(1, Ordering::SeqCst);
             *self.token.lock().unwrap() = Some(t.to_string());
             Ok(())
@@ -414,7 +465,7 @@ mod tests {
         sess.get_json("/x").await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_401s_spend_the_refresh_token_once() {
         let s = MockServer::start().await;
         Mock::given(method("GET"))
@@ -436,20 +487,31 @@ mod tests {
             .await;
         let store = MemStore::with("RT0");
         let sess = Arc::new(session(&s.uri(), store.clone(), Some("AT0")));
-        let rs = futures_util::future::join_all((0..4).map(|_| {
-            let sess = sess.clone();
-            async move { sess.get_json("/x").await }
-        }))
-        .await;
+        let tasks: Vec<_> = (0..4)
+            .map(|_| {
+                let sess = sess.clone();
+                tokio::spawn(async move { sess.get_json("/x").await })
+            })
+            .collect();
+        let mut rs = Vec::new();
+        for t in tasks {
+            rs.push(t.await.unwrap());
+        }
         assert!(rs.iter().all(|r| r.is_ok()), "{rs:?}");
         assert_eq!(store.writes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn other_statuses_are_http_errors_and_do_not_refresh() {
+    async fn forbidden_and_other_statuses_are_typed_and_do_not_refresh() {
         let s = MockServer::start().await;
         Mock::given(method("GET"))
+            .and(path("/forbidden"))
             .respond_with(ResponseTemplate::new(403))
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/x"))
+            .respond_with(ResponseTemplate::new(404))
             .mount(&s)
             .await;
         Mock::given(method("POST"))
@@ -460,9 +522,56 @@ mod tests {
             .await;
         let sess = session(&s.uri(), MemStore::with("RT0"), Some("AT0"));
         assert!(matches!(
-            sess.get_json("/x").await,
-            Err(AppError::Http { status: 403 })
+            sess.get_json("/forbidden").await,
+            Err(AppError::Forbidden)
         ));
+        assert!(matches!(
+            sess.get_json("/x").await,
+            Err(AppError::Http { status: 404 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn keychain_write_failure_keeps_rotated_token_in_memory_and_reports_once() {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("refresh_token=RT0"))
+            .respond_with(token_ok("AT1", "RT1"))
+            .expect(1)
+            .mount(&s)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("refresh_token=RT1"))
+            .respond_with(token_ok("AT2", "RT2"))
+            .expect(1)
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("authorization", "Bearer AT1"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(header("authorization", "Bearer AT2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": 1})))
+            .mount(&s)
+            .await;
+        let store = MemStore::with("RT0");
+        store.fail_set.store(true, Ordering::SeqCst);
+        let sess = session(&s.uri(), store.clone(), None);
+        // The refresh worked but could not be stored: surfaced once.
+        assert!(matches!(
+            sess.get_json("/x").await,
+            Err(AppError::Keychain(_))
+        ));
+        assert_eq!(store.get().unwrap().as_deref(), Some("RT0"));
+        // The Keychain recovers; the next 401 spends the in-memory RT1 (the
+        // stored RT0 is spent) and the new token is stored.
+        store.fail_set.store(false, Ordering::SeqCst);
+        assert_eq!(sess.get_json("/x").await.unwrap()["ok"], 1);
+        assert_eq!(store.get().unwrap().as_deref(), Some("RT2"));
     }
 
     #[tokio::test]

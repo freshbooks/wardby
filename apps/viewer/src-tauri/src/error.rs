@@ -22,6 +22,8 @@ pub enum AppError {
     Keychain(String),
     #[error("not signed in")]
     NotSignedIn,
+    #[error("This account lacks the admin:view permission (admin role)")]
+    Forbidden,
 }
 
 impl AppError {
@@ -35,15 +37,34 @@ impl AppError {
             AppError::NeedsClientId => "needs_client_id",
             AppError::Keychain(_) => "keychain",
             AppError::NotSignedIn => "not_signed_in",
+            AppError::Forbidden => "forbidden",
+        }
+    }
+
+    /// Maps a non-success HTTP status: 403 is its own kind so the UI can say
+    /// "you need the admin role" instead of a generic failure.
+    pub fn from_status(status: u16) -> Self {
+        if status == 403 {
+            AppError::Forbidden
+        } else {
+            AppError::Http { status }
         }
     }
 }
 
 impl Serialize for AppError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut s = serializer.serialize_struct("AppError", 2)?;
+        let status = match self {
+            AppError::Http { status } => Some(*status),
+            _ => None,
+        };
+        let mut s =
+            serializer.serialize_struct("AppError", if status.is_some() { 3 } else { 2 })?;
         s.serialize_field("kind", self.kind())?;
         s.serialize_field("message", &self.to_string())?;
+        if let Some(status) = status {
+            s.serialize_field("status", &status)?;
+        }
         s.end()
     }
 }
@@ -73,7 +94,16 @@ mod tests {
     fn serializes_kind_and_message() {
         let v = serde_json::to_value(AppError::Http { status: 401 }).unwrap();
         assert_eq!(v["kind"], "http");
+        assert_eq!(v["status"], 401);
         assert_eq!(v["message"], "server returned HTTP 401");
+        let v = serde_json::to_value(AppError::from_status(403)).unwrap();
+        assert_eq!(v["kind"], "forbidden");
+        assert!(v["message"].as_str().unwrap().contains("admin:view"));
+        assert!(v.get("status").is_none());
+        assert!(matches!(
+            AppError::from_status(500),
+            AppError::Http { status: 500 }
+        ));
         let v = serde_json::to_value(AppError::NeedsClientId).unwrap();
         assert_eq!(v["kind"], "needs_client_id");
     }
