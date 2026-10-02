@@ -107,6 +107,11 @@ metadata:
 spec:
   default:
     securityPolicy: wardby-control-plane
+    # The Gateway's default backend request timeout (30 s) would cut every
+    # event stream. The admin viewer's stream (/admin/api/events) is
+    # long-lived; the application bounds request reading itself, and clients
+    # reconnect and resync if the stream drops.
+    timeoutSec: 3600
   targetRef:
     group: ""
     kind: Service
