@@ -139,7 +139,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   // after the ContainerExecutor it wraps is built. The closure reads
   // `composed` only when a run finishes, which is after this function returns.
   const coding = new ContainerExecutor({
-    store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent }),
+    store: new PrismaContainerExecutionStore(options.db, { maxConcurrent: concurrency.maxConcurrent, issueTrackers }),
     jobs,
     vcs,
     sessions,
@@ -166,6 +166,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
         executor: composed,
         maxConcurrent: concurrency.maxConcurrent,
         queueTimeoutSec: concurrency.queueTimeoutSec,
+        selfDefects: { db: options.db, issueTrackers },
       }).catch((err: unknown) => {
         // Never throws: the next scheduler tick drains again.
         compositionLog.warn({ err }, "coding queue drain after a released slot failed");

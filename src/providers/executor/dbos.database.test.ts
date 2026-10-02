@@ -1,11 +1,12 @@
 import { PrismaClient } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../llm/types.js";
 import type { Datastore, DatastoreValue } from "../datastore/types.js";
 import type { SecretCipher } from "../secrets/types.js";
 import type { AgentMemoryStore } from "../memory/types.js";
+import type { IssueTracker } from "../issue-tracker/types.js";
 import { NativeEngine } from "../../core/engine-native.js";
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import { DBOS_BACKEND, DbosExecutor } from "./dbos.js";
@@ -245,6 +246,69 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
     expect(after.status).toBe("failed");
     expect(after.error).toContain("without persisting a terminal run state");
+  });
+
+  it("recover(): files a self-defect only when its mark-failed write made the run failed", async () => {
+    const defectAgentId = `dbos-defect-agent-${suffix}`;
+    const projectKey = "DBOSDEFECT";
+    const createIssue = vi.fn(async () => ({ key: `${projectKey}-${suffix}`, url: "https://jira.example/x" }));
+    const tracker = { provider: "jira", createIssue } as unknown as IssueTracker;
+    await db.agent.create({
+      data: {
+        id: defectAgentId,
+        name: defectAgentId,
+        systemPrompt: "sys",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 5,
+        defectProjectKey: projectKey,
+        defectIssueType: "Bug",
+      },
+    });
+    await db.agentIssueProject.create({
+      data: {
+        agentId: defectAgentId,
+        provider: "jira",
+        projectKey,
+        access: "write",
+        creatableIssueTypes: ["Bug"],
+        authorizedById: "test",
+      },
+    });
+    try {
+      const llm = scriptedLlm([finalAnswer("ok")]);
+      executor = new DbosExecutor(
+        {
+          llm,
+          engine: new NativeEngine(),
+          datastore: fakeDatastore(),
+          secrets: fakeCipher,
+          memory: {} as AgentMemoryStore,
+          issueTrackers: { jira: tracker },
+        },
+        { systemDatabaseUrl: process.env.DATABASE_URL, schemaName: "dbos_test", executorId },
+        db,
+        50,
+      );
+      await executor.launch();
+      const run = await db.run.create({ data: { agentId: defectAgentId, executionManaged: true } });
+      await executor.start(run.id);
+      // Simulate a lost terminal write.
+      await db.run.update({ where: { id: run.id }, data: { status: "running", finishedAt: null } });
+
+      expect(await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id })).toEqual({
+        state: "terminal",
+      });
+      expect(createIssue).toHaveBeenCalledTimes(1);
+
+      // Already terminal: nothing is written, so nothing more is filed.
+      await executor.recover({ runId: run.id, backend: DBOS_BACKEND, id: run.id });
+      expect(createIssue).toHaveBeenCalledTimes(1);
+    } finally {
+      await db.issueFingerprint.deleteMany({ where: { projectKey, issueKey: `${projectKey}-${suffix}` } });
+      await db.run.deleteMany({ where: { agentId: defectAgentId } });
+      await db.agent.deleteMany({ where: { id: defectAgentId } });
+    }
   });
 
   it("resumes an interrupted run from its last completed step without re-running earlier turns", async () => {

@@ -200,6 +200,7 @@ async function startReviews(
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
+        selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
         agentId: target.agentId,
         trigger: "host_event",
         taskOverride: `Review pull request #${prNumber} in ${repository} (head ${headSha}).`,
@@ -346,6 +347,7 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
+        selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
         agentId: allowed[0].agentId,
         trigger: "host_event",
         taskOverride: mentionTaskText(event),

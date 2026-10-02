@@ -636,3 +636,72 @@ describe("reconcileOnce orphaned issue status comments", () => {
     expect(row.completedAt).toBeInstanceOf(Date);
   });
 });
+
+describe("reconcileOnce self-defects", () => {
+  function selfDefectDb(runs: FakeRun[], opts: { optedIn: boolean }) {
+    const created: any[] = [];
+    const db = fakeDb(runs) as any;
+    db.agent = {
+      findUnique: vi.fn(async () => ({
+        id: "a1",
+        name: "nightly",
+        defectProjectKey: opts.optedIn ? "OPS" : null,
+        defectIssueType: opts.optedIn ? "Bug" : null,
+      })),
+    };
+    db.agentIssueProject = {
+      findUnique: vi.fn(async () => ({
+        provider: "jira",
+        projectKey: "OPS",
+        access: "write",
+        commentVisibilityRole: null,
+        creatableIssueTypes: ["Bug"],
+      })),
+    };
+    db.codingRun = { findUnique: vi.fn(async () => null) };
+    db.runIssueStatus = { findMany: vi.fn(async () => []) };
+    db.$transaction = async (fn: any) =>
+      fn({
+        $executeRaw: async () => 0,
+        issueFingerprint: {
+          findFirst: async () => null,
+          create: async ({ data }: any) => (created.push(data), data),
+        },
+      });
+    return { db: db as ReconcilerDb, created };
+  }
+
+  function jira(): IssueTracker {
+    return {
+      provider: "jira",
+      createIssue: vi.fn(async () => ({ id: "1", key: "OPS-7", url: "https://your-site.atlassian.net/browse/OPS-7" })),
+    } as unknown as IssueTracker;
+  }
+
+  it("files a defect for a run it marks lost, fingerprinted without the reason text", async () => {
+    const runs = [{ ...baseRun({ heartbeatAt: STALE }), agentId: "a1" } as FakeRun];
+    const { db, created } = selfDefectDb(runs, { optedIn: true });
+    const tracker = jira();
+    const count = await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
+    expect(count).toBe(1);
+    expect(tracker.createIssue).toHaveBeenCalledTimes(1);
+    const input = vi.mocked(tracker.createIssue).mock.calls[0][0];
+    expect(input).toMatchObject({
+      projectKey: "OPS",
+      issueType: "Bug",
+      summary: 'wardby agent "nightly": lost (orphaned)',
+    });
+    expect(input.descriptionMarkdown).not.toContain("heartbeat");
+    expect(created).toEqual([expect.objectContaining({ issueKey: "OPS-7", createdByRunId: "r1" })]);
+  });
+
+  it("files nothing for an agent that has not opted in, or when the run was not stale", async () => {
+    const tracker = jira();
+    const optedOut = selfDefectDb([baseRun({ heartbeatAt: STALE })], { optedIn: false });
+    await reconcileOnce(optedOut.db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
+    const fresh = selfDefectDb([baseRun({ heartbeatAt: FRESH })], { optedIn: true });
+    await reconcileOnce(fresh.db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
+    expect(tracker.createIssue).not.toHaveBeenCalled();
+    expect((fresh.db as any).agent.findUnique).not.toHaveBeenCalled();
+  });
+});

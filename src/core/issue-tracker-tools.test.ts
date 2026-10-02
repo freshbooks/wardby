@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { IssueTrackerError, projectOf, type IssueTracker } from "../providers/issue-tracker/types.js";
+import { fileIssue, type FileIssueInput, type FileIssueResult } from "./issue-dedupe.js";
 import {
   ISSUE_TRACKER_TOOL_DEFS,
   ISSUE_TRACKER_TOOL_NAMES,
@@ -17,6 +18,8 @@ const WRITE_LINK: IssueProjectLink = {
   allowedTransitions: ["In Progress", "Done"],
   writableFields: ["labels", "priority", "customfield_10010"],
   allowedLinkTypes: ["Blocks", "Duplicate"],
+  creatableIssueTypes: ["Bug", "Task"],
+  maxNewIssuesPerRun: null,
 };
 const READ_LINK: IssueProjectLink = {
   provider: "jira",
@@ -26,12 +29,18 @@ const READ_LINK: IssueProjectLink = {
   allowedTransitions: [],
   writableFields: [],
   allowedLinkTypes: [],
+  creatableIssueTypes: [],
+  maxNewIssuesPerRun: null,
 };
 
 function tracker(): IssueTracker {
   return {
     provider: "jira",
     botAccountId: vi.fn(async () => "bot-1"),
+    createMeta: vi.fn(),
+    fieldMeta: vi.fn(),
+    createIssue: vi.fn(),
+    readAttachmentText: vi.fn(),
     identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "wardby", accountType: "app" })),
     transitions: vi.fn(),
     transitionTo: vi.fn(),
@@ -77,11 +86,13 @@ describe("ISSUE_TRACKER_TOOL_DEFS", () => {
   it("defines the jira_* tools and tells the model how it posts", () => {
     expect([...ISSUE_TRACKER_TOOL_NAMES].sort()).toEqual([
       "jira_comment",
+      "jira_create_issue",
       "jira_edit_own_comment",
       "jira_get_issue",
       "jira_get_property",
       "jira_link_issues",
       "jira_list_transitions",
+      "jira_read_attachment",
       "jira_search",
       "jira_set_property",
       "jira_transition",
@@ -127,6 +138,7 @@ describe("handleIssueTrackerTool", () => {
     expect(t.comment).toHaveBeenCalledWith("PROJ-1", {
       markdown: "Looks done.\n\n_wardby agent a1_",
       visibilityRole: "Developers",
+      issueKeyProjects: expect.arrayContaining(["PROJ"]),
     });
     expect(result).toEqual({
       id: "10001",
@@ -141,7 +153,10 @@ describe("handleIssueTrackerTool", () => {
       { issueKey: "PROJ-1", body: "x" },
       ctx(t, [{ ...WRITE_LINK, commentVisibilityRole: null }]),
     );
-    expect(t.comment).toHaveBeenCalledWith("PROJ-1", { markdown: "x\n\n_wardby agent a1_" });
+    expect(t.comment).toHaveBeenCalledWith("PROJ-1", {
+      markdown: "x\n\n_wardby agent a1_",
+      issueKeyProjects: expect.arrayContaining(["PROJ"]),
+    });
   });
 
   it("jira_get_issue passes the agent marker and a default comment cap", async () => {
@@ -212,7 +227,10 @@ describe("handleIssueTrackerTool", () => {
       ctx(t),
     );
     expect(t.readComment).toHaveBeenCalledWith("PROJ-1", "10001");
-    expect(t.editComment).toHaveBeenCalledWith("PROJ-1", "10001", { markdown: "Updated.\n\n_wardby agent a1_" });
+    expect(t.editComment).toHaveBeenCalledWith("PROJ-1", "10001", {
+      markdown: "Updated.\n\n_wardby agent a1_",
+      issueKeyProjects: expect.arrayContaining(["PROJ"]),
+    });
     expect(result).toEqual({
       id: "10001",
       url: "https://your-site.atlassian.net/browse/PROJ-1?focusedCommentId=10001",
@@ -399,6 +417,8 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
     allowedTransitions: [],
     writableFields: [],
     allowedLinkTypes: [],
+    creatableIssueTypes: [],
+    maxNewIssuesPerRun: null,
   };
   const def = (name: string) => ISSUE_TRACKER_TOOL_DEFS.find((t) => t.name === name)!;
   const TRANSITIONS = [
@@ -639,6 +659,8 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
       allowedTransitions: [],
       writableFields: [],
       allowedLinkTypes: ["blocks"],
+      creatableIssueTypes: [],
+      maxNewIssuesPerRun: null,
     };
     const links = () => [WRITE_LINK, READ_LINK, TEAM, OPS];
 
@@ -895,5 +917,378 @@ describe("jira_* write tools (transitions, fields, links, properties)", () => {
         message: "Slow down.",
       });
     });
+  });
+});
+
+describe("jira_create_issue", () => {
+  const def = ISSUE_TRACKER_TOOL_DEFS.find((t) => t.name === "jira_create_issue")!;
+  const ARGS = { projectKey: "PROJ", issueType: "Bug", summary: "Login fails", description: "Steps: ..." };
+
+  function creating(t: IssueTracker, links: IssueProjectLink[] = [WRITE_LINK, READ_LINK], recorded = 0) {
+    const c = ctx(t, links);
+    const file = vi.fn(async (input: FileIssueInput): Promise<FileIssueResult> =>
+      fileIssue({ db: {} as never }, input),
+    );
+    const recordedCreates = vi.fn(async (_projectKey: string) => recorded);
+    c.creation = { runId: "run-1", counters: new Map(), fileIssue: file, recordedCreates };
+    return { c, file, recordedCreates };
+  }
+  function creatingTracker(): IssueTracker {
+    const t = tracker();
+    let n = 0;
+    vi.mocked(t.createIssue).mockImplementation(async () => {
+      n++;
+      return { key: `PROJ-${100 + n}`, url: `https://your-site.atlassian.net/browse/PROJ-${100 + n}` };
+    });
+    return t;
+  }
+
+  it("describes the allowlist, the cap, fingerprints, and untrusted text", () => {
+    expect(def.description).toMatch(/creatableIssueTypes/);
+    expect(def.description).toMatch(/maxNewIssuesPerRun/);
+    expect(def.description).toMatch(/fingerprint/i);
+    expect(def.description).toMatch(/secret/i);
+    expect(def.description).toMatch(/writableFields/);
+  });
+
+  it("creates with the agent footer and a created-by property, and reports the outcome", async () => {
+    const t = creatingTracker();
+    const { c } = creating(t);
+    const result = await call(
+      "jira_create_issue",
+      { ...ARGS, issueType: "bug", labels: ["triage"], priority: "High", customFields: { customfield_10010: 3 } },
+      c,
+    );
+    expect(result).toEqual({
+      outcome: "created",
+      issueKey: "PROJ-101",
+      url: "https://your-site.atlassian.net/browse/PROJ-101",
+      seenCount: 1,
+    });
+    expect(t.createIssue).toHaveBeenCalledWith({
+      projectKey: "PROJ",
+      issueType: "bug",
+      summary: "Login fails",
+      descriptionMarkdown: "Steps: ...\n\n_wardby agent a1_",
+      labels: ["triage"],
+      priority: "High",
+      customFields: { customfield_10010: 3 },
+      properties: { "wardby.a1.created": { runId: "run-1" } },
+      issueKeyProjects: expect.arrayContaining(["PROJ"]),
+    });
+  });
+
+  it("refuses an unlinked project, a read link, and a link downgraded since load, without creating", async () => {
+    const t = creatingTracker();
+    const { c } = creating(t);
+    expect(await call("jira_create_issue", { ...ARGS, projectKey: "OTHER" }, c)).toMatchObject({
+      error: "project_not_linked",
+    });
+    expect(await call("jira_create_issue", { ...ARGS, projectKey: "DOCS" }, c)).toMatchObject({
+      error: "write_access_required",
+    });
+    c.currentLink = async () => ({ ...WRITE_LINK, access: "read" });
+    expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "write_access_required" });
+    c.currentLink = async () => null;
+    expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "project_not_linked" });
+    expect(t.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("applies the LIVE link's creatableIssueTypes and fails closed when empty", async () => {
+    const t = creatingTracker();
+    const { c } = creating(t);
+    expect(await call("jira_create_issue", { ...ARGS, issueType: "Epic" }, c)).toMatchObject({
+      error: "issue_type_not_allowed",
+    });
+    c.currentLink = async () => ({ ...WRITE_LINK, creatableIssueTypes: [] });
+    expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "issue_type_not_allowed" });
+    // A link pinned before the field existed (undefined) allows nothing either.
+    c.currentLink = async () => ({ ...WRITE_LINK, creatableIssueTypes: undefined as never });
+    expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "issue_type_not_allowed" });
+    expect(t.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("refuses custom fields outside the link's writableFields, and non-custom keys", async () => {
+    const t = creatingTracker();
+    const { c } = creating(t);
+    expect(await call("jira_create_issue", { ...ARGS, customFields: { customfield_99999: "x" } }, c)).toMatchObject({
+      error: "field_not_allowed",
+    });
+    expect(await call("jira_create_issue", { ...ARGS, customFields: { summary: "x" } }, c)).toMatchObject({
+      error: "invalid_arguments",
+    });
+    expect(t.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("validates lengths and unknown fields", async () => {
+    const t = creatingTracker();
+    const { c } = creating(t);
+    for (const bad of [
+      { ...ARGS, summary: "" },
+      { ...ARGS, summary: "x".repeat(256) },
+      { ...ARGS, description: "x".repeat(20_001) },
+      { ...ARGS, fingerprint: "" },
+      { ...ARGS, fingerprint: "x".repeat(201) },
+      { ...ARGS, projectKey: "proj" },
+      { ...ARGS, extra: 1 },
+    ]) {
+      expect(await call("jira_create_issue", bad, c)).toMatchObject({ error: "invalid_arguments" });
+    }
+    expect(t.createIssue).not.toHaveBeenCalled();
+  });
+
+  it("needs a parent in a write-linked project, by key and by resolved project", async () => {
+    const t = creatingTracker();
+    const { c } = creating(t);
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "SECRET-1" }, c)).toMatchObject({
+      error: "project_not_linked",
+    });
+    // Read-only by key: no visible change (a new subtask) in a read-only project.
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "DOCS-1" }, c)).toMatchObject({
+      error: "write_access_required",
+    });
+    // Write-linked by key but the issue now lives in a read-only or unlinked project.
+    vi.mocked(t.issueProject).mockResolvedValueOnce("DOCS");
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "PROJ-1" }, c)).toMatchObject({
+      error: "write_access_required",
+    });
+    vi.mocked(t.issueProject).mockResolvedValueOnce("SECRET");
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "PROJ-1" }, c)).toMatchObject({
+      error: "project_not_linked",
+    });
+    expect(t.createIssue).not.toHaveBeenCalled();
+    vi.mocked(t.issueProject).mockResolvedValueOnce("PROJ");
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "PROJ-1" }, c)).toMatchObject({
+      outcome: "created",
+    });
+    expect(t.createIssue).toHaveBeenCalledWith(expect.objectContaining({ parentKey: "PROJ-1" }));
+  });
+
+  it("files a fingerprinted issue through dedupe with the live link", async () => {
+    const t = creatingTracker();
+    const { c, file } = creating(t);
+    const live = { ...WRITE_LINK, commentVisibilityRole: "Admins" };
+    c.currentLink = async (k) => (k === "PROJ" ? live : null);
+    file.mockResolvedValueOnce({ outcome: "seen_again", issueKey: "PROJ-7", url: "u", seenCount: 3 });
+    expect(await call("jira_create_issue", { ...ARGS, fingerprint: "svc:NullPointer:Foo.bar" }, c)).toEqual({
+      outcome: "seen_again",
+      issueKey: "PROJ-7",
+      url: "u",
+      seenCount: 3,
+    });
+    const input = file.mock.calls[0][0];
+    expect(input).toMatchObject({ agentId: "a1", runId: "run-1", link: live, fingerprint: "svc:NullPointer:Foo.bar" });
+    expect(input.create).not.toHaveProperty("projectKey");
+    expect(input.seenAgainMarkdown).toMatch(/wardby agent a1/);
+  });
+
+  it("returns dedupe errors as JSON", async () => {
+    const t = creatingTracker();
+    const { c, file } = creating(t);
+    file.mockResolvedValueOnce({ error: "busy", message: "try again" });
+    expect(await call("jira_create_issue", { ...ARGS, fingerprint: "f" }, c)).toEqual({
+      error: "busy",
+      message: "try again",
+    });
+    vi.mocked(t.createIssue).mockRejectedValueOnce(new IssueTrackerError("tracker_invalid_request", "need Component"));
+    expect(await call("jira_create_issue", ARGS, c)).toEqual({
+      error: "tracker_invalid_request",
+      message: "need Component",
+    });
+  });
+
+  it("refuses when the run has no creation context, before any tracker call", async () => {
+    const t = creatingTracker();
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "PROJ-1" }, ctx(t))).toMatchObject({
+      error: "not_available",
+    });
+    expect(t.issueProject).not.toHaveBeenCalled();
+    expect(t.createIssue).not.toHaveBeenCalled();
+  });
+
+  describe("per-run cap (maxNewIssuesPerRun)", () => {
+    const capped = (n: number | null): IssueProjectLink => ({ ...WRITE_LINK, maxNewIssuesPerRun: n });
+
+    it("counts creates and regressions, not seen-again updates", async () => {
+      const t = creatingTracker();
+      const { c, file } = creating(t, [capped(2), READ_LINK]);
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ outcome: "created" });
+      file.mockResolvedValueOnce({ outcome: "seen_again", issueKey: "PROJ-7", url: "u", seenCount: 2 });
+      expect(await call("jira_create_issue", { ...ARGS, fingerprint: "f" }, c)).toMatchObject({
+        outcome: "seen_again",
+      });
+      file.mockResolvedValueOnce({ outcome: "regression", issueKey: "PROJ-8", url: "u", seenCount: 1 });
+      expect(await call("jira_create_issue", { ...ARGS, fingerprint: "g" }, c)).toMatchObject({
+        outcome: "regression",
+      });
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "issue_cap_reached" });
+      expect(t.createIssue).toHaveBeenCalledTimes(1);
+      expect(file).toHaveBeenCalledTimes(3);
+    });
+
+    it("at the cap, lets a fingerprinted call through without create permission, and seen-again does not count", async () => {
+      const t = creatingTracker();
+      const { c, file } = creating(t, [capped(1), READ_LINK]);
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ outcome: "created" });
+      expect(file.mock.calls[0][0].createAllowed).toBe(true);
+      file.mockResolvedValueOnce({ outcome: "seen_again", issueKey: "PROJ-7", url: "u", seenCount: 4 });
+      file.mockResolvedValueOnce({ outcome: "seen_again", issueKey: "PROJ-7", url: "u", seenCount: 5 });
+      for (const seenCount of [4, 5]) {
+        expect(await call("jira_create_issue", { ...ARGS, fingerprint: "f" }, c)).toMatchObject({
+          outcome: "seen_again",
+          seenCount,
+        });
+      }
+      expect(file.mock.calls[1][0].createAllowed).toBe(false);
+      expect(file.mock.calls[2][0].createAllowed).toBe(false);
+      // At the cap fileIssue itself refuses a would-be create (no match, or a Done match).
+      file.mockResolvedValueOnce({ error: "issue_cap_reached", message: "limit" });
+      expect(await call("jira_create_issue", { ...ARGS, fingerprint: "g" }, c)).toMatchObject({
+        error: "issue_cap_reached",
+      });
+      // Without a fingerprint, refused before fileIssue.
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "issue_cap_reached" });
+      expect(file).toHaveBeenCalledTimes(4);
+      expect(t.createIssue).toHaveBeenCalledTimes(1);
+    });
+
+    it("at the cap, a real fileIssue refuses no-match and Done-match creates without a tracker create", async () => {
+      const t = creatingTracker();
+      const { c } = creating(t, [capped(0), READ_LINK]);
+      const tx = {
+        $executeRaw: vi.fn(async () => 0),
+        issueFingerprint: { findFirst: vi.fn(async () => null), create: vi.fn(), update: vi.fn() },
+      };
+      const db = { $transaction: vi.fn(async (fn: (x: typeof tx) => unknown) => fn(tx)) };
+      c.creation!.fileIssue = (input) => fileIssue({ db: db as never }, input);
+      expect(await call("jira_create_issue", { ...ARGS, fingerprint: "f" }, c)).toMatchObject({
+        error: "issue_cap_reached",
+      });
+      tx.issueFingerprint.findFirst.mockResolvedValue({ id: "r1", issueKey: "PROJ-3", seenCount: 1 } as never);
+      vi.mocked(t.getIssue).mockResolvedValue({ key: "PROJ-3", projectKey: "PROJ", statusCategory: "done" } as never);
+      expect(await call("jira_create_issue", { ...ARGS, fingerprint: "f" }, c)).toMatchObject({
+        error: "issue_cap_reached",
+      });
+      expect(t.createIssue).not.toHaveBeenCalled();
+      expect(tx.issueFingerprint.create).not.toHaveBeenCalled();
+    });
+
+    it("does not count failed creates", async () => {
+      const t = creatingTracker();
+      const { c } = creating(t, [capped(1), READ_LINK]);
+      vi.mocked(t.createIssue).mockRejectedValueOnce(new IssueTrackerError("tracker_api_error", "boom"));
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "tracker_api_error" });
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ outcome: "created" });
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "issue_cap_reached" });
+    });
+
+    it("uses the recorded fingerprint creates of this run as a floor (a resumed attempt)", async () => {
+      const t = creatingTracker();
+      const { c, recordedCreates } = creating(t, [capped(2), READ_LINK], 2);
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "issue_cap_reached" });
+      expect(recordedCreates).toHaveBeenCalledWith("PROJ");
+      expect(t.createIssue).not.toHaveBeenCalled();
+    });
+
+    it("holds under concurrent calls", async () => {
+      const t = creatingTracker();
+      const { c } = creating(t, [capped(1), READ_LINK]);
+      const results = await Promise.all([1, 2, 3].map(() => call("jira_create_issue", ARGS, c)));
+      expect(results.filter((r) => r.outcome === "created")).toHaveLength(1);
+      expect(results.filter((r) => r.error === "issue_cap_reached")).toHaveLength(2);
+      expect(t.createIssue).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts per project and null means unlimited", async () => {
+      const t = creatingTracker();
+      const ops: IssueProjectLink = { ...WRITE_LINK, projectKey: "OPS", maxNewIssuesPerRun: null };
+      const { c } = creating(t, [capped(1), ops]);
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ outcome: "created" });
+      for (let i = 0; i < 3; i++) {
+        expect(await call("jira_create_issue", { ...ARGS, projectKey: "OPS" }, c)).toMatchObject({
+          outcome: "created",
+        });
+      }
+    });
+
+    it("applies the live cap, not the pinned one", async () => {
+      const t = creatingTracker();
+      const { c } = creating(t, [capped(null), READ_LINK]);
+      c.currentLink = async (k) => (k === "PROJ" ? capped(0) : null);
+      expect(await call("jira_create_issue", ARGS, c)).toMatchObject({ error: "issue_cap_reached" });
+    });
+  });
+});
+
+describe("jira_read_attachment", () => {
+  const def = ISSUE_TRACKER_TOOL_DEFS.find((t) => t.name === "jira_read_attachment")!;
+  function withAttachment(t: IssueTracker, projectKey?: string) {
+    vi.mocked(t.getIssue).mockImplementation(
+      async (key: string) =>
+        ({
+          key,
+          projectKey: projectKey ?? projectOf(key),
+          attachments: [{ id: "500", filename: "log.txt", mimeType: "text/plain", size: 10 }],
+        }) as never,
+    );
+    vi.mocked(t.readAttachmentText).mockResolvedValue({
+      filename: "log.txt",
+      mimeType: "text/plain",
+      text: "ERROR at line 3",
+      truncated: false,
+    });
+  }
+
+  it("describes attachment text as untrusted", () => {
+    expect(def.description).toMatch(/untrusted/i);
+  });
+
+  it("reads an attachment of an issue in a read-linked project, default 50000 bytes", async () => {
+    const t = tracker();
+    withAttachment(t);
+    expect(await call("jira_read_attachment", { issueKey: "DOCS-1", attachmentId: "500" }, ctx(t))).toEqual({
+      filename: "log.txt",
+      mimeType: "text/plain",
+      text: "ERROR at line 3",
+      truncated: false,
+    });
+    expect(t.readAttachmentText).toHaveBeenCalledWith("500", 50_000);
+  });
+
+  it("passes maxBytes and rejects bad arguments", async () => {
+    const t = tracker();
+    withAttachment(t);
+    await call("jira_read_attachment", { issueKey: "PROJ-1", attachmentId: "500", maxBytes: 1000 }, ctx(t));
+    expect(t.readAttachmentText).toHaveBeenCalledWith("500", 1000);
+    for (const bad of [
+      { issueKey: "PROJ-1", attachmentId: "500", maxBytes: 200_001 },
+      { issueKey: "PROJ-1", attachmentId: "500", maxBytes: 0 },
+      { issueKey: "PROJ-1", attachmentId: "../500" },
+      { issueKey: "PROJ-1" },
+    ]) {
+      expect(await call("jira_read_attachment", bad, ctx(t))).toMatchObject({ error: "invalid_arguments" });
+    }
+  });
+
+  it("refuses an attachment that is not on the issue", async () => {
+    const t = tracker();
+    withAttachment(t);
+    expect(await call("jira_read_attachment", { issueKey: "PROJ-1", attachmentId: "501" }, ctx(t))).toMatchObject({
+      error: "tracker_not_found",
+    });
+    expect(t.readAttachmentText).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unlinked project and an issue that resolves to one", async () => {
+    const t = tracker();
+    withAttachment(t);
+    expect(await call("jira_read_attachment", { issueKey: "SECRET-1", attachmentId: "500" }, ctx(t))).toMatchObject({
+      error: "project_not_linked",
+    });
+    withAttachment(t, "SECRET");
+    expect(await call("jira_read_attachment", { issueKey: "PROJ-1", attachmentId: "500" }, ctx(t))).toMatchObject({
+      error: "project_not_linked",
+    });
+    expect(t.readAttachmentText).not.toHaveBeenCalled();
   });
 });

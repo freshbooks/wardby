@@ -57,11 +57,13 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     reviewHosts: providers.reviewHosts,
     issueTrackers: providers.issueTrackers,
   });
+  const selfDefects = { db: prisma, issueTrackers: providers.issueTrackers };
   const scheduler = startScheduler({
     executor: providers.executor,
     scope: options.scope,
+    selfDefects,
     onLeaderTick: async () => {
-      await drainCodingQueue({ db: prisma, executor: providers.executor, ...concurrency });
+      await drainCodingQueue({ db: prisma, executor: providers.executor, ...concurrency, selfDefects });
     },
   });
 

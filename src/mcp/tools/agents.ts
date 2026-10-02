@@ -11,6 +11,7 @@ import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } fro
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { validateCronExpression } from "../../core/cron.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
+import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
 import { requireReadableBudgetGroup } from "../auth/ownership.js";
 import {
@@ -72,7 +73,29 @@ const agentFields = {
   budgetGroupId: z.string().min(1).max(128),
   memoryEnabled: z.boolean(),
   effort: z.enum(LLM_EFFORT_LEVELS),
+  defectProjectKey: z.string().regex(PROJECT_KEY, "must be an upper-case Jira project key"),
+  defectIssueType: z.string().trim().min(1).max(100),
 };
+
+/** Self-defect config is both-or-neither; on update, both null clears it. */
+function refineDefectPair(
+  value: { defectProjectKey?: string | null; defectIssueType?: string | null },
+  ctx: z.RefinementCtx,
+): void {
+  const key = value.defectProjectKey;
+  const type = value.defectIssueType;
+  if ((key === undefined) !== (type === undefined) || (key === null) !== (type === null)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["defectProjectKey"],
+      message: "defectProjectKey and defectIssueType must be set together (or both null to clear on update)",
+    });
+  }
+}
+
+const DEFECT_DESCRIPTION =
+  "Self-defects (optional, both or neither with defectIssueType): the Jira project key wardby files this agent's own failures into. " +
+  "Filing needs a write link (link_issue_project) to that project whose creatableIssueTypes includes defectIssueType; it is checked at filing time and fails closed.";
 
 const CreateAgentSchema = z
   .object({
@@ -88,11 +111,14 @@ const CreateAgentSchema = z
     budgetGroupId: agentFields.budgetGroupId.optional(),
     memoryEnabled: agentFields.memoryEnabled.default(false),
     effort: agentFields.effort.optional(),
+    defectProjectKey: agentFields.defectProjectKey.optional(),
+    defectIssueType: agentFields.defectIssueType.optional(),
     codingProfile: CodingProfileSchema.optional(),
     repositoryAdminOverride: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
+    refineDefectPair(value, ctx);
     if (value.kind === "coding" && !value.codingProfile) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["codingProfile"], message: "is required for coding agents" });
     }
@@ -139,13 +165,16 @@ const UpdateAgentSchema = z
     budgetGroupId: agentFields.budgetGroupId.nullable().optional(),
     memoryEnabled: agentFields.memoryEnabled.optional(),
     effort: agentFields.effort.nullable().optional(),
+    defectProjectKey: agentFields.defectProjectKey.nullable().optional(),
+    defectIssueType: agentFields.defectIssueType.nullable().optional(),
     codingProfile: CodingProfilePatchSchema.extend({
       /** Not a stored profile field: sets CodingAgentProfile.debugTraceUntil = now + minutes (null clears). */
       debugTraceMinutes: z.number().int().min(1).max(MAX_DEBUG_TRACE_MINUTES).nullable().optional(),
     }).optional(),
     repositoryAdminOverride: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(refineDefectPair);
 
 type CreateAgentArgs = z.infer<typeof CreateAgentSchema>;
 type UpdateAgentArgs = z.infer<typeof UpdateAgentSchema>;
@@ -329,6 +358,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           enum: [...LLM_EFFORT_LEVELS],
           description: "Reasoning effort for native agents. Unset uses the provider default.",
         },
+        defectProjectKey: { type: "string", pattern: PROJECT_KEY.source, description: DEFECT_DESCRIPTION },
+        defectIssueType: { type: "string", minLength: 1, maxLength: 100, description: DEFECT_DESCRIPTION },
         codingProfile: { ...profileJsonSchema, required: ["repository"] },
         repositoryAdminOverride: REPOSITORY_ADMIN_OVERRIDE,
       },
@@ -401,6 +432,17 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           type: ["string", "null"],
           enum: [...LLM_EFFORT_LEVELS, null],
           description: "Reasoning effort for native agents. Null clears it back to the provider default.",
+        },
+        defectProjectKey: {
+          type: ["string", "null"],
+          pattern: PROJECT_KEY.source,
+          description: `${DEFECT_DESCRIPTION} Null (together with defectIssueType) clears it.`,
+        },
+        defectIssueType: {
+          type: ["string", "null"],
+          minLength: 1,
+          maxLength: 100,
+          description: `${DEFECT_DESCRIPTION} Null (together with defectProjectKey) clears it.`,
         },
         codingProfile: {
           ...profileJsonSchema,

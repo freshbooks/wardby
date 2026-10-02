@@ -28,6 +28,8 @@ export interface IssueView {
   summary: string;
   description: string;
   status: string;
+  /** The status's category (Jira statusCategory.key): "done" is what dedupe treats as resolved. */
+  statusCategory: IssueStatusCategory;
   issueType: string;
   priority: string | null;
   labels: string[];
@@ -37,6 +39,51 @@ export interface IssueView {
   /** Most recent last; capped. */
   comments: IssueCommentView[];
   commentsTruncated: boolean;
+  /** Capped list; contents are read with readAttachmentText. Filenames are untrusted. */
+  attachments: IssueAttachmentView[];
+}
+
+export type IssueStatusCategory = "new" | "indeterminate" | "done";
+
+export interface IssueAttachmentView {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface CreateIssueInput {
+  projectKey: string;
+  /** Issue type name (case-insensitive); resolved to an id from the project's create metadata. */
+  issueType: string;
+  summary: string;
+  descriptionMarkdown: string;
+  labels?: string[];
+  /** Priority name. */
+  priority?: string;
+  /** Component names. */
+  components?: string[];
+  parentKey?: string;
+  /** customfield_N -> raw JSON value. */
+  customFields?: Record<string, unknown>;
+  /** Issue properties, set in the create call itself. */
+  properties?: Record<string, unknown>;
+  /** Projects whose bare issue keys in the description become smart links. */
+  issueKeyProjects?: readonly string[];
+}
+
+export interface CreateMetaIssueType {
+  id: string;
+  name: string;
+  subtask: boolean;
+}
+
+export interface CreateMetaField {
+  fieldId: string;
+  name: string;
+  required: boolean;
+  hasDefault: boolean;
+  allowedValues?: string[];
 }
 
 export interface IssueSearchHit {
@@ -59,6 +106,16 @@ export interface IssueTrackerIdentity {
   accountType: string;
 }
 
+/**
+ * Bounds one tracker call for callers on a latency budget (e.g. inside a database transaction).
+ * `timeoutMs` caps the WHOLE call, every request it makes included; with `retryOn429: false` a 429 fails
+ * at once instead of sleeping for Retry-After, so the call cannot outlive `timeoutMs`.
+ */
+export interface TrackerCallOptions {
+  timeoutMs?: number;
+  retryOn429?: boolean;
+}
+
 /** What cost attribution keeps about an issue (src/core/attribution.ts): the hierarchy as of now. */
 export interface IssueSnapshot {
   /** The key that was asked for (WorkItem.key). */
@@ -77,16 +134,25 @@ export interface IssueTracker {
   botAccountId(): Promise<string>;
   /** The account the credential acts as, from the same cached call as botAccountId. */
   identity(): Promise<IssueTrackerIdentity>;
-  getIssue(key: string, opts: { maxComments: number; agentMarker: string }): Promise<IssueView>;
+  getIssue(key: string, opts: { maxComments: number; agentMarker: string } & TrackerCallOptions): Promise<IssueView>;
   /** The project the issue is in now; an old key (kept as an alias after a move) resolves to its new project. */
   issueProject(key: string): Promise<string>;
   /** Title, type, scope and parent of `key` in one call, for cost attribution. Throws IssueTrackerError. */
   snapshotIssue(key: string, opts?: { timeoutMs?: number; retryOn429?: boolean }): Promise<IssueSnapshot>;
   search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult>;
   /** Whether issue `key` matches `jql` (used for a link's jqlFilter). Callers on a latency budget pass a short timeout and no 429 retry. */
-  matchesJql(key: string, jql: string, opts?: { timeoutMs?: number; retryOn429?: boolean }): Promise<boolean>;
-  comment(key: string, input: { markdown: string; visibilityRole?: string }): Promise<{ id: string; url: string }>;
-  editComment(key: string, commentId: string, input: { markdown: string }): Promise<void>;
+  matchesJql(key: string, jql: string, opts?: TrackerCallOptions): Promise<boolean>;
+  comment(
+    key: string,
+    /** issueKeyProjects: projects whose bare issue keys in the text become smart links. */
+    input: { markdown: string; visibilityRole?: string; issueKeyProjects?: readonly string[] },
+    opts?: TrackerCallOptions,
+  ): Promise<{ id: string; url: string }>;
+  editComment(
+    key: string,
+    commentId: string,
+    input: { markdown: string; issueKeyProjects?: readonly string[] },
+  ): Promise<void>;
   /** The comment's author accountId and plain text (uncapped: only for ownership checks, never shown to a model), or null when it doesn't exist. */
   readComment(key: string, commentId: string): Promise<{ authorId: string | null; body: string } | null>;
   issueUrl(key: string): string;
@@ -98,8 +164,8 @@ export interface IssueTracker {
   editableFields(key: string): Promise<string[]>;
   /** Sets fields: labels (string[]), components (names), priority (name), customfield_N (raw JSON value). */
   editFields(key: string, fields: Record<string, unknown>): Promise<void>;
-  linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>>;
-  linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void>;
+  linkTypes(opts?: TrackerCallOptions): Promise<Array<{ name: string; inward: string; outward: string }>>;
+  linkIssues(input: { type: string; inwardKey: string; outwardKey: string }, opts?: TrackerCallOptions): Promise<void>;
   /** Adds (or, for an existing globalId, updates) a web link on the issue: Jira's remote link, shown under "Web links". */
   addRemoteLink(
     key: string,
@@ -108,6 +174,17 @@ export interface IssueTracker {
   /** The property's JSON value, or null when it does not exist. */
   getProperty(key: string, property: string): Promise<unknown>;
   setProperty(key: string, property: string, value: unknown): Promise<void>;
+  /** Issue types creatable in the project by the service account. */
+  createMeta(projectKey: string): Promise<{ issueTypes: CreateMetaIssueType[] }>;
+  /** Create-screen fields for one issue type (by id). */
+  fieldMeta(projectKey: string, issueTypeId: string): Promise<CreateMetaField[]>;
+  /** Creates an issue; missing required fields (without defaults) fail with tracker_invalid_request naming them. */
+  createIssue(input: CreateIssueInput, opts?: TrackerCallOptions): Promise<{ key: string; url: string }>;
+  /** First `maxBytes` of a text-like attachment, decoded as UTF-8; other types fail with tracker_invalid_request. */
+  readAttachmentText(
+    id: string,
+    maxBytes: number,
+  ): Promise<{ filename: string; mimeType: string; text: string; truncated: boolean }>;
 }
 
 export type IssueTrackerErrorCode =
