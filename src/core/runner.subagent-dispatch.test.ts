@@ -236,6 +236,18 @@ const toolCall = (name: string, argsJson: string): LlmStreamEvent[] => [
   { type: "tool_call", id: "c1", name, argsJson },
   { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.01 } },
 ];
+/**
+ * A delegating first turn that itself costs `priceUsd = tokens / 1000`. The parent's spend must
+ * come from its own engine turns: live progress overwrites the run's cost columns with them.
+ */
+const costlyToolCall = (name: string, argsJson: string, tokens: number): LlmStreamEvent[] => [
+  { type: "tool_call", id: "c1", name, argsJson },
+  {
+    type: "done",
+    stopReason: "tool_calls",
+    usage: { inputTokens: tokens - 10, outputTokens: 10, costUsd: tokens / 1000 },
+  },
+];
 
 /** One shared counter across both the parent's and child's `executeRun` calls — each is its own "turn" in sequence. */
 function scriptedLlm(scripts: LlmStreamEvent[][]): LlmProvider & { calls: LlmRequest[] } {
@@ -414,14 +426,57 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       [orchestrator, researcher],
       [{ parentAgentId: "parent-agent", childAgentId: "child-agent", boundName: "researcher" }],
     );
-    // The root run has already spent nearly all of its own $1 ceiling.
-    const parentRun = await db.run.create({ data: { agentId: "parent-agent", costUsd: 0.99 } });
+    // The root run spends nearly all of its own $1 ceiling on its first (delegating) turn.
+    const parentRun = await db.run.create({ data: { agentId: "parent-agent", costUsd: 0 } });
 
     const llm = scriptedLlm([
-      toolCall("delegate_to_researcher", JSON.stringify({ task: "go" })),
+      costlyToolCall("delegate_to_researcher", JSON.stringify({ task: "go" }), 990),
       // The child should be refused pre-flight (run-tree remaining ~= 0.01),
       // so it never actually streams a response — if it did, the engine
       // would consume this and something is wrong with the budget wiring.
+      finalAnswer("should not run"),
+      finalAnswer("parent wraps up"),
+    ]);
+    await executeRun(parentRun.id, providers(llm), db);
+
+    const childRun = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+      status: string;
+    }>;
+    expect(childRun).toHaveLength(1);
+    expect(childRun[0].status).toBe("refused");
+  });
+
+  it("counts a running parent's in-progress spend against the run tree's shared ceiling", async () => {
+    const orchestrator: FakeAgent = {
+      id: "parent-agent",
+      name: "orchestrator",
+      systemPrompt: "sys",
+      model: "m",
+      budgetUsd: 1,
+      maxTurns: 10,
+    };
+    const researcher: FakeAgent = {
+      id: "child-agent",
+      name: "researcher",
+      systemPrompt: "sys",
+      model: "m",
+      budgetUsd: 100,
+      maxTurns: 10,
+    };
+    const db = fakeDb(
+      [orchestrator, researcher],
+      [{ parentAgentId: "parent-agent", childAgentId: "child-agent", boundName: "researcher" }],
+    );
+    // Unlike the test above, the parent starts at $0: its spend exists only as live progress.
+    const parentRun = await db.run.create({ data: { agentId: "parent-agent", costUsd: 0 } });
+
+    const llm = scriptedLlm([
+      // The parent's own first turn costs $0.99 (priceUsd = (980 + 10) / 1000) and delegates.
+      [
+        { type: "tool_call", id: "c1", name: "delegate_to_researcher", argsJson: JSON.stringify({ task: "go" }) },
+        { type: "done", stopReason: "tool_calls", usage: { inputTokens: 980, outputTokens: 10, costUsd: 0.99 } },
+      ],
+      // Refused pre-flight (tree remaining ~= $0.01), so the child never streams this.
       finalAnswer("should not run"),
       finalAnswer("parent wraps up"),
     ]);
@@ -528,11 +583,11 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       [dispatcher, implementer],
       [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
     );
-    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent", costUsd: 0.4 } });
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent", costUsd: 0 } });
     const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.1 });
 
     const llm = scriptedLlm([
-      toolCall("delegate_to_implement", JSON.stringify({ task: "add the feature" })),
+      costlyToolCall("delegate_to_implement", JSON.stringify({ task: "add the feature" }), 400),
       finalAnswer("parent wraps up"),
     ]);
     await executeRun(parentRun.id, providers(llm, executor), db);
@@ -568,8 +623,8 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       [dispatcher, implementer],
       [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
     );
-    // As in the native test above: the tree has recorded its whole $1 ceiling.
-    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent", costUsd: 1 } });
+    // As in the native test above: the parent's first turn spends the whole $1 ceiling (so the parent itself stops afterwards).
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent", costUsd: 0 } });
     const started: string[] = [];
     const executor = {
       async start(runId: string) {
@@ -579,7 +634,7 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     };
 
     const llm = scriptedLlm([
-      toolCall("delegate_to_implement", JSON.stringify({ task: "add the feature" })),
+      costlyToolCall("delegate_to_implement", JSON.stringify({ task: "add the feature" }), 1000),
       finalAnswer("parent wraps up"),
     ]);
     await executeRun(parentRun.id, providers(llm, executor), db);
@@ -593,9 +648,6 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     expect(child.error).toMatch(/^run_tree_exhausted\b/);
     expect(started).toEqual([]);
     expect(await db.codingRun.findUnique({ where: { runId: child.id } })).toBeNull();
-    // The parent's delegate call got the refusal back as the child's result.
-    const toolResult = llm.calls[1]?.messages.find((m) => m.role === "tool");
-    expect(JSON.stringify(toolResult)).toContain("refused");
   });
 
   it("waits for a coding child that was queued (start resolved while still pending) and returns its terminal result", async () => {
