@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../providers/engine/types.js";
@@ -183,6 +183,7 @@ function fakeDb(
       findFirst: (async () => null) as any,
       findMany: (async () => []) as any,
     },
+    runModelUsage: { upsert: (async () => ({})) as any },
   } as unknown as RunnerDb;
 }
 
@@ -326,6 +327,32 @@ describe("runAgent", () => {
     expect(run.costUsd).toBe(0.0005);
     expect(run.finalText).toBe("hi there");
     expect(run.turns).toBe(1);
+  });
+
+  it("records the run's usage under the agent's model after a successful run", async () => {
+    const db = fakeDb([
+      { id: "a1", name: "greeter", systemPrompt: "be nice", model: "claude-sonnet-4-6", budgetUsd: 10, maxTurns: 10 },
+    ]);
+    const upsert = vi.fn(async (_args: unknown) => ({}));
+    (db as any).runModelUsage = { upsert };
+    const engine = fakeEngine({
+      status: "succeeded",
+      finalText: "hi",
+      turns: 1,
+      usage: { tokensIn: 1000, tokensOut: 50, costUsd: 0.01, cachedInputTokens: 800, cacheWriteTokens: 100 },
+    });
+
+    const run = await runAgent(
+      "greeter",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(upsert.mock.calls[0][0]).toMatchObject({
+      where: { runId_model: { runId: run.id, model: "claude-sonnet-4-6" } },
+      create: { freshInputTokens: 200, cachedInputTokens: 800, cacheWriteTokens: 100, outputTokens: 50 },
+    });
   });
 
   it("persists a refused/budget_exhausted/failed status and error message verbatim", async () => {

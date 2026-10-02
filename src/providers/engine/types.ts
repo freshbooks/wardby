@@ -73,7 +73,15 @@ export interface EngineResult {
   status: EngineStatus;
   finalText: string;
   turns: number;
-  usage: { tokensIn: number; tokensOut: number; costUsd: number };
+  usage: {
+    tokensIn: number;
+    tokensOut: number;
+    costUsd: number;
+    /** Subset of tokensIn served from a prompt cache. */
+    cachedInputTokens?: number;
+    /** Tokens billed for writing prompt-cache entries (not part of tokensIn). */
+    cacheWriteTokens?: number;
+  };
   error?: string;
 }
 

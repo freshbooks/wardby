@@ -54,10 +54,18 @@ interface Usage {
   tokensIn: number;
   tokensOut: number;
   costUsd: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
 }
 
 interface TurnResult {
-  usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; costUsd: number };
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    cacheWriteTokens: number;
+    costUsd: number;
+  };
   text: string;
   toolCalls: { id: string; name: string; argsJson: string }[];
   budgetExceededMidStream: boolean;
@@ -65,14 +73,16 @@ interface TurnResult {
 }
 
 function zeroUsage(): Usage {
-  return { tokensIn: 0, tokensOut: 0, costUsd: 0 };
+  return { tokensIn: 0, tokensOut: 0, costUsd: 0, cachedInputTokens: 0, cacheWriteTokens: 0 };
 }
 
-function addUsage(a: Usage, b: { inputTokens: number; outputTokens: number; costUsd: number }): Usage {
+function addUsage(a: Usage, b: TurnResult["usage"]): Usage {
   return {
     tokensIn: a.tokensIn + b.inputTokens,
     tokensOut: a.tokensOut + b.outputTokens,
     costUsd: a.costUsd + b.costUsd,
+    cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens,
+    cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
   };
 }
 
@@ -308,7 +318,7 @@ export class NativeEngine implements Engine {
       }
     } catch (err) {
       return {
-        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, costUsd: 0 },
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
         text,
         toolCalls,
         budgetExceededMidStream: false,
@@ -323,7 +333,13 @@ export class NativeEngine implements Engine {
         cachedInputTokens: estimatedCachedInput,
       });
       return {
-        usage: { inputTokens, outputTokens: outputTokensSoFar, cachedInputTokens: estimatedCachedInput, costUsd },
+        usage: {
+          inputTokens,
+          outputTokens: outputTokensSoFar,
+          cachedInputTokens: estimatedCachedInput,
+          cacheWriteTokens: 0,
+          costUsd,
+        },
         text,
         toolCalls,
         budgetExceededMidStream: true,
@@ -332,7 +348,7 @@ export class NativeEngine implements Engine {
 
     if (!usage) {
       return {
-        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, costUsd: 0 },
+        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
         text,
         toolCalls,
         budgetExceededMidStream: false,
@@ -363,6 +379,7 @@ export class NativeEngine implements Engine {
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         cachedInputTokens: usage.cachedInputTokens ?? 0,
+        cacheWriteTokens: usage.cacheWriteTokens ?? 0,
         costUsd: usage.costUsd,
       },
       text,

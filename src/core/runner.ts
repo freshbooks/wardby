@@ -64,6 +64,7 @@ import {
   type IssueProjectLink,
 } from "./issue-tracker-tools.js";
 import { completeIssueStatus } from "./issue-status.js";
+import { recordNativeModelUsage } from "./model-usage.js";
 import { trackRun } from "./in-flight-runs.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
@@ -158,6 +159,7 @@ export type RunnerDb = Pick<
   | "$transaction"
   | "$queryRaw"
   | "agentRepository"
+  | "runModelUsage"
   | "runHostCheck"
   | "runHostStatus"
   | "hostIdentity"
@@ -900,6 +902,7 @@ async function executeTrackedRun(
       turns: engineResult.turns,
       finishedAt: new Date(),
     });
+    await recordNativeModelUsage(db, runId, loaded.agent.model, engineResult.usage);
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
