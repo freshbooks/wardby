@@ -717,7 +717,7 @@ describe("JiraIssueTracker issue creation and attachments", () => {
     ).rejects.toMatchObject({ code: "tracker_invalid_request" });
   });
 
-  it("getIssue exposes statusCategory and a capped attachment list", async () => {
+  it("getIssue exposes statusCategory and the 20 most recent attachments", async () => {
     const attachment = Array.from({ length: 25 }, (_, i) => ({
       id: String(i),
       filename: `f${i}.log`,
@@ -735,7 +735,9 @@ describe("JiraIssueTracker issue creation and attachments", () => {
     const v = await tracker.getIssue("KAN-1", { maxComments: 5, agentMarker: "a" });
     expect(v.statusCategory).toBe("done");
     expect(v.attachments).toHaveLength(20);
-    expect(v.attachments[0]).toEqual({ id: "0", filename: "f0.log", mimeType: "text/plain", size: 10 });
+    // Jira lists oldest first: the five oldest are the ones left out.
+    expect(v.attachments[0]).toEqual({ id: "5", filename: "f5.log", mimeType: "text/plain", size: 10 });
+    expect(v.attachments[19].id).toBe("24");
   });
 
   const attachmentFake = (mimeType: string, size: number, content: (c: Call) => Response) =>

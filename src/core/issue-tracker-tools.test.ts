@@ -1024,21 +1024,31 @@ describe("jira_create_issue", () => {
     expect(t.createIssue).not.toHaveBeenCalled();
   });
 
-  it("needs a parent in a live-linked project (read is enough), by key and by resolved project", async () => {
+  it("needs a parent in a write-linked project, by key and by resolved project", async () => {
     const t = creatingTracker();
     const { c } = creating(t);
     expect(await call("jira_create_issue", { ...ARGS, parentKey: "SECRET-1" }, c)).toMatchObject({
       error: "project_not_linked",
     });
-    vi.mocked(t.issueProject).mockResolvedValueOnce("SECRET");
+    // Read-only by key: no visible change (a new subtask) in a read-only project.
     expect(await call("jira_create_issue", { ...ARGS, parentKey: "DOCS-1" }, c)).toMatchObject({
+      error: "write_access_required",
+    });
+    // Write-linked by key but the issue now lives in a read-only or unlinked project.
+    vi.mocked(t.issueProject).mockResolvedValueOnce("DOCS");
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "PROJ-1" }, c)).toMatchObject({
+      error: "write_access_required",
+    });
+    vi.mocked(t.issueProject).mockResolvedValueOnce("SECRET");
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "PROJ-1" }, c)).toMatchObject({
       error: "project_not_linked",
     });
     expect(t.createIssue).not.toHaveBeenCalled();
-    expect(await call("jira_create_issue", { ...ARGS, parentKey: "DOCS-1" }, c)).toMatchObject({
+    vi.mocked(t.issueProject).mockResolvedValueOnce("PROJ");
+    expect(await call("jira_create_issue", { ...ARGS, parentKey: "PROJ-1" }, c)).toMatchObject({
       outcome: "created",
     });
-    expect(t.createIssue).toHaveBeenCalledWith(expect.objectContaining({ parentKey: "DOCS-1" }));
+    expect(t.createIssue).toHaveBeenCalledWith(expect.objectContaining({ parentKey: "PROJ-1" }));
   });
 
   it("files a fingerprinted issue through dedupe with the live link", async () => {

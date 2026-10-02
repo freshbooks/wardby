@@ -26,6 +26,7 @@ const ISSUE_FIELDS =
   "project,summary,description,status,issuetype,priority,labels,assignee,reporter,comment,attachment";
 const MAX_DESCRIPTION = 20_000;
 const MAX_COMMENT = 4_000;
+/** An issue view lists (and jira_read_attachment can read) only the most recent this many attachments. */
 const MAX_ATTACHMENTS = 20;
 const META_PAGE_SIZE = 50;
 const META_MAX_PAGES = 10;
@@ -56,7 +57,6 @@ const person = (v: unknown): IssuePerson | null => {
   return typeof p.accountId === "string" ? { accountId: p.accountId, displayName: str(p.displayName) } : null;
 };
 
-/** Jira reports locales as "en_US"; Accept-Language wants BCP-47 ("en-US"). Anything malformed keeps the default. */
 /**
  * One call's budget (TrackerCallOptions): each request gets what is left of `timeoutMs`, and awaits that
  * are not requests (the cached identity) are abandoned at the deadline. Without `timeoutMs`, a no-op.
@@ -98,6 +98,7 @@ function callBudget(opts: TrackerCallOptions = {}) {
 }
 type CallBudget = ReturnType<typeof callBudget>;
 
+/** Jira reports locales as "en_US"; Accept-Language wants BCP-47 ("en-US"). Anything malformed keeps the default. */
 function localeToLanguageTag(locale: unknown): string {
   if (typeof locale !== "string") return "en-US";
   const m = /^([a-z]{2,3})(?:[_-]([A-Za-z]{2}|\d{3}))?$/.exec(locale.trim());
@@ -209,7 +210,8 @@ export class JiraIssueTracker implements IssueTracker {
       attachments: (Array.isArray(f.attachment) ? f.attachment : [])
         .map(obj)
         .filter((a) => str(a.id) !== "")
-        .slice(0, MAX_ATTACHMENTS)
+        // Jira lists attachments oldest first; keep the most recent (a fresh log is usually the useful one).
+        .slice(-MAX_ATTACHMENTS)
         .map((a): IssueAttachmentView => ({
           id: str(a.id),
           filename: str(a.filename),

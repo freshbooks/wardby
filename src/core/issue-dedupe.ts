@@ -149,6 +149,9 @@ export async function fileIssue(
 
         if (previous) {
           const view = await currentIssue(tracker, previous.issueKey);
+          // A moved issue (now in another project) is not reused. Known limitation: renaming the project's key
+          // makes every earlier issue look moved too (Jira answers with the new key while the link keeps the old
+          // one), so each sighting files a new issue until the link is re-pointed at the new key.
           if (view && view.projectKey === link.projectKey) {
             if (view.statusCategory !== "done") {
               const seenCount = previous.seenCount + 1;
@@ -172,6 +175,9 @@ export async function fileIssue(
         }
 
         if (!createAllowed) throw new CreateNotAllowed();
+        // Not idempotent: if the bounded POST is aborted after Jira already committed the issue, this transaction
+        // rolls back with no fingerprint row, and a retry files a second issue. Inherent to timing out a create
+        // (Jira has no idempotency key for it); the timeout keeps the advisory lock from being held indefinitely.
         const created = await tracker.createIssue(
           regressionOf
             ? {
