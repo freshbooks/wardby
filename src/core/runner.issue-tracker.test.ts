@@ -80,13 +80,20 @@ function fakeTracker(): IssueTracker {
   };
 }
 
-function harness(opts: { links: FakeLink[]; status?: FakeStatus; script: LlmStreamEvent[][] }) {
+function harness(opts: {
+  links: FakeLink[];
+  status?: FakeStatus;
+  script: LlmStreamEvent[][];
+  defect?: { projectKey: string; issueType: string };
+  llmThrows?: string;
+}) {
   const state = {
     toolNamesOfferedOnFirstCall: [] as string[],
     toolResults: [] as string[],
     agentIssueProjectQueried: false,
     links: opts.links,
     status: opts.status ? { ...opts.status } : null,
+    fingerprints: [] as any[],
   };
   const agent = {
     id: "a1",
@@ -96,6 +103,8 @@ function harness(opts: { links: FakeLink[]; status?: FakeStatus; script: LlmStre
     budgetUsd: 10,
     maxTurns: 10,
     ownerId: "p1",
+    defectProjectKey: opts.defect?.projectKey ?? null,
+    defectIssueType: opts.defect?.issueType ?? null,
   };
   const runs = new Map<string, any>([
     [
@@ -149,6 +158,18 @@ function harness(opts: { links: FakeLink[]; status?: FakeStatus; script: LlmStre
         );
       },
     },
+    // Just enough of a transaction for issue-dedupe's fileIssue (advisory lock + fingerprint rows).
+    $transaction: async (fn: any) =>
+      fn({
+        $executeRaw: async () => 0,
+        issueFingerprint: {
+          findFirst: async () => null,
+          create: async ({ data }: any) => {
+            state.fingerprints.push(data);
+            return data;
+          },
+        },
+      }),
     runIssueStatus: {
       findUnique: async ({ where }: any) =>
         state.status && state.status.runId === where.runId ? { ...state.status } : null,
@@ -164,6 +185,7 @@ function harness(opts: { links: FakeLink[]; status?: FakeStatus; script: LlmStre
   const llm: LlmProvider = {
     async *stream(req) {
       if (turn === 0) state.toolNamesOfferedOnFirstCall = (req.tools ?? []).map((t) => t.name);
+      if (opts.llmThrows) throw new Error(opts.llmThrows);
       for (const m of req.messages) if (m.role === "tool") state.toolResults.push(m.content);
       for (const event of opts.script[turn++] ?? []) yield event;
     },
@@ -357,5 +379,42 @@ describe("jira_* built-ins in the native run loop", () => {
       markdown: expect.stringContaining("Triaged."),
     });
     expect(state.status!.completedAt).toBeInstanceOf(Date);
+  });
+});
+
+describe("self-defects at run finalization", () => {
+  const DEFECT = { projectKey: "PROJ", issueType: "Bug" };
+  const WRITE_LINK: FakeLink = { ...LINK, creatableIssueTypes: ["Bug"] };
+
+  it("files a defect when a run of an opted-in agent fails, without the error text", async () => {
+    const tracker = fakeTracker();
+    vi.mocked(tracker.createIssue).mockResolvedValue({
+      id: "10100",
+      key: "PROJ-9",
+      url: "https://your-site.atlassian.net/browse/PROJ-9",
+    } as any);
+    const { db, state, llm } = harness({
+      links: [WRITE_LINK],
+      script: [],
+      defect: DEFECT,
+      llmThrows: "provider_down: secret internals",
+    });
+    const run = await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(run.status).toBe("failed");
+    expect(tracker.createIssue).toHaveBeenCalledTimes(1);
+    const input = vi.mocked(tracker.createIssue).mock.calls[0][0];
+    expect(input).toMatchObject({ projectKey: "PROJ", issueType: "Bug" });
+    expect(input.summary).toMatch(/^wardby agent "triager": failed/);
+    expect(JSON.stringify(input)).not.toContain("secret internals");
+    expect(state.fingerprints).toHaveLength(1);
+    expect(state.fingerprints[0]).toMatchObject({ issueKey: "PROJ-9", agentId: "a1", createdByRunId: "run1" });
+  });
+
+  it("files nothing when the run succeeds", async () => {
+    const tracker = fakeTracker();
+    const { db, llm } = harness({ links: [WRITE_LINK], script: [text("done")], defect: DEFECT });
+    const run = await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(run.status).toBe("succeeded");
+    expect(tracker.createIssue).not.toHaveBeenCalled();
   });
 });

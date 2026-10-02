@@ -66,6 +66,7 @@ import {
 } from "./issue-tracker-tools.js";
 import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
+import { fileSelfDefect } from "./self-defects.js";
 import { trackRun } from "./in-flight-runs.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
@@ -253,8 +254,17 @@ export class RunCancelledError extends Error {
  * the race, the winner's if it did not.
  */
 async function finishRun(db: RunnerDb, runId: string, data: Prisma.RunUpdateManyMutationInput): Promise<Run> {
-  await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data });
-  return db.run.findUniqueOrThrow({ where: { id: runId } });
+  return (await finishRunClaimed(db, runId, data)).run;
+}
+
+/** finishRun, also saying whether this call made the row terminal (false: something else finished it first). */
+async function finishRunClaimed(
+  db: RunnerDb,
+  runId: string,
+  data: Prisma.RunUpdateManyMutationInput,
+): Promise<{ run: Run; claimed: boolean }> {
+  const updated = await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data });
+  return { run: await db.run.findUniqueOrThrow({ where: { id: runId } }), claimed: updated.count > 0 };
 }
 
 /**
@@ -908,7 +918,7 @@ async function executeTrackedRun(
       step,
     });
 
-    const finished = await finishRun(db, runId, {
+    const { run: finished, claimed } = await finishRunClaimed(db, runId, {
       status: engineResult.status,
       tokensIn: engineResult.usage.tokensIn,
       tokensOut: engineResult.usage.tokensOut,
@@ -921,6 +931,9 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
+    // filed twice. Bounded and never throws.
+    if (claimed) await fileSelfDefect(db, issueTrackers, finished);
     return finished;
   } catch (err) {
     // Defensive backstop: the engine is expected to catch its own errors
@@ -928,7 +941,7 @@ async function executeTrackedRun(
     // (a real bug, or tool-loading failing outside the per-tool try above)
     // must still never leave the run dangling in "running". A cancellation
     // is not a failure: it carries the operator's own reason.
-    const finished = await finishRun(db, runId, {
+    const { run: finished, claimed } = await finishRunClaimed(db, runId, {
       status: err instanceof RunCancelledError ? "cancelled" : "failed",
       error: err instanceof Error ? err.message : String(err),
       finishedAt: new Date(),
@@ -936,6 +949,9 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
+    // filed twice. Bounded and never throws.
+    if (claimed) await fileSelfDefect(db, issueTrackers, finished);
     return finished;
   }
 }
