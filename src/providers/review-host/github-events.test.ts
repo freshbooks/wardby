@@ -37,7 +37,32 @@ describe("normalizeGitHubEvent", () => {
       });
     }
     expect(normalizeGitHubEvent("pull_request", pr("opened", "stranger/x"), APP)).toMatchObject({ isFork: true });
-    expect(normalizeGitHubEvent("pull_request", pr("closed"), APP)).toBeNull();
+    for (const action of ["edited", "labeled", "assigned", "converted_to_draft"]) {
+      expect(normalizeGitHubEvent("pull_request", pr(action), APP)).toBeNull();
+    }
+  });
+
+  it("maps a closed PR to pr_closed, merged or not", () => {
+    const closed = (merged: unknown) => ({ ...pr("closed"), pull_request: { ...pr("closed").pull_request, merged } });
+    expect(normalizeGitHubEvent("pull_request", closed(true), APP)).toEqual({
+      kind: "pr_closed",
+      provider: "github",
+      repository: "chfields/knock-knock-jokes",
+      prNumber: 7,
+      merged: true,
+    });
+    expect(normalizeGitHubEvent("pull_request", closed(false), APP)).toMatchObject({
+      kind: "pr_closed",
+      merged: false,
+    });
+    // Anything but a literal true is "not merged".
+    expect(normalizeGitHubEvent("pull_request", closed("true"), APP)).toMatchObject({ merged: false });
+    expect(normalizeGitHubEvent("pull_request", pr("closed"), APP)).toMatchObject({ merged: false });
+    // A fork's PR closing still counts: the event only drives bookkeeping on rows wardby wrote.
+    expect(normalizeGitHubEvent("pull_request", { ...closed(true), pull_request: { number: 7 } }, APP)).toMatchObject({
+      kind: "pr_closed",
+    });
+    expect(normalizeGitHubEvent("pull_request", { action: "closed", repository, pull_request: {} }, APP)).toBeNull();
   });
 
   it("maps a rerequested check only when our App owns it", () => {

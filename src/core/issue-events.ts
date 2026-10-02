@@ -18,7 +18,7 @@ import { composeTaskOverride } from "./untrusted-content.js";
 const log = logger.child({ module: "issue-events" });
 const MAX_TASK_BODY = 8000;
 
-export type IssueEventDb = DispatchDb & Pick<PrismaClient, "agentIssueProject" | "runIssueStatus">;
+export type IssueEventDb = DispatchDb & Pick<PrismaClient, "agentIssueProject" | "runIssueStatus" | "issuePullRequest">;
 
 export interface RouteIssueEventDeps {
   db: IssueEventDb;
@@ -34,6 +34,15 @@ export interface RouteResult {
 type LinkRow = Awaited<ReturnType<IssueEventDb["agentIssueProject"]["findMany"]>>[number] & {
   agent: { ownerId: string | null; kind: string };
 };
+
+export interface OpenIssuePr {
+  repository: string;
+  number: number;
+  url: string;
+  openedByRunId: string;
+}
+
+const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 type TaskLink = { triggerLabels: string[]; trustedAccountIds: string[] };
 
@@ -62,7 +71,13 @@ function describeKind(event: IssueEvent, kind: IssueEventKind, link: TaskLink): 
  * is in the link's trustedAccountIds, their display name. An unchecked actor's
  * display name goes into the untrusted context with the summary/description.
  */
-export function issueTaskText(event: IssueEvent, matched: IssueEventKind[], issueUrl: string, link: TaskLink): string {
+export function issueTaskText(
+  event: IssueEvent,
+  matched: IssueEventKind[],
+  issueUrl: string,
+  link: TaskLink,
+  openPrs: OpenIssuePr[] = [],
+): string {
   const trusted = link.trustedAccountIds.includes(event.actor.accountId);
   const actor =
     trusted && event.actor.displayName ? `${event.actor.accountId}, ${event.actor.displayName}` : event.actor.accountId;
@@ -74,6 +89,13 @@ export function issueTaskText(event: IssueEvent, matched: IssueEventKind[], issu
     ].join("\n"),
     "Use jira_get_issue to read the issue; reply with jira_comment.",
   ];
+  // Control-plane data from stored rows (validated at write time), never issue text.
+  for (const pr of openPrs.filter((p) => RUN_ID_RE.test(p.openedByRunId))) {
+    sections.push(
+      `This issue already has an open pull request wardby opened: ${pr.repository}#${pr.number} (${pr.url}). ` +
+        `To revise it, delegate with continuePriorRun set to exactly "${pr.openedByRunId}".`,
+    );
+  }
   if (matched.includes("mention") && event.comment) {
     sections.push(`Request comment:\n${event.comment.body.slice(0, MAX_TASK_BODY)}`);
   }
@@ -112,6 +134,20 @@ function matchedKinds(event: IssueEvent, link: LinkRow, bot: string): IssueEvent
   });
 }
 
+async function openPullRequests(db: IssueEventDb, issueKey: string, agentId: string): Promise<OpenIssuePr[]> {
+  try {
+    return await db.issuePullRequest.findMany({
+      where: { issueProvider: "jira", issueKey, agentId, state: "open" },
+      orderBy: { createdAt: "desc" },
+      take: 3,
+      select: { repository: true, number: true, url: true, openedByRunId: true },
+    });
+  } catch (err) {
+    log.warn({ err, issueKey, agentId }, "open pull requests could not be looked up; continuing without a hint");
+    return [];
+  }
+}
+
 const JQL_FILTER_BUDGET = { timeoutMs: 5000, retryOn429: false } as const;
 
 export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDeps): Promise<RouteResult> {
@@ -137,13 +173,14 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
       }
       if (!ok) continue;
     }
+    const openPrs = await openPullRequests(deps.db, event.issueKey, link.agentId);
     try {
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
         agentId: link.agentId,
         trigger: "host_event",
-        taskOverride: issueTaskText(event, matched, tracker.issueUrl(event.issueKey), link),
+        taskOverride: issueTaskText(event, matched, tracker.issueUrl(event.issueKey), link, openPrs),
         afterPersist: async (tx, run) => {
           await tx.runIssueStatus.create({ data: issueStatusRow(event, run.id, link.commentVisibilityRole) });
         },

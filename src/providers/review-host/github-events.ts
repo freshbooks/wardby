@@ -89,8 +89,15 @@ export function normalizeGitHubEvent(
   if (!repository) return null;
 
   if (eventName === "pull_request") {
-    if (typeof p.action !== "string" || !PR_ACTIONS.has(p.action)) return null;
     const pr = obj(p.pull_request);
+    if (p.action === "closed") {
+      // No author or fork gate: this only marks issue/PR pairs wardby itself
+      // recorded for this repository and number, never acting on PR text.
+      const prNumber = int(pr?.number);
+      if (!prNumber) return null;
+      return { kind: "pr_closed", provider: "github", repository, prNumber, merged: pr?.merged === true };
+    }
+    if (typeof p.action !== "string" || !PR_ACTIONS.has(p.action)) return null;
     const head = obj(pr?.head);
     const prNumber = int(pr?.number);
     const headSha = head?.sha;

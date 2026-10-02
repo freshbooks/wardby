@@ -5,6 +5,8 @@
  */
 export type IssueTrackerProvider = "jira";
 export const ISSUE_TRACKER_PROVIDERS: readonly IssueTrackerProvider[] = ["jira"];
+/** The product name shown to people (e.g. in a pull request's "Resolves Jira issue …" line). */
+export const ISSUE_TRACKER_NAMES: Readonly<Record<IssueTrackerProvider, string>> = { jira: "Jira" };
 
 export interface IssuePerson {
   accountId: string;
@@ -84,6 +86,11 @@ export interface IssueTracker {
   editFields(key: string, fields: Record<string, unknown>): Promise<void>;
   linkTypes(): Promise<Array<{ name: string; inward: string; outward: string }>>;
   linkIssues(input: { type: string; inwardKey: string; outwardKey: string }): Promise<void>;
+  /** Adds (or, for an existing globalId, updates) a web link on the issue: Jira's remote link, shown under "Web links". */
+  addRemoteLink(
+    key: string,
+    input: { globalId: string; url: string; title: string; status?: { resolved: boolean } },
+  ): Promise<void>;
   /** The property's JSON value, or null when it does not exist. */
   getProperty(key: string, property: string): Promise<unknown>;
   setProperty(key: string, property: string, value: unknown): Promise<void>;

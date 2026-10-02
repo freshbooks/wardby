@@ -450,6 +450,9 @@ model CodingRun {
   /// .wardby/services.yaml: one snapshot per service (the catalog entry minus
   /// kind), fixed for the run's lifetime. Empty = none.
   services          Json                @default("[]")
+  /// The originating tracker issue ("jira" + key), set by the control plane from the run tree, never from model output.
+  issueProvider     String?
+  issueKey          String?
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?
@@ -1150,12 +1153,41 @@ model AgentIssueProject {
   writableFields        String[] @default([])
   /// Issue link type names (case-insensitive) jira_link_issues may create. Empty = linking off.
   allowedLinkTypes      String[] @default([])
+  /// Status to move the issue to when a pull request for it opens (a control-plane move, not gated by allowedTransitions). Null = none.
+  onPullRequestOpened   String?
+  /// Status to move the issue to when a pull request for it merges. Null = none.
+  onPullRequestMerged   String?
   authorizedById        String
   authorizedAt          DateTime @default(now())
   createdAt             DateTime @default(now())
 
   @@unique([agentId, provider, projectKey])
   @@index([provider, projectKey])
+}
+
+/// A pull request wardby opened for a tracker issue (the Jira -> code bridge). Provider-neutral on both sides.
+/// Deliberately no foreign keys to Agent or Run: audit-style rows that survive agent/run deletion.
+model IssuePullRequest {
+  id            String   @id @default(cuid())
+  /// "jira"
+  issueProvider String
+  issueKey      String
+  /// "github" today; "bitbucket" next.
+  codeProvider  String
+  repository    String
+  number        Int
+  url           String
+  /// The issue-linked agent whose run tree opened it (the parent native agent).
+  agentId       String
+  /// The coding run that opened it (continuePriorRun target for follow-ups).
+  openedByRunId String
+  /// "open" | "merged" | "closed"
+  state         String   @default("open")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([codeProvider, repository, number, issueProvider, issueKey])
+  @@index([issueProvider, issueKey])
 }
 
 /// The status comment wardby posts on the Jira issue whose event started this
