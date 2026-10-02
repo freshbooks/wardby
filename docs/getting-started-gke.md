@@ -300,6 +300,11 @@ own role, for every privilege `database-grants.sql` gives `wardby_proxy`
 grants instead of letting the proxy fail registry requests with "permission
 denied".
 
+Releases that add per-model usage recording for coding runs (used by the
+`cost_report` tool's `model` grouping) also need the bootstrap re-run on an
+existing deployment. Until then coding runs still work, but their per-model
+breakdown isn't recorded.
+
 `bootstrap-database-iam.sh --check` runs the grants inside a transaction that
 is then rolled back, and reports success or the exact statement the database
 refused, without changing anything. Run it before the real run on a live

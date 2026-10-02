@@ -177,6 +177,11 @@ The bootstrap has two modes:
   already running is disturbed. A brand-new deployment never has a password
   to give it.
 
+Re-run it after upgrading an existing deployment to a release that lets the
+coding proxy write per-model usage (`RunModelUsage`, used by the `cost_report`
+tool's `model` grouping). Until then coding runs still work, but their
+per-model breakdown isn't recorded.
+
 Either mode takes `--check`: the grants run inside a transaction that is
 rolled back, and the bootstrap reports success or the exact refusal while
 changing nothing. Run it before the real run on a live deployment.

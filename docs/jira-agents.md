@@ -123,6 +123,7 @@ Set these variables (see `.env.example`) and restart:
 | `WARDBY_JIRA_API_TOKEN`            | The service account's API token.                                                                    |
 | `WARDBY_JIRA_WEBHOOK_SECRET`       | The webhook secret, 20 or more characters.                                                          |
 | `WARDBY_JIRA_API_TOKEN_EXPIRES_AT` | Optional. Token expiry (`YYYY-MM-DD`); wardby logs a warning 14 days before.                        |
+| `WARDBY_JIRA_EPIC_LINK_FIELD`      | Optional. Field id of the legacy Epic Link field, for cost attribution (see below).                 |
 
 Set the four required variables together or none of them. On startup wardby
 logs `Jira acting as` with the account id, display name and account type it
@@ -383,6 +384,57 @@ Grant only what the sweep needs: `access: "write"`, and for the example
 `allowedTransitions: ["Backlog"]` if it may move stale issues back. Searches are limited to the
 agent's linked projects. Keep sweeps bounded: a narrow JQL and a per-run cap in
 the prompt, since each run spends the agent's budget.
+
+## Cost attribution
+
+wardby attributes each run's cost to the issue it worked on, so you can see
+what agent work on a card, an epic, or a project cost.
+
+A run is attributed when:
+
+- a Jira event on an issue started it;
+- it reviews or answers a mention on a pull request wardby opened for an issue;
+- `trigger_agent` or a webhook named an `issue`
+  (`{ "provider": "jira", "key": "PROJ-123" }`) in a project the agent is
+  linked to. A key in a project the agent isn't linked to is refused
+  (`trigger_agent` returns an error; a webhook answers `400 invalid_issue`);
+- its parent run is attributed (sub-agents and coding runs inherit, and cannot
+  change it).
+
+When a run starts, wardby records the issue's parent (its epic) as it is at
+that moment. Moving an issue to another epic later leaves earlier runs under
+the earlier epic. Titles in reports are always the latest known.
+
+Use the `cost_report` MCP tool to read it, e.g. `groupBy: "parent", scopeKey: "PROJ"`
+for epics in a project, then `groupBy: "issue", parentKey: "PROJ-10"` for that
+epic's cards. `groupBy` also accepts `scope`, `agent`, `model` and `run`; the
+window defaults to the last 30 days (`from` inclusive, `to` exclusive). Amounts
+are USD. Tokens are reported by kind (fresh input, cached input, cache write,
+output) because each kind is priced differently.
+
+How to read the numbers:
+
+- Totals always sum each run's full cost over the attributed runs, whatever
+  the grouping. With `groupBy: "model"`, rows come from per-model usage and can
+  add up to less than the total when some runs have no per-model record.
+- Spend that no issue can be attributed to is reported as `unattributed`. It
+  covers the runs in the window that you can see and that have no issue. The
+  `provider`, `scopeKey`, `parentKey` and `issueKey` filters can't narrow it;
+  only `agentId` can.
+- You see the runs of agents you own and runs you triggered, the same as
+  `list_runs` and `get_run`.
+
+On GKE, existing deployments must re-run the database grants bootstrap
+(`deploy/gke/bootstrap-database-iam.sh`) after upgrading, so the coding proxy
+can write per-model usage for coding runs. Until then coding runs still work,
+but their per-model breakdown isn't recorded. See
+[Getting started on GKE](getting-started-gke.md).
+
+### Company-managed projects using Epic Link
+
+If your site still uses the legacy Epic Link field instead of issue parents,
+set `WARDBY_JIRA_EPIC_LINK_FIELD` to its field id (for example
+`customfield_10014`) so runs are grouped under their epic.
 
 ## Security model
 
