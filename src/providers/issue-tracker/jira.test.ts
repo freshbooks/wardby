@@ -37,7 +37,7 @@ function fake(handler: (c: Call) => Response | undefined) {
     { apiBaseUrl: SITE, auth: { kind: "bearer", token: "tok" } },
     { fetch: fetchMock as unknown as typeof fetch, sleep: async () => undefined },
   );
-  return { tracker: new JiraIssueTracker(client, SITE), calls, languages };
+  return { tracker: new JiraIssueTracker(client, SITE), calls, languages, client };
 }
 const json = (v: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...headers } });
@@ -522,5 +522,86 @@ describe("JiraIssueTracker", () => {
         tracker.linkIssues({ type: "Blocks", inwardKey: "PROJ-2", outwardKey: "PROJ-1" }),
       ).resolves.toBeUndefined();
     });
+  });
+});
+
+describe("snapshotIssue", () => {
+  it("reads summary, type, project and an Epic-typed parent in one call", async () => {
+    const { tracker, calls } = fake((c) =>
+      c.path === "/rest/api/3/issue/PAY-241?fields=summary,issuetype,project,parent"
+        ? json({
+            key: "PAY-241",
+            fields: {
+              summary: "Refund flow retries",
+              issuetype: { name: "Story" },
+              project: { key: "PAY" },
+              parent: { key: "PAY-200", fields: { summary: "Refunds v2", issuetype: { name: "Epic" } } },
+            },
+          })
+        : undefined,
+    );
+    expect(await tracker.snapshotIssue("PAY-241")).toEqual({
+      key: "PAY-241",
+      title: "Refund flow retries",
+      type: "Story",
+      url: `${SITE}/browse/PAY-241`,
+      scopeKey: "PAY",
+      parent: { key: "PAY-200", title: "Refunds v2", kind: "epic" },
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("labels a non-epic parent as parent", async () => {
+    const { tracker } = fake((c) =>
+      !c.path.startsWith("/rest/api/3/issue/")
+        ? undefined
+        : json({
+            key: "PAY-9",
+            fields: {
+              summary: "Sub-task",
+              issuetype: { name: "Sub-task" },
+              project: { key: "PAY" },
+              parent: { key: "PAY-8", fields: { summary: "Story", issuetype: { name: "Story" } } },
+            },
+          }),
+    );
+    expect((await tracker.snapshotIssue("PAY-9")).parent).toEqual({ key: "PAY-8", title: "Story", kind: "parent" });
+  });
+
+  it("uses the configured Epic Link field when there is no parent, without a second call", async () => {
+    const { calls, client } = fake((c) =>
+      c.path === "/rest/api/3/issue/OLD-3?fields=summary,issuetype,project,parent,customfield_10014"
+        ? json({
+            key: "OLD-3",
+            fields: { summary: "S", issuetype: { name: "Story" }, project: { key: "OLD" }, customfield_10014: "OLD-1" },
+          })
+        : undefined,
+    );
+    const tracker = new JiraIssueTracker(client, SITE, { epicLinkField: "customfield_10014" });
+    expect((await tracker.snapshotIssue("OLD-3")).parent).toEqual({ key: "OLD-1", kind: "epic" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("has no parent when Jira reports none", async () => {
+    const { tracker } = fake((c) =>
+      !c.path.startsWith("/rest/api/3/issue/")
+        ? undefined
+        : json({ key: "PAY-1", fields: { summary: "S", issuetype: { name: "Bug" }, project: { key: "PAY" } } }),
+    );
+    expect((await tracker.snapshotIssue("PAY-1")).parent).toBeUndefined();
+  });
+
+  it("falls back to the key's prefix when the project is missing", async () => {
+    const { tracker } = fake((c) =>
+      c.path.startsWith("/rest/api/3/issue/") ? json({ key: "PAY-1", fields: { summary: "S" } }) : undefined,
+    );
+    expect((await tracker.snapshotIssue("PAY-1")).scopeKey).toBe("PAY");
+  });
+
+  it("propagates Jira errors as IssueTrackerError", async () => {
+    const { tracker } = fake((c) =>
+      c.path.startsWith("/rest/api/3/issue/") ? new Response("{}", { status: 404 }) : undefined,
+    );
+    await expect(tracker.snapshotIssue("PAY-1")).rejects.toBeInstanceOf(IssueTrackerError);
   });
 });

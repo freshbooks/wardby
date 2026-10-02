@@ -25,6 +25,11 @@ function tracker(): IssueTracker {
     setProperty: vi.fn(),
     getIssue: vi.fn(),
     issueProject: vi.fn(async (key: string) => key.slice(0, key.lastIndexOf("-"))),
+    snapshotIssue: vi.fn(async (key: string) => ({
+      key,
+      url: `https://example.test/browse/${key}`,
+      scopeKey: key.slice(0, key.lastIndexOf("-")),
+    })),
     search: vi.fn(),
     matchesJql: vi.fn(),
     comment: vi.fn(async () => ({ id: "c-1", url: "u" })),

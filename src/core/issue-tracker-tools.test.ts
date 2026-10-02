@@ -44,6 +44,11 @@ function tracker(): IssueTracker {
     setProperty: vi.fn(),
     getIssue: vi.fn(async (key: string) => ({ key, projectKey: projectOf(key), summary: "S" }) as never),
     issueProject: vi.fn(async (key: string) => projectOf(key)),
+    snapshotIssue: vi.fn(async (key: string) => ({
+      key,
+      url: `https://example.test/browse/${key}`,
+      scopeKey: key.slice(0, key.lastIndexOf("-")),
+    })),
     search: vi.fn(async () => ({ issues: [], truncated: false })),
     matchesJql: vi.fn(),
     comment: vi.fn(async () => ({
