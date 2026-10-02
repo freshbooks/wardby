@@ -62,8 +62,10 @@ function deps(
   reviewed: { runId: string } | null = null,
 ) {
   const reviewLookup = vi.fn(async () => reviewed);
+  const linkedIssue = vi.fn(async (): Promise<{ issueProvider: string; issueKey: string } | null> => null);
   return {
     reviewLookup,
+    linkedIssue,
     hosts: { github: h },
     executor: {} as never,
     mentionHandle: "wardby",
@@ -96,6 +98,8 @@ function deps(
       },
       runHostCheck: { findFirst: reviewLookup },
       run: { findUnique: vi.fn(async () => ({ id: "run", status: "running", finalText: null })) },
+      issuePullRequest: { findFirst: linkedIssue },
+      workItem: { findUnique: vi.fn(async () => null) },
     } as never,
   };
 }
@@ -538,5 +542,61 @@ describe("routeHostEvent pr_closed", () => {
     (d.db as any).issuePullRequest = { findMany };
     await expect(routeHostEvent(closed, d)).resolves.toEqual({ runIds: [], followUps: [] });
     expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("routeHostEvent linked-PR attribution", () => {
+  const LINK = { issueProvider: "jira", issueKey: "PAY-1" };
+  const mention: Extract<HostEvent, { kind: "mention" }> = {
+    kind: "mention",
+    provider: "github",
+    repository: REPO,
+    number: 7,
+    isPullRequest: true,
+    comment: { kind: "conversation", id: "4" },
+    body: "@wardby please fix the typo",
+    author: "chfields",
+    authorId: "1001",
+  };
+
+  it("a review run on a PR linked to an issue is attributed to it as linked_pr, one lookup for all reviewers", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([
+      { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" },
+      { agentId: "a2", triggers: ["pull_request"], checkName: "security" },
+    ]);
+    d.linkedIssue.mockResolvedValue(LINK);
+    await routeHostEvent(pr, d);
+    for (const call of vi.mocked(dispatchRun).mock.calls) {
+      expect(call[0].attribution).toMatchObject({ source: "linked_pr", item: { provider: "jira", key: "PAY-1" } });
+    }
+    expect(d.linkedIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("a review run on an unlinked PR is unattributed", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }]);
+    await routeHostEvent(pr, d);
+    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toBeUndefined();
+  });
+
+  it("an @wardby mention on a linked PR is attributed", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    d.linkedIssue.mockResolvedValue(LINK);
+    await routeHostEvent(mention, d);
+    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toMatchObject({
+      source: "linked_pr",
+      item: { provider: "jira", key: "PAY-1" },
+    });
+  });
+
+  it("a mention on a plain issue is not looked up", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    d.linkedIssue.mockResolvedValue(LINK);
+    await routeHostEvent({ ...mention, isPullRequest: false }, d);
+    expect(d.linkedIssue).not.toHaveBeenCalled();
+    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toBeUndefined();
   });
 });

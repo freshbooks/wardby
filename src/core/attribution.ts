@@ -189,3 +189,33 @@ export async function attributeRun(
   });
   return { provider: from.intent.item.provider, key: from.intent.item.key };
 }
+
+/** The issue a pull request was opened for (phase-3 IssuePullRequest); the earliest link when several exist. */
+export async function linkedPullRequestIssue(
+  db: Pick<PrismaClient, "issuePullRequest">,
+  pr: { codeProvider: string; repository: string; number: number },
+): Promise<{ provider: string; key: string } | null> {
+  try {
+    const row = await db.issuePullRequest.findFirst({
+      where: { codeProvider: pr.codeProvider, repository: pr.repository, number: pr.number },
+      orderBy: { createdAt: "asc" },
+      select: { issueProvider: true, issueKey: true },
+    });
+    return row ? { provider: row.issueProvider, key: row.issueKey } : null;
+  } catch (err) {
+    log.warn({ err, ...pr }, "linked issue lookup failed; the run is unattributed");
+    return null;
+  }
+}
+
+/** Attribution for a run on a pull request that was opened for an issue; undefined when it has none. */
+export async function linkedPullRequestAttribution(
+  db: Pick<PrismaClient, "issuePullRequest" | "workItem">,
+  trackers: IssueTrackerRegistry | undefined,
+  pr: { codeProvider: string; repository: string; number: number },
+  opts?: { timeoutMs?: number; retryOn429?: boolean },
+): Promise<AttributionIntent | undefined> {
+  const issue = await linkedPullRequestIssue(db, pr);
+  if (!issue) return undefined;
+  return { source: "linked_pr", item: await resolveWorkItem(db, trackers, issue.provider, issue.key, opts) };
+}

@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { IssueTrackerError, type IssueTracker, type IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
-import { resolveWorkItem, SNAPSHOT_CACHE_MS } from "./attribution.js";
+import {
+  linkedPullRequestAttribution,
+  linkedPullRequestIssue,
+  resolveWorkItem,
+  SNAPSHOT_CACHE_MS,
+} from "./attribution.js";
 
 const logged = vi.hoisted(() => [] as { level: string; message: string }[]);
 vi.mock("./logger.js", () => {
@@ -84,5 +89,63 @@ describe("resolveWorkItem", () => {
     const r = await resolveWorkItem(db as never, undefined, "jira", "PAY-241");
     expect(r.snapshot).toBeNull();
     expect(logged.at(-1)).toEqual({ level: "warn", message: "work item lookup failed; attributing by key only" });
+  });
+});
+
+describe("linkedPullRequestIssue", () => {
+  const pr = { codeProvider: "github", repository: "your-org/your-repo", number: 7 };
+
+  it("returns the earliest-linked issue", async () => {
+    const findFirst = vi.fn(async () => ({ issueProvider: "jira", issueKey: "PAY-1" }));
+    expect(await linkedPullRequestIssue({ issuePullRequest: { findFirst } } as never, pr)).toEqual({
+      provider: "jira",
+      key: "PAY-1",
+    });
+    expect(findFirst).toHaveBeenCalledWith({
+      where: pr,
+      orderBy: { createdAt: "asc" },
+      select: { issueProvider: true, issueKey: true },
+    });
+  });
+
+  it("returns null when the PR has no linked issue", async () => {
+    const db = { issuePullRequest: { findFirst: vi.fn(async () => null) } };
+    expect(await linkedPullRequestIssue(db as never, pr)).toBeNull();
+  });
+
+  it("returns null when the lookup fails", async () => {
+    const db = {
+      issuePullRequest: {
+        findFirst: vi.fn(async () => {
+          throw new Error("x");
+        }),
+      },
+    };
+    expect(await linkedPullRequestIssue(db as never, pr)).toBeNull();
+  });
+});
+
+describe("linkedPullRequestAttribution", () => {
+  const pr = { codeProvider: "github", repository: "your-org/your-repo", number: 7 };
+
+  it("forwards the snapshot options to the tracker", async () => {
+    const snapshotIssue = vi.fn(async () => {
+      throw new Error("down");
+    });
+    const db = {
+      issuePullRequest: { findFirst: vi.fn(async () => ({ issueProvider: "jira", issueKey: "PAY-1" })) },
+      workItem: { findUnique: vi.fn(async () => null) },
+    };
+    const out = await linkedPullRequestAttribution(db as never, { jira: { snapshotIssue } } as never, pr, {
+      timeoutMs: 2000,
+      retryOn429: false,
+    });
+    expect(snapshotIssue).toHaveBeenCalledWith("PAY-1", { timeoutMs: 2000, retryOn429: false });
+    expect(out).toMatchObject({ source: "linked_pr", item: { provider: "jira", key: "PAY-1" } });
+  });
+
+  it("is undefined when the PR is unlinked", async () => {
+    const db = { issuePullRequest: { findFirst: vi.fn(async () => null) }, workItem: {} };
+    expect(await linkedPullRequestAttribution(db as never, undefined, pr)).toBeUndefined();
   });
 });

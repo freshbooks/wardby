@@ -9,6 +9,7 @@ import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { CodeReviewHost, HostEvent, ReviewHostRegistry } from "../providers/review-host/types.js";
+import { linkedPullRequestAttribution } from "./attribution.js";
 import { dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
@@ -21,6 +22,8 @@ export type { HostEvent };
 const log = logger.child({ module: "host-events" });
 const MAX_TASK_BODY = 8000;
 const MAX_TITLE = 256;
+/** Host events route on the webhook response path: short snapshot timeout, and no 429 wait. */
+const SNAPSHOT_BUDGET = { timeoutMs: 2000, retryOn429: false } as const;
 const HOST_NAMES: Record<HostEvent["provider"], string> = { github: "GitHub" };
 
 export type HostEventDb = Pick<
@@ -35,6 +38,8 @@ export type HostEventDb = Pick<
   | "webhook"
   | "budgetGroup"
   | "issuePullRequest"
+  | "workItem"
+  | "runAttribution"
   | "agentIssueProject"
   | "$transaction"
   | "$queryRaw"
@@ -168,6 +173,13 @@ async function startReviews(
   skipReviewedCommits = false,
 ): Promise<string[]> {
   const runIds: string[] = [];
+  // One lookup per PR, not per reviewer.
+  const attribution = await linkedPullRequestAttribution(
+    deps.db,
+    deps.issueTrackers,
+    { codeProvider: host.provider, repository, number: prNumber },
+    SNAPSHOT_BUDGET,
+  );
   for (const target of targets) {
     if (skipReviewedCommits && (await alreadyReviewed(deps, repository, prNumber, headSha, target.agentId))) {
       log.info(
@@ -190,6 +202,7 @@ async function startReviews(
         agentId: target.agentId,
         trigger: "host_event",
         taskOverride: `Review pull request #${prNumber} in ${repository} (head ${headSha}).`,
+        attribution,
         afterPersist: checkId
           ? async (tx, run) => {
               await tx.runHostCheck.create({
@@ -335,6 +348,14 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         agentId: allowed[0].agentId,
         trigger: "host_event",
         taskOverride: mentionTaskText(event),
+        attribution: event.isPullRequest
+          ? await linkedPullRequestAttribution(
+              deps.db,
+              deps.issueTrackers,
+              { codeProvider: host.provider, repository: event.repository, number: event.number },
+              SNAPSHOT_BUDGET,
+            )
+          : undefined,
         // Where to report, written with the run: even if this instance dies
         // before the follow-up below, the run's outcome still gets a comment.
         afterPersist: async (tx, run) => {
