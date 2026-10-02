@@ -7,13 +7,16 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use url::Url;
 
 use crate::error::AppError;
 
 pub const CALLBACK_PATH: &str = "/callback";
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CONNECTIONS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct Callback {
@@ -46,77 +49,141 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(diff) == 0
 }
 
-/// Waits for one valid callback and returns the authorization code.
-/// Consumes the listener, so the port closes on every exit path.
+/// Waits for the callback of this sign-in attempt and returns the code.
+///
+/// Requests that are not a callback for this attempt (other paths, missing or
+/// wrong `state`, duplicate parameters) get an error page and are ignored; only
+/// a callback whose `state` matches ends the wait. `expected_iss` is the RFC
+/// 9207 issuer, checked when the server sends one. Each connection is served in
+/// its own task so a stalled client cannot block the real callback. Consumes
+/// the listener, so the port closes on every exit path.
 pub async fn wait_for_code(
     listener: TcpListener,
     expected_state: &str,
+    expected_iss: Option<&str>,
     timeout: Duration,
 ) -> Result<String, AppError> {
-    tokio::time::timeout(timeout, accept_loop(&listener, expected_state))
-        .await
-        .map_err(|_| AppError::Timeout)?
+    tokio::time::timeout(
+        timeout,
+        accept_loop(&listener, expected_state, expected_iss),
+    )
+    .await
+    .map_err(|_| AppError::Timeout)?
 }
 
-async fn accept_loop(listener: &TcpListener, expected_state: &str) -> Result<String, AppError> {
+async fn accept_loop(
+    listener: &TcpListener,
+    expected_state: &str,
+    expected_iss: Option<&str>,
+) -> Result<String, AppError> {
+    let (tx, mut rx) = mpsc::channel::<Result<String, AppError>>(1);
+    // Dropping the set on return aborts any connection still in flight.
+    let mut tasks: JoinSet<()> = JoinSet::new();
+    let state: std::sync::Arc<str> = expected_state.into();
+    let iss: Option<std::sync::Arc<str>> = expected_iss.map(Into::into);
     loop {
-        let (mut stream, peer) = match listener.accept().await {
-            Ok(x) => x,
-            Err(_) => continue,
-        };
-        if !peer.ip().is_loopback() {
-            continue;
+        tokio::select! {
+            outcome = rx.recv() => return outcome.unwrap_or(Err(AppError::Timeout)),
+            accepted = listener.accept() => {
+                let Ok((stream, peer)) = accepted else { continue };
+                while tasks.try_join_next().is_some() {}
+                if !peer.ip().is_loopback() || tasks.len() >= MAX_CONNECTIONS {
+                    continue;
+                }
+                tasks.spawn(handle_connection(stream, state.clone(), iss.clone(), tx.clone()));
+            }
         }
-        let Some(target) = read_target(&mut stream).await else {
-            respond(&mut stream, "400 Bad Request", PAGE_ERROR).await;
-            continue;
-        };
-        let Ok(url) = Url::parse(&format!("http://127.0.0.1{target}")) else {
-            respond(&mut stream, "400 Bad Request", PAGE_ERROR).await;
-            continue;
-        };
-        if url.path() != CALLBACK_PATH {
-            respond(&mut stream, "404 Not Found", PAGE_NOT_FOUND).await;
-            continue;
-        }
-        let outcome = interpret(&url, expected_state);
-        let page = match &outcome {
-            Ok(_) => PAGE_OK,
-            Err(_) => PAGE_ERROR,
-        };
-        respond(&mut stream, "200 OK", page).await;
-        return outcome;
     }
 }
 
-fn interpret(url: &Url, expected_state: &str) -> Result<String, AppError> {
+async fn handle_connection(
+    mut stream: TcpStream,
+    expected_state: std::sync::Arc<str>,
+    expected_iss: Option<std::sync::Arc<str>>,
+    done: mpsc::Sender<Result<String, AppError>>,
+) {
+    let Some(target) = read_target(&mut stream).await else {
+        respond(&mut stream, "400 Bad Request", PAGE_ERROR).await;
+        return;
+    };
+    let Ok(url) = Url::parse(&format!("http://127.0.0.1{target}")) else {
+        respond(&mut stream, "400 Bad Request", PAGE_ERROR).await;
+        return;
+    };
+    if url.path() != CALLBACK_PATH {
+        respond(&mut stream, "404 Not Found", PAGE_NOT_FOUND).await;
+        return;
+    }
+    match interpret(&url, &expected_state, expected_iss.as_deref()) {
+        Verdict::Ignore => respond(&mut stream, "400 Bad Request", PAGE_ERROR).await,
+        Verdict::Finish(outcome) => {
+            let (status, page) = match &outcome {
+                Ok(_) => ("200 OK", PAGE_OK),
+                Err(_) => ("400 Bad Request", PAGE_ERROR),
+            };
+            respond(&mut stream, status, page).await;
+            let _ = done.try_send(outcome);
+        }
+    }
+}
+
+enum Verdict {
+    /// Not a callback for this attempt: keep listening.
+    Ignore,
+    /// The callback for this attempt: stop listening.
+    Finish(Result<String, AppError>),
+}
+
+fn interpret(url: &Url, expected_state: &str, expected_iss: Option<&str>) -> Verdict {
     let mut code = None;
     let mut state = None;
     let mut error = None;
+    let mut iss = None;
     for (k, v) in url.query_pairs() {
         let slot = match k.as_ref() {
             "code" => &mut code,
             "state" => &mut state,
             "error" => &mut error,
+            "iss" => &mut iss,
             _ => continue,
         };
         if slot.replace(v.into_owned()).is_some() {
-            return Err(AppError::Protocol(
-                "duplicate callback parameter".to_string(),
-            ));
+            return Verdict::Ignore;
         }
     }
     match state {
         Some(s) if constant_time_eq(s.as_bytes(), expected_state.as_bytes()) => {}
-        _ => return Err(AppError::Protocol("callback state mismatch".to_string())),
+        _ => return Verdict::Ignore,
     }
-    if error.is_some() {
-        return Err(AppError::Denied);
+    // From here the request belongs to this attempt, so the outcome is final.
+    if let (Some(got), Some(want)) = (iss.as_deref(), expected_iss)
+        && got.trim_end_matches('/') != want.trim_end_matches('/')
+    {
+        return Verdict::Finish(Err(AppError::Protocol(
+            "callback issuer mismatch".to_string(),
+        )));
     }
-    match code {
+    if let Some(e) = error {
+        return Verdict::Finish(Err(if e == "access_denied" {
+            AppError::Denied
+        } else {
+            AppError::Protocol(format!("authorization error: {}", sanitize_error_code(&e)))
+        }));
+    }
+    Verdict::Finish(match code {
         Some(c) if !c.is_empty() => Ok(c),
         _ => Err(AppError::Protocol("callback had no code".to_string())),
-    }
+    })
+}
+
+/// OAuth error codes are short ASCII tokens; anything else is not echoed.
+fn sanitize_error_code(code: &str) -> &str {
+    let ok = !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if ok { code } else { "unrecognized" }
 }
 
 /// Reads the request head and returns the target of a `GET`.
@@ -185,19 +252,26 @@ mod tests {
         out
     }
 
-    async fn start(
+    type Waiter = tokio::task::JoinHandle<Result<String, AppError>>;
+
+    async fn start_iss(
         state: &'static str,
+        iss: Option<&'static str>,
         timeout: Duration,
-    ) -> (
-        std::net::SocketAddr,
-        tokio::task::JoinHandle<Result<String, AppError>>,
-        Callback,
-    ) {
-        let (cb, listener) = bind().await.unwrap();
+    ) -> (std::net::SocketAddr, Waiter) {
+        let (_, listener) = bind().await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let h = tokio::spawn(wait_for_code(listener, state, timeout));
-        (addr, h, cb)
+        (
+            addr,
+            tokio::spawn(wait_for_code(listener, state, iss, timeout)),
+        )
     }
+
+    async fn start(state: &'static str, timeout: Duration) -> (std::net::SocketAddr, Waiter) {
+        start_iss(state, None, timeout).await
+    }
+
+    const LONG: Duration = Duration::from_secs(10);
 
     #[tokio::test]
     async fn binds_loopback_and_reports_redirect() {
@@ -212,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn success_returns_code_and_serves_page() {
-        let (addr, h, _) = start("st4te", Duration::from_secs(5)).await;
+        let (addr, h) = start("st4te", LONG).await;
         let resp = get(addr, "/callback?code=abc%20123&state=st4te").await;
         assert!(resp.starts_with("HTTP/1.1 200"));
         assert!(resp.contains("Signed in"));
@@ -221,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn ignores_other_paths_then_accepts_callback() {
-        let (addr, h, _) = start("s", Duration::from_secs(5)).await;
+        let (addr, h) = start("s", LONG).await;
         assert!(get(addr, "/favicon.ico").await.starts_with("HTTP/1.1 404"));
         assert!(
             get(addr, "/other?code=x&state=s")
@@ -233,40 +307,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_state_is_a_protocol_error_without_leaking_values() {
-        let (addr, h, _) = start("right", Duration::from_secs(5)).await;
+    async fn wrong_state_gets_error_page_and_listener_keeps_waiting() {
+        let (addr, h) = start("right", LONG).await;
         let resp = get(addr, "/callback?code=secretcode&state=wrong").await;
+        assert!(resp.starts_with("HTTP/1.1 400"));
         assert!(!resp.contains("secretcode"));
-        let err = h.await.unwrap().unwrap_err();
-        assert!(matches!(err, AppError::Protocol(_)));
-        let msg = err.to_string();
-        assert!(!msg.contains("secretcode") && !msg.contains("right") && !msg.contains("wrong"));
+        assert!(!h.is_finished());
+        assert!(
+            get(addr, "/callback?error=access_denied")
+                .await
+                .starts_with("HTTP/1.1 400")
+        );
+        assert!(!h.is_finished());
+        get(addr, "/callback?code=real&state=right").await;
+        assert_eq!(h.await.unwrap().unwrap(), "real");
     }
 
     #[tokio::test]
-    async fn missing_state_is_rejected() {
-        let (addr, h, _) = start("s", Duration::from_secs(5)).await;
-        get(addr, "/callback?code=c").await;
-        assert!(matches!(h.await.unwrap(), Err(AppError::Protocol(_))));
+    async fn duplicate_params_are_ignored_not_terminal() {
+        let (addr, h) = start("s", LONG).await;
+        assert!(
+            get(addr, "/callback?code=a&code=b&state=s")
+                .await
+                .starts_with("HTTP/1.1 400")
+        );
+        assert!(!h.is_finished());
+        get(addr, "/callback?code=ok&state=s").await;
+        assert_eq!(h.await.unwrap().unwrap(), "ok");
     }
 
     #[tokio::test]
-    async fn access_denied_maps_to_denied() {
-        let (addr, h, _) = start("s", Duration::from_secs(5)).await;
-        get(addr, "/callback?error=access_denied&state=s").await;
+    async fn access_denied_with_valid_state_maps_to_denied() {
+        let (addr, h) = start("s", LONG).await;
+        let resp = get(addr, "/callback?error=access_denied&state=s").await;
+        assert!(resp.starts_with("HTTP/1.1 400"));
         assert!(matches!(h.await.unwrap(), Err(AppError::Denied)));
     }
 
     #[tokio::test]
-    async fn duplicate_params_are_rejected() {
-        let (addr, h, _) = start("s", Duration::from_secs(5)).await;
-        get(addr, "/callback?code=a&code=b&state=s").await;
+    async fn other_error_codes_become_protocol_errors_with_the_code() {
+        let (addr, h) = start("s", LONG).await;
+        get(addr, "/callback?error=invalid_scope&state=s").await;
+        match h.await.unwrap() {
+            Err(AppError::Protocol(m)) => assert!(m.contains("invalid_scope")),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let (addr, h) = start("s", LONG).await;
+        get(addr, "/callback?error=%3Cscript%3E&state=s").await;
+        match h.await.unwrap() {
+            Err(AppError::Protocol(m)) => assert!(!m.contains("script")),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn iss_mismatch_is_a_protocol_error_and_match_or_absence_is_fine() {
+        let (addr, h) = start_iss("s", Some("https://as.example/mcp"), LONG).await;
+        get(
+            addr,
+            "/callback?code=c&state=s&iss=https%3A%2F%2Fevil.example",
+        )
+        .await;
         assert!(matches!(h.await.unwrap(), Err(AppError::Protocol(_))));
+        let (addr, h) = start_iss("s", Some("https://as.example/mcp"), LONG).await;
+        get(
+            addr,
+            "/callback?code=c&state=s&iss=https%3A%2F%2Fas.example%2Fmcp",
+        )
+        .await;
+        assert_eq!(h.await.unwrap().unwrap(), "c");
+        let (addr, h) = start_iss("s", Some("https://as.example/mcp"), LONG).await;
+        get(addr, "/callback?code=c2&state=s").await;
+        assert_eq!(h.await.unwrap().unwrap(), "c2");
     }
 
     #[tokio::test]
     async fn non_get_is_ignored() {
-        let (addr, h, _) = start("s", Duration::from_secs(5)).await;
+        let (addr, h) = start("s", LONG).await;
         let mut s = TcpStream::connect(addr).await.unwrap();
         s.write_all(b"POST /callback?code=x&state=s HTTP/1.1\r\n\r\n")
             .await
@@ -279,8 +396,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stalled_connection_does_not_block_the_real_callback() {
+        let (addr, h) = start("s", LONG).await;
+        let _stalled = TcpStream::connect(addr).await.unwrap(); // sends nothing
+        let started = std::time::Instant::now();
+        get(addr, "/callback?code=fast&state=s").await;
+        assert_eq!(h.await.unwrap().unwrap(), "fast");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
     async fn times_out_and_closes_port() {
-        let (addr, h, _) = start("s", Duration::from_millis(150)).await;
+        let (addr, h) = start("s", Duration::from_millis(150)).await;
         assert!(matches!(h.await.unwrap(), Err(AppError::Timeout)));
         assert!(TcpStream::connect(addr).await.is_err());
     }

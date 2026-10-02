@@ -77,6 +77,9 @@ pub struct AuthServer {
     pub token_endpoint: Url,
     pub registration_endpoint: Option<Url>,
     pub resource: String,
+    /// The advertised issuer, already checked against the metadata's `issuer`.
+    /// Also the expected value of the RFC 9207 `iss` callback parameter.
+    pub issuer: String,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +90,7 @@ struct ProtectedResource {
 
 #[derive(Deserialize)]
 struct AsMetadata {
+    issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
     registration_endpoint: Option<String>,
@@ -149,9 +153,31 @@ async fn parse_json<T: serde::de::DeserializeOwned>(
             status: status.as_u16(),
         });
     }
-    resp.json::<T>()
-        .await
+    let body = read_capped(resp).await?;
+    serde_json::from_slice(&body)
         .map_err(|_| AppError::Protocol("unexpected response shape".to_string()))
+}
+
+const MAX_EXPIRES_IN_SECS: u64 = 24 * 60 * 60;
+/// Upper bound on any metadata, registration or token response body.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+async fn read_capped(mut resp: reqwest::Response) -> Result<Vec<u8>, AppError> {
+    let too_big = || AppError::Protocol("response too large".to_string());
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_BODY_BYTES as u64)
+    {
+        return Err(too_big());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len() + chunk.len() > MAX_BODY_BYTES {
+            return Err(too_big());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthServer, AppError> {
@@ -161,14 +187,19 @@ pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthSe
 
     let prm: ProtectedResource =
         get_json(http, well_known(&server, "oauth-protected-resource")?).await?;
-    let issuer = prm
+    let advertised = prm
         .authorization_servers
         .first()
         .ok_or_else(|| AppError::Protocol("no authorization server advertised".to_string()))?;
-    let issuer = parse_endpoint(issuer, "authorization server")?;
+    let issuer = parse_endpoint(advertised, "authorization server")?;
 
-    let meta: AsMetadata =
-        get_json(http, well_known(&issuer, "oauth-authorization-server")?).await?;
+    let meta = fetch_as_metadata(http, &issuer).await?;
+    // RFC 8414 section 3.3: the metadata must name the issuer we asked about.
+    if meta.issuer.trim_end_matches('/') != advertised.trim_end_matches('/') {
+        return Err(AppError::Protocol(
+            "authorization server issuer mismatch".to_string(),
+        ));
+    }
     Ok(AuthServer {
         authorization_endpoint: parse_endpoint(
             &meta.authorization_endpoint,
@@ -181,7 +212,42 @@ pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthSe
             .map(|r| parse_endpoint(r, "registration endpoint"))
             .transpose()?,
         resource: prm.resource,
+        issuer: advertised.clone(),
     })
+}
+
+/// Candidate metadata URLs in MCP-spec order. wardby serves its metadata only
+/// at the origin root, so the root form is tried for path issuers too.
+fn metadata_candidates(issuer: &Url) -> Result<Vec<Url>, AppError> {
+    let mut out = vec![well_known(issuer, "oauth-authorization-server")?];
+    let path = issuer.path().trim_end_matches('/').to_string();
+    if !path.is_empty() {
+        let mut root = issuer.clone();
+        root.set_path("/");
+        out.push(well_known(&root, "oauth-authorization-server")?);
+    }
+    out.push(well_known(issuer, "openid-configuration")?);
+    if !path.is_empty() {
+        // OpenID Connect Discovery appends the segment to the issuer path.
+        let mut u = issuer.clone();
+        u.set_query(None);
+        u.set_fragment(None);
+        u.set_path(&format!("{path}/.well-known/openid-configuration"));
+        out.push(u);
+    }
+    Ok(out)
+}
+
+async fn fetch_as_metadata(http: &reqwest::Client, issuer: &Url) -> Result<AsMetadata, AppError> {
+    let mut last = AppError::Http { status: 404 };
+    for url in metadata_candidates(issuer)? {
+        match get_json::<AsMetadata>(http, url).await {
+            Ok(meta) => return Ok(meta),
+            Err(e @ AppError::Http { status: 404 }) => last = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
 }
 
 // -------------------------------------------------------- registration
@@ -262,6 +328,7 @@ impl fmt::Debug for Tokens {
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
+    token_type: String,
     refresh_token: Option<String>,
     expires_in: Option<u64>,
 }
@@ -277,15 +344,19 @@ async fn token_request(
         .send()
         .await?;
     let t: TokenResponse = parse_json(resp).await?;
+    if !t.token_type.eq_ignore_ascii_case("bearer") {
+        return Err(AppError::Protocol("unsupported token type".to_string()));
+    }
     if t.access_token.is_empty() {
         return Err(AppError::Protocol("empty access token".to_string()));
     }
     Ok(Tokens {
         access_token: t.access_token,
         refresh_token: t.refresh_token.filter(|r| !r.is_empty()),
-        expires_at: t
-            .expires_in
-            .map(|s| Instant::now() + Duration::from_secs(s)),
+        // Capped at a day; a value that would overflow Instant means "unknown".
+        expires_at: t.expires_in.and_then(|s| {
+            Instant::now().checked_add(Duration::from_secs(s.min(MAX_EXPIRES_IN_SECS)))
+        }),
     })
 }
 
@@ -388,6 +459,7 @@ mod tests {
             token_endpoint: Url::parse(&format!("{base}/token")).unwrap(),
             registration_endpoint: Some(Url::parse(&format!("{base}/register")).unwrap()),
             resource: format!("{base}/mcp"),
+            issuer: format!("{base}/mcp"),
         }
     }
 
@@ -478,6 +550,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/.well-known/oauth-authorization-server"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": base,
                 "authorization_endpoint": format!("{base}/authorize"),
                 "token_endpoint": format!("{base}/token"),
             })))
@@ -727,5 +800,149 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Protocol(_)));
+    }
+
+    async fn mount_prm(s: &MockServer, issuer: &str) {
+        let base = s.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "resource": format!("{base}/mcp"), "authorization_servers": [issuer],
+            })))
+            .mount(s)
+            .await;
+    }
+
+    fn as_meta(base: &str, issuer: &str) -> serde_json::Value {
+        serde_json::json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "registration_endpoint": format!("{base}/register"),
+        })
+    }
+
+    #[tokio::test]
+    async fn path_issuer_falls_back_to_root_metadata_like_wardby() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        let issuer = format!("{base}/mcp");
+        mount_prm(&s, &issuer).await;
+        // Only the root path is mounted, as wardby serves it.
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta(&base, &issuer)))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let a = discover(&http_client().unwrap(), &base).await.unwrap();
+        assert_eq!(a.issuer, issuer);
+        assert_eq!(a.token_endpoint.as_str(), format!("{base}/token"));
+    }
+
+    #[tokio::test]
+    async fn path_issuer_prefers_path_inserted_metadata() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        let issuer = format!("{base}/mcp");
+        mount_prm(&s, &issuer).await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta(&base, &issuer)))
+            .expect(1)
+            .mount(&s)
+            .await;
+        assert!(discover(&http_client().unwrap(), &base).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_openid_configuration_for_external_idps() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        let issuer = format!("{base}/tenant");
+        mount_prm(&s, &issuer).await;
+        Mock::given(method("GET"))
+            .and(path("/tenant/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta(&base, &issuer)))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let a = discover(&http_client().unwrap(), &base).await.unwrap();
+        assert_eq!(a.issuer, issuer);
+    }
+
+    #[tokio::test]
+    async fn issuer_mismatch_is_rejected() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        mount_prm(&s, &base).await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(as_meta(&base, "https://evil.example")),
+            )
+            .mount(&s)
+            .await;
+        let err = discover(&http_client().unwrap(), &base).await.unwrap_err();
+        assert!(matches!(err, AppError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn oversized_response_is_rejected() {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(100 * 1024)))
+            .mount(&s)
+            .await;
+        let err = refresh(&http_client().unwrap(), &as_for(&s.uri()), "cid", "rt")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Protocol(m) if m == "response too large"));
+    }
+
+    #[tokio::test]
+    async fn non_bearer_token_type_is_rejected_and_case_is_ignored() {
+        let s = MockServer::start().await;
+        let as_ = as_for(&s.uri());
+        let http = http_client().unwrap();
+        for (tt, ok) in [("DPoP", false), ("bearer", true), ("BEARER", true)] {
+            s.reset().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"access_token": "AT", "token_type": tt})),
+                )
+                .mount(&s)
+                .await;
+            assert_eq!(refresh(&http, &as_, "cid", "rt").await.is_ok(), ok, "{tt}");
+        }
+        s.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"access_token": "AT"})),
+            )
+            .mount(&s)
+            .await;
+        assert!(refresh(&http, &as_, "cid", "rt").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn huge_expires_in_does_not_panic() {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"AT","token_type":"Bearer","expires_in":18446744073709551615}"#,
+            ))
+            .mount(&s)
+            .await;
+        let t = refresh(&http_client().unwrap(), &as_for(&s.uri()), "cid", "rt")
+            .await
+            .unwrap();
+        let e = t.expires_at.unwrap();
+        assert!(e <= Instant::now() + Duration::from_secs(24 * 60 * 60));
     }
 }
