@@ -29,7 +29,12 @@
  * gets 404, not another principal's final text/cost.
  */
 import { dispatchRun } from "../../core/dispatch.js";
-import { AttributionError, explicitAttribution, type AttributionIntent } from "../../core/attribution.js";
+import {
+  AttributionError,
+  explicitAttribution,
+  RESPONSE_PATH_SNAPSHOT_BUDGET,
+  type AttributionIntent,
+} from "../../core/attribution.js";
 import { CodingBaseRefSchema, CodingTaskOverrideSchema } from "../../coding/protocol.js";
 import { z } from "zod";
 import type { WardbyMcpServer } from "../server.js";
@@ -139,7 +144,13 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       let attribution: AttributionIntent | undefined;
       if (args.issue !== undefined) {
         try {
-          attribution = await explicitAttribution(ctx.db, ctx.providers.issueTrackers, agent.id, args.issue);
+          attribution = await explicitAttribution(
+            ctx.db,
+            ctx.providers.issueTrackers,
+            agent.id,
+            args.issue,
+            RESPONSE_PATH_SNAPSHOT_BUDGET,
+          );
         } catch (err) {
           if (err instanceof AttributionError) throw new McpError(400, err.message);
           throw err;

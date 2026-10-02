@@ -591,6 +591,46 @@ describe("routeHostEvent linked-PR attribution", () => {
     });
   });
 
+  it("does no linked-issue lookup when every reviewer skips the push as already reviewed", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps(
+      [
+        { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" },
+        { agentId: "a2", triggers: ["pull_request"], checkName: "security" },
+      ],
+      host(),
+      gate(),
+      { runId: "earlier" },
+    );
+    d.linkedIssue.mockResolvedValue(LINK);
+    await routeHostEvent(pr, d);
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(d.linkedIssue).not.toHaveBeenCalled();
+  });
+
+  it("snapshots the linked issue within the response-path budget (2 s, no 429 retry), for reviews and mentions", async () => {
+    for (const event of [pr, mention]) {
+      vi.mocked(dispatchRun).mockClear();
+      const snapshotIssue = vi.fn(async (key: string) => ({
+        key,
+        scopeKey: "PAY",
+        url: `https://jira.example/${key}`,
+      }));
+      const d = {
+        ...deps([
+          { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" },
+          { agentId: "a3", triggers: ["mention"], checkName: null },
+        ]),
+        issueTrackers: { jira: { snapshotIssue } } as never,
+      };
+      d.linkedIssue.mockResolvedValue(LINK);
+      await routeHostEvent(event, d);
+      expect(dispatchRun).toHaveBeenCalled();
+      expect(snapshotIssue).toHaveBeenCalledTimes(1);
+      expect(snapshotIssue).toHaveBeenCalledWith("PAY-1", { timeoutMs: 2000, retryOn429: false });
+    }
+  });
+
   it("a mention on a plain issue is not looked up", async () => {
     vi.mocked(dispatchRun).mockClear();
     const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);

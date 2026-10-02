@@ -12,7 +12,12 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
-import { AttributionError, explicitAttribution, type AttributionIntent } from "./attribution.js";
+import {
+  AttributionError,
+  explicitAttribution,
+  RESPONSE_PATH_SNAPSHOT_BUDGET,
+  type AttributionIntent,
+} from "./attribution.js";
 import { dispatchRun } from "./dispatch.js";
 import { atLeast, effectiveAccess } from "./grants.js";
 
@@ -113,7 +118,13 @@ export async function resolveWebhookRun(
   let attribution: AttributionIntent | undefined;
   if (opts.issue !== undefined) {
     try {
-      attribution = await explicitAttribution(db, opts.issueTrackers, agent.id, opts.issue);
+      attribution = await explicitAttribution(
+        db,
+        opts.issueTrackers,
+        agent.id,
+        opts.issue,
+        RESPONSE_PATH_SNAPSHOT_BUDGET,
+      );
     } catch (err) {
       if (err instanceof AttributionError) return { ok: false, reason: "invalid_issue", message: err.message };
       throw err;

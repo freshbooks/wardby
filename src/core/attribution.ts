@@ -40,6 +40,14 @@ export const SNAPSHOT_CACHE_MS = 10 * 60 * 1000;
 export const SNAPSHOT_TIMEOUT_MS = 3000;
 
 /**
+ * Snapshot budget for a caller that is answering a request (a webhook, an
+ * MCP tool call, a host event): a short timeout and no 429 retry, so a slow
+ * or rate-limited tracker degrades to key-only attribution instead of
+ * stalling the response.
+ */
+export const RESPONSE_PATH_SNAPSHOT_BUDGET = { timeoutMs: 2000, retryOn429: false } as const;
+
+/**
  * The work item a new attribution points at, snapshotted from the tracker
  * unless a fresh snapshot is already stored. Never throws: a failed lookup or
  * snapshot attributes by key only.
@@ -262,7 +270,8 @@ export async function explicitAttribution(
   trackers: IssueTrackerRegistry | undefined,
   agentId: string,
   issue: unknown,
+  opts?: { timeoutMs?: number; retryOn429?: boolean },
 ): Promise<AttributionIntent> {
   const { provider, key } = await validateExplicitIssue(db, agentId, issue);
-  return { source: "explicit", item: await resolveWorkItem(db, trackers, provider, key) };
+  return { source: "explicit", item: await resolveWorkItem(db, trackers, provider, key, opts) };
 }
