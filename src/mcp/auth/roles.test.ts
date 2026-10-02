@@ -67,14 +67,24 @@ describe("supported scopes", () => {
       for (const scope of scopes) expect(SCOPES_SUPPORTED, `${name} needs ${scope}`).toContain(scope);
   });
 
-  it("treats exactly agents:admin, packages:approve and services:manage as privileged", () => {
-    expect([...PRIVILEGED_SCOPES].sort()).toEqual(["agents:admin", "packages:approve", "services:manage"]);
+  it("treats exactly admin:view, agents:admin, packages:approve and services:manage as privileged", () => {
+    expect([...PRIVILEGED_SCOPES].sort()).toEqual([
+      "admin:view",
+      "agents:admin",
+      "packages:approve",
+      "services:manage",
+    ]);
     for (const scope of PRIVILEGED_SCOPES) expect(SCOPES_SUPPORTED).toContain(scope);
   });
 
   it("built-in roles: admin grants every permission, package-approver and service-manager one each", () => {
     expect([...ROLE_NAMES].sort()).toEqual(["admin", "package-approver", "service-manager"]);
-    expect([...ROLE_PERMISSIONS.admin].sort()).toEqual(["agents:admin", "packages:approve", "services:manage"]);
+    expect([...ROLE_PERMISSIONS.admin].sort()).toEqual([
+      "admin:view",
+      "agents:admin",
+      "packages:approve",
+      "services:manage",
+    ]);
     expect(ROLE_PERMISSIONS["package-approver"]).toEqual(["packages:approve"]);
     expect(ROLE_PERMISSIONS["service-manager"]).toEqual(["services:manage"]);
     for (const perms of Object.values(ROLE_PERMISSIONS)) for (const p of perms) expect(PRIVILEGED_SCOPES).toContain(p);
@@ -164,6 +174,13 @@ describe("privileged operations need the scope AND a role granting it", () => {
     expect(
       denial(() => requireAnyScope(ctx(["packages:approve"], ["service-manager"]), URI, ...PACKAGES))?.message,
     ).toMatch(/requires a role that grants it/);
+  });
+
+  it("admin:view is honoured only for the admin role", () => {
+    const base = { scopes: ["admin:view"] };
+    expect(() => requireScope(ctx([...base.scopes], ["admin"]), URI, "admin:view")).not.toThrow();
+    expect(() => requireScope(ctx([...base.scopes], []), URI, "admin:view")).toThrow(/Forbidden/);
+    expect(() => requireScope(ctx([...base.scopes], ["service-manager"]), URI, "admin:view")).toThrow(/Forbidden/);
   });
 });
 

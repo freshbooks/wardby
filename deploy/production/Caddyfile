@@ -6,7 +6,12 @@
 		timeouts {
 			read_body 15s
 			read_header 10s
-			write 15s
+			# `write` is a hard limit on the whole response, not an idle timeout.
+			# Long-lived responses such as the admin viewer's event stream
+			# (text/event-stream) stay open while a client watches, so a short
+			# value would cut them off. Clients reconnect and resync when a
+			# stream ends at this limit.
+			write 1h
 			idle 5s
 		}
 	}

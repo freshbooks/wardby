@@ -495,3 +495,43 @@ describe("startHttpServer (GitHub user callback)", () => {
     expect(handleHostUserCallback).not.toHaveBeenCalled();
   });
 });
+
+describe("viewer API routing", () => {
+  async function startViewer(viewer?: import("../../viewer/http.js").ViewerApi) {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb(), config: { canonicalUri: CANONICAL_URI } });
+    handle = await startHttpServer({
+      mcp,
+      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
+      auth: {
+        authProvider: fakeAuthProvider(async () => ({ subject: "u", roles: [], scopes: [] })),
+        db: fakeDb(),
+        providers: fakeProviders,
+      },
+      viewer,
+    });
+    return `http://127.0.0.1:${handle.port}`;
+  }
+
+  it("answers 404 for /admin/api/* when no viewer is configured", async () => {
+    const base = await startViewer();
+    expect((await fetch(`${base}/admin/api/graph`)).status).toBe(404);
+  });
+
+  it("routes /admin/api/* to the viewer, 404s when it declines, and closes its streams on close", async () => {
+    const closeStreams = vi.fn();
+    const viewer = {
+      handle: vi.fn(async (_req, res, url: URL) => {
+        if (url.pathname !== "/admin/api/graph") return false;
+        res.writeHead(204).end();
+        return true;
+      }),
+      closeStreams,
+    } as unknown as import("../../viewer/http.js").ViewerApi;
+    const base = await startViewer(viewer);
+    expect((await fetch(`${base}/admin/api/graph`)).status).toBe(204);
+    expect((await fetch(`${base}/admin/api/other`)).status).toBe(404);
+    await handle!.close();
+    handle = undefined;
+    expect(closeStreams).toHaveBeenCalledOnce();
+  });
+});

@@ -20,18 +20,20 @@ to the exact same public MCP URL. Tokens need a stable subject, expiry, issuer,
 audience, and the granted Wardby scopes in `scope` or `scp`.
 
 Scopes authorize normal operations such as managing agents, runs, tools,
-datastores, secrets, webhooks, budgets, packages, services, and memory. Three
+datastores, secrets, webhooks, budgets, packages, services, and memory. Four
 sensitive permissions have an additional role requirement:
 
 - `agents:admin` requires the Wardby `admin` role.
 - `packages:approve` requires the `admin` or `package-approver` role.
 - `services:manage` requires the `admin` or `service-manager` role.
+- `admin:view` requires the `admin` role. It opens the read-only, deployment-wide
+  admin viewer API; see [Watch live runs with the admin viewer API](admin-viewer.md).
 
 Map roles only from an IdP claim that users cannot self-assign. Removing a
 role affects the next token the caller receives.
 
 When you upgrade a delegating-mode deployment, define any newly advertised
-scope, such as `services:manage`, in the provider before deploying. Clients
+scope, such as `admin:view`, in the provider before deploying. Clients
 that request every advertised scope otherwise fail with `invalid_scope`.
 
 Read [`docs/getting-started-identity-provider.md`](../docs/getting-started-identity-provider.md)

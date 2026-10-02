@@ -45,8 +45,10 @@ import { countUnattendedSchedules, unattendedSchedulesWarning } from "./unattend
 import { runStdioServer } from "./transport/stdio.js";
 import { startHttpServer } from "./transport/streamable-http.js";
 import { resolvePrincipal } from "./auth/principal.js";
-import { ROLE_NAMES, SCOPES_SUPPORTED } from "./auth/resource-server.js";
+import { ROLE_NAMES, SCOPES_SUPPORTED, authenticate } from "./auth/resource-server.js";
 import { canonicalUrl } from "./transport/http-limits.js";
+import { createViewerApi } from "../viewer/http.js";
+import { createViewerEventBus } from "../viewer/event-bus.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerServiceTools } from "./tools/services.js";
 import { registerBudgetGroupTools } from "./tools/budget-groups.js";
@@ -368,10 +370,23 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     : undefined;
   mcpLog.info({ enabled: Boolean(hostUserAuth) }, "GitHub account linking");
 
+  const canonicalHref = canonicalUrl(mcpConfig.canonicalUri).href;
+  const viewerBus = process.env.DATABASE_URL
+    ? createViewerEventBus({ connectionString: process.env.DATABASE_URL })
+    : undefined;
+  const viewer = viewerBus
+    ? createViewerApi({
+        db: prisma,
+        bus: viewerBus,
+        authenticate: (authorization) =>
+          authenticate({ authorization }, { authProvider, db: prisma, providers, canonicalUri: canonicalHref }),
+        canonicalUri: canonicalHref,
+      })
+    : undefined;
   const http = await startHttpServer({
     mcp,
     config: {
-      canonicalUri: canonicalUrl(mcpConfig.canonicalUri).href,
+      canonicalUri: canonicalHref,
       httpBind: mcpConfig.httpBind,
       authProviderKind,
       authorizationServer: authConfig.issuer,
@@ -381,6 +396,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     selfHosted,
     hostEvents,
     hostUserAuth,
+    viewer,
   });
   const cleanupTimer = selfHosted
     ? setInterval(() => {
@@ -391,6 +407,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     close: async () => {
       if (cleanupTimer) clearInterval(cleanupTimer);
       await closeQuietly(http.close(), "HTTP transport close");
+      await closeQuietly(viewerBus?.close(), "viewer event bus close");
       // Let the runs this instance is executing finish before the executor
       // closes under them; a run abandoned here is lost, never resumed.
       await waitForInFlightRuns(drainSeconds * 1000);
