@@ -310,4 +310,24 @@ describe("redirectMatches (RFC 8252 loopback)", () => {
   ])("%s -> %s", (requested, expected) => {
     expect(redirectMatches(registered, requested)).toBe(expected);
   });
+
+  // Adversarial inputs. URLs are parsed with WHATWG rules, so dot segments are
+  // resolved (`/x/../callback` IS `/callback`, the same path a browser would
+  // follow) and the scheme is case-insensitive.
+  const v6 = ["http://[::1]:1/callback"];
+  it.each([
+    [registered, "http://127.0.0.1.evil.com/callback", false],
+    [v6, "http://[::1]:5/callback", true],
+    [registered, "http://[::1]:5/callback", false],
+    [v6, "http://127.0.0.1:5/callback", false],
+    [registered, "http://u:p@127.0.0.1:5/callback", false],
+    [registered, "http://127.0.0.1:5/callback#", false],
+    [registered, "http://127.0.0.1:5/callback#x", false],
+    [registered, "http://127.0.0.1:5/x/../callback", true],
+    [registered, "http://127.0.0.1:5/callback/../other", false],
+    [registered, "http://127.0.0.1:5/x/%2e%2e/other", false],
+    [registered, "HTTP://127.0.0.1:5/callback", true],
+  ])("%j: %s -> %s", (reg, requested, expected) => {
+    expect(redirectMatches(reg, requested)).toBe(expected);
+  });
 });

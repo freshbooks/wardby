@@ -30,7 +30,7 @@ const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
  * Whether `requested` is one of a client's registered redirect URIs. A native
  * app's loopback redirect may differ from its registration only in port: it
  * listens on whatever port the OS hands it (RFC 8252 §7.3). Everything else —
- * scheme, host, path, query — must match exactly.
+ * scheme, host, path, query — must match exactly, with no userinfo or fragment.
  */
 export function redirectMatches(registered: readonly string[], requested: string): boolean {
   if (registered.includes(requested)) return true;
@@ -51,7 +51,7 @@ export function redirectMatches(registered: readonly string[], requested: string
         have.search === want.search &&
         !want.username &&
         !want.password &&
-        !want.hash
+        !requested.includes("#") // URL.hash is "" for a bare "#"
       );
     } catch {
       return false;
