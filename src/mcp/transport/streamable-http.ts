@@ -17,6 +17,7 @@ import { canonicalUrl, HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } fro
 import { browserHandler } from "../auth/self-hosted/browser.js";
 import { handleSecretElicitationForm, SECRET_ELICITATION_PATH } from "../tools/secret-elicitation-form.js";
 import { logger } from "../../core/logger.js";
+import { VIEWER_API_PREFIX, type ViewerApi } from "../../viewer/http.js";
 
 const httpLog = logger.child({ module: "streamable-http" });
 
@@ -37,6 +38,8 @@ export interface StartHttpServerOptions {
   hostEvents?: { github?: GitHubIngressDeps; jira?: JiraIngressDeps };
   /** The host identity-link browser callback (link_host_account); absent = 404. */
   hostUserAuth?: { github?: HostUserCallbackDeps };
+  /** The admin viewer API (/admin/api/*); absent = those paths answer 404. */
+  viewer?: ViewerApi;
 }
 export interface HttpServerHandle {
   port: number;
@@ -213,6 +216,11 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
       await handleHostUserCallback(url, res, opts.hostUserAuth.github);
       return;
     }
+    if (url.pathname.startsWith(VIEWER_API_PREFIX)) {
+      if (opts.viewer && (await opts.viewer.handle(req, res, url))) return;
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
     if (url.pathname === "/mcp") {
       if (req.method === "POST" && (!body || body instanceof URLSearchParams))
         throw new HttpBoundaryError(415, "expected_json");
@@ -252,6 +260,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
     port: typeof address === "object" && address ? address.port : opts.config.httpBind.port,
     close: () =>
       new Promise((resolve, reject) => {
+        opts.viewer?.closeStreams();
         server.close((err) => (err ? reject(err) : resolve()));
         server.closeIdleConnections();
       }),
