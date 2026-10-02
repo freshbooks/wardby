@@ -168,9 +168,36 @@ describe("validateExplicitIssue", () => {
     });
   });
 
+  it.each(["pay-241", "Pay-241", "  pay-241 "])(
+    "corrects a key that only differs by case or spacing (%j)",
+    async (key) => {
+      const db = { agentIssueProject: { findUnique: vi.fn(async () => ({ agentId: "a" })) } };
+      await expect(validateExplicitIssue(db as never, "a", { provider: "jira", key })).resolves.toEqual({
+        provider: "jira",
+        key: "PAY-241",
+      });
+      expect(db.agentIssueProject.findUnique).toHaveBeenCalledWith({
+        where: { agentId_provider_projectKey: { agentId: "a", provider: "jira", projectKey: "PAY" } },
+        select: { agentId: true },
+      });
+    },
+  );
+
+  it("names the caller's field in its messages (default issue)", async () => {
+    await expect(validateExplicitIssue(linked as never, "a", { provider: "jira", key: "not a key" })).rejects.toThrow(
+      "issue.key must be an issue key such as PROJ-123.",
+    );
+    await expect(
+      validateExplicitIssue(linked as never, "a", { provider: "jira", key: "not a key" }, "wardbyIssue"),
+    ).rejects.toThrow("wardbyIssue.key must be an issue key such as PROJ-123.");
+    await expect(
+      validateExplicitIssue(linked as never, "a", { provider: "trello", key: "PAY-1" }, "wardbyIssue"),
+    ).rejects.toThrow(/^wardbyIssue\.provider must be one of: jira\.$/);
+  });
+
   it.each([
-    [{ provider: "jira", key: "pay-241" }],
     [{ provider: "jira", key: "PAY-0" }],
+    [{ provider: "jira", key: "pay 241" }],
     [{ provider: "jira" }],
     [{ provider: "linear", key: "ENG-1" }],
     ["PAY-241"],

@@ -158,6 +158,27 @@ describe("webhook ingress", () => {
     ]);
   });
 
+  it("corrects a lowercase wardbyIssue key and attributes the run to the uppercase issue", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    const upserts: Array<{ where: unknown }> = [];
+    db.agentIssueProject = { findUnique: async () => ({ agentId: "a1" }) };
+    db.workItem = {
+      findUnique: async () => null,
+      upsert: async (a: { where: unknown }) => (upserts.push(a), { id: "wi1", parentKey: null }),
+    };
+    db.runAttribution = { findUnique: async () => null, create: async () => ({}) };
+    db.runIssueStatus = { findUnique: async () => null };
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { wardbyIssue: { provider: "jira", key: "pay-241" } } },
+      db,
+      executor,
+    );
+    expect(result.status).toBe(202);
+    expect(upserts.map((u) => u.where)).toEqual([{ provider_key: { provider: "jira", key: "PAY-241" } }]);
+  });
+
   it("rejects a wardbyIssue the agent is not linked to with 400 invalid_issue, creating no run", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
     db.agentIssueProject = { findUnique: async () => null };
@@ -209,9 +230,25 @@ describe("webhook ingress", () => {
     );
     expect(result).toEqual({
       status: 400,
-      body: { error: "invalid_issue", error_description: expect.stringMatching(/issue key/) },
+      // Names the webhook's own field, not trigger_agent's `issue`.
+      body: { error: "invalid_issue", error_description: "wardbyIssue.key must be an issue key such as PROJ-123." },
     });
     expect(runCreate).not.toHaveBeenCalled();
+  });
+
+  it("names wardbyIssue.provider when the provider is unknown", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter" }]) as any;
+    const { id, secret } = await createWebhook("a1", "p1", db);
+    const result = await handleWebhookIngress(
+      id,
+      { headers: { "x-webhook-secret": secret }, body: { wardbyIssue: { provider: "trello", key: "PAY-241" } } },
+      db,
+      executor,
+    );
+    expect(result).toMatchObject({
+      status: 400,
+      body: { error: "invalid_issue", error_description: expect.stringMatching(/^wardbyIssue\.provider must be/) },
+    });
   });
 
   it("snapshots a wardbyIssue within the response-path budget (2 s, no 429 retry)", async () => {

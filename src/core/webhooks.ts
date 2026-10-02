@@ -118,13 +118,10 @@ export async function resolveWebhookRun(
   let attribution: AttributionIntent | undefined;
   if (opts.issue !== undefined) {
     try {
-      attribution = await explicitAttribution(
-        db,
-        opts.issueTrackers,
-        agent.id,
-        opts.issue,
-        RESPONSE_PATH_SNAPSHOT_BUDGET,
-      );
+      attribution = await explicitAttribution(db, opts.issueTrackers, agent.id, opts.issue, {
+        ...RESPONSE_PATH_SNAPSHOT_BUDGET,
+        field: "wardbyIssue",
+      });
     } catch (err) {
       if (err instanceof AttributionError) return { ok: false, reason: "invalid_issue", message: err.message };
       throw err;

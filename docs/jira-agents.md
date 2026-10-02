@@ -396,8 +396,9 @@ A run is attributed when:
 - it reviews or answers a mention on a pull request wardby opened for an issue;
 - `trigger_agent` named an `issue`, or a webhook call's JSON body named a
   `wardbyIssue` (both `{ "provider": "jira", "key": "PROJ-123" }`), in a
-  project the agent is linked to. A malformed key, or a key in a project the
-  agent isn't linked to, is refused (`trigger_agent` returns an error; a
+  project the agent is linked to. Keys are matched without regard to case or
+  surrounding spaces (`proj-123` is read as `PROJ-123`). A malformed key, or a
+  key in a project the agent isn't linked to, is refused (`trigger_agent` returns an error; a
   webhook answers `400 invalid_issue`). A webhook ignores a top-level `issue`
   field, so payloads forwarded from GitHub or Jira, which carry their own
   `issue` object, still run unattributed;

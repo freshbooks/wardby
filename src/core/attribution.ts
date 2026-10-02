@@ -242,20 +242,25 @@ export class AttributionError extends Error {
  * An issue a caller names on trigger_agent or a webhook. It decides whose
  * cost this run counts toward, so it must be well formed and in a project the
  * agent is linked to (AgentIssueProject) — otherwise the dispatch is refused.
+ * Issue keys are uppercase, so a key that differs only by case or surrounding
+ * spaces ("pay-241") is corrected rather than refused. `field` is the caller's
+ * name for the value (trigger_agent: issue; webhooks: wardbyIssue), so
+ * refusals name the field the caller actually sent.
  */
 export async function validateExplicitIssue(
   db: Pick<PrismaClient, "agentIssueProject">,
   agentId: string,
   issue: unknown,
+  field = "issue",
 ): Promise<{ provider: IssueTrackerProvider; key: string }> {
   const candidate = issue && typeof issue === "object" ? (issue as { provider?: unknown; key?: unknown }) : {};
   const provider = candidate.provider;
-  const key = candidate.key;
+  const key = typeof candidate.key === "string" ? candidate.key.trim().toUpperCase() : candidate.key;
   if (typeof provider !== "string" || !ISSUE_TRACKER_PROVIDERS.includes(provider as IssueTrackerProvider)) {
-    throw new AttributionError(`issue.provider must be one of: ${ISSUE_TRACKER_PROVIDERS.join(", ")}.`);
+    throw new AttributionError(`${field}.provider must be one of: ${ISSUE_TRACKER_PROVIDERS.join(", ")}.`);
   }
   if (typeof key !== "string" || !ISSUE_KEY.test(key)) {
-    throw new AttributionError("issue.key must be an issue key such as PROJ-123.");
+    throw new AttributionError(`${field}.key must be an issue key such as PROJ-123.`);
   }
   const link = await db.agentIssueProject.findUnique({
     where: { agentId_provider_projectKey: { agentId, provider, projectKey: projectOf(key) } },
@@ -270,8 +275,9 @@ export async function explicitAttribution(
   trackers: IssueTrackerRegistry | undefined,
   agentId: string,
   issue: unknown,
-  opts?: { timeoutMs?: number; retryOn429?: boolean },
+  opts?: { timeoutMs?: number; retryOn429?: boolean; field?: string },
 ): Promise<AttributionIntent> {
-  const { provider, key } = await validateExplicitIssue(db, agentId, issue);
-  return { source: "explicit", item: await resolveWorkItem(db, trackers, provider, key, opts) };
+  const { field, ...budget } = opts ?? {};
+  const { provider, key } = await validateExplicitIssue(db, agentId, issue, field);
+  return { source: "explicit", item: await resolveWorkItem(db, trackers, provider, key, budget) };
 }
