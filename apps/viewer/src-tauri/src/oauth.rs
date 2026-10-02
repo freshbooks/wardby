@@ -1,0 +1,731 @@
+//! OAuth 2.1 public-client flow against a wardby server: RFC 9728 / 8414
+//! discovery, RFC 7591 registration, PKCE (RFC 7636), authorization URL, and
+//! token exchange/refresh. Secrets (codes, verifiers, tokens) never appear in
+//! errors or Debug output.
+
+use std::fmt;
+use std::time::{Duration, Instant};
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use url::Url;
+
+use crate::error::AppError;
+
+pub const SCOPE: &str = "admin:view";
+pub const CLIENT_NAME: &str = "wardby viewer";
+/// Redirect registered once per server; sign-in substitutes the bound port
+/// (RFC 8252 section 7.3, which the wardby server honours).
+pub const REGISTRATION_REDIRECT: &str = "http://127.0.0.1/callback";
+
+/// HTTP client for all OAuth traffic: no redirects (a token endpoint must not
+/// bounce credentials elsewhere) and bounded time.
+pub fn http_client() -> Result<reqwest::Client, AppError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .user_agent(concat!("wardby-viewer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|_| AppError::Network("could not build HTTP client".to_string()))
+}
+
+// ---------------------------------------------------------------- PKCE
+
+pub struct Pkce {
+    pub verifier: String,
+    pub challenge: String,
+}
+
+impl fmt::Debug for Pkce {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Pkce(<redacted>)")
+    }
+}
+
+fn random_url_safe(byte_len: usize) -> String {
+    let mut bytes = vec![0u8; byte_len];
+    rand::fill(&mut bytes[..]);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub fn challenge_for(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+/// S256 PKCE pair; the verifier is 64 url-safe characters (48 random bytes).
+pub fn new_pkce() -> Pkce {
+    let verifier = random_url_safe(48);
+    let challenge = challenge_for(&verifier);
+    Pkce {
+        verifier,
+        challenge,
+    }
+}
+
+/// 32 url-safe characters (24 random bytes).
+pub fn new_state() -> String {
+    random_url_safe(24)
+}
+
+// ----------------------------------------------------------- discovery
+
+#[derive(Debug, Clone)]
+pub struct AuthServer {
+    pub authorization_endpoint: Url,
+    pub token_endpoint: Url,
+    pub registration_endpoint: Option<Url>,
+    pub resource: String,
+}
+
+#[derive(Deserialize)]
+struct ProtectedResource {
+    resource: String,
+    authorization_servers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct AsMetadata {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    registration_endpoint: Option<String>,
+}
+
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Credentials only travel over https, except to a loopback host (local dev).
+fn require_secure(url: &Url, what: &str) -> Result<(), AppError> {
+    let ok = match url.scheme() {
+        "https" => true,
+        "http" => is_loopback_host(url),
+        _ => false,
+    };
+    if ok && url.host_str().is_some() {
+        Ok(())
+    } else {
+        Err(AppError::Protocol(format!("{what} must use https")))
+    }
+}
+
+/// RFC 8615-style well-known URL: the well-known segment goes between the
+/// origin and any path (RFC 9728 section 3.1, RFC 8414 section 3.1).
+fn well_known(base: &Url, suffix: &str) -> Result<Url, AppError> {
+    let mut u = base.clone();
+    u.set_query(None);
+    u.set_fragment(None);
+    let path = base.path().trim_end_matches('/');
+    u.set_path(&format!("/.well-known/{suffix}{path}"));
+    Ok(u)
+}
+
+fn parse_endpoint(raw: &str, what: &str) -> Result<Url, AppError> {
+    let u = Url::parse(raw).map_err(|_| AppError::Protocol(format!("invalid {what}")))?;
+    require_secure(&u, what)?;
+    Ok(u)
+}
+
+async fn get_json<T: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    url: Url,
+) -> Result<T, AppError> {
+    let resp = http.get(url).send().await?;
+    parse_json(resp).await
+}
+
+async fn parse_json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+) -> Result<T, AppError> {
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(AppError::Http {
+            status: status.as_u16(),
+        });
+    }
+    resp.json::<T>()
+        .await
+        .map_err(|_| AppError::Protocol("unexpected response shape".to_string()))
+}
+
+pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthServer, AppError> {
+    let server = Url::parse(server_url.trim())
+        .map_err(|_| AppError::Protocol("invalid server URL".to_string()))?;
+    require_secure(&server, "server URL")?;
+
+    let prm: ProtectedResource =
+        get_json(http, well_known(&server, "oauth-protected-resource")?).await?;
+    let issuer = prm
+        .authorization_servers
+        .first()
+        .ok_or_else(|| AppError::Protocol("no authorization server advertised".to_string()))?;
+    let issuer = parse_endpoint(issuer, "authorization server")?;
+
+    let meta: AsMetadata =
+        get_json(http, well_known(&issuer, "oauth-authorization-server")?).await?;
+    Ok(AuthServer {
+        authorization_endpoint: parse_endpoint(
+            &meta.authorization_endpoint,
+            "authorization endpoint",
+        )?,
+        token_endpoint: parse_endpoint(&meta.token_endpoint, "token endpoint")?,
+        registration_endpoint: meta
+            .registration_endpoint
+            .as_deref()
+            .map(|r| parse_endpoint(r, "registration endpoint"))
+            .transpose()?,
+        resource: prm.resource,
+    })
+}
+
+// -------------------------------------------------------- registration
+
+#[derive(Deserialize)]
+struct Registered {
+    client_id: String,
+}
+
+/// Dynamic client registration; `NeedsClientId` when the server offers none.
+pub async fn register(
+    http: &reqwest::Client,
+    as_: &AuthServer,
+    redirect_uri: &str,
+) -> Result<String, AppError> {
+    let endpoint = as_
+        .registration_endpoint
+        .clone()
+        .ok_or(AppError::NeedsClientId)?;
+    let body = serde_json::json!({
+        "redirect_uris": [redirect_uri],
+        "client_name": CLIENT_NAME,
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    });
+    let resp = http.post(endpoint).json(&body).send().await?;
+    let reg: Registered = parse_json(resp).await?;
+    if reg.client_id.is_empty() {
+        return Err(AppError::Protocol("empty client id".to_string()));
+    }
+    Ok(reg.client_id)
+}
+
+// ----------------------------------------------------- authorize URL
+
+pub fn authorize_url(
+    as_: &AuthServer,
+    client_id: &str,
+    redirect_uri: &str,
+    pkce: &Pkce,
+    state: &str,
+) -> Url {
+    let mut url = as_.authorization_endpoint.clone();
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("scope", SCOPE)
+        .append_pair("state", state)
+        .append_pair("code_challenge", &pkce.challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("resource", &as_.resource);
+    url
+}
+
+// -------------------------------------------------------------- tokens
+
+pub struct Tokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<Instant>,
+}
+
+impl fmt::Debug for Tokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tokens")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<u64>,
+}
+
+async fn token_request(
+    http: &reqwest::Client,
+    as_: &AuthServer,
+    form: &[(&str, &str)],
+) -> Result<Tokens, AppError> {
+    let resp = http
+        .post(as_.token_endpoint.clone())
+        .form(form)
+        .send()
+        .await?;
+    let t: TokenResponse = parse_json(resp).await?;
+    if t.access_token.is_empty() {
+        return Err(AppError::Protocol("empty access token".to_string()));
+    }
+    Ok(Tokens {
+        access_token: t.access_token,
+        refresh_token: t.refresh_token.filter(|r| !r.is_empty()),
+        expires_at: t
+            .expires_in
+            .map(|s| Instant::now() + Duration::from_secs(s)),
+    })
+}
+
+pub async fn exchange_code(
+    http: &reqwest::Client,
+    as_: &AuthServer,
+    client_id: &str,
+    redirect_uri: &str,
+    code: &str,
+    pkce: &Pkce,
+) -> Result<Tokens, AppError> {
+    token_request(
+        http,
+        as_,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", client_id),
+            ("code_verifier", &pkce.verifier),
+            ("resource", &as_.resource),
+        ],
+    )
+    .await
+}
+
+pub async fn refresh(
+    http: &reqwest::Client,
+    as_: &AuthServer,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<Tokens, AppError> {
+    token_request(
+        http,
+        as_,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
+            ("resource", &as_.resource),
+        ],
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
+
+    #[test]
+    fn pkce_matches_rfc7636_appendix_b() {
+        assert_eq!(
+            challenge_for("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn generated_pkce_and_state_shapes() {
+        let p = new_pkce();
+        assert_eq!(p.verifier.len(), 64);
+        assert!(
+            p.verifier
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+        assert_eq!(p.challenge, challenge_for(&p.verifier));
+        let s = new_state();
+        assert_eq!(s.len(), 32);
+        assert!(
+            s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+        assert_ne!(new_state(), s);
+        assert_ne!(new_pkce().verifier, p.verifier);
+    }
+
+    #[test]
+    fn debug_output_redacts_secrets() {
+        let p = Pkce {
+            verifier: "VERIFIER".into(),
+            challenge: "CHAL".into(),
+        };
+        assert!(!format!("{p:?}").contains("VERIFIER"));
+        let t = Tokens {
+            access_token: "ACCESS".into(),
+            refresh_token: Some("REFRESH".into()),
+            expires_at: None,
+        };
+        let d = format!("{t:?}");
+        assert!(!d.contains("ACCESS") && !d.contains("REFRESH"));
+    }
+
+    fn as_for(base: &str) -> AuthServer {
+        AuthServer {
+            authorization_endpoint: Url::parse(&format!("{base}/authorize")).unwrap(),
+            token_endpoint: Url::parse(&format!("{base}/token")).unwrap(),
+            registration_endpoint: Some(Url::parse(&format!("{base}/register")).unwrap()),
+            resource: format!("{base}/mcp"),
+        }
+    }
+
+    fn pairs(url: &Url) -> Vec<(String, String)> {
+        url.query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn authorize_url_has_every_param_exactly_once() {
+        let as_ = as_for("https://wardby.example");
+        let pkce = Pkce {
+            verifier: "v".into(),
+            challenge: "CH".into(),
+        };
+        let url = authorize_url(&as_, "cid", "http://127.0.0.1:5555/callback", &pkce, "ST");
+        assert_eq!(url.path(), "/authorize");
+        let p = pairs(&url);
+        let expect = [
+            ("response_type", "code"),
+            ("client_id", "cid"),
+            ("redirect_uri", "http://127.0.0.1:5555/callback"),
+            ("scope", "admin:view"),
+            ("state", "ST"),
+            ("code_challenge", "CH"),
+            ("code_challenge_method", "S256"),
+            ("resource", "https://wardby.example/mcp"),
+        ];
+        assert_eq!(p.len(), expect.len());
+        for (k, v) in expect {
+            let found: Vec<_> = p.iter().filter(|(pk, _)| pk == k).collect();
+            assert_eq!(found.len(), 1, "param {k}");
+            assert_eq!(found[0].1, v, "param {k}");
+        }
+        assert!(!url.as_str().contains("verifier"));
+    }
+
+    #[tokio::test]
+    async fn discovers_prm_then_as_metadata() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "resource": format!("{base}/mcp"),
+                "authorization_servers": [base],
+                "scopes_supported": ["admin:view"],
+            })))
+            .expect(1)
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": base,
+                "authorization_endpoint": format!("{base}/authorize"),
+                "token_endpoint": format!("{base}/token"),
+                "registration_endpoint": format!("{base}/register"),
+            })))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let a = discover(&http_client().unwrap(), &base).await.unwrap();
+        assert_eq!(
+            a.authorization_endpoint.as_str(),
+            format!("{base}/authorize")
+        );
+        assert_eq!(a.token_endpoint.as_str(), format!("{base}/token"));
+        assert_eq!(
+            a.registration_endpoint.unwrap().as_str(),
+            format!("{base}/register")
+        );
+        assert_eq!(a.resource, format!("{base}/mcp"));
+    }
+
+    #[tokio::test]
+    async fn discovery_without_registration_endpoint_then_register_needs_client_id() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "resource": base, "authorization_servers": [base],
+            })))
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authorization_endpoint": format!("{base}/authorize"),
+                "token_endpoint": format!("{base}/token"),
+            })))
+            .mount(&s)
+            .await;
+        let http = http_client().unwrap();
+        let a = discover(&http, &base).await.unwrap();
+        assert!(a.registration_endpoint.is_none());
+        let err = register(&http, &a, REGISTRATION_REDIRECT)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::NeedsClientId));
+    }
+
+    #[tokio::test]
+    async fn discovery_errors_are_typed() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        let http = http_client().unwrap();
+        // 404 on PRM
+        let err = discover(&http, &base).await.unwrap_err();
+        assert!(matches!(err, AppError::Http { status: 404 }));
+        // empty authorization_servers
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "resource": base, "authorization_servers": [],
+            })))
+            .mount(&s)
+            .await;
+        assert!(matches!(
+            discover(&http, &base).await.unwrap_err(),
+            AppError::Protocol(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn discovery_refuses_cleartext_remote_hosts() {
+        let http = http_client().unwrap();
+        let err = discover(&http, "http://wardby.example.com")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Protocol(_)));
+    }
+
+    #[test]
+    fn well_known_inserts_before_path() {
+        let u = Url::parse("https://h.example/api/").unwrap();
+        assert_eq!(
+            well_known(&u, "oauth-protected-resource").unwrap().as_str(),
+            "https://h.example/.well-known/oauth-protected-resource/api"
+        );
+        let u = Url::parse("https://h.example").unwrap();
+        assert_eq!(
+            well_known(&u, "x").unwrap().as_str(),
+            "https://h.example/.well-known/x"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_sends_documented_body_and_returns_client_id() {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/register"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(serde_json::json!({
+                "redirect_uris": ["http://127.0.0.1/callback"],
+                "client_name": "wardby viewer",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "client_id": "client-123",
+                "token_endpoint_auth_method": "none",
+                "redirect_uris": ["http://127.0.0.1/callback"],
+            })))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let id = register(
+            &http_client().unwrap(),
+            &as_for(&s.uri()),
+            REGISTRATION_REDIRECT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(id, "client-123");
+    }
+
+    #[tokio::test]
+    async fn register_surfaces_http_status() {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/register"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&s)
+            .await;
+        let err = register(
+            &http_client().unwrap(),
+            &as_for(&s.uri()),
+            REGISTRATION_REDIRECT,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::Http { status: 400 }));
+    }
+
+    /// Matches a form body with exactly these key/value pairs.
+    struct ExactForm(BTreeMap<String, String>);
+    impl Match for ExactForm {
+        fn matches(&self, req: &Request) -> bool {
+            let got: BTreeMap<String, String> = url::form_urlencoded::parse(&req.body)
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            got == self.0
+        }
+    }
+    fn form(pairs: &[(&str, &str)]) -> ExactForm {
+        ExactForm(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn exchange_code_posts_form_and_parses_tokens() {
+        let s = MockServer::start().await;
+        let as_ = as_for(&s.uri());
+        let pkce = Pkce {
+            verifier: "the-verifier".into(),
+            challenge: "c".into(),
+        };
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(form(&[
+                ("grant_type", "authorization_code"),
+                ("code", "the code"),
+                ("redirect_uri", "http://127.0.0.1:5555/callback"),
+                ("client_id", "cid"),
+                ("code_verifier", "the-verifier"),
+                ("resource", &as_.resource),
+            ]))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "AT", "token_type": "Bearer", "expires_in": 600,
+                "refresh_token": "RT", "scope": "admin:view",
+            })))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let before = Instant::now();
+        let t = exchange_code(
+            &http_client().unwrap(),
+            &as_,
+            "cid",
+            "http://127.0.0.1:5555/callback",
+            "the code",
+            &pkce,
+        )
+        .await
+        .unwrap();
+        assert_eq!(t.access_token, "AT");
+        assert_eq!(t.refresh_token.as_deref(), Some("RT"));
+        let exp = t.expires_at.unwrap();
+        assert!(exp >= before + Duration::from_secs(600));
+        assert!(exp <= Instant::now() + Duration::from_secs(600));
+    }
+
+    #[tokio::test]
+    async fn refresh_posts_form_and_handles_missing_refresh_token() {
+        let s = MockServer::start().await;
+        let as_ = as_for(&s.uri());
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", "old-rt"),
+                ("client_id", "cid"),
+                ("resource", &as_.resource),
+            ]))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "AT2", "token_type": "Bearer",
+            })))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let t = refresh(&http_client().unwrap(), &as_, "cid", "old-rt")
+            .await
+            .unwrap();
+        assert_eq!(t.access_token, "AT2");
+        assert!(t.refresh_token.is_none());
+        assert!(t.expires_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn token_errors_carry_status_but_no_secrets() {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_json(
+                    serde_json::json!({"error": "invalid_grant", "echo": "SECRET-RT"}),
+                ),
+            )
+            .mount(&s)
+            .await;
+        let err = refresh(
+            &http_client().unwrap(),
+            &as_for(&s.uri()),
+            "cid",
+            "SECRET-RT",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::Http { status: 400 }));
+        assert!(!err.to_string().contains("SECRET"));
+    }
+
+    #[tokio::test]
+    async fn token_redirects_are_not_followed() {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(307).insert_header("location", "http://127.0.0.1:1/steal"),
+            )
+            .mount(&s)
+            .await;
+        let err = refresh(&http_client().unwrap(), &as_for(&s.uri()), "cid", "rt")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Http { status: 307 }));
+    }
+
+    #[tokio::test]
+    async fn malformed_token_body_is_protocol_error() {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&s)
+            .await;
+        let err = refresh(&http_client().unwrap(), &as_for(&s.uri()), "cid", "rt")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Protocol(_)));
+    }
+}
