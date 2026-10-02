@@ -219,7 +219,9 @@ describe("fileIssue", () => {
     const res = await fileIssue({ db }, input(tracker));
     expect(res).toMatchObject({ outcome: "regression", issueKey: "OPS-100", seenCount: 1 });
     expect(tracker.createIssue).toHaveBeenCalledWith(
-      expect.objectContaining({ descriptionMarkdown: "It broke.\n\nRegression of OPS-1." }),
+      expect.objectContaining({
+        descriptionMarkdown: "It broke.\n\nRegression of [OPS-1](https://your-site.atlassian.net/browse/OPS-1).",
+      }),
 
       TRACKER_CALL_OPTIONS,
     );
@@ -301,7 +303,7 @@ describe("fileIssue", () => {
     expect(res).toMatchObject({ outcome: "regression" });
     expect(tracker.linkIssues).not.toHaveBeenCalled();
     expect(tracker.createIssue).toHaveBeenCalledWith(
-      expect.objectContaining({ descriptionMarkdown: expect.stringContaining("Regression of OPS-1") }),
+      expect.objectContaining({ descriptionMarkdown: expect.stringContaining("Regression of [OPS-1](") }),
 
       TRACKER_CALL_OPTIONS,
     );

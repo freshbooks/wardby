@@ -44,6 +44,21 @@ describe("markdownToAdf", () => {
     expect(JSON.stringify(doc)).not.toContain('"link"');
     expect(JSON.stringify(doc)).not.toContain('"mention"');
   });
+  it("links bare https URLs, leaving trailing punctuation and other schemes as text", () => {
+    const href = "https://example.atlassian.net/browse/PROJ-7";
+    expect(markdownToAdf(`Created PROJ-7 at ${href}. (see ${href})`).content?.[0].content).toEqual([
+      { type: "text", text: "Created PROJ-7 at " },
+      { type: "text", text: href, marks: [{ type: "link", attrs: { href } }] },
+      { type: "text", text: ". (see " },
+      { type: "text", text: href, marks: [{ type: "link", attrs: { href } }] },
+      { type: "text", text: ")" },
+    ]);
+    expect(JSON.stringify(markdownToAdf("plain http://example.com and ftp://x"))).not.toContain('"link"');
+    expect(markdownToAdf("run `curl https://example.com/x`").content?.[0].content).toEqual([
+      { type: "text", text: "run " },
+      { type: "text", text: "curl https://example.com/x", marks: [{ type: "code" }] },
+    ]);
+  });
   it("keeps snake_case identifiers literal but still italicises _word_", () => {
     expect(markdownToAdf("Set WARDBY_JIRA_API_TOKEN and my_var_name").content?.[0].content).toEqual([
       { type: "text", text: "Set WARDBY_JIRA_API_TOKEN and my_var_name" },

@@ -110,6 +110,8 @@ export async function fileIssue(
   // answering with an error would make the caller retry and file a duplicate.
   let completed: FileIssueSuccess | undefined;
   let regressionOf: string | undefined;
+  // The tracker's own URL for the Done issue (never model input), so the new issue links back to it.
+  let regressionOfUrl: string | undefined;
   let hash: string | undefined;
   try {
     if (link.access !== "write") {
@@ -171,6 +173,7 @@ export async function fileIssue(
               return completed;
             }
             regressionOf = previous.issueKey;
+            regressionOfUrl = view.url;
           }
         }
 
@@ -182,7 +185,7 @@ export async function fileIssue(
           regressionOf
             ? {
                 ...createInput,
-                descriptionMarkdown: `${createInput.descriptionMarkdown}\n\nRegression of ${regressionOf}.`,
+                descriptionMarkdown: `${createInput.descriptionMarkdown}\n\nRegression of ${regressionOfUrl?.startsWith("https://") ? `[${regressionOf}](${regressionOfUrl})` : regressionOf}.`,
               }
             : createInput,
           TRACKER_CALL_OPTIONS,
