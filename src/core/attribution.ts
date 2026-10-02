@@ -78,7 +78,10 @@ export async function resolveWorkItem(
   }
 }
 
-export type AttributionTx = Pick<Prisma.TransactionClient, "workItem" | "runAttribution">;
+export type AttributionTx = Pick<
+  Prisma.TransactionClient,
+  "workItem" | "runAttribution" | "codingRun" | "runIssueStatus"
+>;
 
 /** Upserts the item (and its parent) and returns the item's id and the parent to freeze. A key-only result never clobbers stored fields. */
 async function upsertWorkItem(
@@ -122,9 +125,36 @@ async function upsertWorkItem(
 }
 
 /**
+ * Covers runs created before attribution existed (no backfill): a continued
+ * coding run that already carries CodingRun.issueKey, else a direct parent
+ * with a RunIssueStatus. Grandchildren then inherit the child's new
+ * RunAttribution, so only the direct parent is checked.
+ */
+async function legacyIssue(
+  tx: AttributionTx,
+  from: { parentRunId?: string; continuesCodingRunId?: string },
+): Promise<{ provider: string; key: string } | null> {
+  if (from.continuesCodingRunId) {
+    const prior = await tx.codingRun.findUnique({
+      where: { runId: from.continuesCodingRunId },
+      select: { issueProvider: true, issueKey: true },
+    });
+    if (prior?.issueProvider && prior.issueKey) return { provider: prior.issueProvider, key: prior.issueKey };
+  }
+  if (from.parentRunId) {
+    const status = await tx.runIssueStatus.findUnique({
+      where: { runId: from.parentRunId },
+      select: { provider: true, issueKey: true },
+    });
+    if (status) return { provider: status.provider, key: status.issueKey };
+  }
+  return null;
+}
+
+/**
  * Writes the run's attribution inside dispatch's persist transaction.
  * Precedence: the parent run's attribution, then the continued coding run's,
- * then the caller's intent. Returns the item's provider/key (for
+ * then a pre-attribution issue (legacyIssue), then the caller's intent. Returns the item's provider/key (for
  * CodingRun.issueProvider/issueKey), or null when the run is unattributed.
  */
 export async function attributeRun(
@@ -144,6 +174,13 @@ export async function attributeRun(
       data: { runId, workItemId: inherited.workItemId, parentKeyAtRun: inherited.parentKeyAtRun, source: "inherited" },
     });
     return { provider: inherited.workItem.provider, key: inherited.workItem.key };
+  }
+  const legacy = await legacyIssue(tx, from);
+  if (legacy) {
+    const item = { ...legacy, scopeKey: projectOf(legacy.key), snapshot: null };
+    const { id, parentKey } = await upsertWorkItem(tx, item, now);
+    await tx.runAttribution.create({ data: { runId, workItemId: id, parentKeyAtRun: parentKey, source: "inherited" } });
+    return legacy;
   }
   if (!from.intent) return null;
   const { id, parentKey } = await upsertWorkItem(tx, from.intent.item, now);

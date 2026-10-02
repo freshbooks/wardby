@@ -20,6 +20,8 @@ interface FakeBudget {
   ancestors?: Record<string, { parentRunId: string | null }>;
   /** Existing runs' attributions: { runId: issueKey } (provider jira). */
   attributedRuns?: Record<string, string>;
+  /** Pre-attribution runs with a RunIssueStatus: { runId: issueKey } (provider jira). */
+  issueRuns?: Record<string, string>;
 }
 
 function fakeDb(
@@ -99,6 +101,12 @@ function fakeDb(
       create: async ({ data }: any) => {
         attributions.set(data.runId, data);
         return data;
+      },
+    },
+    runIssueStatus: {
+      findUnique: async ({ where }: any) => {
+        const key = (budget.issueRuns ?? {})[where.runId];
+        return key ? { provider: "jira", issueKey: key } : null;
       },
     },
     workItem: {
@@ -829,6 +837,40 @@ describe("dispatchRun", () => {
         continuesCodingRunId: "root_run",
       });
       expect(state.codingRuns.at(-1)).toMatchObject({ issueProvider: "jira", issueKey: "OPS-10" });
+    });
+
+    it("a continuation of a pre-attribution coding run keeps its CodingRun issue, key-only", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [{ ...priorPrRun, issueProvider: "jira", issueKey: "OPS-20" }]);
+      const result = await dispatchRun({
+        db: state.db,
+        executor,
+        agentId: agent.id,
+        continuesCodingRunId: "root_run",
+        attribution: intent("OPS-21"),
+      });
+      expect(state.attributions.get(result!.run.id)).toMatchObject({
+        workItemId: "wi_jira_OPS-20",
+        parentKeyAtRun: null,
+        source: "inherited",
+      });
+      expect(state.workItems.get("wi_jira_OPS-20")).toMatchObject({ scopeKey: "OPS" });
+      expect(state.workItems.has("wi_jira_OPS-21")).toBe(false);
+      expect(state.codingRuns.at(-1)).toMatchObject({ issueProvider: "jira", issueKey: "OPS-20" });
+    });
+
+    it("a child of a pre-attribution issue-event run gets its RunIssueStatus issue, and grandchildren inherit", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [], {
+        ancestors: { legacy: { parentRunId: null } },
+        issueRuns: { legacy: "OPS-22" },
+      });
+      const child = await dispatchRun({ db: state.db, executor, agentId: agent.id, parentRunId: "legacy" });
+      const grandchild = await dispatchRun({ db: state.db, executor, agentId: agent.id, parentRunId: child!.run.id });
+      for (const run of [child!.run, grandchild!.run]) {
+        expect(state.attributions.get(run.id)).toMatchObject({ workItemId: "wi_jira_OPS-22", source: "inherited" });
+      }
+      expect(state.codingRuns.at(-1)).toMatchObject({ issueProvider: "jira", issueKey: "OPS-22" });
     });
 
     it("a native run is attributed too", async () => {

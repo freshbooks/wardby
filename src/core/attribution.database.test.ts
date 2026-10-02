@@ -215,6 +215,87 @@ describe.skipIf(!process.env.DATABASE_URL)("attribution (database)", () => {
     });
   });
 
+  const prOpened = (c: { repository: string; baseRef: string; headRef: string }) => ({
+    schemaVersion: 1,
+    outcome: "pull_request_opened",
+    repository: c.repository,
+    baseRef: c.baseRef,
+    headRef: c.headRef,
+    commitSha: "b".repeat(40),
+    pullRequestUrl: "https://github.com/openai/example/pull/2",
+    pullRequestNumber: 2,
+    summary: "Opened the PR",
+    tests: [],
+    usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+  });
+
+  it("legacy: continuing a pre-attribution coding run attributes key-only to its CodingRun issue", async () => {
+    const agentId = await codingAgent("c2");
+    const key = issueKey(10);
+    const epic = issueKey(110);
+    // A WorkItem already known (e.g. from another run): its stored fields are kept and its parent frozen.
+    await db.workItem.create({
+      data: { provider: "jira", key, scopeKey: project, title: "kept", parentKey: epic, refreshedAt: new Date() },
+    });
+    const legacy = await dispatch(agentId);
+    const legacyCoding = await db.codingRun.findUniqueOrThrow({ where: { runId: legacy } });
+    await db.codingRun.update({
+      where: { runId: legacy },
+      data: { issueProvider: "jira", issueKey: key, result: prOpened(legacyCoding) },
+    });
+    expect(await db.runAttribution.findUnique({ where: { runId: legacy } })).toBeNull();
+    const next = await dispatch(agentId, { continuesCodingRunId: legacy, attribution: intent(issueKey(11)) });
+    expect(
+      await db.runAttribution.findUniqueOrThrow({ where: { runId: next }, include: { workItem: true } }),
+    ).toMatchObject({ source: "inherited", parentKeyAtRun: epic, workItem: { key, title: "kept" } });
+    expect(await db.codingRun.findUniqueOrThrow({ where: { runId: next } })).toMatchObject({ issueKey: key });
+    expect(
+      await db.workItem.findUnique({ where: { provider_key: { provider: "jira", key: issueKey(11) } } }),
+    ).toBeNull();
+  });
+
+  it("legacy: a child of a pre-attribution issue-event run gets its RunIssueStatus issue; grandchildren inherit", async () => {
+    const agentId = await nativeAgent("a8");
+    const key = issueKey(12);
+    const root = await dispatch(agentId);
+    await db.runIssueStatus.create({ data: { runId: root, provider: "jira", issueKey: key } });
+    const child = await dispatch(agentId, { parentRunId: root });
+    const grandchild = await dispatch(agentId, { parentRunId: child });
+    for (const runId of [child, grandchild]) {
+      expect(
+        await db.runAttribution.findUniqueOrThrow({ where: { runId }, include: { workItem: true } }),
+      ).toMatchObject({
+        source: "inherited",
+        parentKeyAtRun: null,
+        workItem: { key, scopeKey: project, title: null, refreshedAt: null },
+      });
+    }
+  });
+
+  it("concurrent first dispatches on new keys sharing a new epic make one epic WorkItem", async () => {
+    const agentId = await nativeAgent("a9");
+    const epic = issueKey(120);
+    const keys = [13, 14, 15, 16, 17, 18].map(issueKey);
+    const ids = await Promise.all(keys.map((key) => dispatch(agentId, { attribution: intent(key, epic) })));
+    expect(await db.workItem.count({ where: { provider: "jira", key: epic } })).toBe(1);
+    expect(await db.workItem.count({ where: { provider: "jira", key: { in: keys } } })).toBe(keys.length);
+    expect(await db.runAttribution.count({ where: { runId: { in: ids }, parentKeyAtRun: epic } })).toBe(keys.length);
+  });
+
+  it("concurrent key-only first dispatches on one new key make one WorkItem", async () => {
+    const agentId = await nativeAgent("a10");
+    const key = issueKey(19);
+    const ids = await Promise.all(
+      [1, 2, 3, 4, 5, 6].map(() =>
+        dispatch(agentId, {
+          attribution: { source: "explicit", item: { provider: "jira", key, scopeKey: project, snapshot: null } },
+        }),
+      ),
+    );
+    expect(await db.workItem.count({ where: { provider: "jira", key } })).toBe(1);
+    expect(await db.runAttribution.count({ where: { runId: { in: ids } } })).toBe(6);
+  });
+
   it("a run with no intent and no attributed ancestor is unattributed", async () => {
     const agentId = await nativeAgent("a6");
     const runId = await dispatch(agentId);
