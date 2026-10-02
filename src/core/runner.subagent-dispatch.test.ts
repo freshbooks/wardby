@@ -61,6 +61,15 @@ interface FakeRun {
   triggeredById?: string | null;
 }
 
+interface FakeBudgetGroup {
+  id: string;
+  name: string;
+  dailyBudgetUsd: number | null;
+  weeklyBudgetUsd: number | null;
+  monthlyBudgetUsd: number | null;
+  warnThresholdRatio: number;
+}
+
 interface FakeEdge {
   parentAgentId: string;
   childAgentId: string;
@@ -73,6 +82,7 @@ function fakeDb(
   priorRuns: FakeRun[] = [],
   seedCodingRuns: Record<string, any>[] = [],
   grants: FakeGrantSeed[] = [],
+  groups: FakeBudgetGroup[] = [],
 ): RunnerDb {
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map(priorRuns.map((r) => [r.id, r]));
@@ -158,7 +168,14 @@ function fakeDb(
     agentTool: { findMany: (async () => []) as any },
     agentSecret: { findFirst: (async () => null) as any },
     agentDatastore: { findFirst: (async () => null) as any },
-    budgetGroup: { findUnique: (async () => null) as any },
+    budgetGroup: {
+      findUnique: (async ({ where }: any) => {
+        const g = groups.find((x) => x.id === where.id);
+        if (!g) return null;
+        const members = agents.filter((a) => a.budgetGroupId === g.id);
+        return { ...g, agents: members.map((a) => ({ id: a.id, budgetUsd: a.budgetUsd })) };
+      }) as any,
+    },
     task: { findFirst: (async () => null) as any },
     resourceGrant: fakeResourceGrants(grants),
     agentSubAgent: {
@@ -175,6 +192,8 @@ function fakeDb(
   // dispatchRun wraps everything in one transaction — the fake just runs the
   // callback against this same object rather than modeling real isolation.
   db.$transaction = async (callback: (tx: unknown) => unknown) => callback(db);
+  // The grouped-dispatch advisory lock: nothing to serialize in a single-threaded fake.
+  db.$executeRawUnsafe = async () => 0;
   return db;
 }
 
@@ -648,6 +667,91 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     expect(child.error).toMatch(/^run_tree_exhausted\b/);
     expect(started).toEqual([]);
     expect(await db.codingRun.findUnique({ where: { runId: child.id } })).toBeNull();
+  });
+
+  it("E-01: a coding child refused at dispatch reaches the parent model as a tool result", async () => {
+    const dispatcher: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "knock-knock-delivery",
+      systemPrompt: "You classify and delegate.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const implementer: FakeAgent = {
+      id: "implement-agent",
+      name: "knock-knock-implement",
+      systemPrompt: "unused for coding agents",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+      budgetGroupId: "g-impl",
+    };
+    // Another member of the implementer's group has already spent the group's whole daily cap,
+    // so the child is refused while the parent still has budget for its next model call.
+    const other: FakeAgent = { ...implementer, id: "other-agent", name: "other" };
+    const group: FakeBudgetGroup = {
+      id: "g-impl",
+      name: "impl",
+      dailyBudgetUsd: 2,
+      weeklyBudgetUsd: null,
+      monthlyBudgetUsd: null,
+      warnThresholdRatio: 0.8,
+    };
+    const otherRun: FakeRun = {
+      id: "run-other",
+      agentId: "other-agent",
+      status: "succeeded",
+      trigger: "manual",
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 2,
+      error: null,
+      startedAt: new Date(),
+      finishedAt: new Date(),
+      heartbeatAt: null,
+      finalText: "done",
+      turns: 1,
+      parentRunId: null,
+      grantedParentMemoryKeys: [],
+      taskOverride: null,
+    };
+    const db = fakeDb(
+      [dispatcher, implementer, other],
+      [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+      [otherRun],
+      [],
+      [],
+      [group],
+    );
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+    const started: string[] = [];
+    const executor = {
+      async start(runId: string) {
+        started.push(runId);
+      },
+      async stop() {},
+    };
+
+    const llm = scriptedLlm([
+      toolCall("delegate_to_implement", JSON.stringify({ task: "add the feature" })),
+      finalAnswer("parent wraps up"),
+    ]);
+    await executeRun(parentRun.id, providers(llm, executor), db);
+
+    const [child] = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+      id: string;
+      status: string;
+      error: string | null;
+    }>;
+    expect(child.status).toBe("refused");
+    expect(child.error).toMatch(/^budget_group_exhausted:day\b/);
+    expect(started).toEqual([]);
+    // The parent's delegate call got the refusal back as the child's result, on its second model call.
+    expect(llm.calls).toHaveLength(2);
+    expect(toolResultSeen(llm, 1)).toMatchObject({ status: "refused", costUsd: 0 });
   });
 
   it("waits for a coding child that was queued (start resolved while still pending) and returns its terminal result", async () => {
