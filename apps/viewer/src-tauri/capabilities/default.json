@@ -1,7 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
+  "description": "The minimum the UI needs: core defaults and this app's own commands",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "allow-list-servers",
+    "allow-add-server",
+    "allow-remove-server",
+    "allow-sign-in",
+    "allow-sign-out",
+    "allow-connect",
+    "allow-disconnect",
+    "allow-fetch-graph",
+    "allow-fetch-run"
+  ]
 }

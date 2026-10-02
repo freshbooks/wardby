@@ -20,6 +20,8 @@ pub enum AppError {
     NeedsClientId,
     #[error("keychain error: {0}")]
     Keychain(String),
+    #[error("storage error: {0}")]
+    Storage(String),
     #[error("not signed in")]
     NotSignedIn,
     #[error("This account lacks the admin:view permission (admin role)")]
@@ -36,6 +38,7 @@ impl AppError {
             AppError::Timeout => "timeout",
             AppError::NeedsClientId => "needs_client_id",
             AppError::Keychain(_) => "keychain",
+            AppError::Storage(_) => "storage",
             AppError::NotSignedIn => "not_signed_in",
             AppError::Forbidden => "forbidden",
         }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fetch-graph"
+description = "Enables the fetch_graph command without any pre-configured scope."
+commands.allow = ["fetch_graph"]
+
+[[permission]]
+identifier = "deny-fetch-graph"
+description = "Denies the fetch_graph command without any pre-configured scope."
+commands.deny = ["fetch_graph"]
