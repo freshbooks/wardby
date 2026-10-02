@@ -337,6 +337,8 @@ model Run {
   hostCheck        RunHostCheck?
   hostStatus       RunHostStatus?
   issueStatus      RunIssueStatus?
+  attribution      RunAttribution?
+  modelUsage       RunModelUsage[]
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -1204,4 +1206,66 @@ model RunIssueStatus {
   completedAt    DateTime?
 
   @@index([completedAt])
+}
+
+/// Latest known state of an issue/epic in an external tracker (Jira, later
+/// Linear). Shared by every run attributed to it; titles are refreshed by the
+/// next snapshot, so reports always show current names.
+model WorkItem {
+  id           String           @id @default(cuid())
+  /// "jira" | "linear" | ...
+  provider     String
+  /// PAY-241, ENG-123
+  key          String
+  title        String?
+  type         String?
+  url          String?
+  /// Jira project / Linear team.
+  scopeKey     String
+  /// The current parent (epic or parent issue), refreshed on each snapshot.
+  parentKey    String?
+  /// "epic" | "parent" | ...
+  parentKind   String?
+  /// Last successful snapshot; null = key-only (never snapshotted).
+  refreshedAt  DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  attributions RunAttribution[]
+
+  @@unique([provider, key])
+  @@index([provider, parentKey])
+  @@index([provider, scopeKey])
+}
+
+/// Which work item a run's cost belongs to, with its parent frozen as of
+/// dispatch. Written in dispatchRun's persist transaction; child runs copy
+/// their parent's row (source "inherited"). Control-plane data only.
+model RunAttribution {
+  runId          String   @id
+  run            Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  workItemId     String
+  workItem       WorkItem @relation(fields: [workItemId], references: [id])
+  parentKeyAtRun String?
+  /// issue_event | linked_pr | explicit | inherited
+  source         String
+  createdAt      DateTime @default(now())
+
+  @@index([workItemId])
+  @@index([parentKeyAtRun])
+}
+
+/// Per-run, per-model usage by priced token kind. Sum of costUsd over a
+/// run's rows equals Run.costUsd (to Run.costUsd's 6 decimal places).
+model RunModelUsage {
+  runId             String
+  run               Run     @relation(fields: [runId], references: [id], onDelete: Cascade)
+  model             String
+  /// Input tokens NOT served from cache (LlmUsage.inputTokens - cachedInputTokens).
+  freshInputTokens  Int     @default(0)
+  cachedInputTokens Int     @default(0)
+  cacheWriteTokens  Int     @default(0)
+  outputTokens      Int     @default(0)
+  costUsd           Decimal @default(0) @db.Decimal(18, 10)
+
+  @@id([runId, model])
 }
