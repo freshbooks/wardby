@@ -187,6 +187,14 @@ interface GroupRow {
 }
 
 /**
+ * How long one report may take. Prisma's interactive-transaction default (5 s)
+ * is too short for a wide window over a large Run table; the same limit is set
+ * as the transaction's statement_timeout so Postgres stops the work too, not
+ * only the client.
+ */
+export const COST_REPORT_TIMEOUT_MS = 30_000;
+
+/**
  * Every query runs in one read-only REPEATABLE READ transaction, so the rows,
  * the totals and the unattributed figure all come from the same snapshot even
  * while runs are finishing.
@@ -199,9 +207,11 @@ export async function costReport(
   return db.$transaction(
     async (tx) => {
       await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+      // SET takes no bind parameters; the value is a constant.
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '${COST_REPORT_TIMEOUT_MS}ms'`);
       return reportIn(tx, q, visibility);
     },
-    { isolationLevel: "RepeatableRead" },
+    { isolationLevel: "RepeatableRead", timeout: COST_REPORT_TIMEOUT_MS },
   );
 }
 

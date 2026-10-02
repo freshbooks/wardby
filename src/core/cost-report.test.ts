@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CostReportInputError, costReport, parseCostReportQuery } from "./cost-report.js";
+import { COST_REPORT_TIMEOUT_MS, CostReportInputError, costReport, parseCostReportQuery } from "./cost-report.js";
 
 const NOW = new Date("2026-10-01T00:00:00Z");
 
@@ -44,6 +44,10 @@ describe("costReport", () => {
         txQueries.push(strings.join("?"));
         return 0;
       },
+      $executeRawUnsafe: async (sql: string) => {
+        txQueries.push(sql);
+        return 0;
+      },
     };
     const options: unknown[] = [];
     const db = {
@@ -57,8 +61,12 @@ describe("costReport", () => {
     };
     const report = await costReport(db as never, parseCostReportQuery({}, NOW), null);
     expect(report.totals.runs).toBe(0);
-    expect(options).toEqual([expect.objectContaining({ isolationLevel: "RepeatableRead" })]);
+    expect(options).toEqual([
+      expect.objectContaining({ isolationLevel: "RepeatableRead", timeout: COST_REPORT_TIMEOUT_MS }),
+    ]);
     expect(txQueries[0]).toMatch(/SET TRANSACTION READ ONLY/);
-    expect(txQueries.length).toBeGreaterThan(1);
+    // The database stops the work at the same limit, not only the client.
+    expect(txQueries[1]).toMatch(/SET LOCAL statement_timeout = '30000ms'/);
+    expect(txQueries.length).toBeGreaterThan(2);
   });
 });
