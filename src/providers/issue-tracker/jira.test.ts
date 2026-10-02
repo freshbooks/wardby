@@ -833,7 +833,7 @@ describe("JiraIssueTracker issue creation and attachments", () => {
         {
           fetch: (async (url: string, init?: RequestInit) => {
             seen.push({ url, auth: new Headers(init?.headers).get("authorization") });
-            return url.startsWith(SITE)
+            return new URL(url).origin === new URL(SITE).origin
               ? new Response(null, { status: 303, headers: { location } })
               : new Response("media", { status: 200 });
           }) as unknown as typeof fetch,
