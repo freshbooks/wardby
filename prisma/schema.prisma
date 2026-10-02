@@ -374,6 +374,11 @@ model Run {
   triggeredById           String?
 
   @@index([agentId, triggeredById])
+  /// The admin viewer's graph window (runs started since a time, or still
+  /// pending/running) and its ancestor/children walks (docs/viewer-api.md).
+  @@index([startedAt])
+  @@index([status])
+  @@index([parentRunId])
 }
 
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
@@ -1249,6 +1254,8 @@ model IssuePullRequest {
 
   @@unique([codeProvider, repository, number, issueProvider, issueKey])
   @@index([issueProvider, issueKey])
+  /// The admin viewer's outcome lookup by run.
+  @@index([openedByRunId])
 }
 
 /// The status comment wardby posts on the Jira issue whose event started this

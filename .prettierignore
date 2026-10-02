@@ -2,5 +2,6 @@ dist
 node_modules
 src/sandbox/generated
 src/generated
+src/viewer/schemas
 coverage
 package-lock.json

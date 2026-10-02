@@ -54,23 +54,24 @@ access tokens for that audience.
 
 Create these scopes in the provider:
 
-| Scope                 | Capability                                                        |
-| --------------------- | ----------------------------------------------------------------- |
-| `agents:read`         | Inspect agents, models, runs, memory, and attached resources.     |
-| `agents:write`        | Create and modify agents, schedules, and sub-agent relationships. |
-| `runs:trigger`        | Start agent runs.                                                 |
-| `tools:write`         | Create, attach, and manage tools.                                 |
-| `datastore:write`     | Create, attach, query, and modify datastores.                     |
-| `secrets:write`       | Create, attach, rotate, and remove secret bindings.               |
-| `webhooks:write`      | Create and manage webhook triggers.                               |
-| `budget_groups:write` | Create and manage shared budget groups.                           |
-| `packages:approve`    | Approve coding agents' package allowlists.                        |
-| `services:manage`     | Create, update and delete coding-run service catalog entries.     |
-| `agents:admin`        | Reassign agent ownership, BYO worker images; admins only.         |
-| `memory:write`        | Set and delete agent memory entries.                              |
+| Scope                 | Capability                                                         |
+| --------------------- | ------------------------------------------------------------------ |
+| `agents:read`         | Inspect agents, models, runs, memory, and attached resources.      |
+| `agents:write`        | Create and modify agents, schedules, and sub-agent relationships.  |
+| `runs:trigger`        | Start agent runs.                                                  |
+| `tools:write`         | Create, attach, and manage tools.                                  |
+| `datastore:write`     | Create, attach, query, and modify datastores.                      |
+| `secrets:write`       | Create, attach, rotate, and remove secret bindings.                |
+| `webhooks:write`      | Create and manage webhook triggers.                                |
+| `budget_groups:write` | Create and manage shared budget groups.                            |
+| `packages:approve`    | Approve coding agents' package allowlists.                         |
+| `services:manage`     | Create, update and delete coding-run service catalog entries.      |
+| `agents:admin`        | Reassign agent ownership, BYO worker images; admins only.          |
+| `memory:write`        | Set and delete agent memory entries.                               |
+| `admin:view`          | Read every owner's runs through the admin viewer API; admins only. |
 
 MCP clients discover this list from Wardby's protected-resource metadata and
-may request every advertised scope. Define all twelve in the provider even when
+may request every advertised scope. Define all thirteen in the provider even when
 policy grants a particular client or user only a subset. Ensure granted scopes
 are emitted in the access token's `scope` or `scp` claim; defining them only in
 the provider UI is not sufficient.
@@ -82,16 +83,20 @@ request every advertised scope may fail with `invalid_scope`.
 `services:manage` was added after `memory:write`. When you upgrade an existing
 deployment, define it in the provider too, for the same reason.
 
+`admin:view` was added after `services:manage`. When you upgrade an existing
+deployment, define it in the provider too and map it like `agents:admin`;
+otherwise clients that request every advertised scope fail with `invalid_scope`.
+
 ### Wardby roles
 
-A scope only delegates. `agents:admin`, `packages:approve` and `services:manage`
-take effect only for a caller who also holds a Wardby role that grants them:
+A scope only delegates. `agents:admin`, `packages:approve`, `services:manage`
+and `admin:view` take effect only for a caller who also holds a Wardby role that grants them:
 
-| Wardby role        | Grants                                                                                        |
-| ------------------ | --------------------------------------------------------------------------------------------- |
-| `admin`            | `agents:admin` (`make_owner`, BYO `workerImageRef`), `packages:approve` and `services:manage` |
-| `package-approver` | `packages:approve` (package allowlist and policy approval)                                    |
-| `service-manager`  | `services:manage` (coding-run service catalog changes)                                        |
+| Wardby role        | Grants                                                                                                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admin`            | `agents:admin` (`make_owner`, BYO `workerImageRef`), `packages:approve`, `services:manage` and `admin:view` (read every owner's runs, see [viewer-api.md](viewer-api.md)) |
+| `package-approver` | `packages:approve` (package allowlist and policy approval)                                                                                                                |
+| `service-manager`  | `services:manage` (coding-run service catalog changes)                                                                                                                    |
 
 The roles come from a claim in the caller's **access token**, which you map to
 Wardby roles:
@@ -151,7 +156,7 @@ Provider examples:
   token, filtered to those groups. Set `AUTH_ROLE_CLAIM=groups` and
   `AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager`.
   Optionally, add access policy rules so only those groups can obtain
-  `agents:admin`, `packages:approve` and `services:manage`.
+  `agents:admin`, `packages:approve`, `services:manage` and `admin:view`.
 - **FusionAuth:** create three application roles, `admin`,
   `package-approver` and `service-manager`. They appear in the access token's
   top-level `roles` claim. Set `AUTH_ROLE_CLAIM=roles` and

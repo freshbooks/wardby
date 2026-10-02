@@ -1,0 +1,144 @@
+{
+  "$ref": "#/definitions/viewer-event",
+  "definitions": {
+    "viewer-event": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "parentRunId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agentId": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "succeeded",
+                "failed",
+                "refused",
+                "lost",
+                "budget_exhausted",
+                "cancelled"
+              ]
+            },
+            "turns": {
+              "type": "integer"
+            },
+            "tokensIn": {
+              "type": "integer"
+            },
+            "tokensOut": {
+              "type": "integer"
+            },
+            "costUsd": {
+              "type": "number"
+            },
+            "finishedAt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "runId",
+            "parentRunId",
+            "agentId",
+            "status",
+            "turns",
+            "tokensIn",
+            "tokensOut",
+            "costUsd",
+            "finishedAt"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "service"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "probing",
+                "ready",
+                "failed"
+              ]
+            },
+            "attempts": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "runId",
+            "name",
+            "state",
+            "attempts"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "outcome"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string",
+              "enum": [
+                "pull_request",
+                "host_status",
+                "issue_status",
+                "host_check"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "runId",
+            "source"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -78,14 +78,14 @@ Scopes and roles do different jobs:
 - **Roles authorize.** A user has a set of roles. With no roles, the user is a
   member:
 
-| Role               | Grants                                                          |
-| ------------------ | --------------------------------------------------------------- |
-| `admin`            | `agents:admin`, `packages:approve` and `services:manage`        |
-| `package-approver` | `packages:approve`                                              |
-| `service-manager`  | `services:manage`                                               |
-| (none)             | nothing privileged; every other scope works as the token allows |
+| Role               | Grants                                                                 |
+| ------------------ | ---------------------------------------------------------------------- |
+| `admin`            | `agents:admin`, `packages:approve`, `services:manage` and `admin:view` |
+| `package-approver` | `packages:approve`                                                     |
+| `service-manager`  | `services:manage`                                                      |
+| (none)             | nothing privileged; every other scope works as the token allows        |
 
-Five operations are privileged:
+Six operations are privileged:
 
 - `make_owner`, which reassigns any agent's owner, including another
   principal's private agent (see [Sharing agents](#sharing-agents) for what
@@ -97,7 +97,9 @@ Five operations are privileged:
   `create_agent`/`update_agent`; see [Repository access](#repository-access));
 - creating, updating or deleting coding-run service catalog entries
   (`create_service`, `update_service`, `delete_service`; reading the catalog
-  is `agents:read`, see [coding-services.md](coding-services.md)).
+  is `agents:read`, see [coding-services.md](coding-services.md));
+- reading every owner's runs through the admin viewer API (see
+  [viewer-api.md](viewer-api.md)).
 
 Each needs **both** its scope on the token **and** a role that grants that
 permission:
@@ -105,10 +107,11 @@ permission:
 - `make_owner`, `workerImageRef`, and repository approval need `agents:admin`.
 - Package approval needs `packages:approve`, or `agents:admin`.
 - Service catalog changes need `services:manage`.
+- The admin viewer API needs `admin:view`, which only the `admin` role grants.
 
 In practice:
 
-- an `admin` can do all five;
+- an `admin` can do all six;
 - a `package-approver` can approve packages only;
 - a `service-manager` can change the service catalog only;
 - a member can do none of them.
