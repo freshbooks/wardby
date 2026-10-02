@@ -21,6 +21,8 @@ interface FakeLink {
   allowedTransitions?: string[];
   writableFields?: string[];
   allowedLinkTypes?: string[];
+  creatableIssueTypes?: string[];
+  maxNewIssuesPerRun?: number | null;
 }
 
 interface FakeStatus {
@@ -196,6 +198,8 @@ const JIRA_TOOLS = [
   "jira_link_issues",
   "jira_get_property",
   "jira_set_property",
+  "jira_create_issue",
+  "jira_read_attachment",
 ];
 
 describe("jira_* built-ins in the native run loop", () => {
@@ -293,6 +297,45 @@ describe("jira_* built-ins in the native run loop", () => {
     expect(state.toolResults.some((r) => r.includes("link_type_not_allowed"))).toBe(true);
     expect(state.toolResults.some((r) => r.includes("transition_not_allowed"))).toBe(true);
     expect(state.toolResults.some((r) => r.includes("field_not_allowed"))).toBe(true);
+  });
+
+  it("creates issues with the run id, capped per run, counting this run's recorded fingerprint creates", async () => {
+    const tracker = fakeTracker();
+    vi.mocked(tracker.createIssue).mockResolvedValue({
+      key: "PROJ-9",
+      url: "https://your-site.atlassian.net/browse/PROJ-9",
+    });
+    const args = { projectKey: "PROJ", issueType: "Bug", summary: "S", description: "D" };
+    const { db, state, llm } = harness({
+      links: [{ ...LINK, creatableIssueTypes: ["Bug"], maxNewIssuesPerRun: 2 }],
+      script: [toolCall("jira_create_issue", args), toolCall("jira_create_issue", args), text("done")],
+    });
+    const count = vi.fn(async (_args: any) => 1);
+    (db as any).issueFingerprint = { count };
+    await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(tracker.createIssue).toHaveBeenCalledTimes(1);
+    expect(tracker.createIssue).toHaveBeenCalledWith(
+      expect.objectContaining({ projectKey: "PROJ", properties: { "wardby.a1.created": { runId: "run1" } } }),
+    );
+    expect(count).toHaveBeenCalledWith({
+      where: { createdByRunId: "run1", issueProvider: "jira", projectKey: "PROJ" },
+    });
+    expect(state.toolResults.some((r) => r.includes('"outcome":"created"'))).toBe(true);
+    expect(state.toolResults.some((r) => r.includes("issue_cap_reached"))).toBe(true);
+  });
+
+  it("refuses jira_create_issue for a link row without creatableIssueTypes", async () => {
+    const tracker = fakeTracker();
+    const { db, state, llm } = harness({
+      links: [LINK],
+      script: [
+        toolCall("jira_create_issue", { projectKey: "PROJ", issueType: "Bug", summary: "S", description: "D" }),
+        text("done"),
+      ],
+    });
+    await executeRun("run1", { ...providers(llm), issueTrackers: { jira: tracker } }, db);
+    expect(tracker.createIssue).not.toHaveBeenCalled();
+    expect(state.toolResults.some((r) => r.includes("issue_type_not_allowed"))).toBe(true);
   });
 
   it("completes the run's issue status comment with the outcome", async () => {

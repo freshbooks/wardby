@@ -62,8 +62,10 @@ import {
   ISSUE_TRACKER_TOOL_NAMES,
   handleIssueTrackerTool,
   type IssueProjectLink,
+  type RunCreationCounter,
 } from "./issue-tracker-tools.js";
 import { completeIssueStatus } from "./issue-status.js";
+import { fileIssue } from "./issue-dedupe.js";
 import { trackRun } from "./in-flight-runs.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
@@ -164,6 +166,7 @@ export type RunnerDb = Pick<
   | "agentIssueProject"
   | "issuePullRequest"
   | "runIssueStatus"
+  | "issueFingerprint"
 >;
 
 /** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */
@@ -202,6 +205,8 @@ function toIssueProjectLink(row: {
   allowedTransitions?: string[] | null;
   writableFields?: string[] | null;
   allowedLinkTypes?: string[] | null;
+  creatableIssueTypes?: string[] | null;
+  maxNewIssuesPerRun?: number | null;
 }): IssueProjectLink {
   return {
     provider: "jira",
@@ -212,6 +217,9 @@ function toIssueProjectLink(row: {
     allowedTransitions: row.allowedTransitions ?? [],
     writableFields: row.writableFields ?? [],
     allowedLinkTypes: row.allowedLinkTypes ?? [],
+    creatableIssueTypes: row.creatableIssueTypes ?? [],
+    // No built-in cap: absent (an older pinned load) means none, like null.
+    maxNewIssuesPerRun: row.maxNewIssuesPerRun ?? null,
   };
 }
 
@@ -572,6 +580,9 @@ async function executeTrackedRun(
     const toolsByName = new Map(Object.entries(loaded.toolsByName));
     const secretsAccessor = buildSecretsAccessor(loaded.agentId, providers.secrets, db);
     const sharedDatastoreAccessor = buildSharedDatastoreAccessor(loaded.agentId, providers.datastore, db);
+    // jira_create_issue's per-run cap counter: shared by every tool call of this attempt (a resumed attempt
+    // starts a fresh one, floored by the run's recorded fingerprint creates).
+    const issueCreationCounters = new Map<string, RunCreationCounter>();
 
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
@@ -641,6 +652,13 @@ async function executeTrackedRun(
               where: { agentId_provider_projectKey: { agentId: loaded.agentId, provider: "jira", projectKey } },
             });
             return row ? toIssueProjectLink(row) : null;
+          },
+          creation: {
+            runId,
+            counters: issueCreationCounters,
+            fileIssue: (input) => fileIssue({ db }, input),
+            recordedCreates: (projectKey) =>
+              db.issueFingerprint.count({ where: { createdByRunId: runId, issueProvider: "jira", projectKey } }),
           },
         });
       }
