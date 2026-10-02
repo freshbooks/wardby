@@ -65,15 +65,18 @@ afterEach(async () => {
 
 async function start(
   ctx: McpRequestContext,
-  opts: { heartbeatMs?: number } = {},
+  opts: { heartbeatMs?: number; authDelayMs?: number } = {},
 ): Promise<{ base: string; bus: ReturnType<typeof fakeBus>; api: ViewerApi }> {
   const bus = fakeBus();
   const viewer = createViewerApi({
     db: {} as PrismaClient,
     bus,
-    authenticate: async () => ctx,
+    authenticate: async () => {
+      if (opts.authDelayMs) await new Promise((r) => setTimeout(r, opts.authDelayMs));
+      return ctx;
+    },
     canonicalUri: URI,
-    ...opts,
+    heartbeatMs: opts.heartbeatMs,
   });
   api = viewer;
   server = createServer((req, res) => {
@@ -202,6 +205,17 @@ describe("viewer api event stream", () => {
 
     ac.abort();
     await vi.waitFor(() => expect(bus.count()).toBe(0));
+  });
+
+  it("opens no stream when the client disconnects during authentication", async () => {
+    const { base, bus } = await start(admin(), { heartbeatMs: 20, authDelayMs: 150 });
+    const ac = new AbortController();
+    const pending = fetch(`${base}/admin/api/events`, { signal: ac.signal }).catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 30));
+    ac.abort();
+    await pending;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(bus.count()).toBe(0);
   });
 
   it("closeStreams() ends an open stream and unsubscribes", async () => {

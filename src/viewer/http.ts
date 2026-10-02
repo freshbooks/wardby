@@ -40,6 +40,9 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
   let nextEventId = 0;
 
   function openStream(req: IncomingMessage, res: ServerResponse): void {
+    // The client may have gone while we awaited authentication; its close
+    // events already fired and will not fire again, so subscribing now would leak.
+    if (req.destroyed || res.destroyed || res.writableEnded) return;
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-store",
@@ -69,6 +72,7 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
     streams.add(close);
     req.on("close", cleanup);
     res.on("close", cleanup);
+    res.on("error", cleanup);
   }
 
   return {
