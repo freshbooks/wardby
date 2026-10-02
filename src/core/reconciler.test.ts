@@ -620,7 +620,12 @@ describe("reconcileOnce orphaned issue status comments", () => {
       updateMany: vi.fn(async () => ({ count: 0 })),
     };
     const agentIssueProject = { findUnique: vi.fn(async () => ({ access: "write", commentVisibilityRole: null })) };
-    const db = { run, runIssueStatus, agentIssueProject } as unknown as ReconcilerDb;
+    const db = {
+      run,
+      runIssueStatus,
+      agentIssueProject,
+      $queryRaw: async () => [{ usd: null }],
+    } as unknown as ReconcilerDb;
     const tracker = { provider: "jira", editComment: vi.fn(async () => undefined) } as unknown as IssueTracker;
 
     await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });

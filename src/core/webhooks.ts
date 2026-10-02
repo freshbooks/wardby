@@ -12,6 +12,12 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
+import {
+  AttributionError,
+  explicitAttribution,
+  RESPONSE_PATH_SNAPSHOT_BUDGET,
+  type AttributionIntent,
+} from "./attribution.js";
 import { dispatchRun } from "./dispatch.js";
 import { atLeast, effectiveAccess } from "./grants.js";
 
@@ -80,7 +86,9 @@ export async function deleteWebhook(id: string, db: PrismaClient): Promise<void>
 }
 
 export type ResolveWebhookRunResult =
-  { ok: true; runId: string } | { ok: false; reason: "not_found" | "invalid_secret" | "disabled" };
+  | { ok: true; runId: string }
+  | { ok: false; reason: "not_found" | "invalid_secret" | "disabled" }
+  | { ok: false; reason: "invalid_issue"; message: string };
 
 /**
  * Validates the presented secret and, if valid + enabled, enqueues a run via
@@ -93,8 +101,7 @@ export async function resolveWebhookRun(
   db: PrismaClient,
   executor: Executor,
   codingTask?: string,
-  /** Configured issue trackers: a run whose executor fails to start files a self-defect. Optional. */
-  issueTrackers?: IssueTrackerRegistry,
+  opts: { issue?: unknown; issueTrackers?: IssueTrackerRegistry } = {},
 ): Promise<ResolveWebhookRunResult> {
   const webhook = await db.webhook.findUnique({ where: { id } });
   if (!webhook) return { ok: false, reason: "not_found" };
@@ -107,13 +114,28 @@ export async function resolveWebhookRun(
     return { ok: false, reason: "disabled" };
   }
 
+  // An invalid or unlinked issue refuses the call before any run exists.
+  let attribution: AttributionIntent | undefined;
+  if (opts.issue !== undefined) {
+    try {
+      attribution = await explicitAttribution(db, opts.issueTrackers, agent.id, opts.issue, {
+        ...RESPONSE_PATH_SNAPSHOT_BUDGET,
+        field: "wardbyIssue",
+      });
+    } catch (err) {
+      if (err instanceof AttributionError) return { ok: false, reason: "invalid_issue", message: err.message };
+      throw err;
+    }
+  }
+
   let rejected: "not_found" | "invalid_secret" | "disabled" = "disabled";
   const dispatched = await dispatchRun({
     db,
     executor,
-    selfDefects: { db, issueTrackers },
+    selfDefects: { db, issueTrackers: opts.issueTrackers },
     agentId: agent.id,
     trigger: "webhook",
+    attribution,
     // Coding agents keep the existing per-agent opt-in (allowWebhookTaskOverride);
     // a native agent's system prompt has no per-run input at all otherwise, so
     // accepting task text over an authenticated webhook call needs no separate

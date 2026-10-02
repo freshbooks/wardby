@@ -67,7 +67,8 @@ agent's live link. Properties are not allowlisted: any `write` link can set
 them and any link can read them. They are stored as `wardby.<agentId>.<name>`,
 and anyone with Jira API access to the issue can read or overwrite them, so
 never store secrets there. Run status comments include an `Agent spend: $...`
-line.
+line. To see what work on a card, epic, or project cost, read
+[Attribute agent spend to issues](cost-attribution.md).
 If the token belongs to a person, Wardby refuses to act: startup logs an error
 and the webhook answers 503 `jira_personal_account`. Deliveries with a
 timestamp older than two hours (or more than five minutes ahead) are ignored.

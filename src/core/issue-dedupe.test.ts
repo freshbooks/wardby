@@ -87,6 +87,7 @@ function fakeTracker(over: Partial<IssueTracker> = {}): IssueTracker {
     botAccountId: vi.fn(),
     identity: vi.fn(),
     getIssue: vi.fn(async (key: string) => view(key, "new")),
+    snapshotIssue: vi.fn(),
     issueProject: vi.fn(),
     search: vi.fn(),
     matchesJql: vi.fn(),

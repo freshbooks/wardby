@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../providers/engine/types.js";
@@ -183,6 +183,7 @@ function fakeDb(
       findFirst: (async () => null) as any,
       findMany: (async () => []) as any,
     },
+    runModelUsage: { upsert: (async () => ({})) as any },
   } as unknown as RunnerDb;
 }
 
@@ -273,6 +274,51 @@ function fakeEngine(result: EngineResult, capture?: (ctx: EngineRunContext) => v
 }
 
 describe("runAgent", () => {
+  it("writes the engine's live progress onto the running run, and the final result still wins", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", systemPrompt: "s", model: "m", budgetUsd: 10, maxTurns: 10 }]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    let midRun: any;
+    const engine: Engine = {
+      async run(ctx) {
+        await ctx.onProgress?.({ turns: 2, usage: { tokensIn: 30, tokensOut: 7, costUsd: 0.25 } });
+        midRun = await db.run.findUnique({ where: { id: run.id } });
+        return { status: "succeeded", finalText: "ok", turns: 3, usage: { tokensIn: 40, tokensOut: 9, costUsd: 0.3 } };
+      },
+    };
+
+    const finished = await executeRun(
+      run.id,
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+
+    expect(midRun).toMatchObject({ status: "running", turns: 2, tokensIn: 30, tokensOut: 7, costUsd: 0.25 });
+    expect(midRun.heartbeatAt).toBeInstanceOf(Date);
+    expect(finished).toMatchObject({ status: "succeeded", turns: 3, tokensIn: 40, tokensOut: 9, costUsd: 0.3 });
+  });
+
+  it("a failing progress write never fails the run", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", systemPrompt: "s", model: "m", budgetUsd: 10, maxTurns: 10 }]);
+    const updateMany = db.run.updateMany;
+    db.run.updateMany = (async (args: any) => {
+      if (args.data.turns !== undefined && args.data.finishedAt === undefined) throw new Error("db down");
+      return updateMany(args);
+    }) as any;
+    const engine: Engine = {
+      async run(ctx) {
+        await ctx.onProgress?.({ turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 } });
+        return { status: "succeeded", finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 } };
+      },
+    };
+
+    const run = await runAgent(
+      "greeter",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+
+    expect(run.status).toBe("succeeded");
+  });
   it("fails closed instead of executing a coding agent in the native engine", async () => {
     const db = fakeDb([
       {
@@ -326,6 +372,32 @@ describe("runAgent", () => {
     expect(run.costUsd).toBe(0.0005);
     expect(run.finalText).toBe("hi there");
     expect(run.turns).toBe(1);
+  });
+
+  it("records the run's usage under the agent's model after a successful run", async () => {
+    const db = fakeDb([
+      { id: "a1", name: "greeter", systemPrompt: "be nice", model: "claude-sonnet-4-6", budgetUsd: 10, maxTurns: 10 },
+    ]);
+    const upsert = vi.fn(async (_args: unknown) => ({}));
+    (db as any).runModelUsage = { upsert };
+    const engine = fakeEngine({
+      status: "succeeded",
+      finalText: "hi",
+      turns: 1,
+      usage: { tokensIn: 1000, tokensOut: 50, costUsd: 0.01, cachedInputTokens: 800, cacheWriteTokens: 100 },
+    });
+
+    const run = await runAgent(
+      "greeter",
+      { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+      db,
+    );
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(upsert.mock.calls[0][0]).toMatchObject({
+      where: { runId_model: { runId: run.id, model: "claude-sonnet-4-6" } },
+      create: { freshInputTokens: 200, cachedInputTokens: 800, cacheWriteTokens: 100, outputTokens: 50 },
+    });
   });
 
   it("persists a refused/budget_exhausted/failed status and error message verbatim", async () => {

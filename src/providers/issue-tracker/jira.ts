@@ -12,10 +12,12 @@ import {
   type CreateMetaField,
   type CreateMetaIssueType,
   type IssueAttachmentView,
+  projectOf,
   type IssueCommentView,
   type IssueStatusCategory,
   type IssuePerson,
   type IssueSearchResult,
+  type IssueSnapshot,
   type IssueTracker,
   type IssueTrackerIdentity,
   type IssueView,
@@ -128,6 +130,7 @@ export class JiraIssueTracker implements IssueTracker {
   constructor(
     private readonly client: JiraClient,
     private readonly siteUrl: string,
+    private readonly opts: { epicLinkField?: string } = {},
   ) {}
 
   identity(): Promise<IssueTrackerIdentity> {
@@ -232,6 +235,51 @@ export class JiraIssueTracker implements IssueTracker {
     const projectKey = obj(obj(raw.fields).project).key;
     if (typeof projectKey !== "string" || !projectKey) throw new IssueTrackerError("tracker_invalid_response");
     return projectKey;
+  }
+
+  async snapshotIssue(key: string, opts: { timeoutMs?: number; retryOn429?: boolean } = {}): Promise<IssueSnapshot> {
+    await this.ready();
+    const fields = [
+      "summary",
+      "issuetype",
+      "project",
+      "parent",
+      ...(this.opts.epicLinkField ? [this.opts.epicLinkField] : []),
+    ];
+    const raw = await this.client.request<Json>(
+      "GET",
+      `/rest/api/3/issue/${key}?fields=${fields.join(",")}`,
+      undefined,
+      { timeoutMs: opts.timeoutMs, retryOn429: opts.retryOn429 },
+    );
+    const f = obj(raw.fields);
+    const parentRaw = obj(f.parent);
+    const parentFields = obj(parentRaw.fields);
+    const epicLink = this.opts.epicLinkField ? f[this.opts.epicLinkField] : undefined;
+    // An epic sits at hierarchy level 1 whatever the site calls it; fall back to the name when Jira omits the level.
+    const parentType = obj(parentFields.issuetype);
+    const parentIsEpic =
+      typeof parentType.hierarchyLevel === "number"
+        ? parentType.hierarchyLevel === 1
+        : str(parentType.name).toLowerCase() === "epic";
+    const parent =
+      typeof parentRaw.key === "string" && parentRaw.key
+        ? {
+            key: parentRaw.key,
+            ...(str(parentFields.summary) ? { title: str(parentFields.summary) } : {}),
+            kind: parentIsEpic ? "epic" : "parent",
+          }
+        : typeof epicLink === "string" && epicLink
+          ? { key: epicLink, kind: "epic" }
+          : undefined;
+    return {
+      key,
+      ...(str(f.summary) ? { title: str(f.summary) } : {}),
+      ...(str(obj(f.issuetype).name) ? { type: str(obj(f.issuetype).name) } : {}),
+      url: this.issueUrl(key),
+      scopeKey: str(obj(f.project).key) || projectOf(key),
+      ...(parent ? { parent } : {}),
+    };
   }
 
   async search(

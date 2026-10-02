@@ -20,7 +20,7 @@
 import { z } from "zod";
 import type { Prisma, PrismaClient, Run, RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
-import type { LoadedTool } from "../providers/engine/types.js";
+import type { EngineProgress, LoadedTool } from "../providers/engine/types.js";
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import { validateParams } from "../sandbox/zod-params.js";
@@ -67,6 +67,7 @@ import {
 import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
 import { fileSelfDefect } from "./self-defects.js";
+import { recordNativeModelUsage } from "./model-usage.js";
 import { trackRun } from "./in-flight-runs.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
@@ -161,6 +162,7 @@ export type RunnerDb = Pick<
   | "$transaction"
   | "$queryRaw"
   | "agentRepository"
+  | "runModelUsage"
   | "runHostCheck"
   | "runHostStatus"
   | "hostIdentity"
@@ -912,12 +914,34 @@ async function executeTrackedRun(
       return JSON.stringify(result.value);
     };
 
+    // Live progress for observers (MCP get_run, the viewer). Absolute totals, so a DBOS replay
+    // re-writing them is harmless. Written into the run's own cost columns on purpose: the run
+    // tree's shared budget (computeRunTreeSpend) then counts a running parent's spend so far, as it
+    // already does for coding runs, whose proxy ledger writes their totals live. Best-effort: a
+    // failed write only delays what observers see, and finishRun writes the final totals anyway.
+    const onProgress = async (progress: EngineProgress): Promise<void> => {
+      try {
+        await db.run.updateMany({
+          where: { id: runId, status: "running" },
+          data: {
+            turns: progress.turns,
+            tokensIn: progress.usage.tokensIn,
+            tokensOut: progress.usage.tokensOut,
+            costUsd: progress.usage.costUsd,
+            heartbeatAt: new Date(),
+          },
+        });
+      } catch (err) {
+        runnerLog.warn({ err, runId }, "failed to record run progress");
+      }
+    };
     const engineResult = await providers.engine.run({
       agent: loaded.agent,
       tools: loaded.tools,
       providers: { llm: providers.llm },
       runSandboxTool,
       onText,
+      onProgress,
       step,
     });
 
@@ -931,6 +955,8 @@ async function executeTrackedRun(
       turns: engineResult.turns,
       finishedAt: new Date(),
     });
+    // Per-model usage is written on the same path as Run.costUsd: any future mid-run cost write must write usage too.
+    await recordNativeModelUsage(db, runId, loaded.agent.model, engineResult.usage);
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);

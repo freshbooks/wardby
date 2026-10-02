@@ -24,6 +24,7 @@ import {
 import { buildDockerIsolationPlan, NETWORK_KEEPER_SCRIPT, WORKER_PATHS } from "./docker-isolation.js";
 import { dockerServiceContainerName, serviceMemoryMib, serviceTmpfsOptions } from "./docker-services.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
+import type { ServiceStateUpdate } from "./service-state.js";
 import type { JobHandle, JobResult, JobSpec } from "./types.js";
 
 const image = `registry.example/wardby-worker@sha256:${"a".repeat(64)}`;
@@ -1151,6 +1152,114 @@ describe("Docker launcher with services", () => {
     await created.launcher.launch(created.spec);
     expect(commands(created.docker, "container", "exec")).toHaveLength(3);
     expect(created.sleeps).toEqual([2_000, 2_000]);
+  });
+
+  describe("service state reporting", () => {
+    function reporting() {
+      const updates: ServiceStateUpdate[] = [];
+      return { updates, onServiceState: async (update: ServiceStateUpdate) => void updates.push(update) };
+    }
+
+    it("reports pending, each probe attempt, then ready", async () => {
+      const { updates, onServiceState } = reporting();
+      const created = await servicesHarness("docker-services-report", {}, { onServiceState });
+      created.docker.readinessFailures = 2;
+      await created.launcher.launch(created.spec);
+      const base = { runId: "docker-services-report", name: "postgres" };
+      expect(updates).toEqual([
+        { ...base, state: "pending" },
+        { ...base, state: "probing", attempts: 0 },
+        { ...base, state: "probing", attempts: 1 },
+        { ...base, state: "probing", attempts: 2 },
+        { ...base, state: "ready", attempts: 3 },
+      ]);
+    });
+
+    it("reports probe_failed with the attempt count when readiness never passes", async () => {
+      const { updates, onServiceState } = reporting();
+      const created = await servicesHarness("docker-services-report-unready", {}, { onServiceState });
+      created.docker.present.add(POSTGRES.image);
+      created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+      await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+      expect(updates.at(-1)).toEqual({
+        runId: "docker-services-report-unready",
+        name: "postgres",
+        state: "failed",
+        reason: "probe_failed",
+        attempts: POSTGRES.readiness.failureThreshold,
+      });
+    });
+
+    it.each([
+      [
+        "exited",
+        (docker: any) => {
+          docker.present.add(POSTGRES.image);
+          docker.serviceExitsOnStart = true;
+        },
+      ],
+      [
+        "image_unavailable",
+        (docker: any) => {
+          docker.pullFails = true;
+        },
+      ],
+    ] as const)("reports failed with reason %s", async (reason, arrange) => {
+      const { updates, onServiceState } = reporting();
+      const created = await servicesHarness(`docker-services-report-${reason}`, {}, { onServiceState });
+      arrange(created.docker);
+      await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+      expect(updates.at(-1)).toMatchObject({ name: "postgres", state: "failed", reason });
+    });
+
+    it("reports timed_out when the start-up budget runs out while probing", async () => {
+      const { updates, onServiceState } = reporting();
+      const created = await servicesHarness(
+        "docker-services-report-budget",
+        {},
+        { serviceReadyTimeoutMs: 5_000, onServiceState },
+      );
+      created.docker.present.add(POSTGRES.image);
+      created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+      await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+      expect(updates.at(-1)).toMatchObject({ name: "postgres", state: "failed", reason: "timed_out" });
+    });
+
+    it("reports start_failed when Docker refuses to create the service", async () => {
+      const { updates, onServiceState } = reporting();
+      const created = await servicesHarness("docker-services-report-create", {}, { onServiceState });
+      created.docker.present.add(POSTGRES.image);
+      created.docker.serviceCreateFails = true;
+      await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+      expect(updates.at(-1)).toMatchObject({ name: "postgres", state: "failed", reason: "start_failed" });
+    });
+
+    it("a throwing reporter does not mask the original launch failure", async () => {
+      const created = await servicesHarness(
+        "docker-services-report-throws-failed",
+        {},
+        {
+          onServiceState: async () => {
+            throw new Error("db down");
+          },
+        },
+      );
+      created.docker.pullFails = true;
+      await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    });
+
+    it("a throwing reporter never fails the launch", async () => {
+      const created = await servicesHarness(
+        "docker-services-report-throws",
+        {},
+        {
+          onServiceState: async () => {
+            throw new Error("db down");
+          },
+        },
+      );
+      await expect(created.launcher.launch(created.spec)).resolves.toBeDefined();
+    });
   });
 
   it("fails the launch as coding_service_unready after failureThreshold probes and never creates the worker", async () => {

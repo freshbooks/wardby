@@ -63,6 +63,7 @@ export type ReconcilerDb = Pick<
   | "codingRun"
   | "agent"
   | "$transaction"
+  | "$queryRaw"
 >;
 
 /**

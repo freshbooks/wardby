@@ -5,6 +5,7 @@ import type { IssueTracker } from "../providers/issue-tracker/types.js";
 import {
   closeOrphanedIssueStatuses,
   completeIssueStatus,
+  formatSpendLine,
   postIssueWorkingStatus,
   toJiraMarkdown,
 } from "./issue-status.js";
@@ -29,6 +30,11 @@ function tracker(): IssueTracker {
     setProperty: vi.fn(),
     getIssue: vi.fn(),
     issueProject: vi.fn(async (key: string) => key.slice(0, key.lastIndexOf("-"))),
+    snapshotIssue: vi.fn(async (key: string) => ({
+      key,
+      url: `https://example.test/browse/${key}`,
+      scopeKey: key.slice(0, key.lastIndexOf("-")),
+    })),
     search: vi.fn(),
     matchesJql: vi.fn(),
     comment: vi.fn(async () => ({ id: "c-1", url: "u" })),
@@ -38,6 +44,18 @@ function tracker(): IssueTracker {
   };
 }
 
+type SpendRows = { tree?: unknown; issue?: unknown; models?: unknown };
+
+/** A $queryRaw tagged-template stub that answers the three spend queries by the table each one reads. */
+function queryRaw(rows: SpendRows = {}) {
+  return vi.fn(async (strings: TemplateStringsArray) => {
+    const sql = strings.join("?");
+    if (sql.includes("RunModelUsage")) return rows.models ?? [];
+    if (sql.includes("RunAttribution")) return rows.issue ?? [{ usd: null }];
+    return rows.tree ?? [{ usd: null }];
+  });
+}
+
 function db(
   row: Record<string, unknown> | null,
   run: Record<string, unknown> = { id: "r1", status: "running", finalText: null, agentId: "a1" },
@@ -45,6 +63,7 @@ function db(
   link: Record<string, unknown> | null = { access: "write", commentVisibilityRole: null },
 ) {
   return {
+    $queryRaw: queryRaw(),
     agentIssueProject: { findUnique: vi.fn(async () => link) },
     issuePullRequest: {
       findUnique: vi.fn(async () => null),
@@ -60,7 +79,6 @@ function db(
     run: {
       findUnique: vi.fn(async () => run),
       findMany: vi.fn(async () => []),
-      aggregate: vi.fn(async () => ({ _sum: { costUsd: null } })),
       ...extra,
     },
   } as never;
@@ -220,49 +238,43 @@ describe("completeIssueStatus", () => {
     expect(markdown).toContain("Triaged");
     expect(markdown).not.toContain("Finished without");
   });
-  it("shows the run's and its children's spend above the footer, which stays last", async () => {
+  it("shows the tree, issue and model spend above the footer, which stays last", async () => {
     const t = tracker();
     const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
-    const d = db(
-      row,
-      { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok", costUsd: 0.01 },
-      {
-        aggregate: vi.fn(async () => ({ _sum: { costUsd: { toString: () => "0.0023" } } })),
-      },
-    );
+    const d = db(row, { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok" });
+    (d as any).$queryRaw = queryRaw({
+      tree: [{ usd: "1.84" }],
+      issue: [{ usd: "4.12" }],
+      models: [
+        { model: "claude-sonnet-4-6", usd: "1.52" },
+        { model: "claude-haiku-4-5", usd: "0.32" },
+      ],
+    });
     await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
     const { markdown } = (t.editComment as any).mock.calls[0][2];
     const lines = markdown.trimEnd().split("\n");
-    expect(markdown).toContain("Agent spend: $0.0123");
+    expect(markdown).toContain(
+      "Agent spend: $1.8400 this run · $4.1200 on this issue so far · claude-sonnet-4-6 $1.5200, claude-haiku-4-5 $0.3200",
+    );
     expect(lines.at(-1)).toMatch(/^_wardby run `r1`_$/);
     expect(isStatusComment(adfToText(markdownToAdf(markdown)))).toBe(true);
-    expect((d as any).run.aggregate).toHaveBeenCalledWith({ where: { parentRunId: "r1" }, _sum: { costUsd: true } });
   });
-  it("treats null costs as zero", async () => {
+  it("treats null costs as zero and omits the issue total for an unattributed run", async () => {
     const t = tracker();
     const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
-    const d = db(
-      row,
-      { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok", costUsd: null },
-      {
-        aggregate: vi.fn(async () => ({ _sum: { costUsd: null } })),
-      },
-    );
+    const d = db(row, { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok", costUsd: null });
     await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
-    expect((t.editComment as any).mock.calls[0][2].markdown).toContain("Agent spend: $0.0000");
+    const { markdown } = (t.editComment as any).mock.calls[0][2];
+    expect(markdown).toContain("Agent spend: $0.0000 this run");
+    expect(markdown).not.toContain("on this issue");
   });
   it("omits the spend line but still posts the outcome when the cost lookup fails", async () => {
     const t = tracker();
     const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
-    const d = db(
-      row,
-      { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok" },
-      {
-        aggregate: vi.fn(async () => {
-          throw new Error("db down");
-        }),
-      },
-    );
+    const d = db(row, { id: "r1", agentId: "a1", status: "succeeded", finalText: "ok" });
+    (d as any).$queryRaw = vi.fn(async () => {
+      throw new Error("db down");
+    });
     await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "ok" }, { jira: t });
     const { markdown } = (t.editComment as any).mock.calls[0][2];
     expect(markdown).not.toContain("Agent spend");
@@ -298,6 +310,7 @@ describe("closeOrphanedIssueStatuses", () => {
 
   function orphanDb(rows: Array<Record<string, unknown>>) {
     return {
+      $queryRaw: queryRaw(),
       runIssueStatus: {
         findMany: vi.fn(async () => rows.map((r) => ({ run: { id: r.runId, status: "lost", finalText: null } }))),
         findUnique: vi.fn(async ({ where }: any) => rows.find((r) => r.runId === where.runId) ?? null),
@@ -484,5 +497,26 @@ describe("completeIssueStatus bridging pull requests to the issue", () => {
       expect((d as any).issuePullRequest.create).toHaveBeenCalled();
       expect(t.addRemoteLink).toHaveBeenCalled();
     }
+  });
+});
+
+describe("formatSpendLine", () => {
+  it("shows the tree total, the issue total and the models by cost", () => {
+    expect(
+      formatSpendLine({
+        treeUsd: 1.84,
+        issueUsd: 4.12,
+        models: [
+          { model: "claude-sonnet-4-6", costUsd: 1.52 },
+          { model: "claude-haiku-4-5", costUsd: 0.32 },
+        ],
+      }),
+    ).toBe(
+      "Agent spend: $1.8400 this run · $4.1200 on this issue so far · claude-sonnet-4-6 $1.5200, claude-haiku-4-5 $0.3200",
+    );
+  });
+
+  it("omits the issue total when unattributed and the models when unknown", () => {
+    expect(formatSpendLine({ treeUsd: 0.01, issueUsd: null, models: [] })).toBe("Agent spend: $0.0100 this run");
   });
 });

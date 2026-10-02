@@ -47,11 +47,18 @@ export async function handleWebhookIngress(
     return { status: 400, body: { error: "invalid_task" } };
   }
 
-  const result = await resolveWebhookRun(webhookId, secret, db, executor, codingTask, issueTrackers);
+  // `wardbyIssue`, not `issue`: forwarded third-party payloads (GitHub, Jira)
+  // carry their own top-level `issue` object, which is not ours to read.
+  const result = await resolveWebhookRun(webhookId, secret, db, executor, codingTask, {
+    issue: req.body.wardbyIssue,
+    issueTrackers,
+  });
   if (result.ok) {
     return { status: 202, body: { runId: result.runId } };
   }
   switch (result.reason) {
+    case "invalid_issue":
+      return { status: 400, body: { error: "invalid_issue", error_description: result.message } };
     case "not_found":
       return { status: 404, body: { error: "not_found" } };
     case "invalid_secret":

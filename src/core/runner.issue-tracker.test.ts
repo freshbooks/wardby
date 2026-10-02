@@ -71,6 +71,11 @@ function fakeTracker(): IssueTracker {
     setProperty: vi.fn(),
     getIssue: vi.fn(),
     issueProject: vi.fn(async (key: string) => key.slice(0, key.lastIndexOf("-"))),
+    snapshotIssue: vi.fn(async (key: string) => ({
+      key,
+      url: `https://example.test/browse/${key}`,
+      scopeKey: key.slice(0, key.lastIndexOf("-")),
+    })),
     search: vi.fn(),
     matchesJql: vi.fn(),
     comment: vi.fn(async () => ({ id: "10001", url: "https://your-site.atlassian.net/browse/PROJ-1" })),
@@ -170,6 +175,7 @@ function harness(opts: {
           },
         },
       }),
+    $queryRaw: async () => [{ usd: null }],
     runIssueStatus: {
       findUnique: async ({ where }: any) =>
         state.status && state.status.runId === where.runId ? { ...state.status } : null,

@@ -56,6 +56,16 @@ export type StepRunner = <T>(name: string, fn: () => Promise<T>) => Promise<T>;
 /** The no-checkpoint default: run the step body directly. */
 export const runStepInline: StepRunner = (_name, fn) => fn();
 
+/**
+ * Live progress after a completed model turn: absolute cumulative totals,
+ * never deltas, so re-delivering one (a DBOS replay re-runs the loop over
+ * recorded steps) rewrites the same values instead of double counting.
+ */
+export interface EngineProgress {
+  turns: number;
+  usage: { tokensIn: number; tokensOut: number; costUsd: number };
+}
+
 export interface EngineRunContext {
   agent: EngineAgent;
   tools: LoadedTool[];
@@ -63,6 +73,8 @@ export interface EngineRunContext {
   /** Host bridge: validates params (Zod-in-sandbox) then runs the tool body in the WASM sandbox. Never throws — a tool/validation failure is a JSON error result string, fed back to the model as the tool's result. */
   runSandboxTool(name: string, argsJson: string): Promise<string>;
   onText?: (delta: string) => void;
+  /** Called after each model turn that completed without error; the engine awaits it. */
+  onProgress?: (progress: EngineProgress) => Promise<void>;
   /** See StepRunner. Optional; the in-process executor leaves it unset. */
   step?: StepRunner;
 }
@@ -73,7 +85,15 @@ export interface EngineResult {
   status: EngineStatus;
   finalText: string;
   turns: number;
-  usage: { tokensIn: number; tokensOut: number; costUsd: number };
+  usage: {
+    tokensIn: number;
+    tokensOut: number;
+    costUsd: number;
+    /** Subset of tokensIn served from a prompt cache. */
+    cachedInputTokens?: number;
+    /** Tokens billed for writing prompt-cache entries (not part of tokensIn). */
+    cacheWriteTokens?: number;
+  };
   error?: string;
 }
 

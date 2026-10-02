@@ -23,4 +23,10 @@ In-progress runs retain their unspent reservation, so overlapping scheduled,
 webhook, and manual runs share one cap rather than each assuming the full
 remaining balance.
 
+A run's spend is recorded as it goes, not only when it finishes. A sub-agent
+dispatched partway through a run therefore gets the run tree's capacity minus
+what the parent (and any earlier sub-agents) have already spent, so a parent
+that spends heavily before delegating can leave a sub-agent refused with
+`run_tree_exhausted`.
+
 For a shared-group refusal, read [Budget group exhausted](../errors/budget-group-exhausted.md).

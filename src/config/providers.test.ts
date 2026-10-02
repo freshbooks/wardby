@@ -431,6 +431,17 @@ describe("loadJiraConfig", () => {
       webhookSecret: "x".repeat(24),
     });
   });
+  it("accepts an optional Epic Link custom field id", () => {
+    expect(loadJiraConfig({ ...base, WARDBY_JIRA_EPIC_LINK_FIELD: "customfield_10014" })?.epicLinkField).toBe(
+      "customfield_10014",
+    );
+    expect(loadJiraConfig(base)?.epicLinkField).toBeUndefined();
+  });
+  it("rejects an Epic Link field that is not a custom field id", () => {
+    expect(() => loadJiraConfig({ ...base, WARDBY_JIRA_EPIC_LINK_FIELD: "parent" })).toThrow(
+      /WARDBY_JIRA_EPIC_LINK_FIELD/,
+    );
+  });
   it("accepts an uppercase cloudId", () => {
     const upper = "https://api.atlassian.com/ex/jira/ABCDEF12-2222-3333-4444-555555555555";
     expect(loadJiraConfig({ ...base, WARDBY_JIRA_API_BASE_URL: upper })?.apiBaseUrl).toBe(upper);
