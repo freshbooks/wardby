@@ -70,4 +70,27 @@ describe("App", () => {
     );
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("admin:view"));
   });
+
+  it("selects a newly added server", async () => {
+    servers = [{ name: "Prod", url: "https://w.example", signed_in: true }];
+    render(<App />);
+    await screen.findByText(/Today/);
+    fireEvent.change(screen.getByLabelText("Server"), { target: { value: "__add" } });
+    fireEvent.change(await screen.findByLabelText(/^name/i), { target: { value: "Dev" } });
+    fireEvent.change(screen.getByLabelText(/server url/i), { target: { value: "https://d.example" } });
+    servers = [...servers, { name: "Dev", url: "https://d.example", signed_in: true }];
+    fireEvent.click(screen.getByRole("button", { name: "Add server" }));
+    await waitFor(() => expect(client.connect).toHaveBeenCalledWith("https://d.example"));
+    expect(screen.getByLabelText("Server")).toHaveValue("https://d.example");
+  });
+
+  it("closes the server dialog on Escape when other servers exist", async () => {
+    servers = [{ name: "Prod", url: "https://w.example", signed_in: true }];
+    render(<App />);
+    await screen.findByText(/Today/);
+    fireEvent.change(screen.getByLabelText("Server"), { target: { value: "__add" } });
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
 });

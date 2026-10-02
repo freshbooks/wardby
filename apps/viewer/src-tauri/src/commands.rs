@@ -89,10 +89,6 @@ impl AppState {
         *self.events_slot() = Some((server_url, handle));
     }
 
-    fn stop_stream(&self) {
-        *self.events_slot() = None;
-    }
-
     fn stop_stream_for(&self, server_url: &str) {
         let mut slot = self.events_slot();
         if slot.as_ref().is_some_and(|(u, _)| u == server_url) {
@@ -668,8 +664,9 @@ pub async fn connect(
 }
 
 #[tauri::command]
-pub async fn disconnect(state: State<'_, AppState>) -> Result<(), AppError> {
-    state.stop_stream();
+pub async fn disconnect(state: State<'_, AppState>, url: String) -> Result<(), AppError> {
+    // Only that server's stream: a late cleanup must not kill the next server's.
+    state.stop_stream_for(&normalize_server_url(&url)?);
     Ok(())
 }
 
@@ -1097,7 +1094,23 @@ mod tests {
         st.set_stream("one".into(), spawn_events(a.clone(), |_| {}));
         st.set_stream("two".into(), spawn_events(a, |_| {}));
         assert_eq!(st.events_slot().as_ref().unwrap().0, "two");
-        st.stop_stream();
+        st.stop_stream_for("two");
+        assert!(st.events_slot().is_none());
+    }
+
+    #[tokio::test]
+    async fn disconnect_only_stops_the_named_servers_stream() {
+        let s = MockServer::start().await;
+        mount_server(&s, true).await;
+        let st = AppState::default();
+        let a = st
+            .session_for(&s.uri(), Some("cid"), MemStore::with("rt"))
+            .await
+            .unwrap();
+        st.set_stream("https://new.example".into(), spawn_events(a, |_| {}));
+        st.stop_stream_for("https://old.example");
+        assert_eq!(st.events_slot().as_ref().unwrap().0, "https://new.example");
+        st.stop_stream_for("https://new.example");
         assert!(st.events_slot().is_none());
     }
 

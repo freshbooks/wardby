@@ -1,10 +1,10 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { addServer, isAppError, type AppError } from "../api/client";
 import { ErrorLine } from "./ErrorLine";
 
 interface Props {
   /** Called after the server was saved. */
-  onAdded: () => void;
+  onAdded: () => void | Promise<void>;
   /** Present when other servers exist, so the dialog can be dismissed. */
   onCancel?: () => void;
 }
@@ -16,13 +16,21 @@ export function ServerDialog({ onAdded, onCancel }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
 
+  // Focus moves into the dialog (autoFocus) and returns to the opener on close.
+  useEffect(() => {
+    const opener = document.activeElement;
+    return () => {
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
+  }, []);
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
       await addServer(name.trim(), url.trim(), clientId.trim() || undefined);
-      onAdded();
+      await onAdded();
     } catch (err) {
       setError(isAppError(err) ? err : { kind: "protocol", message: String(err) });
     } finally {
@@ -32,7 +40,19 @@ export function ServerDialog({ onAdded, onCancel }: Props) {
 
   return (
     <div className="dialog-backdrop">
-      <form className="dialog" role="dialog" aria-modal="true" aria-labelledby="server-dialog-title" onSubmit={submit}>
+      <form
+        className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="server-dialog-title"
+        onSubmit={submit}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && onCancel) {
+            e.stopPropagation();
+            onCancel();
+          }
+        }}
+      >
         <h2 id="server-dialog-title">Add a wardby server</h2>
         <label>
           Name

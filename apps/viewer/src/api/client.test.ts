@@ -40,7 +40,7 @@ describe("command wrappers", () => {
     await cancelSignIn("https://w.example");
     await signOut("https://w.example");
     await connect("https://w.example");
-    await disconnect();
+    await disconnect("https://w.example");
     await fetchGraph("https://w.example", "24h", 200);
     await fetchRun("https://w.example", "run-1");
     expect(invokeMock.mock.calls).toEqual([
@@ -52,7 +52,7 @@ describe("command wrappers", () => {
       ["cancel_sign_in", { url: "https://w.example" }],
       ["sign_out", { url: "https://w.example" }],
       ["connect", { url: "https://w.example" }],
-      ["disconnect"],
+      ["disconnect", { url: "https://w.example" }],
       ["fetch_graph", { url: "https://w.example", since: "24h", limit: 200 }],
       ["fetch_run", { url: "https://w.example", id: "run-1" }],
     ]);

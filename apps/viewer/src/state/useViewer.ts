@@ -1,11 +1,13 @@
 // Stream-first data flow: subscribe to frames and open the event stream BEFORE the
 // first graph fetch, so nothing that happens between the two is lost; refetch the
 // graph on every `resync` and (debounced) when an event references an unknown run.
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { connect, disconnect, fetchGraph, isAppError, onFrame, type AppError, type FramePayload } from "../api/client";
 import { initialModel, reduce, type ViewerModel } from "./reducer";
 
 export const REFETCH_DEBOUNCE_MS = 750;
+/** Delays before automatic retries of a failed load; after these, the user retries. */
+export const RETRY_BACKOFF_MS = [1000, 2000, 5000];
 
 export interface ViewerOptions {
   since: string;
@@ -24,6 +26,8 @@ export interface UseViewer {
   reconnecting: boolean;
   /** A graph snapshot has been loaded for the current server. */
   loaded: boolean;
+  /** Refetch the graph now (after a failed load). */
+  retry: () => void;
 }
 
 interface Meta {
@@ -33,6 +37,8 @@ interface Meta {
   loaded: boolean;
 }
 
+const blank = (url: string | null): Meta => ({ url, error: null, reconnecting: false, loaded: false });
+
 function toAppError(e: unknown): AppError {
   if (isAppError(e)) return e;
   return { kind: "network", message: e instanceof Error ? e.message : String(e) };
@@ -41,86 +47,110 @@ function toAppError(e: unknown): AppError {
 export function useViewer(serverUrl: string | null, { since, limit }: ViewerOptions): UseViewer {
   const [model, dispatch] = useReducer(reduce, initialModel);
   // Keyed by server so a server switch starts fresh without resetting state in an effect.
-  const [meta, setMeta] = useState<Meta>({ url: null, error: null, reconnecting: false, loaded: false });
-  const fresh: Meta =
-    meta.url === serverUrl ? meta : { url: serverUrl, error: null, reconnecting: false, loaded: false };
-  const { error, reconnecting, loaded } = fresh;
+  const [meta, setMeta] = useState<Meta>(blank(null));
+  const { error, reconnecting, loaded } = meta.url === serverUrl ? meta : blank(serverUrl);
 
   const sinceRef = useRef(since);
   const limitRef = useRef(limit);
   const agentNames = useRef(new Map<string, string>());
+  const knownRuns = useRef<ReadonlySet<string>>(new Set());
   const loadRef = useRef<(() => void) | null>(null);
-  const loadedRef = useRef(false);
-  const lastFetchAt = useRef(0);
+  /** A load has been requested for the current server (so a window change must refetch). */
+  const requestedRef = useRef(false);
 
   useEffect(() => {
     sinceRef.current = since;
     limitRef.current = limit;
-    // A window change refetches; the first load is driven by the connect effect.
-    if (loadedRef.current) loadRef.current?.();
+    if (requestedRef.current) loadRef.current?.();
   }, [since, limit]);
 
   useEffect(() => {
     const names = new Map<string, string>();
     for (const run of model.runs.values()) names.set(run.agentId, run.agentName);
     agentNames.current = names;
+    knownRuns.current = new Set(model.runs.keys());
   }, [model.runs]);
 
   useEffect(() => {
     if (!serverUrl) return;
     let active = true;
     let seq = 0;
-    let initialRequested = false;
     let unlisten: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let lastFetchAt = 0;
+    let failed = false;
+    let failures = 0;
+    // Events that needed a refetch vs. how many the last fetch started after.
+    let needSeq = 0;
+    let fetchedNeedSeq = 0;
 
     dispatch({ type: "reset" });
-    loadedRef.current = false;
+    requestedRef.current = false;
+
     const patch = (p: Partial<Omit<Meta, "url">>) =>
-      setMeta((m) => ({
-        ...(m.url === serverUrl ? m : { url: serverUrl, error: null, reconnecting: false, loaded: false }),
-        ...p,
-      }));
-    const setError = (error: AppError | null) => patch({ error });
-    const setReconnecting = (reconnecting: boolean) => patch({ reconnecting });
+      setMeta((m) => ({ ...(m.url === serverUrl ? m : blank(serverUrl)), ...p }));
+
+    const schedule = (delay: number, force: boolean) => {
+      if (timer !== undefined) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (force || needSeq > fetchedNeedSeq) void load();
+      }, delay);
+    };
 
     const load = async () => {
+      requestedRef.current = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
       const mine = ++seq;
-      lastFetchAt.current = Date.now();
+      lastFetchAt = Date.now();
+      fetchedNeedSeq = needSeq;
+      failed = false;
       try {
         const snapshot = await fetchGraph(serverUrl, sinceRef.current, limitRef.current);
+        // A newer load (window change, resync) supersedes this response.
         if (!active || mine !== seq) return;
-        loadedRef.current = true;
+        failures = 0;
         patch({ loaded: true, error: null });
         dispatch({ type: "snapshot", snapshot });
+        // An unknown-run event arrived after this fetch started: it is not in the snapshot.
+        if (needSeq > fetchedNeedSeq) schedule(REFETCH_DEBOUNCE_MS, false);
       } catch (e) {
-        if (active && mine === seq) setError(toAppError(e));
+        if (!active || mine !== seq) return;
+        failed = true;
+        const err = toAppError(e);
+        patch({ error: err });
+        if (err.kind !== "not_signed_in" && err.kind !== "forbidden" && failures < RETRY_BACKOFF_MS.length) {
+          schedule(RETRY_BACKOFF_MS[failures], true);
+          failures += 1;
+        }
       }
     };
     loadRef.current = () => void load();
-
-    const ensureInitial = () => {
-      if (initialRequested) return;
-      initialRequested = true;
-      void load();
-    };
 
     const handle = ({ server, frame }: FramePayload) => {
       if (!active || server !== serverUrl) return;
       switch (frame.type) {
         case "hello":
-          dispatch({ type: "status", connected: frame.connected });
-          if (frame.connected) setReconnecting(false);
-          if (!loadedRef.current) ensureInitial();
-          break;
         case "status":
           dispatch({ type: "status", connected: frame.connected });
-          if (frame.connected) setReconnecting(false);
+          if (frame.connected) {
+            patch({ reconnecting: false });
+            // The stream is back: retry a load that failed, or start the first one.
+            if (failed || (frame.type === "hello" && !requestedRef.current)) void load();
+          }
           break;
         case "resync":
-          initialRequested = true;
           void load();
           break;
-        case "event":
+        case "event": {
+          const unknown = frame.data.kind === "outcome" || !knownRuns.current.has(frame.data.runId);
+          if (unknown) {
+            needSeq += 1;
+            schedule(Math.max(0, REFETCH_DEBOUNCE_MS - (Date.now() - lastFetchAt)), false);
+          }
           dispatch({
             type: "event",
             event: frame.data,
@@ -128,14 +158,14 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
             agentName: (id) => agentNames.current.get(id),
           });
           break;
+        }
         case "reconnecting":
           dispatch({ type: "status", connected: false });
-          setReconnecting(true);
+          patch({ reconnecting: true });
           break;
         case "ended":
           dispatch({ type: "status", connected: false });
-          setReconnecting(false);
-          setError(frame.error);
+          patch({ reconnecting: false, error: frame.error });
           break;
       }
     };
@@ -149,28 +179,22 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
         }
         unlisten = off;
         await connect(serverUrl);
-        if (!active) return;
-        ensureInitial();
+        if (active && !requestedRef.current) void load();
       } catch (e) {
-        if (active) setError(toAppError(e));
+        if (active) patch({ error: toAppError(e) });
       }
     })();
 
     return () => {
       active = false;
       loadRef.current = null;
+      clearTimeout(timer);
       unlisten?.();
-      void disconnect().catch(() => undefined);
+      void disconnect(serverUrl).catch(() => undefined);
     };
   }, [serverUrl]);
 
-  // Debounced trailing refetch when an event referenced a run the snapshot lacks.
-  useEffect(() => {
-    if (!model.needsRefetch) return;
-    const wait = Math.max(0, REFETCH_DEBOUNCE_MS - (Date.now() - lastFetchAt.current));
-    const timer = setTimeout(() => loadRef.current?.(), wait);
-    return () => clearTimeout(timer);
-  }, [model.needsRefetch, serverUrl]);
+  const retry = useCallback(() => loadRef.current?.(), []);
 
   return {
     model,
@@ -179,5 +203,6 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
     forbidden: error?.kind === "forbidden",
     reconnecting,
     loaded,
+    retry,
   };
 }

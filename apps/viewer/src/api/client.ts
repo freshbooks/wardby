@@ -74,7 +74,8 @@ export const signOut = (url: string) => invoke<void>("sign_out", { url });
 /** Starts the live event stream for a server, replacing any previous one. */
 export const connect = (url: string) => invoke<void>("connect", { url });
 
-export const disconnect = () => invoke<void>("disconnect");
+/** Stops the stream only if it belongs to this server (a late call can't kill another's). */
+export const disconnect = (url: string) => invoke<void>("disconnect", { url });
 
 export const fetchGraph = (url: string, since: string, limit: number) =>
   invoke<GraphSnapshot>("fetch_graph", { url, since, limit });

@@ -60,6 +60,10 @@ beforeEach(() => {
   handler = null;
   vi.useFakeTimers();
   vi.clearAllMocks();
+  vi.mocked(client.fetchGraph).mockImplementation(async () => {
+    calls.push("fetchGraph");
+    return snapshot();
+  });
 });
 afterEach(() => vi.useRealTimers());
 
@@ -67,6 +71,8 @@ describe("useViewer", () => {
   it("opens the stream before the first graph fetch", async () => {
     renderHook(() => useViewer(URL_, { since: "1h", limit: 500 }));
     await settle();
+    expect(calls.indexOf("onFrame")).toBeGreaterThanOrEqual(0);
+    expect(calls.indexOf("onFrame")).toBeLessThan(calls.indexOf("connect"));
     expect(calls.indexOf("connect")).toBeGreaterThanOrEqual(0);
     expect(calls.indexOf("connect")).toBeLessThan(calls.indexOf("fetchGraph"));
     expect(fetches()).toBe(1);
@@ -148,10 +154,113 @@ describe("useViewer", () => {
     await send({ type: "event", kind: "run", data: runEvent("r1") });
     unmount();
     expect(unlisten).toHaveBeenCalled();
-    expect(client.disconnect).toHaveBeenCalled();
+    expect(client.disconnect).toHaveBeenCalledWith(URL_);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(fetches()).toBe(1);
+  });
+
+  const deferred = () => {
+    let resolve!: (s: GraphSnapshot) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<GraphSnapshot>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+  const withRun = (id: string): GraphSnapshot => ({
+    ...snapshot(),
+    runs: [{ id, agentId: "a", agentName: "agent", status: "running" } as GraphSnapshot["runs"][number]],
+  });
+
+  it("discards a stale response and refetches when the window changes during the first load", async () => {
+    const first = deferred();
+    const second = deferred();
+    vi.mocked(client.fetchGraph).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { result, rerender } = renderHook(({ since }) => useViewer(URL_, { since, limit: 500 }), {
+      initialProps: { since: "1h" },
+    });
+    await settle();
+    rerender({ since: "7d" });
+    await settle();
+    expect(vi.mocked(client.fetchGraph).mock.calls.map((c) => c[1])).toEqual(["1h", "7d"]);
+    await act(async () => second.resolve(withRun("new-window")));
+    await act(async () => first.resolve(withRun("old-window")));
+    expect([...result.current.model.runs.keys()]).toEqual(["new-window"]);
+  });
+
+  it("surfaces a failed first fetch, retries on Retry, and again on the next hello", async () => {
+    vi.mocked(client.fetchGraph).mockRejectedValueOnce({ kind: "network", message: "down" });
+    const { result } = renderHook(() => useViewer(URL_, { since: "1h", limit: 500 }));
+    await settle();
+    expect(result.current.error?.kind).toBe("network");
+    expect(result.current.loaded).toBe(false);
+    act(() => result.current.retry());
+    await settle();
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.error).toBeNull();
+
+    vi.mocked(client.fetchGraph).mockRejectedValueOnce({ kind: "network", message: "down" });
+    await send({ type: "resync" });
+    await settle();
+    expect(result.current.error?.kind).toBe("network");
+    const before = fetches();
+    await send({ type: "hello", connected: true });
+    await settle();
+    expect(fetches()).toBe(before + 1);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("window change after a failed first fetch refetches", async () => {
+    vi.mocked(client.fetchGraph).mockRejectedValueOnce({ kind: "network", message: "down" });
+    const { result, rerender } = renderHook(({ since }) => useViewer(URL_, { since, limit: 500 }), {
+      initialProps: { since: "1h" },
+    });
+    await settle();
+    rerender({ since: "6h" });
+    await settle();
+    expect(result.current.loaded).toBe(true);
+  });
+
+  it("keeps an unknown-run event that arrives while a fetch is in flight", async () => {
+    const slow = deferred();
+    renderHook(() => useViewer(URL_, { since: "1h", limit: 500 }));
+    await settle();
+    vi.mocked(client.fetchGraph).mockReturnValueOnce(slow.promise);
+    await send({ type: "resync" });
+    await send({ type: "event", kind: "run", data: runEvent("late") });
+    await act(async () => slow.resolve(snapshot()));
+    const before = fetches();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(fetches()).toBe(before + 1);
+  });
+
+  it("retries a failed refetch with backoff, then stops", async () => {
+    renderHook(() => useViewer(URL_, { since: "1h", limit: 500 }));
+    await settle();
+    vi.mocked(client.fetchGraph).mockRejectedValue({ kind: "network", message: "down" });
+    await send({ type: "resync" });
+    await settle();
+    const n = vi.mocked(client.fetchGraph).mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(vi.mocked(client.fetchGraph).mock.calls.length).toBe(n + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(vi.mocked(client.fetchGraph).mock.calls.length).toBe(n + 2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(vi.mocked(client.fetchGraph).mock.calls.length).toBe(n + 3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30000);
+    });
+    expect(vi.mocked(client.fetchGraph).mock.calls.length).toBe(n + 3);
   });
 });

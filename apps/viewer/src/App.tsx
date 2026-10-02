@@ -31,7 +31,12 @@ function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: 
     for (const r of runs) byId.set(r.agentId, r.agentName);
     return [...byId].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
   }, [runs]);
-  const visible = useMemo(() => runs.filter((r) => matchesFilters(r, filters)), [runs, filters]);
+  // Selected agents that left the window can't be cleared from the menu: ignore them.
+  const view = useMemo<Filters>(() => {
+    const ids = new Set(agents.map((a) => a.id));
+    return { ...filters, agents: new Set([...filters.agents].filter((id) => ids.has(id))) };
+  }, [filters, agents]);
+  const visible = useMemo(() => runs.filter((r) => matchesFilters(r, view)), [runs, view]);
 
   return (
     <div className="app">
@@ -42,7 +47,7 @@ function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: 
         onAddServer={onAddServer}
         live={model.live}
         reconnecting={viewer.reconnecting}
-        filters={filters}
+        filters={view}
         onFiltersChange={setFilters}
         agents={agents}
         spend={model.spend}
@@ -61,7 +66,14 @@ function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: 
                 This account needs the admin role (admin:view) to use the viewer.
               </p>
             )}
-            {viewer.error && !viewer.forbidden && <ErrorLine error={viewer.error} />}
+            {viewer.error && !viewer.forbidden && (
+              <>
+                <ErrorLine error={viewer.error} />
+                <button type="button" onClick={viewer.retry}>
+                  Retry
+                </button>
+              </>
+            )}
             {!viewer.loaded && !viewer.error && <p className="muted">Loading…</p>}
             {viewer.loaded && model.truncated && (
               <p className="muted">Showing the most recent {GRAPH_LIMIT} runs; narrow the window to see fewer.</p>
@@ -142,9 +154,14 @@ export function App() {
       <>
         {loadError && <ErrorLine error={{ kind: "storage", message: loadError }} />}
         <ServerDialog
-          onAdded={() => {
+          onAdded={async () => {
+            const list = await listServers().catch(() => null);
+            if (list) {
+              const added = list.find((s) => !servers.some((o) => o.url === s.url));
+              setServers(list);
+              if (added) setSelectedUrl(added.url);
+            }
             setAdding(false);
-            void refresh();
           }}
           onCancel={selected ? () => setAdding(false) : undefined}
         />
