@@ -19,6 +19,7 @@ const ids = {
   R2: id("r2"),
   R3: id("r3"),
   R4: id("r4"),
+  R5: id("r5"),
 };
 const groupId = id("group");
 
@@ -103,10 +104,12 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
         issueStatus: { create: { provider: "jira", issueKey: "WMD-42", commentId: "c1" } },
       },
     });
+    // In flight but started before the window, and nobody's ancestor: only the in-flight rule keeps it visible.
+    await db.run.create({ data: { id: ids.R5, agentId: ids.A, status: "running", startedAt: ago(5 * 60 * MIN) } });
   });
 
   afterAll(async () => {
-    for (const r of [ids.R3, ids.R2, ids.R4, ids.R1, ids.R0]) await db.run.deleteMany({ where: { id: r } });
+    for (const r of [ids.R5, ids.R3, ids.R2, ids.R4, ids.R1, ids.R0]) await db.run.deleteMany({ where: { id: r } });
     await db.agent.deleteMany({ where: { id: { in: [ids.A, ids.C] } } });
     await db.budgetGroup.deleteMany({ where: { id: groupId } });
     await db.$disconnect();
@@ -120,7 +123,7 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
       mine(snap.runs)
         .map((r) => r.id)
         .sort(),
-    ).toEqual([ids.R0, ids.R1, ids.R2, ids.R3, ids.R4].sort());
+    ).toEqual([ids.R0, ids.R1, ids.R2, ids.R3, ids.R4, ids.R5].sort());
     expect(() => GraphSnapshotSchema.parse(snap)).not.toThrow();
     const group = snap.spend.groups.find((g) => g.id === groupId);
     expect(group).toMatchObject({ dailyBudgetUsd: 10 });
@@ -164,5 +167,8 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
     expect(parseSince("2030-01-01T11:00:00Z", now)).toEqual(ago(60 * MIN));
     expect(parseSince(null, now)).toEqual(ago(60 * MIN));
     expect(() => parseSince("5y", now)).toThrow();
+    expect(() => parseSince("constructor", now)).toThrow();
+    expect(() => parseSince("toString", now)).toThrow();
+    expect(() => parseSince("2030-13-99T99:99:99Z", now)).toThrow();
   });
 });

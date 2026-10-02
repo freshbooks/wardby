@@ -19,8 +19,7 @@ const RELATIVE_SINCE_MS: Record<string, number> = {
 /** Accepts "15m" | "1h" | "6h" | "24h" | "7d" or an ISO-8601 timestamp; null defaults to 1h. Throws otherwise. */
 export function parseSince(value: string | null, now: Date): Date {
   if (value === null) return new Date(now.getTime() - DEFAULT_SINCE_MS);
-  const relative = RELATIVE_SINCE_MS[value];
-  if (relative !== undefined) return new Date(now.getTime() - relative);
+  if (Object.hasOwn(RELATIVE_SINCE_MS, value)) return new Date(now.getTime() - RELATIVE_SINCE_MS[value]);
   if (/^\d{4}-\d{2}-\d{2}T/.test(value)) {
     const parsed = new Date(value);
     if (!Number.isNaN(parsed.getTime())) return parsed;
