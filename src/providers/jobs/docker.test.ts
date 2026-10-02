@@ -1212,6 +1212,42 @@ describe("Docker launcher with services", () => {
       expect(updates.at(-1)).toMatchObject({ name: "postgres", state: "failed", reason });
     });
 
+    it("reports timed_out when the start-up budget runs out while probing", async () => {
+      const { updates, onServiceState } = reporting();
+      const created = await servicesHarness(
+        "docker-services-report-budget",
+        {},
+        { serviceReadyTimeoutMs: 5_000, onServiceState },
+      );
+      created.docker.present.add(POSTGRES.image);
+      created.docker.readinessFailures = Number.POSITIVE_INFINITY;
+      await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+      expect(updates.at(-1)).toMatchObject({ name: "postgres", state: "failed", reason: "timed_out" });
+    });
+
+    it("reports start_failed when Docker refuses to create the service", async () => {
+      const { updates, onServiceState } = reporting();
+      const created = await servicesHarness("docker-services-report-create", {}, { onServiceState });
+      created.docker.present.add(POSTGRES.image);
+      created.docker.serviceCreateFails = true;
+      await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+      expect(updates.at(-1)).toMatchObject({ name: "postgres", state: "failed", reason: "start_failed" });
+    });
+
+    it("a throwing reporter does not mask the original launch failure", async () => {
+      const created = await servicesHarness(
+        "docker-services-report-throws-failed",
+        {},
+        {
+          onServiceState: async () => {
+            throw new Error("db down");
+          },
+        },
+      );
+      created.docker.pullFails = true;
+      await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_service_unready:postgres");
+    });
+
     it("a throwing reporter never fails the launch", async () => {
       const created = await servicesHarness(
         "docker-services-report-throws",
