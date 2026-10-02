@@ -235,7 +235,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
 
     await expect(proxy.$queryRawUnsafe(`SELECT "id" FROM "Agent" LIMIT 1`)).rejects.toThrow(/permission denied/);
     await expect(proxy.$queryRawUnsafe(`SELECT "agentId" FROM "Run" LIMIT 1`)).rejects.toThrow(/permission denied/);
-    // The ledger only ever writes these three columns; it may not read them back.
+    // The ledger only ever writes these four columns; it may not read them back.
     for (const column of ["tokensIn", "tokensOut", "costUsd", "turns"]) {
       await expect(proxy.$queryRawUnsafe(`SELECT "${column}" FROM "Run" LIMIT 1`)).rejects.toThrow(/permission denied/);
     }
