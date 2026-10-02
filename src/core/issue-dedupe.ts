@@ -40,18 +40,22 @@ import {
 const log = logger.child({ module: "issue-dedupe" });
 
 export const FINGERPRINT_MAX_LENGTH = 200;
-/** Each tracker call inside the lock: a whole-call cap, and a 429 fails at once rather than sleeping. */
-export const TRACKER_CALL_OPTIONS: Readonly<TrackerCallOptions> = { timeoutMs: 10_000, retryOn429: false };
+/**
+ * Each tracker call inside the lock: a whole-call cap, and a 429 fails at once rather than sleeping. Jira
+ * Cloud calls through the api.atlassian.com gateway routinely take several seconds each, and one tracker
+ * call can be a few requests (a create resolves the issue type and its fields first), so the cap is generous.
+ */
+export const TRACKER_CALL_OPTIONS: Readonly<TrackerCallOptions> = { timeoutMs: 30_000, retryOn429: false };
 /** How long a sighting waits for another sighting of the same fingerprint before answering "busy". */
 export const DEDUPE_LOCK_TIMEOUT_MS = 5_000;
 /**
  * The critical section is the lock wait (5 s) plus at most two bounded tracker calls (getIssue, then
- * createIssue or comment: 2 x 10 s) plus a few row reads/writes; 60 s leaves ample margin so a create is
+ * createIssue or comment: 2 x 30 s) plus a few row reads/writes; 90 s leaves ample margin so a create is
  * never in flight when the transaction (and with it the advisory lock) is torn down. The cost: each
  * sighting in progress holds one pool connection for up to this long, and waiters hold one for up to
  * the lock timeout (callers waiting for a free connection give up after maxWait).
  */
-export const DEDUPE_TRANSACTION_TIMEOUT_MS = 60_000;
+export const DEDUPE_TRANSACTION_TIMEOUT_MS = 90_000;
 const DEDUPE_TRANSACTION_MAX_WAIT_MS = 10_000;
 
 export type IssueDedupeDb = Pick<PrismaClient, "$transaction">;
@@ -234,7 +238,13 @@ export async function fileIssue(
     }
     if (err instanceof CreateNotAllowed) return capReached(link.projectKey);
     if (isLockTimeout(err)) return { ...BUSY_RESULT };
-    if (err instanceof IssueTrackerError) return { error: err.code, message: err.message };
+    if (err instanceof IssueTrackerError) {
+      log.warn(
+        { code: err.code, agentId: input.agentId, projectKey: link.projectKey },
+        "issue dedupe: tracker call failed",
+      );
+      return { error: err.code, message: err.message };
+    }
     log.warn({ err, agentId: input.agentId, projectKey: link.projectKey }, "issue dedupe failed");
     return { error: "internal_error", message: "Filing the issue failed." };
   }

@@ -185,7 +185,7 @@ describe("fileIssue", () => {
       expect.arrayContaining([expect.stringContaining("pg_advisory_xact_lock(")]),
     );
     expect(tx.$executeRaw.mock.calls[1][1]).toBe(dedupeLockKey("jira", "OPS", fingerprintHash(FP)));
-    expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ timeout: 60_000 }));
+    expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ timeout: 90_000 }));
     expect(rows).toEqual([
       expect.objectContaining({
         fingerprintHash: fingerprintHash(FP),
@@ -390,7 +390,7 @@ describe("fileIssue", () => {
     const { db } = fakeDb([row()]);
     const tracker = fakeTracker({ getIssue: vi.fn(async (k: string) => view(k, "done")) });
     await fileIssue({ db }, input(tracker));
-    expect(TRACKER_CALL_OPTIONS).toEqual({ timeoutMs: 10_000, retryOn429: false });
+    expect(TRACKER_CALL_OPTIONS).toEqual({ timeoutMs: 30_000, retryOn429: false });
     expect(tracker.getIssue).toHaveBeenCalledWith("OPS-1", expect.objectContaining(TRACKER_CALL_OPTIONS));
     expect((tracker.createIssue as any).mock.calls[0][1]).toEqual(TRACKER_CALL_OPTIONS);
     expect(tracker.linkTypes).toHaveBeenCalledWith(TRACKER_CALL_OPTIONS);
