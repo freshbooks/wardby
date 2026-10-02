@@ -1,0 +1,491 @@
+{
+  "$ref": "#/definitions/graph-snapshot",
+  "definitions": {
+    "graph-snapshot": {
+      "type": "object",
+      "properties": {
+        "generatedAt": {
+          "type": "string"
+        },
+        "since": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "parentRunId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "agentId": {
+                "type": "string"
+              },
+              "agentName": {
+                "type": "string"
+              },
+              "agentKind": {
+                "type": "string",
+                "enum": [
+                  "native",
+                  "coding"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "succeeded",
+                  "failed",
+                  "refused",
+                  "lost",
+                  "budget_exhausted",
+                  "cancelled"
+                ]
+              },
+              "trigger": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "manual"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "scheduled"
+                      },
+                      "schedule": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "schedule"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "webhook"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "subagent"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "code_host"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "repository": {
+                        "type": "string"
+                      },
+                      "number": {
+                        "anyOf": [
+                          {
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "event": {
+                        "type": "string",
+                        "enum": [
+                          "review",
+                          "mention"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "provider",
+                      "repository",
+                      "number",
+                      "event"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "issue"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "issueKey": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "provider",
+                      "issueKey"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "host_event"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "turns": {
+                "type": "integer"
+              },
+              "tokensIn": {
+                "type": "integer"
+              },
+              "tokensOut": {
+                "type": "integer"
+              },
+              "costUsd": {
+                "type": "number"
+              },
+              "budgetUsd": {
+                "type": "number"
+              },
+              "startedAt": {
+                "type": "string"
+              },
+              "finishedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "heartbeatAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcomes": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "pull_request"
+                        },
+                        "provider": {
+                          "type": "string"
+                        },
+                        "repository": {
+                          "type": "string"
+                        },
+                        "number": {
+                          "type": "integer"
+                        },
+                        "url": {
+                          "type": "string"
+                        },
+                        "state": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "provider",
+                        "repository",
+                        "number",
+                        "url",
+                        "state"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "code_host_comment"
+                        },
+                        "provider": {
+                          "type": "string"
+                        },
+                        "repository": {
+                          "type": "string"
+                        },
+                        "number": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "provider",
+                        "repository",
+                        "number"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "issue_comment"
+                        },
+                        "provider": {
+                          "type": "string"
+                        },
+                        "issueKey": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "provider",
+                        "issueKey"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "check"
+                        },
+                        "provider": {
+                          "type": "string"
+                        },
+                        "repository": {
+                          "type": "string"
+                        },
+                        "number": {
+                          "anyOf": [
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "completed": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "provider",
+                        "repository",
+                        "number",
+                        "completed"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "services": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "probing",
+                        "ready",
+                        "failed"
+                      ]
+                    },
+                    "attempts": {
+                      "anyOf": [
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "readyAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "failedAt": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "state",
+                    "attempts",
+                    "reason",
+                    "readyAt",
+                    "failedAt",
+                    "createdAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "id",
+              "parentRunId",
+              "agentId",
+              "agentName",
+              "agentKind",
+              "status",
+              "trigger",
+              "turns",
+              "tokensIn",
+              "tokensOut",
+              "costUsd",
+              "budgetUsd",
+              "startedAt",
+              "finishedAt",
+              "heartbeatAt",
+              "outcomes",
+              "services"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "spend": {
+          "type": "object",
+          "properties": {
+            "todayUsd": {
+              "type": "number"
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "dailyBudgetUsd": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "spentTodayUsd": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "dailyBudgetUsd",
+                  "spentTodayUsd"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "todayUsd",
+            "groups"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "generatedAt",
+        "since",
+        "limit",
+        "truncated",
+        "runs",
+        "spend"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
