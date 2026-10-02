@@ -52,6 +52,12 @@ import {
   type DockerServiceContainer,
 } from "./docker-services.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
+import {
+  reportServiceState,
+  type ServiceFailureReason,
+  type ServiceStateReporter,
+  type ServiceStateUpdate,
+} from "./service-state.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
 import { replaceDirectoryFromStaging } from "./workspace-swap.js";
 
@@ -441,11 +447,19 @@ export interface DockerJobLauncherOptions {
    * DEFAULT_SERVICE_READY_TIMEOUT_MS). Start-up never runs past the run's own deadline either.
    */
   serviceReadyTimeoutMs?: number;
+  /** Display-only observer of each service's start-up state (the viewer, get_run); its errors are ignored. */
+  onServiceState?: ServiceStateReporter;
   /** Optional observer invoked after provisioning fails but before resources are cleaned up. */
   onProvisionFailure?: (context: { runId: string; keeperContainer: string }) => Promise<void>;
 }
 
 type DockerJobPhase = "provisioning" | "active" | "succeeded" | "failed" | "stopped" | "lost" | "removed";
+
+/** What waitForServiceReady learned before a failure, for the display-only state report. */
+interface ServiceFailure {
+  reason: ServiceFailureReason;
+  attempts?: number;
+}
 
 interface DockerJobRecord {
   schemaVersion: number;
@@ -954,40 +968,61 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     const keeperId = keeper.Id;
     if (!keeperId) throw new Error("docker_resource_attestation_failed");
     await this.startContainer(keeperName);
+    const report = (name: string, update: Omit<ServiceStateUpdate, "runId" | "name">) =>
+      reportServiceState(this.options.onServiceState, { runId: record.runId, name, ...update });
+    for (const planned of services) await report(planned.service.name, { state: "pending" });
     for (const planned of services) {
       const name = planned.service.name;
-      if (budget.remainingMs() <= 0) throw serviceUnready(name);
-      await this.ensureServiceImage(planned, budget);
-      if (budget.remainingMs() <= 0) throw serviceUnready(name);
-      let createFailure: DockerCommandError | undefined;
+      const failure: ServiceFailure = { reason: "image_unavailable" };
+      let attempts: number;
       try {
-        await this.createAndAssert(
-          appendLabels(planned.createArgs, labels),
-          ["container", "inspect", planned.container],
-          (value) => {
-            const inspected = value as DockerContainerInspection;
-            assertServiceContainerInspection(inspected, record.spec, planned.service, keeperId);
-            if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
-          },
-          undefined,
-          (error) => {
-            createFailure = error;
-          },
+        if (budget.remainingMs() <= 0) throw serviceUnready(name);
+        await this.ensureServiceImage(planned, budget);
+        if (budget.remainingMs() <= 0) throw serviceUnready(name);
+        failure.reason = "start_failed";
+        let createFailure: DockerCommandError | undefined;
+        try {
+          await this.createAndAssert(
+            appendLabels(planned.createArgs, labels),
+            ["container", "inspect", planned.container],
+            (value) => {
+              const inspected = value as DockerContainerInspection;
+              assertServiceContainerInspection(inspected, record.spec, planned.service, keeperId);
+              if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
+            },
+            undefined,
+            (error) => {
+              createFailure = error;
+            },
+          );
+        } catch (error) {
+          // createAndAssert tolerates a failed create (a crash retry may find it made), so a service
+          // Docker refused to create shows up as a failed inspection; the create's own failure is the
+          // useful cause, not that generic "not found". Attestation failures rethrow as is.
+          if (error instanceof DockerCommandError) throw serviceUnready(name, createFailure ?? error);
+          throw error;
+        }
+        if (budget.remainingMs() <= 0) throw serviceUnready(name);
+        try {
+          await this.startContainer(planned.container);
+        } catch (error) {
+          throw serviceUnready(name, error);
+        }
+        failure.reason = "probe_failed";
+        await report(name, { state: "probing", attempts: 0 });
+        attempts = await this.waitForServiceReady(planned, budget, failure, (made) =>
+          report(name, { state: "probing", attempts: made }),
         );
       } catch (error) {
-        // createAndAssert tolerates a failed create (a crash retry may find it made), so a service
-        // Docker refused to create shows up as a failed inspection; the create's own failure is the
-        // useful cause, not that generic "not found". Attestation failures rethrow as is.
-        if (error instanceof DockerCommandError) throw serviceUnready(name, createFailure ?? error);
+        const reason = failure.reason !== "exited" && budget.remainingMs() <= 0 ? "timed_out" : failure.reason;
+        await report(name, {
+          state: "failed",
+          reason,
+          ...(failure.attempts === undefined ? {} : { attempts: failure.attempts }),
+        });
         throw error;
       }
-      if (budget.remainingMs() <= 0) throw serviceUnready(name);
-      try {
-        await this.startContainer(planned.container);
-      } catch (error) {
-        throw serviceUnready(name, error);
-      }
-      await this.waitForServiceReady(planned, budget);
+      await report(name, { state: "ready", attempts });
     }
     return keeperId;
   }
@@ -1022,9 +1057,15 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
    * attempt bounded by timeoutSeconds, failing after failureThreshold consecutive failures. A
    * service that exited or vanished fails at once, and so does one still unready when the start-up
    * budget runs out (each probe and wait is clipped to what is left of it). Probe output is never
-   * logged or kept, so these errors carry no cause.
+   * logged or kept, so these errors carry no cause. Returns the number of probes made; records
+   * why it failed in `failure` for the display-only state report.
    */
-  private async waitForServiceReady(planned: DockerServiceContainer, budget: ServiceStartBudget): Promise<void> {
+  private async waitForServiceReady(
+    planned: DockerServiceContainer,
+    budget: ServiceStartBudget,
+    failure: ServiceFailure,
+    onProbeFailed: (attempts: number) => Promise<void>,
+  ): Promise<number> {
     const { command, periodSeconds, timeoutSeconds, failureThreshold } = planned.service.readiness;
     const name = planned.service.name;
     let failures = 0;
@@ -1034,10 +1075,16 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       try {
         state = await this.inspect(["container", "inspect", planned.container]);
       } catch (error) {
-        if (error instanceof DockerCommandError) throw serviceUnready(name);
+        if (error instanceof DockerCommandError) {
+          failure.reason = "exited";
+          throw serviceUnready(name);
+        }
         throw error;
       }
-      if (state.State?.Running !== true) throw serviceUnready(name);
+      if (state.State?.Running !== true) {
+        failure.reason = "exited";
+        throw serviceUnready(name);
+      }
       const remaining = budget.remainingMs();
       if (remaining <= 0) throw serviceUnready(name);
       try {
@@ -1045,11 +1092,13 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
           timeoutMs: Math.min(timeoutSeconds * 1_000, remaining),
           maxOutputBytes: MAX_SERVICE_PROBE_OUTPUT_BYTES,
         });
-        return;
+        return failures + 1;
       } catch {
         failures += 1;
+        failure.attempts = failures;
         if (failures >= failureThreshold) throw serviceUnready(name);
       }
+      await onProbeFailed(failures);
       const wait = Math.min(periodSeconds * 1_000, budget.remainingMs());
       if (wait <= 0) throw serviceUnready(name);
       await this.sleep(wait);
