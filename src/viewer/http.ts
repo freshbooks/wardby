@@ -16,6 +16,8 @@ import type { ViewerEventBus } from "./event-bus.js";
 
 export const VIEWER_API_PREFIX = "/admin/api/";
 export const SSE_HEARTBEAT_MS = 15_000;
+/** A stream whose unsent backlog exceeds this is ended; the client reconnects and resyncs. */
+export const SSE_MAX_BUFFERED_BYTES = 1024 * 1024;
 
 const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -25,6 +27,7 @@ export interface ViewerApiDeps {
   authenticate: (authorization: string | undefined) => Promise<McpRequestContext>;
   canonicalUri: string;
   heartbeatMs?: number; // tests
+  maxBufferedBytes?: number; // tests
 }
 
 export interface ViewerApi {
@@ -36,6 +39,7 @@ export interface ViewerApi {
 
 export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
   const heartbeatMs = deps.heartbeatMs ?? SSE_HEARTBEAT_MS;
+  const maxBufferedBytes = deps.maxBufferedBytes ?? SSE_MAX_BUFFERED_BYTES;
   const streams = new Set<() => void>();
   let nextEventId = 0;
 
@@ -49,24 +53,44 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
       connection: "keep-alive",
       "x-accel-buffering": "no",
     });
+    let done = false;
+    // A client that stops reading (or reads too slowly) must not grow server
+    // memory without bound: past the limit, drop the stream (its backlog with
+    // it); the client reconnects and resyncs.
+    const send = (frame: string): void => {
+      if (done) return;
+      res.write(frame);
+      if (res.writableLength > maxBufferedBytes) {
+        cleanup();
+        res.destroy();
+      }
+    };
     res.write("retry: 3000\n\n");
     res.write(`event: hello\ndata: ${JSON.stringify({ connected: deps.bus.connected() })}\n\n`);
     const unsubscribe = deps.bus.subscribe((event) => {
-      res.write(`id: ${++nextEventId}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`);
+      send(`id: ${++nextEventId}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`);
     });
-    const unreconnect = deps.bus.onReconnect(() => res.write("event: resync\ndata: {}\n\n"));
-    const heartbeat = setInterval(() => res.write(": ping\n\n"), heartbeatMs);
-    let done = false;
+    // Every transition to live (including the bus's first connect, which
+    // usually lands just after this stream opens) may follow missed events, so
+    // tell the client to refetch the graph. Going down only changes status.
+    const unstate = deps.bus.onState((live) => {
+      send(`event: status\ndata: ${JSON.stringify({ connected: live })}\n\n`);
+      if (live) send("event: resync\ndata: {}\n\n");
+    });
+    const heartbeat = setInterval(() => send(": ping\n\n"), heartbeatMs);
     const cleanup = (): void => {
       if (done) return;
       done = true;
       clearInterval(heartbeat);
       unsubscribe();
-      unreconnect();
+      unstate();
       streams.delete(close);
     };
     const close = (): void => {
       cleanup();
+      // Close the connection with the stream, so shutdown never waits for the
+      // keep-alive timeout.
+      res.shouldKeepAlive = false;
       res.end();
     };
     streams.add(close);

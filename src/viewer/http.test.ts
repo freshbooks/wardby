@@ -32,23 +32,27 @@ const RUN_EVENT: ViewerEvent = {
   finishedAt: null,
 };
 
-function fakeBus() {
+function fakeBus(initiallyLive = true) {
   const listeners = new Set<(e: ViewerEvent) => void>();
-  const reconnects = new Set<() => void>();
-  const bus: ViewerEventBus & { emit(e: ViewerEvent): void; reconnect(): void; count(): number } = {
+  const stateListeners = new Set<(live: boolean) => void>();
+  let live = initiallyLive;
+  const bus: ViewerEventBus & { emit(e: ViewerEvent): void; setLive(live: boolean): void; count(): number } = {
     subscribe(l) {
       listeners.add(l);
       return () => listeners.delete(l);
     },
-    onReconnect(l) {
-      reconnects.add(l);
-      return () => reconnects.delete(l);
+    onState(l) {
+      stateListeners.add(l);
+      return () => stateListeners.delete(l);
     },
-    connected: () => true,
+    connected: () => live,
     close: async () => {},
     emit: (e) => listeners.forEach((l) => l(e)),
-    reconnect: () => reconnects.forEach((l) => l()),
-    count: () => listeners.size + reconnects.size,
+    setLive: (next) => {
+      live = next;
+      stateListeners.forEach((l) => l(next));
+    },
+    count: () => listeners.size + stateListeners.size,
   };
   return bus;
 }
@@ -65,9 +69,9 @@ afterEach(async () => {
 
 async function start(
   ctx: McpRequestContext,
-  opts: { heartbeatMs?: number; authDelayMs?: number } = {},
+  opts: { heartbeatMs?: number; authDelayMs?: number; maxBufferedBytes?: number; live?: boolean } = {},
 ): Promise<{ base: string; bus: ReturnType<typeof fakeBus>; api: ViewerApi }> {
-  const bus = fakeBus();
+  const bus = fakeBus(opts.live ?? true);
   const viewer = createViewerApi({
     db: {} as PrismaClient,
     bus,
@@ -77,6 +81,7 @@ async function start(
     },
     canonicalUri: URI,
     heartbeatMs: opts.heartbeatMs,
+    maxBufferedBytes: opts.maxBufferedBytes,
   });
   api = viewer;
   server = createServer((req, res) => {
@@ -182,7 +187,7 @@ describe("viewer api event stream", () => {
     }
   }
 
-  it("streams hello, events, resync and heartbeats; cleans up on disconnect", async () => {
+  it("streams hello, events, status, resync and heartbeats; cleans up on disconnect", async () => {
     const { base, bus } = await start(admin(), { heartbeatMs: 20 });
     const ac = new AbortController();
     const res = await fetch(`${base}/admin/api/events`, { signal: ac.signal });
@@ -199,12 +204,45 @@ describe("viewer api event stream", () => {
     await readUntil(reader, buf, `data: ${JSON.stringify(RUN_EVENT)}`);
     expect(buf.text).toMatch(/id: \d+\nevent: run\ndata: /);
 
-    bus.reconnect();
-    await readUntil(reader, buf, "event: resync");
+    bus.setLive(false);
+    await readUntil(reader, buf, 'event: status\ndata: {"connected":false}\n\n');
+    expect(buf.text).not.toContain("event: resync");
+    bus.setLive(true);
+    await readUntil(reader, buf, 'event: status\ndata: {"connected":true}\n\nevent: resync\ndata: {}\n\n');
     await readUntil(reader, buf, ": ping");
 
     ac.abort();
     await vi.waitFor(() => expect(bus.count()).toBe(0));
+  });
+
+  it("tells the first subscriber when live events start (status + resync)", async () => {
+    const { base, bus } = await start(admin(), { live: false });
+    const ac = new AbortController();
+    const res = await fetch(`${base}/admin/api/events`, { signal: ac.signal });
+    const reader = res.body!.getReader();
+    const buf = { text: "" };
+    await readUntil(reader, buf, 'event: hello\ndata: {"connected":false}\n\n');
+    await vi.waitFor(() => expect(bus.count()).toBe(2));
+    bus.setLive(true);
+    await readUntil(reader, buf, 'event: status\ndata: {"connected":true}\n\nevent: resync\ndata: {}\n\n');
+    bus.setLive(false);
+    await readUntil(reader, buf, 'event: status\ndata: {"connected":false}\n\n');
+    ac.abort();
+    await vi.waitFor(() => expect(bus.count()).toBe(0));
+  });
+
+  it("ends a stream whose unsent backlog exceeds the limit", async () => {
+    const { base, bus } = await start(admin(), { maxBufferedBytes: 64 * 1024 });
+    const res = await fetch(`${base}/admin/api/events`);
+    const reader = res.body!.getReader();
+    await reader.read(); // the stream is open; now stop reading
+    const big = { ...RUN_EVENT, agentId: "a".repeat(16 * 1024) };
+    for (let i = 0; i < 2000 && bus.count() > 0; i++) {
+      bus.emit(big);
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(bus.count()).toBe(0);
+    await reader.cancel().catch(() => {});
   });
 
   it("opens no stream when the client disconnects during authentication", async () => {
@@ -231,5 +269,21 @@ describe("viewer api event stream", () => {
       if (Date.now() > deadline) throw new Error("stream did not end");
     }
     await vi.waitFor(() => expect(bus.count()).toBe(0));
+  });
+
+  it("closeStreams() lets the server shut down without waiting for keep-alive", async () => {
+    const { base, api: viewer } = await start(admin());
+    server!.keepAliveTimeout = 30_000;
+    const res = await fetch(`${base}/admin/api/events`);
+    const reader = res.body!.getReader();
+    await reader.read();
+    const started = Date.now();
+    viewer.closeStreams();
+    await new Promise<void>((resolve) => {
+      server!.close(() => resolve());
+      server!.closeIdleConnections();
+    });
+    expect(Date.now() - started).toBeLessThan(2000);
+    server = undefined;
   });
 });

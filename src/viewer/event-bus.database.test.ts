@@ -54,12 +54,15 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer event bus (PostgreSQL)", { ti
     expect(clients).toHaveLength(0);
     expect(bus.connected()).toBe(false);
 
+    const states: boolean[] = [];
+    bus.onState((live) => states.push(live));
     const got: ViewerEvent[] = [];
     const unsubscribe = bus.subscribe((e) => got.push(e));
     bus.subscribe(() => {
       throw new Error("listener boom"); // must not affect the other listener
     });
     await waitFor(() => bus.connected(), 5000, "connected");
+    expect(states).toEqual([true]); // the first connect is a transition to live
 
     const runId = newRunId("a");
     await db.run.create({ data: { id: runId, agentId } });
@@ -81,18 +84,19 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer event bus (PostgreSQL)", { ti
     await bus.close();
   });
 
-  it("reconnects after its backend is terminated, signals onReconnect, and keeps delivering", async () => {
+  it("reconnects after its backend is terminated, signals down then live, and keeps delivering", async () => {
     const pidsFrom = pids.length;
     const bus = createViewerEventBus({ connectionString: url, connect, reconnectDelaysMs: [50] });
     const got: ViewerEvent[] = [];
-    let reconnects = 0;
-    bus.onReconnect(() => reconnects++);
+    const states: boolean[] = [];
+    bus.onState((live) => states.push(live));
     bus.subscribe((e) => got.push(e));
     await waitFor(() => bus.connected(), 5000, "connected");
     const pidBefore = pids[pids.length - 1];
 
     await db.$executeRaw`SELECT pg_terminate_backend(${pidBefore}::int)`;
-    await waitFor(() => reconnects === 1, 5000, "onReconnect");
+    await waitFor(() => states.length === 3, 5000, "onState down then live");
+    expect(states).toEqual([true, false, true]);
     await waitFor(() => bus.connected(), 5000, "reconnected");
     expect(pids[pids.length - 1]).not.toBe(pidBefore);
 

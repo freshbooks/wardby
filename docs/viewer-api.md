@@ -73,18 +73,30 @@ A Server-Sent Events stream (`text/event-stream`) of live changes. Frames:
 | `retry: 3000`                                    | Suggested client reconnect delay in milliseconds.                                              |
 | `event: hello`                                   | Sent first. Data is `{"connected": <bool>}`: whether the server's live-event connection is up. |
 | `event: run`, `event: service`, `event: outcome` | A run, coding-run service, or outcome changed. Each carries an `id:` line.                     |
-| `event: resync`                                  | The live-event connection was lost and restored. Events may have been missed.                  |
+| `event: status`                                  | The server's live-event connection changed. Data is `{"connected": <bool>}`.                   |
+| `event: resync`                                  | The live-event connection is up (again). Events may have been missed: refetch the graph.       |
 | `: ping`                                         | Comment sent every 15 seconds to keep the connection open.                                     |
 
 Event payloads are small and never include final text; fetch
 `/admin/api/runs/<id>` for detail. A `run` event carries the run's status,
 turn and token counts, cost and finish time. A `service` event carries the
 service name, its state and the attempt count. An `outcome` event carries only
-the run id and the outcome source, so refetch the run to see what changed.
+the run id and the outcome source (`pull_request`, `host_status`,
+`issue_status` or `host_check`), so refetch the run to see what changed.
 
-**There is no replay.** Load `/admin/api/graph` first, then apply events. On
-`resync`, and on every reconnect, refetch `/admin/api/graph` rather than
-trying to resume.
+**There is no replay.** Open the event stream first, then load
+`/admin/api/graph` and apply events on top of it. Refetch `/admin/api/graph` on
+every `resync` and after every reconnect rather than trying to resume.
+
+The server's live-event connection starts when the first client subscribes, so
+`hello` may report `{"connected": false}`. When the connection comes up, the
+stream sends `status` with `{"connected": true}` followed by `resync`; when it
+drops, it sends `status` with `{"connected": false}`, and `status` plus
+`resync` again once it is restored. Use `hello` and `status` to show whether
+the view is live or reconnecting.
+
+A client that stops reading has its stream closed once about 1 MiB of unsent
+data is waiting; it reconnects and resyncs like any other reconnect.
 
 Live events come from Postgres `NOTIFY`. Each server replica holds one
 database connection for them, opened only while at least one client is
@@ -103,4 +115,6 @@ of Wardby must allow responses that last as long as a client stays connected
 and must not buffer `text/event-stream`. Wardby sends `Cache-Control: no-store`
 and `X-Accel-Buffering: no` on the stream. The reference GKE Gateway overlay
 raises the backend timeout to 3600 seconds (`GCPBackendPolicy`
-`spec.default.timeoutSec`); clients reconnect and resync when a stream ends.
+`spec.default.timeoutSec`), and the reference Compose deployment's Caddyfile
+allows responses of up to one hour (`timeouts` `write 1h`); clients reconnect
+and resync when a stream ends.

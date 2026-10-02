@@ -25,8 +25,9 @@ Endpoints, all `GET`:
 - `/admin/api/runs/<id>`: one run in full, including its final text and error.
 - `/admin/api/events`: a Server-Sent Events stream of live changes.
 
-The stream has no replay: load the graph first, and refetch it on a `resync`
-event or after any reconnect. Proxies and load balancers in front of Wardby
+The stream has no replay: open the event stream first, then load the graph,
+and refetch the graph on every `resync` event and after any reconnect. `hello`
+and `status` events report whether live events are flowing. Proxies and load balancers in front of Wardby
 must allow long-lived responses and not buffer `text/event-stream`.
 
 For parameters, status codes, frame formats and schemas, follow
