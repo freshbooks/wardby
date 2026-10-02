@@ -494,9 +494,46 @@ describe("computeRunTreeSpend", () => {
       [{ id: "run-root", agentId: "root-agent", costUsd: 1, startedAt: TODAY_START, parentRunId: null }],
       [{ id: "root-agent", budgetGroupId: "g1", budgetUsd: 10 }],
     );
-    // root's own ceiling: min(10, 6-1=5) = 5; tree has only spent the root's own $1 so far.
+    // The tree's ceiling: min(10, the group's $6 less what runs outside the tree spent, $0) = 6.
+    // The tree has spent the root's own $1 so far, counted once: $5 left (not $6 - $1 - $1).
     const tree = await computeRunTreeSpend(db, "run-root", NOW);
-    expect(tree).toEqual({ rootRunId: "run-root", capUsd: 5, spentUsd: 1, remainingUsd: 4 });
+    expect(tree).toEqual({ rootRunId: "run-root", capUsd: 6, spentUsd: 1, remainingUsd: 5 });
+  });
+
+  it("a running root in a binding group that delegates mid-run leaves the tree its true remainder", async () => {
+    const db = fakeDb(
+      [
+        {
+          id: "g1",
+          name: "g",
+          dailyBudgetUsd: 5,
+          weeklyBudgetUsd: null,
+          monthlyBudgetUsd: null,
+          warnThresholdRatio: 0.8,
+          agentIds: ["root-agent", "other-agent"],
+        },
+      ],
+      [
+        { id: "run-root", agentId: "root-agent", costUsd: 2, startedAt: TODAY_START, status: "running" },
+        // A finished run outside the tree still counts against the group.
+        { id: "run-other", agentId: "other-agent", costUsd: 0.5, startedAt: TODAY_START },
+      ],
+      [
+        { id: "root-agent", budgetGroupId: "g1", budgetUsd: 10 },
+        { id: "other-agent", budgetGroupId: "g1", budgetUsd: 1 },
+      ],
+    );
+    // Group: $5 - $0.50 (other) - $2 (root, live) = $2.50 left; the root's own $10 is looser.
+    const tree = await computeRunTreeSpend(db, "run-root", NOW);
+    expect(tree).toEqual({ rootRunId: "run-root", capUsd: 4.5, spentUsd: 2, remainingUsd: 2.5 });
+    // An ungrouped child gets exactly that remainder.
+    const child = await effectiveBudgetForRun(
+      db,
+      { id: "child-agent", budgetGroupId: null, budgetUsd: 10 } as never,
+      NOW,
+      "run-root",
+    );
+    expect(child).toEqual({ effectiveBudgetUsd: 2.5, constrainedBy: ["run-tree"] });
   });
 
   it("E-04: the tree's own in-flight reservations don't shrink its ceiling; another member's do", async () => {
@@ -521,9 +558,9 @@ describe("computeRunTreeSpend", () => {
         { id: "other-agent", budgetGroupId: "g1", budgetUsd: 5 },
       ],
     );
-    // Root ceiling: min(6, 10 - $1 spent - other's $5 held, it started first) = 4; the tree has spent $1.
+    // Tree ceiling: min(6, 10 - other's $5 held, it started first) = 5; the tree has spent $1, counted once.
     const tree = await computeRunTreeSpend(db, "run-root", NOW);
-    expect(tree).toEqual({ rootRunId: "run-root", capUsd: 4, spentUsd: 1, remainingUsd: 3 });
+    expect(tree).toEqual({ rootRunId: "run-root", capUsd: 5, spentUsd: 1, remainingUsd: 4 });
   });
 });
 
@@ -547,7 +584,7 @@ describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
         { id: "child-agent", budgetGroupId: null, budgetUsd: 100 },
       ],
     );
-    // Root's own ceiling is min(10, 6-1=5) = 5, minus its own $1 spent = 4 remaining for the tree.
+    // The tree's ceiling is min(10, 6) = 6, minus the root's own $1 spent = 5 remaining for the tree.
     // The dispatched child's own budgetUsd (100) is far looser, so the tree ceiling wins.
     const result = await effectiveBudgetForRun(
       db,
@@ -555,7 +592,7 @@ describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
       NOW,
       "run-root",
     );
-    expect(result).toEqual({ effectiveBudgetUsd: 4, constrainedBy: ["run-tree"] });
+    expect(result).toEqual({ effectiveBudgetUsd: 5, constrainedBy: ["run-tree"] });
   });
 
   it("M1: a child in a different group than the root counts the tree's holds in its own group", async () => {

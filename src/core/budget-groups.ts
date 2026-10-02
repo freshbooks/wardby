@@ -97,6 +97,12 @@ export interface SpendOptions {
    */
   excludeReservationRunIds?: readonly string[];
   /**
+   * Runs left out of the group's spend entirely, real cost and hold alike:
+   * the run tree when computing the tree's own ceiling, whose spend is
+   * subtracted from that ceiling separately and must count only once.
+   */
+  excludeRunIds?: readonly string[];
+  /**
    * First come, first served: count only the holds of runs ordered strictly
    * before this one. Unset (a coding dispatch, whose row does not exist yet)
    * counts every live hold.
@@ -185,6 +191,7 @@ export async function computeGroupSpend(
   const widestStart = periodStart("month", now);
   const memberBudgets = new Map(members.map((m) => [m.id, Number(m.budgetUsd)]));
   const excluded = new Set(options.excludeReservationRunIds ?? []);
+  const dropped = new Set(options.excludeRunIds ?? []);
   const queueTimeoutSec = options.codingQueueTimeoutSec ?? loadCodingConcurrencyConfig().queueTimeoutSec;
   const runs =
     members.length === 0
@@ -202,7 +209,8 @@ export async function computeGroupSpend(
           },
         });
 
-  const accounted = runs.map((r) => {
+  const counted = runs.filter((r) => !dropped.has(r.id));
+  const accounted = counted.map((r) => {
     const costUsd = Number(r.costUsd);
     let reservedUsd = 0;
     const holds =
@@ -270,16 +278,17 @@ async function collectTreeRunIds(db: Pick<BudgetGroupsDb, "run">, rootRunId: str
 /**
  * Real-time shared budget scope for a sub-agent dispatch: the whole run tree
  * rooted at `parentRunId`'s ultimate ancestor shares one ceiling —
- * the root's own effective budget (its own budgetUsd, itself tightened by
- * its own BudgetGroup if any) minus everything every run in the tree has
- * spent so far. The root's ceiling is recomputed fresh here, not pinned
- * from whatever it was when the root run started — consistent with
- * BudgetGroup periods already always being live-recomputed rather than
- * snapshotted. That group check sees the group as the root did when it
- * loaded: the tree's own holds are left out (the tree spends inside the
- * root's hold, so counting it again would leave the tree nothing), and so
- * are holds of runs that started after the root (they already counted the
- * root's hold).
+ * the root's own budgetUsd, itself tightened by the root agent's BudgetGroup
+ * if any — minus everything every run in the tree has spent so far. The
+ * ceiling is recomputed fresh here, not pinned from whatever it was when the
+ * root run started — consistent with BudgetGroup periods already always
+ * being live-recomputed rather than snapshotted. Its group check leaves the
+ * tree's runs out entirely, cost and hold alike: the tree's spend is
+ * subtracted once, below, so counting it in the group too would charge it
+ * twice, and the tree spends inside the root's hold, so counting that hold
+ * would leave the tree nothing. It also leaves out holds of runs that started
+ * after the root (they already counted the root's hold). capUsd is therefore
+ * the tree's whole ceiling, and remainingUsd = capUsd - spentUsd.
  */
 export async function computeRunTreeSpend(
   db: BudgetGroupsDb,
@@ -310,7 +319,7 @@ async function runTreeSpend(db: BudgetGroupsDb, parentRunId: string, now: Date):
   // Root has no parentRunId of its own, so this terminates in one level —
   // no unbounded recursion regardless of how deep `parentRunId` itself was.
   const rootCeiling = await groupCappedBudget(db, rootAgent, now, {
-    excludeReservationRunIds: treeRunIds,
+    excludeRunIds: treeRunIds,
     holdsBefore: rootOrder,
   });
 
