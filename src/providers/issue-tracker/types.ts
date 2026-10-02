@@ -59,6 +59,18 @@ export interface IssueTrackerIdentity {
   accountType: string;
 }
 
+/** What cost attribution keeps about an issue (src/core/attribution.ts): the hierarchy as of now. */
+export interface IssueSnapshot {
+  /** The key that was asked for (WorkItem.key). */
+  key: string;
+  title?: string;
+  type?: string;
+  url: string;
+  /** The project (Jira) / team (Linear) the issue is in now. */
+  scopeKey: string;
+  parent?: { key: string; title?: string; kind: string };
+}
+
 export interface IssueTracker {
   readonly provider: IssueTrackerProvider;
   /** The bot's own accountId (cached after the first call). */
@@ -68,6 +80,8 @@ export interface IssueTracker {
   getIssue(key: string, opts: { maxComments: number; agentMarker: string }): Promise<IssueView>;
   /** The project the issue is in now; an old key (kept as an alias after a move) resolves to its new project. */
   issueProject(key: string): Promise<string>;
+  /** Title, type, scope and parent of `key` in one call, for cost attribution. Throws IssueTrackerError. */
+  snapshotIssue(key: string, opts?: { timeoutMs?: number; retryOn429?: boolean }): Promise<IssueSnapshot>;
   search(jql: string, opts: { maxResults: number }): Promise<IssueSearchResult>;
   /** Whether issue `key` matches `jql` (used for a link's jqlFilter). Callers on a latency budget pass a short timeout and no 429 retry. */
   matchesJql(key: string, jql: string, opts?: { timeoutMs?: number; retryOn429?: boolean }): Promise<boolean>;

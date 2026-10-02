@@ -44,6 +44,7 @@ function setup(links: Link[], jqlMatches = true, prs: Pr[] = [], prFails = false
     identity: vi.fn(async () => ({ accountId: "bot-1", displayName: "bot", accountType: "app" })),
     matchesJql: vi.fn(async () => jqlMatches),
     issueUrl: (k: string) => `https://s/browse/${k}`,
+    snapshotIssue: vi.fn(async (key: string) => ({ key, title: "T", url: "u", scopeKey: "PROJ" })),
   } as unknown as IssueTracker;
   vi.mocked(dispatchRun).mockClear();
   txStub.runIssueStatus.create.mockClear();
@@ -53,6 +54,7 @@ function setup(links: Link[], jqlMatches = true, prs: Pr[] = [], prFails = false
       executor: {} as never,
       trackers: { jira: tracker },
       db: {
+        workItem: { findUnique: vi.fn(async () => null) },
         issuePullRequest: {
           findMany: vi.fn(async (args: { where: { agentId: string; state: string } }) => {
             if (prFails) throw new Error("db down");
@@ -187,6 +189,28 @@ describe("routeIssueEvent", () => {
     const { deps } = setup([{ triggers: ["mention"] }]);
     const mention = event({ kinds: ["mention"], comment: { id: "9", body: "hi" } });
     expect((await routeIssueEvent(mention, deps)).runIds).toEqual([]);
+  });
+  it("attributes each dispatched run to the event's issue, snapshotting once per event", async () => {
+    const { deps, tracker } = setup([
+      { agentId: "a1", triggers: ["created"] },
+      { agentId: "a2", triggers: ["created"] },
+    ]);
+    await routeIssueEvent(event({ issueKey: "PROJ-1" }), deps);
+    expect(tracker.snapshotIssue).toHaveBeenCalledTimes(1);
+    expect(tracker.snapshotIssue).toHaveBeenCalledWith("PROJ-1", { timeoutMs: 2000, retryOn429: false });
+    const calls = vi.mocked(dispatchRun).mock.calls;
+    expect(calls).toHaveLength(2);
+    for (const [call] of calls) {
+      expect((call as { attribution: unknown }).attribution).toEqual({
+        source: "issue_event",
+        item: { provider: "jira", key: "PROJ-1", scopeKey: "PROJ", snapshot: expect.objectContaining({ title: "T" }) },
+      });
+    }
+  });
+  it("does not snapshot when no link matches", async () => {
+    const { deps, tracker } = setup([{ triggers: ["labeled"], triggerLabels: ["a"] }]);
+    await routeIssueEvent(event({ kinds: ["labeled"], addedLabels: ["b"] }), deps);
+    expect(tracker.snapshotIssue).not.toHaveBeenCalled();
   });
   it("does not consult JQL when no kind matched", async () => {
     const { deps, tracker } = setup([{ triggers: ["labeled"], triggerLabels: ["a"], jqlFilter: "x = 1" }]);

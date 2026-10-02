@@ -136,7 +136,7 @@ definitions, docs) — never the specific values used to exercise it.
 
 ## Public docs are for operators — STRICT
 
-Everything tracked under `docs/`, `README.md`, and `deploy/**/*.md` is read by
+Everything tracked under `docs/`, `help/`, `README.md`, and `deploy/**/*.md` is read by
 people running wardby on their own infrastructure. Write it as generic,
 current guidance for them — never as a record of how we built, tested, or run
 our own deployment. Keep all of these out of tracked files:
@@ -154,3 +154,25 @@ our own deployment. Keep all of these out of tracked files:
 If a test turns up something operators genuinely need (a missing step, a
 gotcha), write the general rule in the relevant guide — not the story of how
 we found it. Code comments and test fixtures are not bound by this section.
+
+## Every feature gets a docs + help check — STRICT
+
+Any new feature or operator-visible change (an MCP tool or tool argument, a
+webhook or API field, a CLI command or flag, an environment variable, a
+config or schema option, a new failure mode or error code, an upgrade step)
+must be evaluated for **both** documentation surfaces before it is done:
+
+- **`docs/`** — the long-form operator guides (`docs/*.md`, plus
+  `deploy/**/*.md` and `README.md` where relevant). Update the guide that owns
+  the area, including any env-var or role tables.
+- **`help/`** — the short articles served by the `search_help` /
+  `get_help_article` MCP tools (bundled into `dist/help-index.json` by
+  `npm run build:help`). Add or update an article (required frontmatter: `id`,
+  `title`, `summary`, `audience`, `tags`, `appliesTo`), link it from related
+  articles, and check that `search_help` finds it for the obvious queries
+  (tool name, feature name). Use the matching article under `help/errors/` for
+  a new error code.
+
+Plans and specs must include this as a task, not an afterthought. The PR
+description states what was added to each surface, or why a surface needs
+nothing. Both surfaces follow "Public docs are for operators" above.

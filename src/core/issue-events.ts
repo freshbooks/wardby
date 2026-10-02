@@ -10,6 +10,7 @@
 import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueEvent, IssueEventKind, IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
+import { RESPONSE_PATH_SNAPSHOT_BUDGET, resolveWorkItem, type ResolvedWorkItem } from "./attribution.js";
 import { dispatchRun, type DispatchDb } from "./dispatch.js";
 import { issueStatusRow, postIssueWorkingStatus } from "./issue-status.js";
 import { logger } from "./logger.js";
@@ -18,7 +19,8 @@ import { composeTaskOverride } from "./untrusted-content.js";
 const log = logger.child({ module: "issue-events" });
 const MAX_TASK_BODY = 8000;
 
-export type IssueEventDb = DispatchDb & Pick<PrismaClient, "agentIssueProject" | "runIssueStatus" | "issuePullRequest">;
+export type IssueEventDb = DispatchDb &
+  Pick<PrismaClient, "agentIssueProject" | "runIssueStatus" | "issuePullRequest" | "workItem">;
 
 export interface RouteIssueEventDeps {
   db: IssueEventDb;
@@ -159,6 +161,10 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
     include: { agent: { select: { ownerId: true, kind: true } } },
   })) as LinkRow[];
   const bot = await tracker.botAccountId();
+  // One snapshot per event, taken lazily on the first dispatch so an event no link matches costs nothing.
+  let item: Promise<ResolvedWorkItem> | undefined;
+  const workItem = () =>
+    (item ??= resolveWorkItem(deps.db, deps.trackers, event.provider, event.issueKey, RESPONSE_PATH_SNAPSHOT_BUDGET));
   for (const link of links) {
     if (link.access !== "write" || !link.agent.ownerId || link.agent.kind !== "native") continue;
     const matched = matchedKinds(event, link, bot);
@@ -180,6 +186,7 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
         executor: deps.executor,
         agentId: link.agentId,
         trigger: "host_event",
+        attribution: { source: "issue_event", item: await workItem() },
         taskOverride: issueTaskText(event, matched, tracker.issueUrl(event.issueKey), link, openPrs),
         afterPersist: async (tx, run) => {
           await tx.runIssueStatus.create({ data: issueStatusRow(event, run.id, link.commentVisibilityRole) });

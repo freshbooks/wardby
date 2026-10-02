@@ -112,6 +112,8 @@ export interface JiraConfig {
   webhookSecret: string;
   /** Optional, for expiry warnings; Atlassian API tokens last at most a year. */
   tokenExpiresAt?: Date;
+  /** Company-managed sites still on the legacy Epic Link field: its id (customfield_N). Optional. */
+  epicLinkField?: string;
 }
 
 const JIRA_GATEWAY = /^https:\/\/api\.atlassian\.com\/ex\/jira\/[0-9a-f-]{36}$/i;
@@ -178,12 +180,17 @@ export function loadJiraConfig(env: NodeJS.ProcessEnv = process.env): JiraConfig
     if (Number.isNaN(tokenExpiresAt.getTime()))
       throw new Error("WARDBY_JIRA_API_TOKEN_EXPIRES_AT must be an ISO date.");
   }
+  const epicLinkField = env.WARDBY_JIRA_EPIC_LINK_FIELD?.trim() || undefined;
+  if (epicLinkField && !/^customfield_\d+$/.test(epicLinkField)) {
+    throw new Error("WARDBY_JIRA_EPIC_LINK_FIELD must be a custom field id such as customfield_10014.");
+  }
   return {
     siteUrl,
     apiBaseUrl,
     auth: { kind: "bearer", token },
     webhookSecret: secret,
     ...(tokenExpiresAt ? { tokenExpiresAt } : {}),
+    ...(epicLinkField ? { epicLinkField } : {}),
   };
 }
 

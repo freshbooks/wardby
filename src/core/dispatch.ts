@@ -24,6 +24,7 @@ import {
   invalidDeclarationSentence,
   serviceRefusal,
 } from "../coding/services/wording.js";
+import { attributeRun, type AttributionIntent } from "./attribution.js";
 import { effectiveBudgetForRun, MIN_RESERVATION_USD, type BudgetConstraint } from "./budget-groups.js";
 import { logger } from "./logger.js";
 
@@ -47,6 +48,8 @@ export type DispatchTx = Pick<
   | "webhook"
   | "budgetGroup"
   | "resourceGrant"
+  | "workItem"
+  | "runAttribution"
   | "$queryRaw"
   | "$executeRawUnsafe"
 >;
@@ -90,6 +93,13 @@ export interface DispatchRunOptions {
   triggeredById?: string | null;
   /** Sub-agent dispatch (see AgentSubAgent): links this run into a run tree. */
   parentRunId?: string;
+  /**
+   * Cost attribution for a run that starts a new attribution (issue event,
+   * linked PR, explicit key), resolved before the call (attribution.ts
+   * resolveWorkItem). Ignored when the parent run or the continued coding run
+   * is attributed: inheritance wins.
+   */
+  attribution?: AttributionIntent;
   grantedParentMemoryKeys?: string[];
   /**
    * Per-run task text for a NATIVE agent (appended to its systemPrompt at
@@ -245,40 +255,6 @@ const RETRY_MAX_MS = 250;
 function retryDelayMs(attempt: number): number {
   const ceiling = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt);
   return Math.floor(ceiling / 2 + Math.random() * (ceiling / 2));
-}
-
-const MAX_ISSUE_HOPS = 10;
-
-/**
- * The tracker issue a coding run belongs to, from control-plane data only: the nearest ancestor
- * run (starting at the parent) with a RunIssueStatus, else the continued coding run's own issue.
- * Never taken from anything the model wrote.
- */
-async function resolveCodingIssue(
-  tx: Pick<DispatchTx, "run" | "runIssueStatus" | "codingRun">,
-  options: Pick<DispatchRunOptions, "parentRunId" | "continuesCodingRunId">,
-): Promise<{ issueProvider: string; issueKey: string } | null> {
-  let runId: string | null | undefined = options.parentRunId;
-  for (let hop = 0; runId && hop < MAX_ISSUE_HOPS; hop += 1) {
-    const status = await tx.runIssueStatus.findUnique({
-      where: { runId },
-      select: { provider: true, issueKey: true },
-    });
-    if (status) return { issueProvider: status.provider, issueKey: status.issueKey };
-    const parent: { parentRunId: string | null } | null = await tx.run.findUnique({
-      where: { id: runId },
-      select: { parentRunId: true },
-    });
-    runId = parent?.parentRunId;
-  }
-  if (options.continuesCodingRunId !== undefined) {
-    const prior = await tx.codingRun.findUnique({
-      where: { runId: options.continuesCodingRunId },
-      select: { issueProvider: true, issueKey: true },
-    });
-    if (prior?.issueProvider && prior.issueKey) return { issueProvider: prior.issueProvider, issueKey: prior.issueKey };
-  }
-  return null;
 }
 
 /** The branch a coding run works on: its base, and for a continuation, the root's head and id. */
@@ -525,6 +501,16 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         });
 
         if (options.afterPersist) await options.afterPersist(tx, run);
+        const attributed = await attributeRun(
+          tx,
+          run.id,
+          {
+            parentRunId: options.parentRunId,
+            continuesCodingRunId: options.continuesCodingRunId,
+            intent: options.attribution,
+          },
+          now,
+        );
 
         if (agent.kind === "coding" && agent.codingProfile && codingBudget && !refusal) {
           // Checked above too; repeated so the provider type narrows here.
@@ -564,12 +550,11 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           // Claude Code's commands run in its tool runner, so the toolchain picks that image too; fixed
           // here with the worker image so the run keeps both however the deployment changes later.
           const toolImage = options.executor.resolveCodingToolImage?.(imageSelector) ?? null;
-          const issue = await resolveCodingIssue(tx, options);
           await tx.codingRun.create({
             data: {
               runId: run.id,
-              issueProvider: issue?.issueProvider ?? null,
-              issueKey: issue?.issueKey ?? null,
+              issueProvider: attributed?.provider ?? null,
+              issueKey: attributed?.key ?? null,
               task: input.task,
               repository: input.repository,
               baseRef: input.baseRef,

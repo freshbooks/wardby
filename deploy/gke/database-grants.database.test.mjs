@@ -301,6 +301,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
         .replace(/\bCodingProxySession\b/g, `CodingProxySession${missing}`)
         .replace(/\bCodingProxyRequest\b/g, `CodingProxyRequest${missing}`)
         .replace(/\bRun\b/g, `Run${missing}`)
+        .replace(/\bRunModelUsage\b/g, `RunModelUsage${missing}`)
         .replace(/\bCodingRun\b/g, `CodingRun${missing}`)
         .replace(/\bRegistryAllowance\b/g, `RegistryAllowance${missing}`)
         .replace(/\bRegistryFetch\b/g, `RegistryFetch${missing}`)
@@ -309,7 +310,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
         .replace(/\bRegistryPlanRefusal\b/g, `RegistryPlanRefusal${missing}`)
         .replace(/\b_prisma_migrations\b/g, `_prisma_migrations${missing}`);
       expect(sql).not.toMatch(
-        /"(CodingProxySession|CodingProxyRequest|Run|CodingRun|RegistryAllowance|RegistryFetch|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|_prisma_migrations)"/,
+        /"(CodingProxySession|CodingProxyRequest|Run|RunModelUsage|CodingRun|RegistryAllowance|RegistryFetch|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|_prisma_migrations)"/,
       );
       for (const st of statements(sql)) await admin.$executeRawUnsafe(st);
       const [{ tables, columns }] = await admin.$queryRawUnsafe(

@@ -191,6 +191,90 @@ describe("trigger_agent", () => {
     await client.close();
   });
 
+  it("passes a validated issue through as explicit attribution", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]) as any;
+    const created: unknown[] = [];
+    db.agentIssueProject = { findUnique: vi.fn(async () => ({ agentId: "a1" })) };
+    db.workItem = { findUnique: async () => null, upsert: async () => ({ id: "wi1", parentKey: null }) };
+    db.runAttribution = { findUnique: async () => null, create: async (a: unknown) => created.push(a) };
+    db.runIssueStatus = { findUnique: async () => null };
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "trigger_agent",
+      arguments: { agentId: "a1", issue: { provider: "jira", key: "PAY-241" } },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(created).toEqual([
+      { data: { runId: expect.any(String), workItemId: "wi1", parentKeyAtRun: null, source: "explicit" } },
+    ]);
+    await client.close();
+  });
+
+  it("refuses an issue in a project the agent is not linked to, without creating a run", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]) as any;
+    db.agentIssueProject = { findUnique: async () => null };
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "trigger_agent",
+      arguments: { agentId: "a1", issue: { provider: "jira", key: "PAY-241" } },
+    });
+    expect(result.isError).toBe(true);
+    expect((result as { content: { text: string }[] }).content[0].text).toMatch(/not linked/);
+    expect(db.runs.size).toBe(0);
+    await client.close();
+  });
+
+  it("snapshots the issue within the response-path budget (2 s, no 429 retry)", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "p1" }]) as any;
+    db.agentIssueProject = { findUnique: async () => ({ agentId: "a1" }) };
+    db.workItem = { findUnique: async () => null, upsert: async () => ({ id: "wi1", parentKey: null }) };
+    db.runAttribution = { findUnique: async () => null, create: async () => ({}) };
+    db.runIssueStatus = { findUnique: async () => null };
+    const snapshotIssue = vi.fn(async (key: string) => ({ key, scopeKey: "PAY", url: `https://jira.example/${key}` }));
+    const providers = { ...fakeProviders, issueTrackers: { jira: { snapshotIssue } } } as never;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext({ ...fakeCtx(db, "p1", ["runs:trigger"], false), providers });
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "trigger_agent",
+      arguments: { agentId: "a1", issue: { provider: "jira", key: "PAY-241" } },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(snapshotIssue).toHaveBeenCalledWith("PAY-241", { timeoutMs: 2000, retryOn429: false });
+    await client.close();
+  });
+
+  it("checks trigger access before the issue: a caller without access naming an unlinked issue gets the access error", async () => {
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "owner-1" }]) as any;
+    const linkLookup = vi.fn(async () => null);
+    db.agentIssueProject = { findUnique: linkLookup };
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "not-the-owner", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+
+    const result = await client.callTool({
+      name: "trigger_agent",
+      arguments: { agentId: "a1", issue: { provider: "jira", key: "PAY-241" } },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result as { content: { text: string }[] }).content[0].text;
+    expect(text).not.toMatch(/not linked|issue/i);
+    expect(linkLookup).not.toHaveBeenCalled();
+    expect(db.runs.size).toBe(0);
+    await client.close();
+  });
+
   it("a non-owner cannot trigger the agent", async () => {
     const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "owner-1" }]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
