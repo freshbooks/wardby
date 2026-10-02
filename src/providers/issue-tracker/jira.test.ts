@@ -568,6 +568,50 @@ describe("snapshotIssue", () => {
     expect((await tracker.snapshotIssue("PAY-9")).parent).toEqual({ key: "PAY-8", title: "Story", kind: "parent" });
   });
 
+  it("recognises an epic parent by hierarchyLevel 1 whatever its localised name", async () => {
+    const { tracker } = fake((c) =>
+      !c.path.startsWith("/rest/api/3/issue/")
+        ? undefined
+        : json({
+            key: "PAY-9",
+            fields: {
+              summary: "Story",
+              issuetype: { name: "Story", hierarchyLevel: 0 },
+              project: { key: "PAY" },
+              parent: {
+                key: "PAY-8",
+                fields: { summary: "Rückerstattungen", issuetype: { name: "Großaufgabe", hierarchyLevel: 1 } },
+              },
+            },
+          }),
+    );
+    expect((await tracker.snapshotIssue("PAY-9")).parent).toEqual({
+      key: "PAY-8",
+      title: "Rückerstattungen",
+      kind: "epic",
+    });
+  });
+
+  it("trusts hierarchyLevel over the name when both are present", async () => {
+    const { tracker } = fake((c) =>
+      !c.path.startsWith("/rest/api/3/issue/")
+        ? undefined
+        : json({
+            key: "PAY-9",
+            fields: {
+              summary: "Sub-task",
+              issuetype: { name: "Sub-task", hierarchyLevel: -1 },
+              project: { key: "PAY" },
+              parent: {
+                key: "PAY-8",
+                fields: { summary: "Epic-named story", issuetype: { name: "Epic", hierarchyLevel: 0 } },
+              },
+            },
+          }),
+    );
+    expect((await tracker.snapshotIssue("PAY-9")).parent?.kind).toBe("parent");
+  });
+
   it("uses the configured Epic Link field when there is no parent, without a second call", async () => {
     const { calls, client } = fake((c) =>
       c.path === "/rest/api/3/issue/OLD-3?fields=summary,issuetype,project,parent,customfield_10014"

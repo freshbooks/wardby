@@ -228,7 +228,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         expect(run.tokensIn).toBe(before.tokensIn + 100);
         expect(Number(run.costUsd)).toBeCloseTo(Number(before.costUsd) + 0.001, 6);
         expect(await db.runModelUsage.count({ where: { runId: uRun, model: failModel } })).toBe(0);
-        // The transaction stays usable: other models still record afterwards.
+        // Rolling back to the savepoint leaves the rows already recorded for the other models intact.
         const rows = await db.runModelUsage.count({ where: { runId: uRun } });
         expect(rows).toBe(2);
       } finally {

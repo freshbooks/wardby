@@ -902,6 +902,7 @@ async function executeTrackedRun(
       turns: engineResult.turns,
       finishedAt: new Date(),
     });
+    // Per-model usage is written on the same path as Run.costUsd: any future mid-run cost write must write usage too.
     await recordNativeModelUsage(db, runId, loaded.agent.model, engineResult.usage);
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);

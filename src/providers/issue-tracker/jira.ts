@@ -163,12 +163,18 @@ export class JiraIssueTracker implements IssueTracker {
     const parentRaw = obj(f.parent);
     const parentFields = obj(parentRaw.fields);
     const epicLink = this.opts.epicLinkField ? f[this.opts.epicLinkField] : undefined;
+    // An epic sits at hierarchy level 1 whatever the site calls it; fall back to the name when Jira omits the level.
+    const parentType = obj(parentFields.issuetype);
+    const parentIsEpic =
+      typeof parentType.hierarchyLevel === "number"
+        ? parentType.hierarchyLevel === 1
+        : str(parentType.name).toLowerCase() === "epic";
     const parent =
       typeof parentRaw.key === "string" && parentRaw.key
         ? {
             key: parentRaw.key,
             ...(str(parentFields.summary) ? { title: str(parentFields.summary) } : {}),
-            kind: str(obj(parentFields.issuetype).name).toLowerCase() === "epic" ? "epic" : "parent",
+            kind: parentIsEpic ? "epic" : "parent",
           }
         : typeof epicLink === "string" && epicLink
           ? { key: epicLink, kind: "epic" }

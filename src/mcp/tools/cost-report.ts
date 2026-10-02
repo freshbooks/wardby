@@ -7,7 +7,7 @@ import { textResult } from "./text-result.js";
 /**
  * Cost rolled up by issue, parent (epic, as of each run's dispatch), scope
  * (project/team), agent, model, or run. Same visibility as list_runs/get_run:
- * the agents the caller owns (including by owner grant), plus runs the caller
+ * the agents the caller owns (Agent.ownerId), plus runs the caller
  * triggered. USD only; tokens by priced kind.
  */
 export function registerCostReportTools(mcp: WardbyMcpServer): void {

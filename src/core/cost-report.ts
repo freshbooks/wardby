@@ -186,7 +186,26 @@ interface GroupRow {
   last_at: Date;
 }
 
+/**
+ * Every query runs in one read-only REPEATABLE READ transaction, so the rows,
+ * the totals and the unattributed figure all come from the same snapshot even
+ * while runs are finishing.
+ */
 export async function costReport(
+  db: Pick<PrismaClient, "$queryRaw" | "$transaction">,
+  q: CostReportQuery,
+  visibility: CostVisibility | null,
+): Promise<CostReport> {
+  return db.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+      return reportIn(tx, q, visibility);
+    },
+    { isolationLevel: "RepeatableRead" },
+  );
+}
+
+async function reportIn(
   db: Pick<PrismaClient, "$queryRaw">,
   q: CostReportQuery,
   visibility: CostVisibility | null,

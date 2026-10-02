@@ -55,7 +55,8 @@ export async function spendLine(db: IssueStatusDb, runId: string): Promise<strin
     const tree = Prisma.sql`
       WITH RECURSIVE tree AS (
         SELECT "id" FROM "Run" WHERE "id" = ${runId}
-        UNION ALL
+        -- UNION, not UNION ALL: a parentRunId cycle (never written, but not a constraint) can't recurse forever.
+        UNION
         SELECT r."id" FROM "Run" r JOIN tree t ON r."parentRunId" = t."id"
       )`;
     const [treeTotal, issueTotal, models] = await Promise.all([

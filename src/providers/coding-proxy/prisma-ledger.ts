@@ -257,7 +257,7 @@ export class PrismaProxyLedger implements ProxyLedger {
               "completedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
           WHERE "id" = ${requestId} AND "status" IN ('reserved', 'uncertain')
         `;
-      await tx.$executeRaw`
+      const [updatedRun] = await tx.$queryRaw<{ id: string }[]>`
           UPDATE "Run" AS r
           SET "tokensIn" = totals."tokensIn", "tokensOut" = totals."tokensOut", "costUsd" = totals."costUsd"
           FROM (
@@ -270,6 +270,7 @@ export class PrismaProxyLedger implements ProxyLedger {
             GROUP BY s."runId"
           ) AS totals
           WHERE r."id" = totals."runId"
+          RETURNING r."id"
         `;
       // Per-model usage (RunModelUsage), recomputed for this request's model and set, never incremented.
       // Best effort inside a savepoint: Run totals and the ledger are the budget truth, so a failed
@@ -299,9 +300,10 @@ export class PrismaProxyLedger implements ProxyLedger {
         await tx.$executeRaw`RELEASE SAVEPOINT run_model_usage`;
       } catch (err) {
         await tx.$executeRaw`ROLLBACK TO SAVEPOINT run_model_usage`;
-        const code =
-          (err as { code?: unknown; meta?: { code?: unknown } }).meta?.code ?? (err as { code?: unknown }).code;
-        log.warn({ sessionId: prior.sessionId, model: prior.model, code }, "could not record the run's model usage");
+        log.warn(
+          { err, runId: updatedRun?.id, sessionId: prior.sessionId, model: prior.model },
+          "could not record the run's model usage",
+        );
       }
       const request = await requestById(tx, requestId);
       if (!request) throw new Error("proxy_completion_not_persisted");
