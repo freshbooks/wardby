@@ -315,6 +315,8 @@ pub(crate) mod test_support {
         pub token: std::sync::Mutex<Option<String>>,
         pub writes: AtomicUsize,
         pub fail_set: std::sync::atomic::AtomicBool,
+        /// Milliseconds `set` blocks before writing (to widen races in tests).
+        pub set_delay_ms: std::sync::atomic::AtomicU64,
     }
     impl MemStore {
         pub fn with(token: &str) -> Arc<Self> {
@@ -322,6 +324,7 @@ pub(crate) mod test_support {
                 token: std::sync::Mutex::new(Some(token.to_string())),
                 writes: AtomicUsize::new(0),
                 fail_set: Default::default(),
+                set_delay_ms: Default::default(),
             })
         }
     }
@@ -330,6 +333,9 @@ pub(crate) mod test_support {
             Ok(self.token.lock().unwrap().clone())
         }
         fn set(&self, t: &str) -> Result<(), AppError> {
+            std::thread::sleep(std::time::Duration::from_millis(
+                self.set_delay_ms.load(Ordering::SeqCst),
+            ));
             if self.fail_set.load(Ordering::SeqCst) {
                 return Err(AppError::Keychain("write failed".to_string()));
             }

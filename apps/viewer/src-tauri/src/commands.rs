@@ -26,6 +26,14 @@ const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const STORE_FILE: &str = "servers.json";
 const STORE_KEY: &str = "servers";
 
+fn epoch_of(map: &std::sync::Mutex<HashMap<String, u64>>, url: &str) -> u64 {
+    map.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(url)
+        .copied()
+        .unwrap_or(0)
+}
+
 type Slot = Arc<tokio::sync::Mutex<Option<Arc<Session>>>>;
 
 #[derive(Default)]
@@ -44,6 +52,10 @@ pub struct AppState {
     events: std::sync::Mutex<Option<(String, EventsHandle)>>,
     /// Serialises read-modify-write of the saved server list.
     config: std::sync::Mutex<()>,
+    /// Per-server cancel counter, bumped by every `cancel_sign_in`. A sign-in
+    /// remembers the value it started at and its commit is skipped under the
+    /// auth lock if it has changed (see `commit_sign_in`).
+    cancel_epochs: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     /// Sign-ins in flight, by server URL.
     signins: std::sync::Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
@@ -160,11 +172,21 @@ impl AppState {
     /// old-grant token over the new one), re-checks via `check` that the server
     /// is still saved, writes the FIRST refresh token to the store, and installs
     /// the new session.
+    ///
+    /// The commit runs as a DETACHED task: aborting the sign-in task (cancel,
+    /// sign-out, removal) cannot drop it halfway, and the blocking Keychain
+    /// write always finishes while the auth lock is still held, so a later
+    /// `end_session` runs strictly after it. Cancellation is honoured by
+    /// `epoch` (the server's cancel counter when the sign-in began): if it moved,
+    /// the commit is skipped under the lock. A commit that had already started
+    /// writing is NOT undone: the user is signed in until the following
+    /// sign-out/removal (which is ordered after it) ends the session.
     async fn commit_sign_in<C>(
         &self,
         session: Session,
         refresh: String,
         store: Arc<dyn RefreshStore>,
+        epoch: u64,
         check: C,
     ) -> Result<(), AppError>
     where
@@ -172,19 +194,27 @@ impl AppState {
     {
         let url = session.server_url().to_string();
         let slot = self.slot(&url);
-        let mut g = slot.lock().await;
+        let epochs = self.cancel_epochs.clone();
         self.stop_stream_for(&url);
-        if let Some(old) = g.take() {
-            old.revoke().await;
-        }
-        tokio::task::spawn_blocking(move || {
-            check()?;
-            store.set(&refresh)
+        tokio::spawn(async move {
+            let mut g = slot.lock().await;
+            if epoch_of(&epochs, &url) != epoch {
+                return Err(AppError::Cancelled);
+            }
+            if let Some(old) = g.take() {
+                old.revoke().await;
+            }
+            tokio::task::spawn_blocking(move || {
+                check()?;
+                store.set(&refresh)
+            })
+            .await
+            .map_err(|_| AppError::Keychain("keychain task failed".to_string()))??;
+            *g = Some(Arc::new(session));
+            Ok(())
         })
         .await
-        .map_err(|_| AppError::Keychain("keychain task failed".to_string()))??;
-        *g = Some(Arc::new(session));
-        Ok(())
+        .map_err(|_| AppError::Network("sign-in commit failed".to_string()))?
     }
 
     /// Runs one sign-in per server at a time, as its own task so
@@ -220,7 +250,17 @@ impl AppState {
         }
     }
 
+    fn epoch(&self, server_url: &str) -> u64 {
+        epoch_of(&self.cancel_epochs, server_url)
+    }
+
     fn cancel_sign_in(&self, server_url: &str) -> bool {
+        *self
+            .cancel_epochs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(server_url.to_string())
+            .or_insert(0) += 1;
         match self
             .signins
             .lock()
@@ -515,6 +555,7 @@ pub async fn sign_in(
         let url = url.clone();
         async move {
             let st = app.state::<AppState>();
+            let epoch = st.epoch(&url);
             let hooks = SignInHooks {
                 on_registered: {
                     let (app, url) = (app.clone(), url.clone());
@@ -553,7 +594,7 @@ pub async fn sign_in(
                         .map_err(|_| removed_error())
                 }
             };
-            st.commit_sign_in(signed.session, signed.refresh, store, check)
+            st.commit_sign_in(signed.session, signed.refresh, store, epoch, check)
                 .await
         }
     };
@@ -927,7 +968,7 @@ mod tests {
         // The flow itself stores nothing; the commit does, under the auth lock.
         assert!(store.token.lock().unwrap().is_none());
         let st = AppState::default();
-        st.commit_sign_in(out.session, out.refresh, store.clone(), || Ok(()))
+        st.commit_sign_in(out.session, out.refresh, store.clone(), 0, || Ok(()))
             .await
             .unwrap();
         assert_eq!(store.token.lock().unwrap().as_deref(), Some("RT1"));
@@ -1113,12 +1154,9 @@ mod tests {
         let session =
             Session::new(&s.uri(), auth_for(&s.uri()), "cid", store.clone(), None).unwrap();
         let err = st
-            .commit_sign_in(
-                session,
-                "RT1".into(),
-                store.clone(),
-                || Err(removed_error()),
-            )
+            .commit_sign_in(session, "RT1".into(), store.clone(), 0, || {
+                Err(removed_error())
+            })
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Protocol(m) if m == "server was removed"));
@@ -1345,7 +1383,7 @@ mod tests {
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
         let new = Session::new(&s.uri(), auth_for(&s.uri()), "cid", store.clone(), None).unwrap();
-        st.commit_sign_in(new, "RT-new".into(), store.clone(), || Ok(()))
+        st.commit_sign_in(new, "RT-new".into(), store.clone(), 0, || Ok(()))
             .await
             .unwrap();
         assert_eq!(store.token.lock().unwrap().as_deref(), Some("RT-new"));
@@ -1360,36 +1398,49 @@ mod tests {
         assert!(!Arc::ptr_eq(g.as_ref().unwrap(), &old));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sign_out_vs_a_concurrent_rebuild_leaves_the_store_empty() {
         let s = MockServer::start().await;
         mount_server(&s, true).await;
-        for _ in 0..10 {
-            let st = AppState::default();
+        for i in 0..20 {
+            let st = Arc::new(AppState::default());
             let store = MemStore::with("rt");
-            let wipe = store.clone();
             let uri = s.uri();
-            let (out, built) = tokio::join!(
-                sign_out_with(&st, &uri, move |_| {
+            let (wipe, st1, st2, store2, uri1, uri2) = (
+                store.clone(),
+                st.clone(),
+                st.clone(),
+                store.clone(),
+                uri.clone(),
+                uri.clone(),
+            );
+            let rebuild = tokio::spawn(async move {
+                if i % 2 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                let _ = st2.session_for(&uri2, Some("cid"), store2).await;
+            });
+            let out = tokio::spawn(async move {
+                sign_out_with(&st1, &uri1, move |_| {
                     *wipe.token.lock().unwrap() = None;
                     Ok(())
-                }),
-                st.session_for(&uri, Some("cid"), store.clone()),
-            );
-            out.unwrap();
-            drop(built);
+                })
+                .await
+            });
+            out.await.unwrap().unwrap();
+            rebuild.await.unwrap();
             assert!(store.token.lock().unwrap().is_none());
             // Whatever order they ran in, no live session is left behind.
-            assert!(st.slot(&s.uri()).lock().await.is_none());
+            assert!(st.slot(&uri).lock().await.is_none());
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn dead_session_cleanup_never_deletes_a_concurrently_committed_token() {
         let s = MockServer::start().await;
         mount_server(&s, true).await;
-        for _ in 0..10 {
-            let st = AppState::default();
+        for i in 0..20 {
+            let st = Arc::new(AppState::default());
             let store = MemStore::with("rt");
             let old = st
                 .session_for(&s.uri(), Some("cid"), store.clone())
@@ -1398,15 +1449,84 @@ mod tests {
             let new =
                 Session::new(&s.uri(), auth_for(&s.uri()), "cid", store.clone(), None).unwrap();
             let wipe = store.clone();
-            let (_, committed) = tokio::join!(
-                st.drop_dead(&old, move |_| {
+            let (st1, st2, store2) = (st.clone(), st.clone(), store.clone());
+            let dead = tokio::spawn(async move {
+                if i % 2 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                st1.drop_dead(&old, move |_| {
                     *wipe.token.lock().unwrap() = None;
                     Ok(())
-                }),
-                st.commit_sign_in(new, "RT-new".into(), store.clone(), || Ok(())),
-            );
-            committed.unwrap();
+                })
+                .await;
+            });
+            let commit = tokio::spawn(async move {
+                st2.commit_sign_in(new, "RT-new".into(), store2, 0, || Ok(()))
+                    .await
+            });
+            commit.await.unwrap().unwrap();
+            dead.await.unwrap();
             assert_eq!(store.token.lock().unwrap().as_deref(), Some("RT-new"));
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancel_and_sign_out_mid_write_leave_the_store_empty_and_no_session() {
+        let s = MockServer::start().await;
+        let st = Arc::new(AppState::default());
+        let store = MemStore::with("old");
+        store.set_delay_ms.store(400, Ordering::SeqCst);
+        let session =
+            Session::new(&s.uri(), auth_for(&s.uri()), "cid", store.clone(), None).unwrap();
+        let uri = s.uri();
+        let epoch = st.epoch(&uri);
+        let signin = {
+            let (st, store, uri) = (st.clone(), store.clone(), uri.clone());
+            tokio::spawn(async move {
+                let st2 = st.clone();
+                st.single_flight(&uri, async move {
+                    st2.commit_sign_in(session, "RT-new".into(), store, epoch, || Ok(()))
+                        .await
+                })
+                .await
+            })
+        };
+        // Land in the middle of the slow Keychain write.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let wipe = store.clone();
+        let out = {
+            let (st, uri) = (st.clone(), uri.clone());
+            tokio::spawn(async move {
+                st.cancel_sign_in(&uri);
+                sign_out_with(&st, &uri, move |_| {
+                    *wipe.token.lock().unwrap() = None;
+                    Ok(())
+                })
+                .await
+            })
+        };
+        out.await.unwrap().unwrap();
+        let _ = signin.await.unwrap();
+        // The write finished under the lock first, then sign-out deleted it.
+        assert!(store.token.lock().unwrap().is_none());
+        assert!(st.slot(&uri).lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_commit_cancelled_before_it_starts_is_skipped() {
+        let s = MockServer::start().await;
+        let st = AppState::default();
+        let store = Arc::new(MemStore::default());
+        let session =
+            Session::new(&s.uri(), auth_for(&s.uri()), "cid", store.clone(), None).unwrap();
+        let epoch = st.epoch(&s.uri());
+        st.cancel_sign_in(&s.uri());
+        let err = st
+            .commit_sign_in(session, "RT".into(), store.clone(), epoch, || Ok(()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Cancelled));
+        assert!(store.token.lock().unwrap().is_none());
+        assert!(st.slot(&s.uri()).lock().await.is_none());
     }
 }
