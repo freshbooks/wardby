@@ -92,6 +92,9 @@ DO $$ BEGIN
   IF to_regclass('public."CodingProxyRequest"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE ON public.%I TO wardby_proxy', 'CodingProxyRequest');
   END IF;
+  IF to_regclass('public."RunModelUsage"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON public.%I TO wardby_proxy', 'RunModelUsage');
+  END IF;
   IF to_regclass('public."Run"') IS NOT NULL THEN
     EXECUTE format('GRANT UPDATE (%I, %I, %I), SELECT (%I) ON public.%I TO wardby_proxy',
       'tokensIn', 'tokensOut', 'costUsd', 'id', 'Run');

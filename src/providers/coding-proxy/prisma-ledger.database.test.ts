@@ -98,4 +98,115 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     expect(run.tokensOut).toBe(4);
     expect(Number(run.costUsd)).toBe(0.00005);
   });
+
+  describe("per-model usage (RunModelUsage)", () => {
+    const uAgent = `usage-agent-${suffix}`;
+    const uRun = `usage-run-${suffix}`;
+    const uSession = `usage-session-${suffix}`;
+    const modelA = "model-a";
+    const modelB = "model-b";
+    const ledger = new PrismaProxyLedger(db);
+    const u = (inputTokens: number, cachedInputTokens: number, cacheWriteTokens: number, outputTokens: number) => ({
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      cacheWriteTokens,
+      reasoningTokens: 0,
+    });
+    const reserveOn = async (key: string, model: string) => {
+      const result = await ledger.reserve({
+        id: `${key}-${suffix}`,
+        sessionId: uSession,
+        requestKey: key,
+        requestFingerprint: `fingerprint-${key}`,
+        model,
+        reservationUsd: 0.001,
+        pricing: { version: "test", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 },
+        now: new Date(),
+      });
+      if (result.outcome !== "reserved") throw new Error(`unexpected ${result.outcome}`);
+      return result.request.id;
+    };
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${uSession}`;
+      await db.runModelUsage.deleteMany({ where: { runId: uRun } });
+      await db.codingRun.deleteMany({ where: { runId: uRun } });
+      await db.run.deleteMany({ where: { id: uRun } });
+      await db.agent.deleteMany({ where: { id: uAgent } });
+    });
+
+    it("recomputes per-model usage on each completion, by priced token kind", async () => {
+      await db.agent.create({
+        data: { id: uAgent, name: uAgent, systemPrompt: "x", model: modelA, budgetUsd: 1 },
+      });
+      await db.run.create({ data: { id: uRun, agentId: uAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: uRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${uRun}`,
+          provider: "codex",
+          model: modelA,
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      await ledger.createSession({
+        id: uSession,
+        runId: uRun,
+        capabilityHash: `usage-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: [modelA, modelB],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        registryTokenHash: `usage-registry-hash-${suffix}`,
+      });
+      await ledger.complete(await reserveOn("a1", modelA), u(1000, 800, 100, 50), 0.01, 200);
+      await ledger.complete(await reserveOn("a2", modelA), u(500, 400, 0, 20), 0.005, 200);
+      await ledger.complete(await reserveOn("b1", modelB), u(200, 0, 0, 10), 0.002, 200);
+
+      const rows = await db.runModelUsage.findMany({ where: { runId: uRun }, orderBy: { model: "asc" } });
+      expect(rows.map((r) => ({ ...r, costUsd: Number(r.costUsd) }))).toEqual([
+        {
+          runId: uRun,
+          model: modelA,
+          freshInputTokens: 300,
+          cachedInputTokens: 1200,
+          cacheWriteTokens: 100,
+          outputTokens: 70,
+          costUsd: expect.closeTo(0.015, 10),
+        },
+        {
+          runId: uRun,
+          model: modelB,
+          freshInputTokens: 200,
+          cachedInputTokens: 0,
+          cacheWriteTokens: 0,
+          outputTokens: 10,
+          costUsd: expect.closeTo(0.002, 10),
+        },
+      ]);
+      const run = await db.run.findUniqueOrThrow({ where: { id: uRun } });
+      const sum = rows.reduce((total, r) => total + Number(r.costUsd), 0);
+      expect(Number(run.costUsd)).toBeCloseTo(sum, 6);
+    });
+
+    it("a repeated completion does not double the per-model row", async () => {
+      const before = await db.runModelUsage.findUniqueOrThrow({
+        where: { runId_model: { runId: uRun, model: modelA } },
+      });
+      await new PrismaProxyLedger(db).complete(`a1-${suffix}`, u(1000, 800, 100, 50), 0.01, 200);
+      const after = await db.runModelUsage.findUniqueOrThrow({
+        where: { runId_model: { runId: uRun, model: modelA } },
+      });
+      expect(after).toEqual(before);
+      expect(after.outputTokens).toBe(70);
+    });
+  });
 });

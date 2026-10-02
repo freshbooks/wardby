@@ -268,6 +268,27 @@ export class PrismaProxyLedger implements ProxyLedger {
           ) AS totals
           WHERE r."id" = totals."runId"
         `;
+      // Per-model usage (RunModelUsage), recomputed for this request's model and set, never incremented.
+      await tx.$executeRaw`
+          INSERT INTO "RunModelUsage"
+            ("runId", "model", "freshInputTokens", "cachedInputTokens", "cacheWriteTokens", "outputTokens", "costUsd")
+          SELECT s."runId", q."model",
+                 COALESCE(SUM(COALESCE(q."inputTokens", 0) - COALESCE(q."cachedInputTokens", 0)), 0)::integer,
+                 COALESCE(SUM(q."cachedInputTokens"), 0)::integer,
+                 COALESCE(SUM(q."cacheWriteTokens"), 0)::integer,
+                 COALESCE(SUM(q."outputTokens"), 0)::integer,
+                 COALESCE(SUM(q."actualCostUsd"), 0)
+          FROM "CodingProxySession" s
+          JOIN "CodingProxyRequest" q ON q."sessionId" = s."id" AND q."status" = 'completed'
+          WHERE s."id" = ${prior.sessionId} AND q."model" = ${prior.model}
+          GROUP BY s."runId", q."model"
+          ON CONFLICT ("runId", "model") DO UPDATE SET
+            "freshInputTokens" = EXCLUDED."freshInputTokens",
+            "cachedInputTokens" = EXCLUDED."cachedInputTokens",
+            "cacheWriteTokens" = EXCLUDED."cacheWriteTokens",
+            "outputTokens" = EXCLUDED."outputTokens",
+            "costUsd" = EXCLUDED."costUsd"
+        `;
       const request = await requestById(tx, requestId);
       if (!request) throw new Error("proxy_completion_not_persisted");
       return request;
