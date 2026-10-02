@@ -237,6 +237,7 @@ describe("jira_* built-ins in the native run loop", () => {
     expect(tracker.comment).toHaveBeenCalledWith("PROJ-1", {
       markdown: "On it.\n\n_wardby agent a1_",
       visibilityRole: "Developers",
+      issueKeyProjects: ["PROJ"],
     });
     expect(state.toolResults.some((r) => r.includes('"id":"10001"'))).toBe(true);
   });

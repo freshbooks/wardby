@@ -153,6 +153,11 @@ export class JiraIssueTracker implements IssueTracker {
     return (await this.identity()).accountId;
   }
 
+  /** Markdown to ADF, with this site's issue links (and the given projects' bare keys) as smart links. */
+  private toAdf(markdown: string, issueKeyProjects?: readonly string[]) {
+    return markdownToAdf(markdown, { siteUrl: this.siteUrl, projectKeys: issueKeyProjects ?? [] });
+  }
+
   issueUrl(key: string): string {
     return `${this.siteUrl}/browse/${key}`;
   }
@@ -266,7 +271,7 @@ export class JiraIssueTracker implements IssueTracker {
 
   async comment(
     key: string,
-    input: { markdown: string; visibilityRole?: string },
+    input: { markdown: string; visibilityRole?: string; issueKeyProjects?: readonly string[] },
     opts?: TrackerCallOptions,
   ): Promise<{ id: string; url: string }> {
     const budget = callBudget(opts);
@@ -275,7 +280,7 @@ export class JiraIssueTracker implements IssueTracker {
       "POST",
       `/rest/api/3/issue/${key}/comment`,
       {
-        body: markdownToAdf(input.markdown),
+        body: this.toAdf(input.markdown, input.issueKeyProjects),
         ...(input.visibilityRole ? { visibility: { type: "role", value: input.visibilityRole } } : {}),
       },
       budget.request(),
@@ -284,10 +289,14 @@ export class JiraIssueTracker implements IssueTracker {
     return { id: r.id, url: `${this.issueUrl(key)}?focusedCommentId=${r.id}` };
   }
 
-  async editComment(key: string, commentId: string, input: { markdown: string }): Promise<void> {
+  async editComment(
+    key: string,
+    commentId: string,
+    input: { markdown: string; issueKeyProjects?: readonly string[] },
+  ): Promise<void> {
     await this.ready();
     await this.client.request("PUT", `/rest/api/3/issue/${key}/comment/${commentId}`, {
-      body: markdownToAdf(input.markdown),
+      body: this.toAdf(input.markdown, input.issueKeyProjects),
     });
   }
 
@@ -514,7 +523,7 @@ export class JiraIssueTracker implements IssueTracker {
       project: { key: input.projectKey },
       issuetype: { id: type.id },
       summary: input.summary,
-      description: markdownToAdf(input.descriptionMarkdown),
+      description: this.toAdf(input.descriptionMarkdown, input.issueKeyProjects),
     });
     if (input.labels) fields.labels = input.labels;
     if (input.priority) fields.priority = { name: input.priority };

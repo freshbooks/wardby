@@ -201,6 +201,18 @@ describe("JiraIssueTracker", () => {
     });
   });
 
+  it("turns the given projects' issue keys and this site's issue URLs into smart links", async () => {
+    const { tracker, calls } = fake((c) =>
+      c.method === "POST" && c.path === "/rest/api/3/issue/PROJ-1/comment" ? json({ id: "56" }) : undefined,
+    );
+    await tracker.comment("PROJ-1", { markdown: `Filed PROJ-2, see ${SITE}/browse/OPS-3`, issueKeyProjects: ["PROJ"] });
+    const cards = JSON.stringify(calls[0].body).match(/"inlineCard","attrs":\{"url":"[^"]+"/g);
+    expect(cards).toEqual([
+      `"inlineCard","attrs":{"url":"${SITE}/browse/PROJ-2"`,
+      `"inlineCard","attrs":{"url":"${SITE}/browse/OPS-3"`,
+    ]);
+  });
+
   it("searches with the enhanced JQL endpoint and reports truncation", async () => {
     const { tracker, calls } = fake((c) =>
       c.method === "POST" && c.path === "/rest/api/3/search/jql"

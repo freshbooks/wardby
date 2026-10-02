@@ -133,6 +133,7 @@ describe("handleIssueTrackerTool", () => {
     expect(t.comment).toHaveBeenCalledWith("PROJ-1", {
       markdown: "Looks done.\n\n_wardby agent a1_",
       visibilityRole: "Developers",
+      issueKeyProjects: expect.arrayContaining(["PROJ"]),
     });
     expect(result).toEqual({
       id: "10001",
@@ -147,7 +148,10 @@ describe("handleIssueTrackerTool", () => {
       { issueKey: "PROJ-1", body: "x" },
       ctx(t, [{ ...WRITE_LINK, commentVisibilityRole: null }]),
     );
-    expect(t.comment).toHaveBeenCalledWith("PROJ-1", { markdown: "x\n\n_wardby agent a1_" });
+    expect(t.comment).toHaveBeenCalledWith("PROJ-1", {
+      markdown: "x\n\n_wardby agent a1_",
+      issueKeyProjects: expect.arrayContaining(["PROJ"]),
+    });
   });
 
   it("jira_get_issue passes the agent marker and a default comment cap", async () => {
@@ -218,7 +222,10 @@ describe("handleIssueTrackerTool", () => {
       ctx(t),
     );
     expect(t.readComment).toHaveBeenCalledWith("PROJ-1", "10001");
-    expect(t.editComment).toHaveBeenCalledWith("PROJ-1", "10001", { markdown: "Updated.\n\n_wardby agent a1_" });
+    expect(t.editComment).toHaveBeenCalledWith("PROJ-1", "10001", {
+      markdown: "Updated.\n\n_wardby agent a1_",
+      issueKeyProjects: expect.arrayContaining(["PROJ"]),
+    });
     expect(result).toEqual({
       id: "10001",
       url: "https://your-site.atlassian.net/browse/PROJ-1?focusedCommentId=10001",
@@ -962,6 +969,7 @@ describe("jira_create_issue", () => {
       priority: "High",
       customFields: { customfield_10010: 3 },
       properties: { "wardby.a1.created": { runId: "run-1" } },
+      issueKeyProjects: expect.arrayContaining(["PROJ"]),
     });
   });
 

@@ -22,10 +22,47 @@ export interface AdfNode {
 const INLINE =
   /\*\*([^*]+)\*\*|`([^`]+)`|(?<![A-Za-z0-9_])_([^_\s][^_]*?)_(?![A-Za-z0-9_])|\[([^\]]+)\]\(([^)\s]+)\)|(https:\/\/[^\s<>()[\]"']*[^\s<>()[\]"'.,;:!?])/g;
 
-function inline(text: string): AdfNode[] {
+/**
+ * Smart links (ADF inlineCard, what Jira's editor makes from a pasted issue link) for this site's
+ * issues: a bare `<siteUrl>/browse/KEY-1` URL, and a bare `KEY-1` whose project is in `projectKeys`
+ * (only those, so look-alikes such as UTF-8 or SHA-256 stay text).
+ */
+export interface SmartLinkOptions {
+  siteUrl: string;
+  projectKeys?: readonly string[];
+}
+
+const ISSUE_KEY = /^[A-Z][A-Z0-9_]+-[1-9][0-9]*$/;
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function inline(text: string, smart?: SmartLinkOptions): AdfNode[] {
   const out: AdfNode[] = [];
+  const site = smart?.siteUrl.replace(/\/+$/, "");
+  const card = (key: string): AdfNode => ({ type: "inlineCard", attrs: { url: `${site}/browse/${key}` } });
+  const keys = (smart?.projectKeys ?? []).filter((k) => /^[A-Z][A-Z0-9_]+$/.test(k));
+  const keyRe = keys.length
+    ? new RegExp(`(?<![A-Za-z0-9_/.-])(?:${keys.map(escapeRe).join("|")})-[1-9][0-9]*(?![A-Za-z0-9_-])`, "g")
+    : null;
+  const plain = (t: string) => {
+    if (!t) return;
+    if (!keyRe) return void out.push({ type: "text", text: t });
+    let at = 0;
+    for (const k of t.matchAll(keyRe)) {
+      if (k.index > at) out.push({ type: "text", text: t.slice(at, k.index) });
+      out.push(card(k[0]));
+      at = k.index + k[0].length;
+    }
+    if (at < t.length) out.push({ type: "text", text: t.slice(at) });
+  };
   const push = (t: string, marks?: AdfNode["marks"]) => {
-    if (t) out.push(marks ? { type: "text", text: t, marks } : { type: "text", text: t });
+    if (!t) return;
+    if (marks) out.push({ type: "text", text: t, marks });
+    else plain(t);
+  };
+  const siteIssueKey = (url: string): string | null => {
+    if (!site || !url.startsWith(`${site}/browse/`)) return null;
+    const key = url.slice(site.length + "/browse/".length);
+    return ISSUE_KEY.test(key) ? key : null;
   };
   let last = 0;
   for (const m of text.matchAll(INLINE)) {
@@ -34,17 +71,19 @@ function inline(text: string): AdfNode[] {
     else if (m[2] !== undefined) push(m[2], [{ type: "code" }]);
     else if (m[3] !== undefined) push(m[3], [{ type: "em" }]);
     else if (m[5]?.startsWith("https://")) push(m[4], [{ type: "link", attrs: { href: m[5] } }]);
-    else if (m[6] !== undefined) push(m[6], [{ type: "link", attrs: { href: m[6] } }]);
-    else push(m[0]);
+    else if (m[6] !== undefined) {
+      const key = siteIssueKey(m[6]);
+      if (key) out.push(card(key));
+      else push(m[6], [{ type: "link", attrs: { href: m[6] } }]);
+    } else push(m[0]);
     last = m.index + m[0].length;
   }
   push(text.slice(last));
   return out;
 }
 
-const paragraph = (text: string): AdfNode => ({ type: "paragraph", content: inline(text) });
-
-export function markdownToAdf(markdown: string): AdfNode {
+export function markdownToAdf(markdown: string, smart?: SmartLinkOptions): AdfNode {
+  const paragraph = (text: string): AdfNode => ({ type: "paragraph", content: inline(text, smart) });
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const content: AdfNode[] = [];
   let i = 0;
@@ -69,7 +108,7 @@ export function markdownToAdf(markdown: string): AdfNode {
     }
     const heading = /^(#{1,3})\s+(.*)$/.exec(line);
     if (heading) {
-      content.push({ type: "heading", attrs: { level: heading[1].length }, content: inline(heading[2]) });
+      content.push({ type: "heading", attrs: { level: heading[1].length }, content: inline(heading[2], smart) });
       i++;
       continue;
     }

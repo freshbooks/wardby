@@ -59,6 +59,32 @@ describe("markdownToAdf", () => {
       { type: "text", text: "curl https://example.com/x", marks: [{ type: "code" }] },
     ]);
   });
+  it("makes smart links for this site's issue URLs and linked projects' issue keys only", () => {
+    const smart = { siteUrl: "https://example.atlassian.net/", projectKeys: ["OPS"] };
+    const card = (key: string) => ({
+      type: "inlineCard",
+      attrs: { url: `https://example.atlassian.net/browse/${key}` },
+    });
+    expect(
+      markdownToAdf("Filed OPS-12 (see https://example.atlassian.net/browse/WEB-3). UTF-8 and XOPS-1 stay.", smart)
+        .content?.[0].content,
+    ).toEqual([
+      { type: "text", text: "Filed " },
+      card("OPS-12"),
+      { type: "text", text: " (see " },
+      card("WEB-3"),
+      { type: "text", text: "). UTF-8 and XOPS-1 stay." },
+    ]);
+    const other = "https://elsewhere.example.com/browse/OPS-1";
+    expect(markdownToAdf(`${other} \`OPS-1\` **OPS-2**`, smart).content?.[0].content).toEqual([
+      { type: "text", text: other, marks: [{ type: "link", attrs: { href: other } }] },
+      { type: "text", text: " " },
+      { type: "text", text: "OPS-1", marks: [{ type: "code" }] },
+      { type: "text", text: " " },
+      { type: "text", text: "OPS-2", marks: [{ type: "strong" }] },
+    ]);
+    expect(JSON.stringify(markdownToAdf("OPS-12"))).not.toContain("inlineCard");
+  });
   it("keeps snake_case identifiers literal but still italicises _word_", () => {
     expect(markdownToAdf("Set WARDBY_JIRA_API_TOKEN and my_var_name").content?.[0].content).toEqual([
       { type: "text", text: "Set WARDBY_JIRA_API_TOKEN and my_var_name" },

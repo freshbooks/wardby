@@ -68,6 +68,8 @@ export interface CreateIssueInput {
   customFields?: Record<string, unknown>;
   /** Issue properties, set in the create call itself. */
   properties?: Record<string, unknown>;
+  /** Projects whose bare issue keys in the description become smart links. */
+  issueKeyProjects?: readonly string[];
 }
 
 export interface CreateMetaIssueType {
@@ -128,10 +130,15 @@ export interface IssueTracker {
   matchesJql(key: string, jql: string, opts?: TrackerCallOptions): Promise<boolean>;
   comment(
     key: string,
-    input: { markdown: string; visibilityRole?: string },
+    /** issueKeyProjects: projects whose bare issue keys in the text become smart links. */
+    input: { markdown: string; visibilityRole?: string; issueKeyProjects?: readonly string[] },
     opts?: TrackerCallOptions,
   ): Promise<{ id: string; url: string }>;
-  editComment(key: string, commentId: string, input: { markdown: string }): Promise<void>;
+  editComment(
+    key: string,
+    commentId: string,
+    input: { markdown: string; issueKeyProjects?: readonly string[] },
+  ): Promise<void>;
   /** The comment's author accountId and plain text (uncapped: only for ownership checks, never shown to a model), or null when it doesn't exist. */
   readComment(key: string, commentId: string): Promise<{ authorId: string | null; body: string } | null>;
   issueUrl(key: string): string;

@@ -445,6 +445,11 @@ const sameName = (a: string, b: string): boolean => a.trim().toLowerCase() === b
  *    block: other JQL functions, including other app-provided ones, still
  *    run. The result post-filter in jira_search is the real boundary.
  */
+/** The agent's linked projects: their bare issue keys in what it writes become smart links. */
+const linkedProjectKeys = (ctx: { links: readonly IssueProjectLink[] }): string[] => [
+  ...new Set(ctx.links.map((l) => l.projectKey)),
+];
+
 export function scopeJql(projectKeys: readonly string[], jql: string): { jql: string } | { error: string } {
   if (/issuefunction/i.test(jql)) return { error: "issueFunction is not allowed in jira_search." };
   let depth = 0;
@@ -691,6 +696,7 @@ async function createIssue(a: z.infer<typeof CreateIssueArgs>, ctx: IssueToolCon
         issueType: a.issueType,
         summary: a.summary,
         descriptionMarkdown: a.description,
+        issueKeyProjects: linkedProjectKeys(ctx),
         ...(a.labels ? { labels: a.labels } : {}),
         ...(a.priority ? { priority: a.priority } : {}),
         ...(a.components ? { components: a.components } : {}),
@@ -811,6 +817,7 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
         const posted = await tracker.comment(issueKey, {
           markdown: `${body}\n\n${agentFooter(ctx.agentId)}`,
           ...(link.commentVisibilityRole ? { visibilityRole: link.commentVisibilityRole } : {}),
+          issueKeyProjects: linkedProjectKeys(ctx),
         });
         return JSON.stringify({ id: posted.id, url: posted.url });
       }
@@ -826,7 +833,10 @@ export async function handleIssueTrackerTool(name: string, argsJson: string, ctx
           existing.authorId === (await tracker.botAccountId()) &&
           hasAgentFooter(existing.body, ctx.agentId);
         if (!own) return error("not_own_comment", "Only comments this agent posted can be edited.");
-        await tracker.editComment(issueKey, commentId, { markdown: `${body}\n\n${agentFooter(ctx.agentId)}` });
+        await tracker.editComment(issueKey, commentId, {
+          markdown: `${body}\n\n${agentFooter(ctx.agentId)}`,
+          issueKeyProjects: linkedProjectKeys(ctx),
+        });
         return JSON.stringify({ id: commentId, url: commentUrl(tracker, issueKey, commentId) });
       }
       case "jira_list_transitions": {

@@ -127,7 +127,7 @@ export async function fileIssue(
   // answering with an error would make the caller retry and file a duplicate.
   let completed: FileIssueSuccess | undefined;
   let regressionOf: string | undefined;
-  // The tracker's own URL for the Done issue (never model input), so the new issue links back to it.
+  // The tracker's own URL for the Done issue (never model input): the tracker renders it as a smart link.
   let regressionOfUrl: string | undefined;
   let hash: string | undefined;
   try {
@@ -212,7 +212,7 @@ export async function fileIssue(
             ? {
                 ...createInput,
                 descriptionMarkdown: withFooter(
-                  `${input.create.descriptionMarkdown}\n\nRegression of ${regressionOfUrl?.startsWith("https://") ? `[${regressionOf}](${regressionOfUrl})` : regressionOf}.`,
+                  `${input.create.descriptionMarkdown}\n\nRegression of ${regressionOfUrl?.startsWith("https://") ? regressionOfUrl : regressionOf}`,
                 ),
               }
             : createInput,
