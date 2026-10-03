@@ -596,20 +596,22 @@ async function executeTrackedRun(
     }
     throw err;
   });
-  if ("unavailable" in loadedOrUnavailable) {
-    return finishRun(db, runId, { status: "failed", error: loadedOrUnavailable.unavailable, finishedAt: new Date() });
-  }
+  // Fails a run that ends before its engine starts, closing what its trigger opened (the review
+  // check, the host and issue status comments) exactly as the normal and catch paths below do.
+  // Deliberately no self-defect: both callers are configuration states, not this run's defect (an
+  // admin disabled or removed the model, or this deployment has no coding executor), and filing
+  // would open one defect per affected agent rather than describe a failure of that agent.
+  const finishEarly = async (error: string): Promise<Run> => {
+    const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
+    await closeOpenHostCheck(db, finished, reviewHosts);
+    await completeHostStatus(db, finished, reviewHosts);
+    await completeIssueStatus(db, finished, issueTrackers);
+    return finished;
+  };
+  if ("unavailable" in loadedOrUnavailable) return finishEarly(loadedOrUnavailable.unavailable);
   const loaded = loadedOrUnavailable;
 
-  if (loaded.kind === "coding") {
-    // Deliberately no self-defect here: a missing coding executor is a deployment config error, which would
-    // file one defect per opted-in coding agent rather than describe that agent's failure.
-    return finishRun(db, runId, {
-      status: "failed",
-      error: CODING_EXECUTOR_NOT_CONFIGURED,
-      finishedAt: new Date(),
-    });
-  }
+  if (loaded.kind === "coding") return finishEarly(CODING_EXECUTOR_NOT_CONFIGURED);
 
   // Conditional on DRIVABLE rather than on `pending`: an adopted attempt
   // legitimately finds the row already `running`, but a terminal row must
