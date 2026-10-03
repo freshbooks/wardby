@@ -41,6 +41,19 @@ export class CatalogStore {
   private timer: NodeJS.Timeout | undefined;
   private readonly intervalMs: number;
   private readonly log: CatalogLog;
+  /** Monotonic id handed out per load attempt (poll or refreshNow), taken before the
+   *  awaited fetch starts so loads can be ordered by when they were *initiated*, not
+   *  when they happen to resolve. */
+  private loadSeq = 0;
+  /** The seq of the load currently reflected in `catalog`. A load whose result arrives
+   *  after a newer one already applied is discarded — see `applyLoad`. */
+  private appliedSeq = 0;
+  /** True once `close()` has run; a load already in flight at that point must not
+   *  assign into `catalog` or log on failure when it eventually settles. */
+  private closed = false;
+  /** True while a poll-triggered load is in flight, so a slow load doesn't overlap
+   *  with the next interval tick. */
+  private polling = false;
 
   constructor(
     private readonly db: CatalogDb,
@@ -51,8 +64,13 @@ export class CatalogStore {
   }
 
   async start(): Promise<void> {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+    this.closed = false;
     try {
-      this.catalog = await this.load();
+      await this.applyLoad();
     } catch (err) {
       throw new Error(
         `Could not load the model catalog from the database: ${err instanceof Error ? err.message : String(err)}`,
@@ -60,11 +78,15 @@ export class CatalogStore {
       );
     }
     this.timer = setInterval(() => {
-      this.load().then(
-        (next) => {
-          this.catalog = next;
+      if (this.polling) return;
+      this.polling = true;
+      this.applyLoad().then(
+        () => {
+          this.polling = false;
         },
         (err: unknown) => {
+          this.polling = false;
+          if (this.closed) return;
           this.log.warn(
             { event: "models.catalog.refresh_failed", err: err instanceof Error ? err.message : String(err) },
             "model catalog refresh failed; keeping the last good catalog",
@@ -80,12 +102,26 @@ export class CatalogStore {
   }
 
   async refreshNow(): Promise<void> {
-    this.catalog = await this.load();
+    await this.applyLoad();
   }
 
   close(): void {
+    this.closed = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+  }
+
+  /** Runs one load, then applies it only if it is still the newest load to have
+   *  started and the store hasn't been closed in the meantime. Rejects (without
+   *  touching `catalog`) if the underlying load fails. */
+  private async applyLoad(): Promise<void> {
+    const seq = ++this.loadSeq;
+    const next = await this.load();
+    if (this.closed) return;
+    if (seq > this.appliedSeq) {
+      this.catalog = next;
+      this.appliedSeq = seq;
+    }
   }
 
   private async load(): Promise<ModelCatalog> {
