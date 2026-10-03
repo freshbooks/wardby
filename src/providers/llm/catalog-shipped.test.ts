@@ -1,0 +1,76 @@
+import { describe, expect, it } from "vitest";
+import { SHIPPED_CATALOG, SHIPPED_CATALOG_VERSION } from "./catalog-shipped.js";
+
+const byProvider = (provider: string) => SHIPPED_CATALOG.filter((e) => e.provider === provider);
+
+describe("shipped model catalog", () => {
+  it("has a dated version", () => {
+    expect(SHIPPED_CATALOG_VERSION).toBe("2026-10-03");
+  });
+
+  it.each([
+    ["gpt-4o", 2.5, 10, 1.25, 2.5],
+    ["gpt-4o-mini", 0.15, 0.6, 0.075, 0.15],
+    ["gpt-4.1", 2, 8, 0.5, 2],
+    ["gpt-4.1-mini", 0.4, 1.6, 0.1, 0.4],
+    ["gpt-4.1-nano", 0.1, 0.4, 0.025, 0.1],
+    ["gpt-6-astra", 10, 50, 1, 12.5],
+    ["gpt-5.6-sol", 4, 20, 0.4, 5],
+    ["gpt-5.6-terra", 2, 12, 0.2, 2.5],
+    ["gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
+    ["claude-opus-5", 5, 25, 0.5, 6.25],
+    ["claude-sonnet-5", 2, 10, 0.2, 2.5],
+    ["claude-fable-5", 10, 50, 1, 12.5],
+    ["claude-haiku-4-5", 1, 5, 0.1, 1.25],
+    ["us.anthropic.claude-sonnet-4-6", 3, 15, 0.3, 3.75],
+    ["us.anthropic.claude-opus-4-6-v1", 5, 25, 0.5, 6.25],
+    ["us.anthropic.claude-opus-4-8", 5, 25, 0.5, 6.25],
+    ["us.anthropic.claude-haiku-4-5-20251001-v1:0", 1, 5, 0.1, 1.25],
+  ])("%s is priced input %s / output %s / cache read %s / cache write %s", (id, input, output, read, write) => {
+    const e = SHIPPED_CATALOG.find((x) => x.modelId === id)!;
+    expect([e.inputPerMTok, e.outputPerMTok, e.cachedInputPerMTok, e.cacheWritePerMTok]).toEqual([
+      input,
+      output,
+      read,
+      write,
+    ]);
+  });
+
+  it("lists exactly these 17 models", () => {
+    expect(SHIPPED_CATALOG).toHaveLength(17);
+  });
+
+  it("keeps the anthropic opus/sonnet/fable effort ladder, and no efforts for haiku, Bedrock, or OpenAI", () => {
+    for (const id of ["claude-opus-5", "claude-sonnet-5", "claude-fable-5"]) {
+      expect([...SHIPPED_CATALOG.find((e) => e.modelId === id)!.efforts]).toEqual([
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
+    }
+    for (const e of byProvider("openai")) expect([...e.efforts]).toEqual([]);
+    for (const e of byProvider("bedrock-claude")) expect([...e.efforts]).toEqual([]);
+    expect([...SHIPPED_CATALOG.find((e) => e.modelId === "claude-haiku-4-5")!.efforts]).toEqual([]);
+  });
+
+  it("marks only Claude Haiku 4.5 (direct API) as manual thinking, matching the proxy's old set", () => {
+    const manual = SHIPPED_CATALOG.filter((e) => e.thinkingMode === "manual").map((e) => e.modelId);
+    expect(manual).toEqual(["claude-haiku-4-5"]);
+    for (const e of byProvider("openai")) expect(e.thinkingMode).toBe("none");
+  });
+
+  it("sets every rate as a finite non-negative literal", () => {
+    for (const e of SHIPPED_CATALOG) {
+      for (const rate of [e.inputPerMTok, e.outputPerMTok, e.cachedInputPerMTok, e.cacheWritePerMTok]) {
+        expect(Number.isFinite(rate) && rate >= 0).toBe(true);
+      }
+    }
+  });
+
+  it("has unique model ids across providers (routing is by model id)", () => {
+    const ids = SHIPPED_CATALOG.map((e) => e.modelId);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});

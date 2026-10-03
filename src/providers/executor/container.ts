@@ -3,7 +3,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
-import type { CodingProvider } from "../../coding/provider.js";
+import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
 import { parseStoredServices, storedServiceNames, workerServices } from "../../coding/services/catalog.js";
 import { MAX_SERVICE_DECLARATION_BYTES, SERVICE_DECLARATION_PATH } from "../../coding/services/declaration.js";
@@ -40,11 +40,11 @@ import {
   type CodingAgentOutput,
   type CodingRunResult,
 } from "../../coding/protocol.js";
-import { getModelPricing } from "../llm/pricing.js";
-import { getAnthropicPricing } from "../llm/pricing-anthropic.js";
+import { parseStoredEntry } from "../llm/catalog-types.js";
+import { resolveCodingEntry } from "../../core/run-pricing.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
-import type { ProxyProtocol } from "../coding-proxy/types.js";
+import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
 import type { ContinuationOutcome, PreparedWorkspace, VcsPrepareInput, VcsProvider } from "../vcs/types.js";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
@@ -135,6 +135,9 @@ export interface ContainerRunSnapshot {
   profileRepository: string | null;
   /** How the profile's repository was authorized (CodingAgentProfile.repositoryAuthorizedVia). */
   repositoryAuthorizedVia: string | null;
+  /** The run's catalog entry recorded at dispatch (Run.pricingSnapshot); null on runs from before the catalog. */
+  pricingVersion: string | null;
+  pricingSnapshot: unknown;
 }
 
 /**
@@ -238,6 +241,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
       repositoryAuthorizedVia: row.agent.codingProfile?.repositoryAuthorizedVia ?? null,
+      pricingVersion: row.pricingVersion,
+      pricingSnapshot: row.pricingSnapshot,
     };
   }
 
@@ -412,6 +417,8 @@ export interface CodingSessionController {
     allowedModels: string[];
     deadlineAt: Date;
     budgetUsd: number;
+    /** The run's catalog entry; the proxy prices and shapes the run's requests from it. */
+    terms?: ProxyModelTerms;
   }): Promise<{ id: string; capability: string }>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether the proxy refused a request of this session for budget. */
@@ -678,6 +685,7 @@ export class ContainerExecutor implements Executor {
           allowedModels: [run.model],
           deadlineAt,
           budgetUsd: run.budgetUsd,
+          terms: this.modelTerms(run),
         });
         spendEnabled = true;
         sessionId = session.id;
@@ -834,13 +842,25 @@ export class ContainerExecutor implements Executor {
     };
   }
 
+  /** The run's stored model terms; a run from before the catalog resolves them from the current catalog. */
+  private modelTerms(run: ContainerRunSnapshot): ProxyModelTerms {
+    if (run.provider !== "codex" && run.provider !== "claude-code") throw new Error("coding_provider_unsupported");
+    const stored = parseStoredEntry(run.pricingSnapshot);
+    if (stored && run.pricingVersion) {
+      if (stored.modelId !== run.model || codingProviderForModelProvider(stored.provider) !== run.provider) {
+        throw new Error("coding_run_pricing_mismatch");
+      }
+      return { version: run.pricingVersion, entry: stored };
+    }
+    const entry = resolveCodingEntry(run.provider, run.model);
+    return { version: entry.priceVersion, entry: parseStoredEntry(entry)! };
+  }
+
   private preflight(run: ContainerRunSnapshot): VcsPrepareInput {
     try {
       if (run.status !== "pending" && run.status !== "running") throw new Error("coding_run_status_invalid");
       if (run.agentKind !== "coding" || !run.ownerId) throw new Error("coding_run_ownership_invalid");
-      if (run.provider === "codex") getModelPricing(run.model);
-      else if (run.provider === "claude-code") getAnthropicPricing(run.model);
-      else throw new Error("coding_provider_unsupported");
+      this.modelTerms(run);
       if (!Number.isFinite(run.budgetUsd) || run.budgetUsd <= 0 || run.costUsd > run.budgetUsd) {
         throw new Error("coding_run_budget_invalid");
       }

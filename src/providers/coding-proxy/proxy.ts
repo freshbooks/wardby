@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { getModelPricing, PRICING_VERSION, type ModelPricing } from "../llm/pricing.js";
-import { getAnthropicPricing } from "../llm/pricing-anthropic.js";
+import type { ModelPricing } from "../llm/pricing-core.js";
+import { shippedCatalog } from "../llm/catalog.js";
+import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
+import type { ThinkingMode } from "../llm/catalog-types.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import {
   AnthropicSseUsageTracker,
@@ -18,6 +20,7 @@ import type {
   CredentialResolver,
   ProxyAuditSink,
   ProxyLedger,
+  ProxyModelTerms,
   ProxyProtocol,
   ProxyRequest,
   ProxySession,
@@ -83,6 +86,8 @@ export interface CreateCodingProxySession {
   allowedModels: string[];
   deadlineAt: Date;
   budgetUsd: number;
+  /** The run's catalog entry recorded at dispatch; the session then prices and shapes requests from it. */
+  terms?: ProxyModelTerms;
 }
 
 export interface CreatedCodingProxySession {
@@ -673,12 +678,12 @@ function parseAnthropicBeta(value: string | undefined): { header?: string; value
 }
 
 /**
- * Models that take manual extended thinking (`{type: "enabled", budget_tokens}`) instead of adaptive
- * thinking, and no effort level: Claude Haiku 4.5, which returns a 400 for adaptive thinking. The
- * pinned Claude Agent SDK sends it `budget_tokens` = max_tokens - 1 and no `output_config`
+ * Models whose catalog entry says `thinkingMode: "manual"` take manual extended thinking
+ * (`{type: "enabled", budget_tokens}`) instead of adaptive thinking, and no effort level (Claude
+ * Haiku 4.5 in the shipped catalog, which returns a 400 for adaptive thinking). The pinned Claude
+ * Agent SDK sends it `budget_tokens` = max_tokens - 1 and no `output_config`
  * (fixtures/anthropic-sdk-request-haiku-4-5.json). Every other model stays adaptive-only.
  */
-const MANUAL_THINKING_MODELS: ReadonlySet<string> = new Set(["claude-haiku-4-5"]);
 /** Anthropic's minimum manual thinking budget. */
 const MIN_THINKING_BUDGET_TOKENS = 1024;
 
@@ -686,7 +691,11 @@ function requireAnthropicBeta(values: Set<string>, beta: (typeof CLAUDE_CODE_ANT
   if (!values.has(beta)) throw new CodingProxyError(400, "anthropic_beta_required");
 }
 
-function parseAnthropicRequest(rawBody: string, betaHeader: string | undefined): ParsedRequest {
+function parseAnthropicRequest(
+  rawBody: string,
+  betaHeader: string | undefined,
+  thinkingMode: ThinkingMode,
+): ParsedRequest {
   const beta = parseAnthropicBeta(betaHeader);
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
   let value: unknown;
@@ -755,7 +764,7 @@ function parseAnthropicRequest(rawBody: string, betaHeader: string | undefined):
     onlyKeys(metadata, ["user_id"]);
     if (typeof metadata.user_id !== "string") throw new CodingProxyError(400, "invalid_anthropic_request");
   }
-  const manualThinking = MANUAL_THINKING_MODELS.has(body.model);
+  const manualThinking = thinkingMode === "manual";
   if (body.thinking !== undefined) {
     requireAnthropicBeta(beta.values, "interleaved-thinking-2025-05-14");
     requireAnthropicBeta(beta.values, "thinking-token-count-2026-05-13");
@@ -812,13 +821,18 @@ function parseAnthropicRequest(rawBody: string, betaHeader: string | undefined):
   };
 }
 
-function parseRequest(protocol: ProxyProtocol, rawBody: string, anthropicBeta: string | undefined): ParsedRequest {
+function parseRequest(
+  protocol: ProxyProtocol,
+  rawBody: string,
+  anthropicBeta: string | undefined,
+  thinkingMode: ThinkingMode,
+): ParsedRequest {
   if (protocol !== "anthropic-messages" && anthropicBeta !== undefined) {
     throw new CodingProxyError(400, "invalid_anthropic_beta");
   }
   try {
     return protocol === "anthropic-messages"
-      ? parseAnthropicRequest(rawBody, anthropicBeta)
+      ? parseAnthropicRequest(rawBody, anthropicBeta, thinkingMode)
       : parseOpenAiRequest(rawBody);
   } catch (error) {
     // JSON nested deeply enough (inside a free-form tool schema, say) overflows
@@ -885,10 +899,17 @@ export class CodingProxy {
       });
     this.now = options.now ?? (() => new Date());
     this.audit = options.audit ?? (() => undefined);
+    // The fallback for sessions created before the catalog (no stored terms): the
+    // proxy has no catalog store, only the shipped catalog compiled into it.
     this.getPricing =
       options.pricing ??
-      ((model, protocol) => (protocol === "anthropic-messages" ? getAnthropicPricing(model) : getModelPricing(model)));
-    this.priceVersion = options.pricingVersion ?? PRICING_VERSION;
+      ((model, protocol) => {
+        const entry = shippedCatalog().require(model);
+        const expected = protocol === "anthropic-messages" ? "anthropic" : "openai";
+        if (entry.provider !== expected) throw new Error("unknown_model");
+        return entry;
+      });
+    this.priceVersion = options.pricingVersion ?? `shipped:${SHIPPED_CATALOG_VERSION}`;
   }
 
   async createSession(input: CreateCodingProxySession): Promise<CreatedCodingProxySession> {
@@ -899,7 +920,14 @@ export class CodingProxy {
     if (models.length < 1 || models.length > 8 || models.some((model) => !model || model.length > 100)) {
       throw new Error("invalid_proxy_model_allowlist");
     }
-    for (const model of models) this.getPricing(model, input.protocol);
+    if (input.terms) {
+      const expected = input.protocol === "anthropic-messages" ? "anthropic" : "openai";
+      if (models.length !== 1 || input.terms.entry.modelId !== models[0] || input.terms.entry.provider !== expected) {
+        throw new Error("invalid_proxy_model_terms");
+      }
+    } else {
+      for (const model of models) this.getPricing(model, input.protocol);
+    }
     if (!Number.isFinite(input.budgetUsd) || input.budgetUsd <= 0) throw new Error("invalid_proxy_budget");
     if (input.deadlineAt.getTime() <= this.now().getTime()) throw new Error("invalid_proxy_deadline");
     if (!input.credentialRef || input.credentialRef.length > 200) throw new Error("invalid_proxy_credential_reference");
@@ -916,6 +944,7 @@ export class CodingProxy {
       deadlineAt: input.deadlineAt,
       budgetUsd: input.budgetUsd,
       registryTokenHash,
+      terms: input.terms,
     });
     this.audit({ type: "session.created", runId: input.runId });
     return {
@@ -950,9 +979,11 @@ export class CodingProxy {
       this.audit({ type: "request.rejected", runId: session.runId, reason: "protocol_mismatch" });
       throw new CodingProxyError(403, "protocol_mismatch");
     }
+    const thinkingMode =
+      session.terms?.entry.thinkingMode ?? shippedCatalog().get(session.allowedModels[0])?.thinkingMode ?? "adaptive";
     let parsed: ParsedRequest;
     try {
-      parsed = parseRequest(input.protocol, input.rawBody, input.anthropicBeta);
+      parsed = parseRequest(input.protocol, input.rawBody, input.anthropicBeta, thinkingMode);
     } catch (error) {
       // The session is already authenticated and no credential has been
       // resolved; record the refusal against the run so a smuggling attempt
@@ -966,15 +997,15 @@ export class CodingProxy {
       this.audit({ type: "request.rejected", runId: session.runId, model: parsed.model, reason: "model_not_allowed" });
       throw new CodingProxyError(403, "model_not_allowed");
     }
-    let pricing: ModelPricing;
+    let terms: { pricing: ModelPricing; version: string };
     try {
-      pricing = this.getPricing(parsed.model, session.protocol);
+      terms = this.termsFor(session, parsed.model);
     } catch {
       this.audit({ type: "request.rejected", runId: session.runId, model: parsed.model, reason: "unknown_model" });
       throw new CodingProxyError(400, "unknown_model");
     }
     const requestKey = safeRequestKey(input.requestKey, parsed.fingerprint);
-    const snapshot = pricingSnapshot(this.priceVersion, pricing);
+    const snapshot = pricingSnapshot(terms.version, terms.pricing);
     const reservationUsd = estimateReservationUsd(Buffer.byteLength(parsed.encoded), parsed.maxOutputTokens, snapshot);
     const reservation = await this.ledger.reserve({
       id: randomUUID(),
@@ -1107,6 +1138,25 @@ export class CodingProxy {
     } finally {
       cleanupActive();
     }
+  }
+
+  /** A session's model terms: its stored catalog entry, or the fallback for sessions from before the catalog. */
+  private termsFor(
+    session: ProxySession,
+    model: string,
+  ): { pricing: ModelPricing; version: string; thinkingMode: ThinkingMode } {
+    if (session.terms) {
+      return {
+        pricing: session.terms.entry,
+        version: session.terms.version,
+        thinkingMode: session.terms.entry.thinkingMode,
+      };
+    }
+    return {
+      pricing: this.getPricing(model, session.protocol),
+      version: this.priceVersion,
+      thinkingMode: shippedCatalog().get(model)?.thinkingMode ?? "adaptive",
+    };
   }
 
   private async authenticate(bearer: string): Promise<ProxySession> {

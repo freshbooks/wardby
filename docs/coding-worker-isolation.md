@@ -413,6 +413,11 @@ Operating the queue across replicas:
   (`--depth 1`); the worker never receives Git history and finalization needs
   only the base commit.
 
+Every wardby process also polls the model catalog on
+`WARDBY_MODEL_CATALOG_REFRESH_SECONDS` (default `45`), which decides whether
+a coding run's model is still available and how it is priced at dispatch; see
+[Models and pricing](models.md).
+
 The GitHub adapter requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`; the
 App installation is checked while preparing the workspace, before the
 billable proxy session is created. Upstream keys remain behind

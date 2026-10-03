@@ -67,29 +67,33 @@ describe("supported scopes", () => {
       for (const scope of scopes) expect(SCOPES_SUPPORTED, `${name} needs ${scope}`).toContain(scope);
   });
 
-  it("treats exactly admin:view, agents:admin, packages:approve and services:manage as privileged", () => {
+  it("treats exactly admin:view, agents:admin, packages:approve, services:manage and models:admin as privileged", () => {
     expect([...PRIVILEGED_SCOPES].sort()).toEqual([
       "admin:view",
       "agents:admin",
+      "models:admin",
       "packages:approve",
       "services:manage",
     ]);
     for (const scope of PRIVILEGED_SCOPES) expect(SCOPES_SUPPORTED).toContain(scope);
   });
 
-  it("built-in roles: admin grants every permission, package-approver and service-manager one each", () => {
-    expect([...ROLE_NAMES].sort()).toEqual(["admin", "package-approver", "service-manager"]);
+  it("built-in roles: admin grants every permission, package-approver, service-manager and model-manager one each", () => {
+    expect([...ROLE_NAMES].sort()).toEqual(["admin", "model-manager", "package-approver", "service-manager"]);
     expect([...ROLE_PERMISSIONS.admin].sort()).toEqual([
       "admin:view",
       "agents:admin",
+      "models:admin",
       "packages:approve",
       "services:manage",
     ]);
     expect(ROLE_PERMISSIONS["package-approver"]).toEqual(["packages:approve"]);
     expect(ROLE_PERMISSIONS["service-manager"]).toEqual(["services:manage"]);
+    expect(ROLE_PERMISSIONS["model-manager"]).toEqual(["models:admin"]);
     for (const perms of Object.values(ROLE_PERMISSIONS)) for (const p of perms) expect(PRIVILEGED_SCOPES).toContain(p);
     expect([...permissionsOf(["bogus", "package-approver"])]).toEqual(["packages:approve"]);
     expect([...permissionsOf(["service-manager"])]).toEqual(["services:manage"]);
+    expect([...permissionsOf(["model-manager"])]).toEqual(["models:admin"]);
     expect(permissionsOf(null).size).toBe(0);
   });
 });
@@ -181,6 +185,14 @@ describe("privileged operations need the scope AND a role granting it", () => {
     expect(() => requireScope(ctx([...base.scopes], ["admin"]), URI, "admin:view")).not.toThrow();
     expect(() => requireScope(ctx([...base.scopes], []), URI, "admin:view")).toThrow(/Forbidden/);
     expect(() => requireScope(ctx([...base.scopes], ["service-manager"]), URI, "admin:view")).toThrow(/Forbidden/);
+  });
+
+  it("grants models:admin to admin and model-manager only, and treats it as privileged", () => {
+    expect(PRIVILEGED_SCOPES).toContain("models:admin");
+    expect(SCOPES_SUPPORTED).toContain("models:admin");
+    expect(permissionsOf(["admin"]).has("models:admin")).toBe(true);
+    expect(permissionsOf(["model-manager"])).toEqual(new Set(["models:admin"]));
+    expect(permissionsOf(["service-manager"]).has("models:admin")).toBe(false);
   });
 });
 

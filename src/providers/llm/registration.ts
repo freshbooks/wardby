@@ -10,11 +10,11 @@
  * OpenAI, direct Anthropic, and Bedrock-Claude can all be active in one
  * deployment at once. An agent's `model` field (routed by RoutingLlmProvider)
  * picks which one handles its calls; there is no exclusive global mode.
+ * A registration names only its provider — models come from the catalog.
  */
 import { OpenAiLlmProvider, openaiCredentialsPresent } from "./openai.js";
-import { supportedModels as openaiSupportedModels } from "./pricing.js";
-import { AnthropicLlmProvider, anthropicCredentialsPresent, anthropicSupportedModels } from "./anthropic.js";
-import { BedrockClaudeLlmProvider, bedrockCredentialsPresent, bedrockClaudeSupportedModels } from "./bedrock.js";
+import { AnthropicLlmProvider, anthropicCredentialsPresent } from "./anthropic.js";
+import { BedrockClaudeLlmProvider, bedrockCredentialsPresent } from "./bedrock.js";
 import type { LlmRegistration } from "./routing.js";
 
 export type LlmRegistrationResult =
@@ -23,22 +23,17 @@ export type LlmRegistrationResult =
 export function resolveLlmRegistrations(env: NodeJS.ProcessEnv = process.env): LlmRegistrationResult {
   const registrations: LlmRegistration[] = [];
   if (openaiCredentialsPresent(env)) {
-    registrations.push({ provider: new OpenAiLlmProvider(env.OPENAI_API_KEY), models: openaiSupportedModels() });
+    registrations.push({ provider: "openai", adapter: new OpenAiLlmProvider(env.OPENAI_API_KEY) });
   }
   if (anthropicCredentialsPresent(env)) {
-    registrations.push({
-      provider: new AnthropicLlmProvider(env.ANTHROPIC_API_KEY),
-      models: anthropicSupportedModels(),
-    });
+    registrations.push({ provider: "anthropic", adapter: new AnthropicLlmProvider(env.ANTHROPIC_API_KEY) });
   }
   if (bedrockCredentialsPresent(env)) {
     registrations.push({
-      provider: new BedrockClaudeLlmProvider(env.BEDROCK_REGION ?? env.AWS_REGION),
-      models: bedrockClaudeSupportedModels(),
+      provider: "bedrock-claude",
+      adapter: new BedrockClaudeLlmProvider(env.BEDROCK_REGION ?? env.AWS_REGION),
     });
   }
-  if (registrations.length === 0) {
-    return { kind: "no-credentials" };
-  }
+  if (registrations.length === 0) return { kind: "no-credentials" };
   return { kind: "registrations", registrations };
 }

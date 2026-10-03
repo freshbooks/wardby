@@ -20,14 +20,17 @@ to the exact same public MCP URL. Tokens need a stable subject, expiry, issuer,
 audience, and the granted Wardby scopes in `scope` or `scp`.
 
 Scopes authorize normal operations such as managing agents, runs, tools,
-datastores, secrets, webhooks, budgets, packages, services, and memory. Four
-sensitive permissions have an additional role requirement:
+datastores, secrets, webhooks, budgets, packages, services, memory, and
+models. Five sensitive permissions have an additional role requirement:
 
 - `agents:admin` requires the Wardby `admin` role.
 - `packages:approve` requires the `admin` or `package-approver` role.
 - `services:manage` requires the `admin` or `service-manager` role.
 - `admin:view` requires the `admin` role. It opens the read-only, deployment-wide
   admin viewer API; see [Watch live runs with the admin viewer API](admin-viewer.md).
+- `models:admin` requires the `admin` or `model-manager` role. It adds,
+  overrides, disables, and resets model catalog entries; see
+  [Models and pricing](models.md).
 
 Map roles only from an IdP claim that users cannot self-assign. Removing a
 role affects the next token the caller receives.

@@ -8,6 +8,9 @@
   configures an existing OAuth/OIDC provider to protect remote MCP access.
 - [Runtime architecture](architecture-runtime.md) explains the control-plane,
   provider, persistence, and execution boundaries.
+- [Models and pricing](models.md) covers the model catalog: the shipped models,
+  adding or overriding one with `set_model`, disabling and resetting, and how
+  runs are billed.
 - [Coding-agent setup](coding-agent-setup.md) configures the local trusted proxy
   and isolated Codex or Claude Code workers.
 - [Coding-worker isolation](coding-worker-isolation.md) documents the threat

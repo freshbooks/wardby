@@ -7,8 +7,11 @@
 import OpenAI from "openai";
 import { encode as encodeCl100kBase } from "gpt-tokenizer/encoding/cl100k_base";
 import { encode as encodeO200kBase } from "gpt-tokenizer/encoding/o200k_base";
-import type { LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef, LlmUsage } from "./types.js";
-import { getModelPricing, priceUsd as priceUsdFromTable } from "./pricing.js";
+import type { LlmMessage, LlmRequest, LlmStreamEvent, LlmToolDef, LlmUsage } from "./types.js";
+import { computeCost } from "./pricing-core.js";
+import { currentLookup, pinnedLookup, type CatalogLookup } from "./catalog-lookup.js";
+import type { CatalogEntry } from "./catalog-types.js";
+import type { CatalogLlmAdapter } from "./routing.js";
 
 /** Whether the OpenAI adapter has credentials to run (used by the router's enable-by-credential wiring). */
 export function openaiCredentialsPresent(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -27,10 +30,10 @@ const TOKENS_PRIMING_REPLY = 3;
 // gpt-tokenizer's package default is cl100k_base, but every gpt-4o-and-later
 // model (all of Phase 1's roster) actually uses o200k_base — using the
 // wrong table skews the pre-flight token count, which is the budget
-// guardrail's input. The encoding lives on the pricing table (pricing.ts)
-// so a model can't be run without also declaring which tokenizer counts it.
-function encodeForModel(model: string, text: string): number[] {
-  const { encoding } = getModelPricing(model);
+// guardrail's input. The encoding lives on the catalog entry, so a model
+// can't be run without also declaring which tokenizer counts it.
+function encodeForModel(model: string, text: string, lookup: CatalogLookup): number[] {
+  const { encoding } = lookup(model);
   return encoding === "o200k_base" ? encodeO200kBase(text) : encodeCl100kBase(text);
 }
 
@@ -51,27 +54,40 @@ function toOpenAiTools(tools: LlmToolDef[]) {
 // is still an *approximation* (not OpenAI's undocumented exact tool-schema
 // tokenization), not a byte-for-byte match — calibration logging
 // (budget.ts's checkTokenCalibration) is what surfaces any remaining drift.
-export function estimateTokens(model: string, messages: LlmMessage[], tools?: LlmToolDef[]): number {
+export function estimateTokens(
+  model: string,
+  messages: LlmMessage[],
+  tools?: LlmToolDef[],
+  lookup: CatalogLookup = currentLookup,
+): number {
   let total = TOKENS_PRIMING_REPLY;
   for (const message of messages) {
     total += TOKENS_PER_MESSAGE;
-    total += encodeForModel(model, message.content).length;
-    total += encodeForModel(model, message.role).length;
+    total += encodeForModel(model, message.content, lookup).length;
+    total += encodeForModel(model, message.role, lookup).length;
     if (message.name) {
-      total += encodeForModel(model, message.name).length + TOKENS_PER_NAME;
+      total += encodeForModel(model, message.name, lookup).length + TOKENS_PER_NAME;
     }
   }
   if (tools && tools.length > 0) {
-    total += encodeForModel(model, JSON.stringify(toOpenAiTools(tools))).length;
+    total += encodeForModel(model, JSON.stringify(toOpenAiTools(tools)), lookup).length;
   }
   return total;
 }
 
-export class OpenAiLlmProvider implements LlmProvider {
+export class OpenAiLlmProvider implements CatalogLlmAdapter {
   private readonly client: OpenAI;
 
-  /** `client` is an injection point for tests — a real adapter never passes it. */
-  constructor(apiKey: string = process.env.OPENAI_API_KEY ?? "", client?: OpenAI) {
+  /**
+   * `client` is an injection point for tests and withEntry — a real adapter
+   * never passes it. `lookup` is a parameter property so it is set before the
+   * early return below.
+   */
+  constructor(
+    apiKey: string = process.env.OPENAI_API_KEY ?? "",
+    client?: OpenAI,
+    private readonly lookup: CatalogLookup = currentLookup,
+  ) {
     if (client) {
       this.client = client;
       return;
@@ -80,6 +96,10 @@ export class OpenAiLlmProvider implements LlmProvider {
       throw new Error("OPENAI_API_KEY is not set — required by the OpenAI LlmProvider adapter.");
     }
     this.client = new OpenAI({ apiKey });
+  }
+
+  withEntry(entry: CatalogEntry): OpenAiLlmProvider {
+    return new OpenAiLlmProvider("", this.client, pinnedLookup(entry));
   }
 
   async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
@@ -161,7 +181,7 @@ export class OpenAiLlmProvider implements LlmProvider {
   }
 
   async countTokens(model: string, messages: LlmMessage[], tools?: LlmToolDef[]): Promise<number> {
-    return estimateTokens(model, messages, tools);
+    return estimateTokens(model, messages, tools, this.lookup);
   }
 
   priceUsd(
@@ -173,6 +193,6 @@ export class OpenAiLlmProvider implements LlmProvider {
       cacheWriteTokens?: number;
     },
   ): number {
-    return priceUsdFromTable(model, usage);
+    return computeCost(this.lookup(model), usage);
   }
 }

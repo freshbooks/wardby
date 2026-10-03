@@ -68,6 +68,9 @@ import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
 import { fileSelfDefect } from "./self-defects.js";
 import { recordNativeModelUsage } from "./model-usage.js";
+import { pinNativeRunPricing } from "./run-pricing.js";
+import { RoutingLlmProvider } from "../providers/llm/routing.js";
+import { ModelUnavailableError } from "../providers/llm/catalog-types.js";
 import { trackRun } from "./in-flight-runs.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 
@@ -435,11 +438,18 @@ async function executeTrackedRun(
   // engine's control flow depends on budgetUsd and maxTurns, so they must
   // be pinned to the values seen on first execution or the replay's step
   // order diverges from the record.
-  const loaded = await step("load", async () => {
+  const loadedOrUnavailable = await step("load", async () => {
     const agent = await db.agent.findUnique({ where: { id: existingRun.agentId } });
     if (!agent) {
       throw new Error(`Run "${runId}" references missing agent "${existingRun.agentId}".`);
     }
+    // The run's catalog entry, recorded on first execution and read back on
+    // every replay or resume, so its prices never move under it (run-pricing.ts).
+    // A model that is missing, disabled, or has no configured provider fails
+    // the run here, before any spend. Coding agents never run in this engine
+    // (failed below) and are priced by the coding proxy, so they pin nothing.
+    const pricing =
+      agent.kind === "coding" ? undefined : await pinNativeRunPricing(db, existingRun, agent.model, providers.llm);
     const attached = await db.agentTool.findMany({
       where: { agentId: agent.id },
       include: { tool: true },
@@ -513,6 +523,7 @@ async function executeTrackedRun(
     return {
       agentId: agent.id,
       kind: agent.kind,
+      pricing,
       memoryEnabled: agent.memoryEnabled,
       subAgentEdges,
       repositoryLinks,
@@ -573,17 +584,34 @@ async function executeTrackedRun(
         }),
       ),
     };
+  }).catch((err: unknown) => {
+    // Returned, not thrown, so the run is marked failed below rather than left pending for a retry
+    // that would fail the same way. Matched by message too: a DBOS replay may hand back a
+    // deserialized error that is no longer a ModelUnavailableError instance.
+    if (
+      err instanceof ModelUnavailableError ||
+      (err instanceof Error && err.message.startsWith("model_unavailable:"))
+    ) {
+      return { unavailable: err.message } as const;
+    }
+    throw err;
   });
+  // Fails a run that ends before its engine starts, closing what its trigger opened (the review
+  // check, the host and issue status comments) exactly as the normal and catch paths below do.
+  // Deliberately no self-defect: both callers are configuration states, not this run's defect (an
+  // admin disabled or removed the model, or this deployment has no coding executor), and filing
+  // would open one defect per affected agent rather than describe a failure of that agent.
+  const finishEarly = async (error: string): Promise<Run> => {
+    const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
+    await closeOpenHostCheck(db, finished, reviewHosts);
+    await completeHostStatus(db, finished, reviewHosts);
+    await completeIssueStatus(db, finished, issueTrackers);
+    return finished;
+  };
+  if ("unavailable" in loadedOrUnavailable) return finishEarly(loadedOrUnavailable.unavailable);
+  const loaded = loadedOrUnavailable;
 
-  if (loaded.kind === "coding") {
-    // Deliberately no self-defect here: a missing coding executor is a deployment config error, which would
-    // file one defect per opted-in coding agent rather than describe that agent's failure.
-    return finishRun(db, runId, {
-      status: "failed",
-      error: CODING_EXECUTOR_NOT_CONFIGURED,
-      finishedAt: new Date(),
-    });
-  }
+  if (loaded.kind === "coding") return finishEarly(CODING_EXECUTOR_NOT_CONFIGURED);
 
   // Conditional on DRIVABLE rather than on `pending`: an adopted attempt
   // legitimately finds the row already `running`, but a terminal row must
@@ -952,7 +980,12 @@ async function executeTrackedRun(
     const engineResult = await providers.engine.run({
       agent: loaded.agent,
       tools: loaded.tools,
-      providers: { llm: providers.llm },
+      providers: {
+        llm:
+          loaded.pricing && providers.llm instanceof RoutingLlmProvider
+            ? providers.llm.forRun(loaded.pricing.entry)
+            : providers.llm,
+      },
       runSandboxTool,
       onText,
       onProgress,

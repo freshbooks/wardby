@@ -181,10 +181,11 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         if (!dispatched.task) throw new Error("Run task was not persisted.");
         return textResult(createTaskResult(dispatched.task, DEFAULT_TASK_TTL_MS));
       }
-      // A run refused at dispatch (its budget group or run tree is spent) is
-      // already terminal: say so now rather than only through get_run.
-      if (dispatched.run.status === "refused") {
-        return textResult({ runId: dispatched.run.id, status: "refused", error: dispatched.run.error });
+      // A run refused at dispatch (its budget group or run tree is spent), or
+      // failed there (a coding agent's model is unavailable), is already
+      // terminal: say so now rather than only through get_run.
+      if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
+        return textResult({ runId: dispatched.run.id, status: dispatched.run.status, error: dispatched.run.error });
       }
       return textResult({ runId: dispatched.run.id });
     },

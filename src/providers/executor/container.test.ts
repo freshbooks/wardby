@@ -8,6 +8,9 @@ import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
+import { shippedCatalog } from "../llm/catalog.js";
+import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
+import { entryOf } from "../llm/catalog-types.js";
 import { ReviewHostError, type HostPermission } from "../review-host/types.js";
 import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../jobs/types.js";
 import type {
@@ -91,6 +94,8 @@ function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSn
     workspaceDiskMb: null,
     profileRepository: "openai/example",
     repositoryAuthorizedVia: "grandfathered",
+    pricingVersion: null,
+    pricingSnapshot: null,
     ...overrides,
   };
 }
@@ -659,6 +664,49 @@ describe("ContainerExecutor", () => {
 
   it("accepts a content-addressed local Docker image ID", async () => {
     await expect(harness({}, `sha256:${"a".repeat(64)}`)).resolves.toBeDefined();
+  });
+
+  describe("model terms handed to the proxy session", () => {
+    const luna = entryOf(shippedCatalog().require("gpt-5.6-luna"));
+
+    it("passes the run's recorded catalog entry and version", async () => {
+      const created = await harness({
+        pricingVersion: "2026-10-04T00:00:00.000Z",
+        pricingSnapshot: { ...luna, outputPerMTok: 99 },
+      });
+      await created.executor.start("run-1");
+      expect(created.sessions.lastInput?.terms).toEqual({
+        version: "2026-10-04T00:00:00.000Z",
+        entry: { ...luna, outputPerMTok: 99 },
+      });
+    });
+
+    const refusedForPricing = (created: Awaited<ReturnType<typeof harness>>) => {
+      expect(created.store.run.status).toBe("refused");
+      expect(created.vcs.prepared).toBe(0);
+      expect(created.sessions.creates).toBe(0);
+      expect(created.jobs.launches).toBe(0);
+      expect(logged.some((entry) => String(entry.payload.reason).includes("coding_run_pricing_mismatch"))).toBe(true);
+    };
+
+    it("refuses the run before any workspace or session when the recorded entry is for another model", async () => {
+      const created = await harness({ pricingVersion: "v", pricingSnapshot: { ...luna, modelId: "gpt-other" } });
+      await created.executor.start("run-1");
+      refusedForPricing(created);
+    });
+
+    it("refuses the run when the recorded entry belongs to the other coding provider's models", async () => {
+      const sonnet = entryOf(shippedCatalog().require("claude-sonnet-5"));
+      const created = await harness({ model: "claude-sonnet-5", pricingVersion: "v", pricingSnapshot: sonnet });
+      await created.executor.start("run-1");
+      refusedForPricing(created);
+    });
+
+    it("passes the current catalog's entry for a run from before the catalog", async () => {
+      const created = await harness({ pricingVersion: null, pricingSnapshot: null });
+      await created.executor.start("run-1");
+      expect(created.sessions.lastInput?.terms).toEqual({ version: `shipped:${SHIPPED_CATALOG_VERSION}`, entry: luna });
+    });
   });
 
   it("launches once, cancels spend before materialization, and persists a typed PR result", async () => {

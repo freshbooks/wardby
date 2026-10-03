@@ -279,6 +279,41 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
     expect(runs.length).toBe(0);
   });
 
+  it("a coding agent whose model is unavailable gets a terminal failed Run and its schedule advances", async () => {
+    const agent = await makeScheduledAgent();
+    await db.agent.update({
+      where: { id: agent.id },
+      data: {
+        kind: "coding",
+        model: "gpt-not-in-any-catalog",
+        codingProfile: {
+          create: {
+            repository: "openai/wardby",
+            defaultTask: "Update dependencies",
+            allowedEgress: [],
+            protectedPaths: [],
+          },
+        },
+      },
+    });
+    const start = vi.fn(async () => undefined);
+    const now = new Date("2026-09-05T12:16:00.000Z");
+
+    const runId = await claimDueRun(db, { start, async stop() {} }, agent.id, now);
+
+    expect(runId).not.toBeNull();
+    const run = await db.run.findUnique({ where: { id: runId! }, include: { codingRun: true } });
+    expect(run?.status).toBe("failed");
+    expect(run?.error).toMatch(/^model_unavailable: .*reason: not_in_catalog/);
+    expect(run?.finishedAt).toEqual(now);
+    expect(run?.codingRun).toBeNull();
+    expect(start).not.toHaveBeenCalled();
+    // The claim committed with the run, so the next tick does not fire this window again.
+    const updated = await db.agent.findUnique({ where: { id: agent.id } });
+    expect(updated?.lastScheduledAt).toEqual(new Date("2026-09-05T12:15:00.000Z"));
+    expect(await claimDueRun(db, { start, async stop() {} }, agent.id, now)).toBeNull();
+  });
+
   it("claims coding agents and snapshots their default task for routing", async () => {
     const agent = await makeScheduledAgent();
     await db.agent.update({

@@ -26,6 +26,7 @@ import { prisma } from "../core/db.js";
 import { waitForInFlightRuns } from "../core/in-flight-runs.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
+import { startModelCatalog } from "../providers/llm/catalog-store.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
 import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
@@ -52,7 +53,7 @@ import { createViewerEventBus } from "../viewer/event-bus.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerServiceTools } from "./tools/services.js";
 import { registerBudgetGroupTools } from "./tools/budget-groups.js";
-import { registerModelTools } from "./tools/models.js";
+import { registerModelCatalogTools } from "./tools/model-catalog.js";
 import { registerHelpTools } from "./tools/help.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
@@ -119,12 +120,17 @@ export function localOperatorContext(
 /** Registers the full Phase 4 tool surface — every module, in one place. */
 export function registerAllTools(
   mcp: WardbyMcpServer,
-  opts: { secretElicitationUrl: SecretElicitationUrlBuilder; secretElicitationProtocol: boolean },
+  opts: {
+    secretElicitationUrl: SecretElicitationUrlBuilder;
+    secretElicitationProtocol: boolean;
+    /** Rebuilds the process's installed model CatalogStore after set_model/disable_model/reset_model. */
+    refreshModelCatalog?: () => Promise<void>;
+  },
 ): void {
   registerAgentTools(mcp);
   registerServiceTools(mcp);
   registerBudgetGroupTools(mcp);
-  registerModelTools(mcp);
+  registerModelCatalogTools(mcp, { refresh: opts.refreshModelCatalog });
   registerHelpTools(mcp);
   registerTriggerTool(mcp);
   registerToolAuthoringTools(mcp);
@@ -241,6 +247,14 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const mcpConfig = loadMcpConfig();
   // Parsed up front so a malformed value fails at startup, not at shutdown.
   const drainSeconds = loadShutdownDrainSeconds();
+  // Loads the model catalog before anything else: running on the shipped
+  // catalog alone (the fallback currentModelCatalog() uses before a store
+  // is installed) would quietly re-enable models an admin turned off.
+  // `modelCatalog` is handed to registerAllTools as `refreshModelCatalog`,
+  // which the model catalog tools (set_model, disable_model, reset_model)
+  // call via `modelCatalog.refreshNow()` after each write — there is no
+  // separate refresh tool.
+  const modelCatalog = await startModelCatalog(prisma);
   const providers = options.providers ?? buildMcpProviders().providers;
   await providers.executor.launch?.();
   if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
@@ -255,6 +269,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     registerAllTools(mcp, {
       secretElicitationUrl: (token) => secretElicitationHost.urlFor(token),
       secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
+      refreshModelCatalog: () => modelCatalog.refreshNow(),
     });
 
     // stdio never carries per-call AuthInfo — one fixed, fully-trusted
@@ -267,6 +282,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       close: async () => {
         await closeQuietly(stdio.close(), "stdio transport close");
         await closeQuietly(providers.executor.close?.(), "executor close");
+        modelCatalog.close();
       },
     };
   }
@@ -293,6 +309,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     secretElicitationUrl: (token) =>
       Promise.resolve(`${httpOrigin}${SECRET_ELICITATION_PATH}?t=${encodeURIComponent(token)}`),
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
+    refreshModelCatalog: () => modelCatalog.refreshNow(),
   });
 
   const eventConfig = loadGitHubEventConfig();
@@ -412,6 +429,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       // closes under them; a run abandoned here is lost, never resumed.
       await waitForInFlightRuns(drainSeconds * 1000);
       await closeQuietly(providers.executor.close?.(), "executor close");
+      modelCatalog.close();
     },
   };
 }

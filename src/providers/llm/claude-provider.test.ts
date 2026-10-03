@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { ClaudeLlmProvider, type ClaudeMessagesClient, type ClaudePricingModule } from "./claude-provider.js";
+import { ClaudeLlmProvider, type ClaudeMessagesClient } from "./claude-provider.js";
 import type { LlmStreamEvent } from "./types.js";
-import type { ModelPricing } from "./pricing-core.js";
+import { pinnedLookup, type CatalogLookup } from "./catalog-lookup.js";
+import type { CatalogEntry } from "./catalog-types.js";
 
 function fakeClient(events: any[], onParams?: (params: any) => void): ClaudeMessagesClient {
   return {
@@ -16,36 +17,21 @@ function fakeClient(events: any[], onParams?: (params: any) => void): ClaudeMess
   };
 }
 
-const FAKE_PRICING: ModelPricing = {
+const KNOWN_MODEL = "fake-claude-model";
+const FAKE_ENTRY: CatalogEntry = {
+  provider: "anthropic",
+  modelId: KNOWN_MODEL,
   encoding: "o200k_base",
   inputPerMTok: 2,
   outputPerMTok: 10,
   cachedInputPerMTok: 0.2,
   cacheWritePerMTok: 2.5,
+  efforts: ["low", "medium", "high"],
+  thinkingMode: "adaptive",
 };
-const KNOWN_MODEL = "fake-claude-model";
 
-function fakePricingModule(): ClaudePricingModule {
-  function getPricing(model: string): ModelPricing {
-    if (model !== KNOWN_MODEL) throw new Error(`No pricing entry for model "${model}"`);
-    return FAKE_PRICING;
-  }
-  return {
-    getPricing,
-    supportedEfforts: (model) => (model === KNOWN_MODEL ? ["low", "medium", "high"] : []),
-    priceUsd(model, usage) {
-      const p = getPricing(model);
-      const cached = usage.cachedInputTokens ?? 0;
-      const write = usage.cacheWriteTokens ?? 0;
-      const fresh = usage.inputTokens - cached;
-      return (
-        (fresh / 1e6) * p.inputPerMTok +
-        (cached / 1e6) * p.cachedInputPerMTok! +
-        (write / 1e6) * p.cacheWritePerMTok! +
-        (usage.outputTokens / 1e6) * p.outputPerMTok
-      );
-    },
-  };
+function fakeLookup(): CatalogLookup {
+  return pinnedLookup(FAKE_ENTRY);
 }
 
 async function collect(it: AsyncIterable<LlmStreamEvent>) {
@@ -69,7 +55,7 @@ describe("ClaudeLlmProvider", () => {
       { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } },
       { type: "message_stop" },
     ];
-    const p = new ClaudeLlmProvider(fakeClient(events), fakePricingModule());
+    const p = new ClaudeLlmProvider(fakeClient(events), fakeLookup());
     const out = await collect(p.stream({ model: KNOWN_MODEL, messages: [{ role: "user", content: "hi" }] }));
     const done = out.find((e) => e.type === "done") as any;
     // inputTokens = input_tokens + cache_read (mapClaudeStream's contract, see claude-messages.ts)
@@ -95,7 +81,7 @@ describe("ClaudeLlmProvider", () => {
       fakeClient(events, (params) => {
         sentParams = params;
       }),
-      fakePricingModule(),
+      fakeLookup(),
     );
     await collect(p.stream({ model: KNOWN_MODEL, messages: [{ role: "user", content: "hi" }] }));
     expect(sentParams.max_tokens).toBeGreaterThanOrEqual(16000);
@@ -118,7 +104,7 @@ describe("ClaudeLlmProvider", () => {
         fakeClient(events, (params) => {
           sent = params;
         }),
-        fakePricingModule(),
+        fakeLookup(),
       );
       await collect(p.stream(req));
       return sent;
@@ -155,7 +141,7 @@ describe("ClaudeLlmProvider", () => {
   });
 
   it("countTokens is offline, inflates over the raw estimate, counts tools, and fails closed on an unknown model", async () => {
-    const p = new ClaudeLlmProvider(fakeClient([]), fakePricingModule());
+    const p = new ClaudeLlmProvider(fakeClient([]), fakeLookup());
     const withoutTools = await p.countTokens(KNOWN_MODEL, [{ role: "user", content: "hello world" }]);
     const withTools = await p.countTokens(
       KNOWN_MODEL,
@@ -164,12 +150,20 @@ describe("ClaudeLlmProvider", () => {
     );
     expect(withoutTools).toBeGreaterThan(0);
     expect(withTools).toBeGreaterThan(withoutTools);
-    await expect(p.countTokens("unknown-model", [{ role: "user", content: "hi" }])).rejects.toThrow(/No pricing entry/);
+    await expect(p.countTokens("unknown-model", [{ role: "user", content: "hi" }])).rejects.toThrow(
+      /reason: not_in_catalog/,
+    );
   });
 
-  it("priceUsd delegates to the injected pricing module", () => {
-    const p = new ClaudeLlmProvider(fakeClient([]), fakePricingModule());
+  it("priceUsd prices from the injected catalog entry", () => {
+    const p = new ClaudeLlmProvider(fakeClient([]), fakeLookup());
     const cost = p.priceUsd(KNOWN_MODEL, { inputTokens: 1_000_000, outputTokens: 0 });
     expect(cost).toBeCloseTo(2, 9); // 1M fresh input tokens @ $2/MTok
+  });
+
+  it("withEntry prices from the pinned entry and refuses any other model", () => {
+    const p = new ClaudeLlmProvider(fakeClient([]), fakeLookup()).withEntry({ ...FAKE_ENTRY, inputPerMTok: 7 });
+    expect(p.priceUsd(KNOWN_MODEL, { inputTokens: 1_000_000, outputTokens: 0 })).toBeCloseTo(7, 9);
+    expect(() => p.priceUsd("other-model", { inputTokens: 1, outputTokens: 0 })).toThrow(/reason: not_in_catalog/);
   });
 });

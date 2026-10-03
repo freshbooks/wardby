@@ -416,6 +416,21 @@ describe("trigger_agent", () => {
       await client.close();
     });
 
+    it("a coding run failed at dispatch (model unavailable) is reported as failed, with its reason", async () => {
+      const db = fakeDb([{ ...coding(false), model: "gpt-not-in-any-catalog", budgetUsd: 2 } as FakeAgentRow]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "owner", ["runs:trigger"], false));
+      registerTriggerTool(mcp);
+      const client = await connectClient(mcp);
+
+      const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+      expect(result.isError).toBeFalsy();
+      const body = parseText(result as never) as { runId: string; status: string; error: string };
+      expect(body.status).toBe("failed");
+      expect(body.error).toMatch(/^model_unavailable: .*reason: not_in_catalog/);
+      await client.close();
+    });
+
     it("M8: the stdio operator is not the owner for task overrides either", async () => {
       const db = fakeDb([{ ...coding(false), model: "gpt-5.6-luna" } as FakeAgentRow]);
       const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

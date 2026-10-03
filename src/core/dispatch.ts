@@ -8,7 +8,8 @@ import {
   publicCodingRunResult,
   composeCodingTask,
 } from "../coding/protocol.js";
-import { assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
+import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
+import { ModelUnavailableError, entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
 import { parseAllowedServiceNames, workerServices, type ResolvedCodingService } from "../coding/services/catalog.js";
 import {
   MAX_SERVICE_DECLARATION_BYTES,
@@ -27,6 +28,7 @@ import {
 import { attributeRun, type AttributionIntent } from "./attribution.js";
 import { effectiveBudgetForRun, MIN_RESERVATION_USD, type BudgetConstraint } from "./budget-groups.js";
 import { logger } from "./logger.js";
+import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
 
 const dispatchLog = logger.child({ module: "dispatch" });
@@ -512,12 +514,27 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         // reservation. A native run computes its effective budget in
         // executeRun's load step instead.
         let codingBudget: { budgetUsd: number; refusal?: string } | undefined;
+        let codingEntry: ResolvedCatalogEntry | undefined;
+        let modelFailure: string | undefined;
         let services: ResolvedCodingService[] = [];
         let servicesRefusal: string | undefined;
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
-          assertCodingProviderModel(agent.codingProfile.provider, agent.model);
-          if (declarationRead) {
+          // An unknown coding provider is a broken profile, not a catalog state: still thrown.
+          assertCodingProvider(agent.codingProfile.provider);
+          // Recorded on the run row below: the run is billed at this entry for its whole life.
+          // A model the catalog cannot run (missing, disabled, or another provider's) fails
+          // the run here instead of throwing: the run row commits with the reason, so the
+          // caller's own writes stand (a scheduler's lastScheduledAt, a mention's status
+          // row) and the owner sees why in list_runs, rather than a rolled-back
+          // transaction that a scheduler would retry on every tick.
+          try {
+            codingEntry = resolveCodingEntry(agent.codingProfile.provider, agent.model);
+          } catch (err) {
+            if (!(err instanceof ModelUnavailableError || err instanceof CodingModelProviderMismatchError)) throw err;
+            modelFailure = err.message;
+          }
+          if (!modelFailure && declarationRead) {
             if (
               declarationRead.repository !== agent.codingProfile.repository ||
               declarationRead.profileBaseRef !== agent.codingProfile.baseRef
@@ -539,7 +556,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             if ("refusal" in resolved) servicesRefusal = resolved.refusal;
             else services = resolved.services;
           }
-          if (!servicesRefusal) codingBudget = await reserveCodingBudget(tx, agent, now, options);
+          if (!modelFailure && !servicesRefusal) codingBudget = await reserveCodingBudget(tx, agent, now, options);
         }
         const refusal = servicesRefusal ?? codingBudget?.refusal;
 
@@ -552,9 +569,20 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],
             taskOverride: options.taskOverride,
             triggeredById: options.triggeredById ?? null,
+            // Failed before it starts, like a native run whose model the
+            // runner's load step finds unavailable: zero spend, never started.
+            ...(modelFailure ? { status: "failed" as const, error: modelFailure, finishedAt: now } : {}),
             // Refused before it starts, the same terminal status (and zero
             // spend) as a native run whose budget is gone at turn 1.
             ...(refusal ? { status: "refused" as const, error: refusal, finishedAt: now } : {}),
+            ...(codingEntry
+              ? {
+                  pricingVersion: codingEntry.priceVersion,
+                  // entryOf returns plain JSON data (fresh array, no Dates); the interface's readonly
+                  // efforts array is all that keeps it from matching Prisma's Json input type.
+                  pricingSnapshot: entryOf(codingEntry) as unknown as Prisma.InputJsonValue,
+                }
+              : {}),
           },
         });
 
@@ -673,10 +701,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   }
 
   if (!persisted) return null;
-  if (persisted.run.status === "refused") {
+  if (persisted.run.status === "refused" || persisted.run.status === "failed") {
     dispatchLog.warn(
       { runId: persisted.run.id, agentId: options.agentId, reason: persisted.run.error },
-      "coding run refused at dispatch",
+      `coding run ${persisted.run.status} at dispatch`,
     );
     return persisted;
   }

@@ -4,6 +4,7 @@ import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
+import { RoutingLlmProvider, type CatalogLlmAdapter } from "../providers/llm/routing.js";
 import { NativeEngine } from "./engine-native.js";
 import { executeRun, type RunnerDb } from "./runner.js";
 
@@ -239,6 +240,22 @@ describe("repo_* built-ins in the native run loop", () => {
     expect(host.completeCheck).toHaveBeenCalledWith(
       REPO,
       expect.objectContaining({ checkId: "11", conclusion: "failure" }),
+    );
+    expect(state.runHostCheck!.completedAt).toBeInstanceOf(Date);
+  });
+
+  it("closes the run's open check when the run fails before spending because its model is unavailable", async () => {
+    const host = fakeHost();
+    const { db, state, llm } = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [text("unused")] });
+    // A catalog-routed provider: the agent's model "m" is in no catalog, so the load step fails the run.
+    const adapter: CatalogLlmAdapter = { ...llm, withEntry: () => adapter };
+    const routed = new RoutingLlmProvider([{ provider: "anthropic", adapter }]);
+    const run = await executeRun("run1", { ...providers(routed), reviewHosts: { github: host } }, db);
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/^model_unavailable:/);
+    expect(host.completeCheck).toHaveBeenCalledWith(
+      REPO,
+      expect.objectContaining({ checkId: "11", conclusion: "failure", title: "Review did not complete" }),
     );
     expect(state.runHostCheck!.completedAt).toBeInstanceOf(Date);
   });

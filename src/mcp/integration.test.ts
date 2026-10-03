@@ -558,7 +558,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 
     const agentResult = await client.callTool({
       name: "create_agent",
-      arguments: { name: "secret-user", systemPrompt: "x", model: "m", budgetUsd: 1 },
+      arguments: { name: "secret-user", systemPrompt: "x", model: "gpt-4o", budgetUsd: 1 },
     });
     const agent = parseText(agentResult as never) as { id: string };
 
@@ -595,7 +595,7 @@ describe("MCP integration (all tool modules, in-memory)", () => {
 
     const agentResult = await client.callTool({
       name: "create_agent",
-      arguments: { name: "hooked", systemPrompt: "x", model: "m", budgetUsd: 1 },
+      arguments: { name: "hooked", systemPrompt: "x", model: "gpt-4o", budgetUsd: 1 },
     });
     const agent = parseText(agentResult as never) as { id: string };
 

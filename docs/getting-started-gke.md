@@ -407,9 +407,10 @@ server answers `415`, because it checks the content type before the token.
 Create the first self-hosted login credential. It is printed once.
 `--role admin` makes this operator account an admin. Only admins can use all
 the privileged operations: `make_owner`, BYO `workerImageRef`, package
-approval, and service catalog changes. A `package-approver` can approve
-packages only, and a `service-manager` can change the service catalog only.
-Users created without `--role` have no roles. See
+approval, service catalog changes, and model catalog changes. A
+`package-approver` can approve packages only, a `service-manager` can change
+the service catalog only, and a `model-manager` can change the model catalog
+only. Users created without `--role` have no roles. See
 [roles and privileged operations](security-deployment.md#roles-and-privileged-operations).
 
 ```sh

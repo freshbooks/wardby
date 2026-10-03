@@ -10,6 +10,8 @@ import {
 } from "../coding/services/wording.js";
 import type { AttributionIntent } from "./attribution.js";
 import { dispatchRun, isSerializationConflict, type DispatchDb } from "./dispatch.js";
+import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../providers/llm/catalog-store.js";
+import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
 import type { SelfDefectSink } from "./self-defects.js";
 
 interface FakeBudget {
@@ -222,6 +224,130 @@ describe("dispatchRun", () => {
     const state = fakeDb(agent);
     await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id });
     expect(state.codingRuns[0]).not.toHaveProperty("allowedEgress");
+  });
+
+  it("records the coding run's catalog entry on the run row at dispatch", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+      },
+    };
+    const state = fakeDb(agent);
+    await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id });
+    expect(state.runs[0].pricingVersion).toBe("shipped:2026-10-03");
+    expect(state.runs[0].pricingSnapshot.modelId).toBe(agent.model);
+  });
+
+  it("fails a coding dispatch for a disabled model with a terminal run carrying model_unavailable, never started", async () => {
+    const rows = [
+      {
+        ...SHIPPED_CATALOG.find((e) => e.modelId === "gpt-5.6-luna")!,
+        enabled: false,
+        sourceUrl: "https://example.com/pricing",
+        updatedBy: "admin",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ];
+    const store = new CatalogStore({ modelCatalogEntry: { findMany: async () => rows } }, { intervalMs: 60_000 });
+    await store.refreshNow();
+    installModelCatalog(store);
+    try {
+      const agent = {
+        ...nativeAgent(),
+        kind: "coding",
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/wardby",
+          baseRef: "main",
+          defaultTask: "Fix the failing tests",
+          timeoutSec: 900,
+          protectedPaths: [],
+        },
+      };
+      const state = fakeDb(agent);
+      const start = vi.fn(async () => undefined);
+      const beforePersist = vi.fn(async () => true);
+      const afterPersist = vi.fn(async () => undefined);
+      const now = new Date("2026-10-03T12:00:00.000Z");
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { start, async stop() {} },
+        agentId: agent.id,
+        now,
+        beforePersist,
+        afterPersist,
+      });
+      // Committed, not thrown: the caller's beforePersist effects (a scheduler's
+      // lastScheduledAt) stand, and afterPersist's host rows are written.
+      expect(result?.run).toMatchObject({ status: "failed", finishedAt: now });
+      expect(result?.run.error).toMatch(/^model_unavailable: .*reason: disabled/);
+      expect(state.runs).toHaveLength(1);
+      expect(state.runs[0]).not.toHaveProperty("pricingVersion");
+      expect(state.codingRuns).toHaveLength(0);
+      expect(beforePersist).toHaveBeenCalledTimes(1);
+      expect(afterPersist).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ status: "failed" }));
+      expect(start).not.toHaveBeenCalled();
+    } finally {
+      uninstallModelCatalogForTests();
+      store.close();
+    }
+  });
+
+  it("fails a coding dispatch for a model not in the catalog the same way", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      model: "gpt-nonexistent",
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+      },
+    };
+    const state = fakeDb(agent);
+    const start = vi.fn(async () => undefined);
+    const result = await dispatchRun({ db: state.db, executor: { start, async stop() {} }, agentId: agent.id });
+    expect(result?.run.status).toBe("failed");
+    expect(result?.run.error).toMatch(/^model_unavailable: .*reason: not_in_catalog/);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("still throws for a coding profile naming an unknown coding provider", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      codingProfile: {
+        provider: "cobol-bot",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+      },
+    };
+    const state = fakeDb(agent);
+    await expect(
+      dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id }),
+    ).rejects.toThrow(/Unsupported coding provider "cobol-bot"/);
+    expect(state.runs).toHaveLength(0);
+  });
+
+  it("leaves a native run's catalog entry for the runner to record", async () => {
+    const state = fakeDb(nativeAgent());
+    await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: "agent_1" });
+    expect(state.runs[0]).not.toHaveProperty("pricingVersion");
   });
 
   describe("budget groups (E-01)", () => {
@@ -516,7 +642,7 @@ describe("dispatchRun", () => {
     ]);
   });
 
-  it("rejects a model that does not belong to the selected coding provider", async () => {
+  it("fails, at dispatch, a run whose model does not belong to the selected coding provider", async () => {
     const agent = {
       ...nativeAgent(),
       kind: "coding",
@@ -530,10 +656,15 @@ describe("dispatchRun", () => {
         protectedPaths: [],
       },
     };
+    const state = fakeDb(agent);
+    const start = vi.fn(async () => undefined);
 
-    await expect(
-      dispatchRun({ db: fakeDb(agent).db, executor: { async start() {}, async stop() {} }, agentId: agent.id }),
-    ).rejects.toThrow(/not supported by coding provider/);
+    const result = await dispatchRun({ db: state.db, executor: { start, async stop() {} }, agentId: agent.id });
+
+    expect(result?.run.status).toBe("failed");
+    expect(result?.run.error).toMatch(/not supported by coding provider "claude-code"/);
+    expect(state.codingRuns).toHaveLength(0);
+    expect(start).not.toHaveBeenCalled();
   });
 
   it("an unresolvable toolchain rejects dispatchRun's promise (a real transaction rolls the rest back; this fake's $transaction has no rollback semantics, so only the rejection itself is asserted here)", async () => {

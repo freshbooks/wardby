@@ -39,6 +39,7 @@ import {
   modelSupportedEfforts,
   resolveLlmRegistrations,
 } from "./providers/llm/index.js";
+import { startModelCatalog, type CatalogStore } from "./providers/llm/catalog-store.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
@@ -52,6 +53,7 @@ import { buildIssueTrackers } from "./providers/issue-tracker/index.js";
 import { buildReviewHosts } from "./providers/review-host/index.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { validateCronExpression } from "./core/cron.js";
+import { assertAgentModelAvailable } from "./core/run-pricing.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
 import { NativeEngine } from "./core/engine-native.js";
@@ -177,6 +179,22 @@ async function agentCreate(args: string[]): Promise<void> {
     }
   }
 
+  // Started before validating the model so an admin override recorded in
+  // ModelCatalogEntry (a disabled model, a narrowed effort list) is
+  // respected here too, not just at run time.
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
+  try {
+    assertAgentModelAvailable(values.model);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
   if (values.effort !== undefined) {
     const accepted = modelSupportedEfforts(values.model);
     if (!isLlmEffort(values.effort) || !accepted.includes(values.effort)) {
@@ -186,6 +204,7 @@ async function agentCreate(args: string[]): Promise<void> {
       );
     }
   }
+  modelCatalog.close();
 
   // Owned by --owner or the local operator; never owner-less (resource-
   // sharing grants spec §3.8). --public shares it with everyone at execute.
@@ -575,6 +594,13 @@ async function run(name: string | undefined): Promise<void> {
     fail("Coding agents are MCP-first: use trigger_agent so task input and ownership are recorded safely.");
   }
 
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
   const llm = buildLlmProvider();
   const engine = buildEngine();
   const secrets = buildSecrets();
@@ -601,6 +627,7 @@ async function run(name: string | undefined): Promise<void> {
     fail(err instanceof Error ? err.message : String(err));
   } finally {
     removeSignalHandlers?.();
+    modelCatalog.close();
   }
   process.stdout.write("\n");
 
@@ -741,6 +768,13 @@ async function scheduler(args: string[]): Promise<void> {
   // CODING_QUEUE_TIMEOUT_SEC fails fast.
   const concurrency = loadCodingConcurrencyConfig();
 
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
   const config = loadProviderConfig();
   const llm = buildLlmProvider();
   const engine = buildEngine();
@@ -779,7 +813,10 @@ async function scheduler(args: string[]): Promise<void> {
       reconciler.stop();
       void Promise.resolve(executor.close?.())
         .catch((err: unknown) => cliLog.warn({ err }, "executor close failed during scheduler shutdown"))
-        .finally(resolve);
+        .finally(() => {
+          modelCatalog.close();
+          resolve();
+        });
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
@@ -830,10 +867,27 @@ async function serve(args: string[]): Promise<void> {
 
 async function importCommand(rest: string[]): Promise<void> {
   const opts = parseImportArgs(rest);
-  const { report, result } = await runImport({ ...opts, db: prisma, env: process.env });
-  console.log(report);
-  if (result) {
-    for (const w of result.webhookSecrets) console.log(`webhook secret (${w.agentName}): ${w.secret}`);
+
+  // runImport builds an LLM provider and classifies each agent's model as
+  // routable/unroutable from currentModelCatalog() — without a store
+  // started here first, that falls back to the shipped catalog, so an
+  // admin-disabled model would be (wrongly) imported as routable and a
+  // DB-only custom model would be (wrongly) imported as disabled.
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
+  try {
+    const { report, result } = await runImport({ ...opts, db: prisma, env: process.env });
+    console.log(report);
+    if (result) {
+      for (const w of result.webhookSecrets) console.log(`webhook secret (${w.agentName}): ${w.secret}`);
+    }
+  } finally {
+    modelCatalog.close();
   }
 }
 

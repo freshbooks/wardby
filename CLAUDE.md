@@ -6,14 +6,14 @@ architecture and `CLEANROOM.md` for the clean-room rules that bind all work here
 
 ## LLM pricing tables — STRICT
 
-Every model entry in an LLM pricing table (`pricing-anthropic.ts`,
-`pricing-bedrock-claude.ts`, `pricing.ts`, and any future provider's pricing
-file) **must** set cache read/write rates (`cachedInputPerMTok`,
-`cacheWritePerMTok`), never base input/output rates alone. Omitting them
-isn't a silent zero — `pricing-core.ts`'s `computeCost` falls back to the
-full input rate for cache tokens, which fails toward _overestimate_ — but
-that defeats the point of the budget guardrail tracking prompt-cache savings
-at all, and understates real savings to the user.
+Every model entry in the model catalog (`src/providers/llm/catalog-shipped.ts`,
+and every `set_model` call) **must** set cache read/write rates
+(`cachedInputPerMTok`, `cacheWritePerMTok`), never base input/output rates
+alone. Omitting them isn't a silent zero — `pricing-core.ts`'s `computeCost`
+falls back to the full input rate for cache tokens, which fails toward
+_overestimate_ — but that defeats the point of the budget guardrail tracking
+prompt-cache savings at all, and understates real savings to the user. Bump
+`SHIPPED_CATALOG_VERSION` whenever any shipped value changes.
 
 **No multipliers, ever — exact published rates only.** Do not derive
 `cachedInputPerMTok`/`cacheWritePerMTok` from `inputPerMTok` via a ratio

@@ -32,6 +32,7 @@ vi.mock("../providers/secrets/index.js", () => ({
 
 import { runImport } from "./index.js";
 import { createFromBundle } from "./create.js";
+import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../providers/llm/catalog-store.js";
 
 let dir: string;
 const manifest = {
@@ -231,6 +232,69 @@ describe("runImport", () => {
         transferPrivateKey: undefined,
       }),
     );
+  });
+
+  describe("routableModels reflects the installed catalog, not just the shipped one", () => {
+    afterEach(() => uninstallModelCatalogForTests());
+
+    it("classifies a model the deployment's catalog has disabled as unroutable, even though its provider has credentials", async () => {
+      // Simulates what `wardby import` must do before calling runImport:
+      // installing a store whose ModelCatalogEntry rows can disable a
+      // shipped model. Without a store started first, currentModelCatalog()
+      // falls back to the shipped catalog and "gpt-4o" would wrongly come
+      // back routable here despite being disabled.
+      const store = new CatalogStore(
+        {
+          modelCatalogEntry: {
+            findMany: async () => [
+              {
+                provider: "openai",
+                modelId: "gpt-4o",
+                enabled: false,
+                encoding: "o200k_base",
+                inputPerMTok: 2.5,
+                outputPerMTok: 10,
+                cachedInputPerMTok: 1.25,
+                cacheWritePerMTok: 2.5,
+                efforts: [],
+                thinkingMode: "none",
+                sourceUrl: "https://example.test/pricing",
+                updatedBy: "p-admin",
+                createdAt: new Date(),
+                updatedAt: new Date("2026-10-04T00:00:00Z"),
+              },
+            ],
+          },
+        },
+        { log: { warn: vi.fn(), info: vi.fn() } },
+      );
+      await store.start();
+      installModelCatalog(store);
+
+      const db = {
+        agent: { findMany: vi.fn(async () => []), upsert: vi.fn() },
+        tool: { findMany: vi.fn(async () => []) },
+        secret: { findMany: vi.fn(async () => []) },
+        budgetGroup: { findMany: vi.fn(async () => []) },
+        principal: { upsert: vi.fn(async () => ({ id: "principal-1", subject: "sub-1" })) },
+      } as any;
+
+      const { report } = await runImport({
+        dir,
+        owner: "sub-1",
+        isPublic: false,
+        includeSecrets: false,
+        dryRun: true,
+        prefix: "imported-",
+        onConflict: "fail",
+        allowOpenFetch: false,
+        db,
+        env: { OPENAI_API_KEY: "sk-test" }, // credentials present — routable on the shipped catalog alone
+      });
+
+      expect(report).toMatch(/gpt-4o not routable/);
+      store.close();
+    });
   });
 
   it("envelope bundle with --include-secrets but no --transfer-key throws", async () => {

@@ -1,63 +1,85 @@
 /**
- * Model->provider routing. Becomes the single ProviderRegistry.llm and
- * dispatches each call to the adapter that owns `model`, so per-agent model
- * selection (Agent.model) selects the provider too — GPT and Claude agents
- * run in one deployment. Unknown model / duplicate registration fail closed.
+ * Model->provider routing over the model catalog. Becomes the single
+ * ProviderRegistry.llm: each call's model is looked up in the current
+ * catalog, and the adapter registered for that entry's provider handles it.
+ * A model is routable when it is in the catalog AND its provider has
+ * credentials (registration.ts). Unknown model / unconfigured provider /
+ * duplicate registration all fail closed.
  */
+import { currentModelCatalog } from "./catalog-store.js";
+import type { ModelCatalog } from "./catalog.js";
+import {
+  ModelUnavailableError,
+  type CatalogEntry,
+  type ModelProvider,
+  type ResolvedCatalogEntry,
+} from "./catalog-types.js";
 import type { LlmEffort, LlmMessage, LlmProvider, LlmRequest, LlmStreamEvent, LlmToolDef } from "./types.js";
-import { anthropicSupportedEfforts } from "./pricing-anthropic.js";
-import { bedrockClaudeSupportedEfforts } from "./pricing-bedrock-claude.js";
 
-/**
- * Effort levels `model` accepts, whichever provider owns it — for config-time
- * validation, so it needs no credentials. Each provider's own table is the
- * source of truth. OpenAI models accept none: the Chat Completions
- * `reasoning_effort` parameter is documented for o-series models only, and
- * none is on the roster.
- */
+/** Effort levels `model` accepts, from the current catalog; no credentials needed (config-time validation). */
 export function modelSupportedEfforts(model: string): readonly LlmEffort[] {
-  const direct = anthropicSupportedEfforts(model);
-  if (direct.length > 0) return direct;
-  return bedrockClaudeSupportedEfforts(model);
+  return currentModelCatalog().get(model)?.efforts ?? [];
 }
 
 export function modelAcceptsEffort(model: string, effort: LlmEffort): boolean {
   return modelSupportedEfforts(model).includes(effort);
 }
 
+/** An adapter that can be pinned to one run's stored catalog entry. */
+export interface CatalogLlmAdapter extends LlmProvider {
+  withEntry(entry: CatalogEntry): LlmProvider;
+}
+
 export interface LlmRegistration {
-  provider: LlmProvider;
-  models: string[];
+  provider: ModelProvider;
+  adapter: CatalogLlmAdapter;
 }
 
 export class RoutingLlmProvider implements LlmProvider {
-  private readonly byModel = new Map<string, LlmProvider>();
+  private readonly byProvider = new Map<ModelProvider, CatalogLlmAdapter>();
 
-  constructor(registrations: LlmRegistration[]) {
+  constructor(
+    registrations: LlmRegistration[],
+    private readonly catalog: () => ModelCatalog = currentModelCatalog,
+  ) {
     for (const reg of registrations) {
-      for (const model of reg.models) {
-        if (this.byModel.has(model)) {
-          throw new Error(
-            `Model "${model}" is registered by more than one LLM provider — check the routing configuration.`,
-          );
-        }
-        this.byModel.set(model, reg.provider);
+      if (this.byProvider.has(reg.provider)) {
+        throw new Error(
+          `LLM provider "${reg.provider}" is registered more than once — check the routing configuration.`,
+        );
       }
+      this.byProvider.set(reg.provider, reg.adapter);
     }
   }
 
+  hasProvider(provider: ModelProvider): boolean {
+    return this.byProvider.has(provider);
+  }
+
+  /** Model ids this deployment can run right now. */
   listModels(): string[] {
-    return [...this.byModel.keys()];
+    return this.catalog()
+      .entries()
+      .filter((e) => this.byProvider.has(e.provider))
+      .map((e) => e.modelId);
   }
 
-  private resolve(model: string): LlmProvider {
-    const provider = this.byModel.get(model);
-    if (!provider) {
-      throw new Error(
-        `No LLM provider is registered for model "${model}". Known models: ${[...this.byModel.keys()].join(", ") || "(none)"}.`,
-      );
-    }
-    return provider;
+  /** The current catalog entry for a runnable model; throws ModelUnavailableError otherwise. */
+  entryFor(model: string): ResolvedCatalogEntry {
+    const entry = this.catalog().require(model);
+    if (!this.byProvider.has(entry.provider)) throw new ModelUnavailableError(model, "provider_not_configured");
+    return entry;
+  }
+
+  /** A provider bound to one run's stored entry: prices and shapes requests from it, never the live catalog. */
+  forRun(entry: CatalogEntry): LlmProvider {
+    const adapter = this.byProvider.get(entry.provider);
+    if (!adapter) throw new ModelUnavailableError(entry.modelId, "provider_not_configured");
+    return adapter.withEntry(entry);
+  }
+
+  private resolve(model: string): CatalogLlmAdapter {
+    return this.byProvider.get(this.entryFor(model).provider)!;
   }
 
   stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
@@ -70,12 +92,7 @@ export class RoutingLlmProvider implements LlmProvider {
 
   priceUsd(
     model: string,
-    usage: {
-      inputTokens: number;
-      outputTokens: number;
-      cachedInputTokens?: number;
-      cacheWriteTokens?: number;
-    },
+    usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number; cacheWriteTokens?: number },
   ): number {
     return this.resolve(model).priceUsd(model, usage);
   }

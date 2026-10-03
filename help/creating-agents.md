@@ -44,6 +44,21 @@ the trusted coding proxy, and a narrowly installed GitHub App. The agent owner
 must have the required repository access, or an administrator must explicitly
 approve the repository.
 
+## Choosing a model
+
+Both agent types take a `model` field naming an entry in wardby's model
+catalog. Run `list_models` to see which ids this deployment knows about and
+what each costs; `get_model` shows one entry in full. `create_agent` and
+`update_agent` always refuse a `model` that isn't in the catalog or that an
+admin has disabled. For a native agent, they also refuse a model whose
+provider has no credentials configured for native runs here (such a model
+shows `routable: false` in `list_models`). A coding agent's model isn't checked against
+`routable` at all — a coding run uses the coding proxy's own credentials
+instead, so confirm those are configured for Codex or Claude Code
+separately; a missing one fails the run itself at dispatch, not
+`create_agent`/`update_agent`. See [Models and pricing](models.md) and
+[Model not available](errors/model-unavailable.md).
+
 ## Decision checklist
 
 Choose a native agent when all of these are true:

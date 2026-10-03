@@ -1,7 +1,9 @@
 /**
- * Shared pricing types + cost math, provider-agnostic. Each LLM adapter
- * owns its own model table but prices through this one `computeCost`, so the
- * cache-read/cache-write accounting can never diverge between providers.
+ * Shared pricing types + cost math, provider-agnostic. Rates come from the
+ * model catalog (docs/models.md: the shipped catalog plus this deployment's
+ * set_model overrides), not from a per-adapter table; every provider prices
+ * through this one `computeCost`, so the cache-read/cache-write accounting
+ * can never diverge between providers.
  */
 export type TokenizerEncoding = "cl100k_base" | "o200k_base";
 
