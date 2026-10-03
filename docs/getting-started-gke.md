@@ -40,7 +40,7 @@ Install and authenticate:
 
 - Google Cloud CLI (`gcloud`)
 - Terraform 1.10 or newer
-- Docker with `linux/amd64` build support
+- Docker with the `buildx` plugin and `linux/amd64` build support
 - `kubectl`
 - Helm 3 or later (installs External Secrets Operator)
 - Node.js 24 and npm
@@ -453,6 +453,12 @@ Re-run `deploy/gke/up.sh` after a source or configuration change. It rebuilds
 images, pushes them, substitutes immutable digests, leaves Secret Manager values
 as they are, waits for rollouts, and then checks the public endpoint: discovery
 must answer `200` and an unauthenticated MCP request `401`, or the deploy fails.
+
+`up.sh` builds every image in one `docker buildx bake` run
+(`deploy/gke/docker-bake.hcl`), so Docker's `buildx` plugin is required (Docker
+Desktop includes it). The images build concurrently, and the stages that only
+compile JavaScript run on your machine's own architecture, so building the
+`linux/amd64` images from an arm64 machine emulates only what actually ships.
 
 A control-plane restart is designed not to drop requests, at the cost of a
 slower rollout. A new pod must stay Ready for three minutes before the old one
