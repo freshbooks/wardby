@@ -18,6 +18,10 @@ pub enum AppError {
     Timeout,
     #[error("sign-in was cancelled")]
     Cancelled,
+    #[error(
+        "This URL doesn't look like a wardby server. Use its canonical URI (MCP_CANONICAL_URI)."
+    )]
+    NotWardby,
     #[error("this server needs a client id")]
     NeedsClientId,
     #[error("keychain error: {0}")]
@@ -39,6 +43,7 @@ impl AppError {
             AppError::Denied => "denied",
             AppError::Timeout => "timeout",
             AppError::Cancelled => "cancelled",
+            AppError::NotWardby => "not_wardby",
             AppError::NeedsClientId => "needs_client_id",
             AppError::Keychain(_) => "keychain",
             AppError::Storage(_) => "storage",

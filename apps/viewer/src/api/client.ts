@@ -14,6 +14,7 @@ export type AppErrorKind =
   | "denied"
   | "timeout"
   | "cancelled"
+  | "not_wardby"
   | "needs_client_id"
   | "keychain"
   | "storage"

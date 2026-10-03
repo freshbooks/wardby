@@ -36,10 +36,11 @@ right-click, then Open.
 
 ## Add a server and sign in
 
-1. Choose to add a server and enter the server's canonical URI, for example
-   `https://wardby.example.com`. That is the value of `MCP_CANONICAL_URI`, not
-   a path such as `/mcp`. Plain `http` is accepted only for a loopback address
-   such as `http://127.0.0.1:8080`.
+1. Choose to add a server and enter the server's canonical URI exactly as
+   configured in `MCP_CANONICAL_URI`, including any path (for example
+   `https://wardby.example.com/mcp`). The app also finds the server from an
+   origin or other path on the same host. Plain `http` is accepted only for a
+   loopback address such as `http://127.0.0.1:8080`.
 2. Sign in. The app opens your system browser at the server's login page; the
    browser returns to a short-lived listener on `127.0.0.1` that the app opens
    for the duration of the sign-in.
@@ -57,9 +58,9 @@ a login key with `wardby auth` (see `wardby help auth`).
 
 ### External identity provider
 
-With `AUTH_PROVIDER=delegating` the server does not offer client registration,
-so register a public client with your identity provider and enter its client id
-when adding the server. The client must:
+If your identity provider does not offer dynamic client registration (the
+case with `AUTH_PROVIDER=delegating`), register a public client with it and
+enter its client id when adding the server. The client must:
 
 - be a public client using the authorization code flow with PKCE (S256);
 - have the loopback redirect URI `http://127.0.0.1/callback` (the app uses an
@@ -109,5 +110,5 @@ WARDBY_E2E_LOGIN_KEY=<login key of an admin user> \
   cargo test --test e2e_local -- --ignored
 ```
 
-`WARDBY_E2E_URL` is the server's canonical URI. The test does not print tokens
+`WARDBY_E2E_URL` is the server URL as you would enter it in the app. The test does not print tokens
 or the login key.

@@ -191,13 +191,35 @@ pub async fn read_capped_to(mut resp: reqwest::Response, max: usize) -> Result<V
     Ok(body)
 }
 
+/// Protected-resource metadata: the path-inserted URL first (RFC 9728), then
+/// the origin root, which wardby always serves. A 404 on both means the URL is
+/// not a wardby server.
+async fn fetch_prm(http: &reqwest::Client, server: &Url) -> Result<ProtectedResource, AppError> {
+    let first = well_known(server, "oauth-protected-resource")?;
+    let mut root = server.clone();
+    root.set_path("/");
+    let root = well_known(&root, "oauth-protected-resource")?;
+    let candidates = if first == root {
+        vec![first]
+    } else {
+        vec![first, root]
+    };
+    for url in candidates {
+        match get_json::<ProtectedResource>(http, url).await {
+            Ok(prm) => return Ok(prm),
+            Err(AppError::Http { status: 404 }) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(AppError::NotWardby)
+}
+
 pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthServer, AppError> {
     let server = Url::parse(server_url.trim())
         .map_err(|_| AppError::Protocol("invalid server URL".to_string()))?;
     require_secure(&server, "server URL")?;
 
-    let prm: ProtectedResource =
-        get_json(http, well_known(&server, "oauth-protected-resource")?).await?;
+    let prm = fetch_prm(http, &server).await?;
     let advertised = prm
         .authorization_servers
         .first()
@@ -577,13 +599,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_falls_back_to_root_prm_for_a_path_url() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "resource": format!("{base}/"),
+                "authorization_servers": [format!("{base}/")],
+            })))
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": format!("{base}/"),
+                "authorization_endpoint": format!("{base}/authorize"),
+                "token_endpoint": format!("{base}/token"),
+            })))
+            .mount(&s)
+            .await;
+        let a = discover(&http_client().unwrap(), &format!("{base}/mcp"))
+            .await
+            .unwrap();
+        // The OAuth resource is what the server's metadata says, not the entered URL.
+        assert_eq!(a.resource, format!("{base}/"));
+    }
+
+    #[tokio::test]
+    async fn discovery_with_no_metadata_anywhere_is_not_wardby() {
+        let s = MockServer::start().await;
+        let err = discover(&http_client().unwrap(), &format!("{}/mcp", s.uri()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::NotWardby));
+        assert_eq!(err.kind(), "not_wardby");
+    }
+
+    #[tokio::test]
     async fn discovery_errors_are_typed() {
         let s = MockServer::start().await;
         let base = s.uri();
         let http = http_client().unwrap();
         // 404 on PRM
         let err = discover(&http, &base).await.unwrap_err();
-        assert!(matches!(err, AppError::Http { status: 404 }));
+        assert!(matches!(err, AppError::NotWardby));
         // empty authorization_servers
         Mock::given(method("GET"))
             .and(path("/.well-known/oauth-protected-resource"))

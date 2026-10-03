@@ -195,7 +195,13 @@ impl Session {
         if !path_and_query.starts_with('/') || path_and_query.starts_with("//") {
             return Err(AppError::Protocol("invalid API path".to_string()));
         }
-        Ok(format!("{}{}", self.server_url, path_and_query))
+        // The viewer API lives at the server's origin root, whatever path the
+        // server URL was entered with (for example its MCP endpoint).
+        let origin = url::Url::parse(&self.server_url)
+            .map_err(|_| AppError::Protocol("invalid server URL".to_string()))?
+            .origin()
+            .ascii_serialization();
+        Ok(format!("{origin}{path_and_query}"))
     }
 
     fn current(&self) -> Option<(String, bool)> {
@@ -396,6 +402,20 @@ mod tests {
         let sess = session(&s.uri(), MemStore::with("RT0"), Some("AT0"));
         let v = sess.get_json("/admin/api/graph?limit=5").await.unwrap();
         assert_eq!(v["a"], 1);
+    }
+
+    #[tokio::test]
+    async fn api_paths_resolve_against_the_origin_not_the_entered_path() {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/api/graph"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"a": 1})))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let base = format!("{}/mcp", s.uri());
+        let sess = session(&base, MemStore::with("RT0"), Some("AT0"));
+        assert_eq!(sess.get_json("/admin/api/graph").await.unwrap()["a"], 1);
     }
 
     #[tokio::test]
