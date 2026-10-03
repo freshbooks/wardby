@@ -101,6 +101,8 @@ button:disabled {
 .app {
   display: grid;
   grid-template-rows: auto 1fr auto;
+  /* Never wider than the window, whatever a row's content wants. */
+  grid-template-columns: minmax(0, 1fr);
   height: 100%;
 }
 
@@ -241,14 +243,19 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.bottombar .counts {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* The latest event only, cut short with an ellipsis so the bar stays one line. */
 .ticker {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  gap: 1rem;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: right;
   color: var(--muted);
 }
 

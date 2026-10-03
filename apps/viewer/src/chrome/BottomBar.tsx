@@ -6,8 +6,6 @@ import { breakdownText, shownCost } from "../state/cost";
 import { countByGroup, type Filters } from "../state/filters";
 import { formatWindowTotal, TRUNCATED_TITLE, windowSpend } from "../format/spend";
 
-const TICKER_SHOWN = 5;
-
 const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour12: false });
 
 export function BottomBar({
@@ -34,6 +32,7 @@ export function BottomBar({
   const exactTotal = `${truncated ? "≥" : ""}${exactUsd(total)}`;
   const exact = narrowed ? `${exactUsd(shown)} shown of ${exactTotal}` : exactTotal;
   const title = [breakdown, exact, truncated ? TRUNCATED_TITLE : ""].filter(Boolean).join("\n");
+  const latest = ticker[0];
   return (
     <footer className="bottombar">
       <span className="counts">
@@ -42,13 +41,11 @@ export function BottomBar({
           {narrowed ? `${formatUsd(shown)} shown of ${totalText}` : totalText} ({window})
         </span>
       </span>
-      <ol className="ticker" aria-label="Recent events">
-        {ticker.slice(0, TICKER_SHOWN).map((t, i) => (
-          <li key={`${t.at}-${i}`}>
-            <time>{clock(t.at)}</time> {t.text}
-          </li>
-        ))}
-      </ol>
+      {latest && (
+        <span className="ticker" role="status" aria-label="Latest event" title={`${clock(latest.at)} ${latest.text}`}>
+          <time>{clock(latest.at)}</time> {latest.text}
+        </span>
+      )}
     </footer>
   );
 }

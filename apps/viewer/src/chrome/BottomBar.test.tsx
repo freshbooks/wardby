@@ -45,3 +45,21 @@ describe("BottomBar cost", () => {
     expect(screen.getByText("$0 shown of $0 (1h)")).toBeTruthy();
   });
 });
+
+describe("BottomBar ticker", () => {
+  it("shows only the latest event", () => {
+    const ticker = [
+      { at: Date.parse("2026-01-01T10:00:02Z"), text: "hello abc123 succeeded · turn 2 · $0.0029" },
+      { at: Date.parse("2026-01-01T10:00:01Z"), text: "hello abc123 running · turn 1 · $0.0010" },
+    ];
+    render(<BottomBar runs={runs} filters={initialFilters} ticker={ticker} window="1h" />);
+    const latest = screen.getByRole("status", { name: "Latest event" });
+    expect(latest.textContent).toContain("hello abc123 succeeded");
+    expect(screen.queryByText(/running · turn 1/)).toBeNull();
+  });
+
+  it("shows nothing before the first event", () => {
+    render(<BottomBar runs={runs} filters={initialFilters} ticker={[]} window="1h" />);
+    expect(screen.queryByRole("status", { name: "Latest event" })).toBeNull();
+  });
+});
