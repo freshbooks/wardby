@@ -362,3 +362,41 @@ describe("normalizeGitHubEvent", () => {
     expect(normalizeGitHubEvent("pull_request", { action: "opened" }, APP)).toBeNull();
   });
 });
+
+describe("push events", () => {
+  const app = { id: 1, slug: "wardby" };
+  const base = {
+    ref: "refs/heads/main",
+    before: "a".repeat(40),
+    after: "b".repeat(40),
+    deleted: false,
+    repository: { full_name: "Org/Repo", default_branch: "main" },
+    commits: [
+      { added: ["docs/knowledge/x.md"], modified: ["src/a.py"], removed: [] },
+      { added: [], modified: ["src/a.py"], removed: ["old.py"] },
+    ],
+  };
+  it("normalizes a default-branch push with deduplicated changed paths", () => {
+    expect(normalizeGitHubEvent("push", base, app)).toEqual({
+      kind: "push",
+      provider: "github",
+      repository: "org/repo",
+      branch: "main",
+      before: "a".repeat(40),
+      after: "b".repeat(40),
+      changedPaths: ["docs/knowledge/x.md", "old.py", "src/a.py"],
+      changedPathsComplete: true,
+    });
+  });
+  it("ignores other branches, tags, and deletions", () => {
+    expect(normalizeGitHubEvent("push", { ...base, ref: "refs/heads/feature" }, app)).toBeNull();
+    expect(normalizeGitHubEvent("push", { ...base, ref: "refs/tags/v1" }, app)).toBeNull();
+    expect(normalizeGitHubEvent("push", { ...base, deleted: true, after: "0".repeat(40) }, app)).toBeNull();
+    expect(normalizeGitHubEvent("push", { ...base, after: "0".repeat(40) }, app)).toBeNull();
+    expect(normalizeGitHubEvent("push", { ...base, before: "nope" }, app)).toBeNull();
+  });
+  it("marks the path list incomplete when GitHub capped the commits", () => {
+    const commits = Array.from({ length: 20 }, () => ({ added: [], modified: ["a"], removed: [] }));
+    expect(normalizeGitHubEvent("push", { ...base, commits }, app)).toMatchObject({ changedPathsComplete: false });
+  });
+});

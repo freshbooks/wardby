@@ -266,6 +266,19 @@ export type HostUserAuthorizerRegistry = Partial<Record<ReviewHostProvider, Host
  */
 export type HostEvent =
   | {
+      kind: "push";
+      provider: ReviewHostProvider;
+      repository: string;
+      /** The branch pushed (without refs/heads/), always the repository's default branch. */
+      branch: string;
+      before: string;
+      after: string;
+      /** Union of added/modified/removed paths over the payload's commits, deduplicated, at most 1000. */
+      changedPaths: string[];
+      /** False when GitHub truncated the commit list (> 20 commits) or paths were capped: treat every concept as in scope. */
+      changedPathsComplete: boolean;
+    }
+  | {
       kind: "pr_updated";
       provider: ReviewHostProvider;
       repository: string;

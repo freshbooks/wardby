@@ -308,6 +308,9 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
   const reviewerLinks = links.filter((l) => l.access === "write" && l.triggers.includes("pull_request") && l.checkName);
 
   switch (event.kind) {
+    case "push":
+      // Placeholder: Task 2.4 routes default-branch pushes to merge-watcher agents.
+      return { runIds: [], followUps: [] };
     case "pr_updated": {
       if (event.isFork || reviewerLinks.length === 0) return none;
       const reviewers = reviewTargets(await authorizedLinks(deps, event, reviewerLinks));
