@@ -354,6 +354,33 @@ describe("model catalog tools", () => {
     await client.close();
   });
 
+  it("owner edits its row, a later orphan does not take over: repricing keeps the id with the provider that claimed it first", async () => {
+    const { client, rows } = await connect(MODEL_MANAGER);
+    expect((await client.callTool({ name: "set_model", arguments: NEW })).isError).toBeFalsy(); // claude-new, anthropic
+    // Backdate the owner's claim, then plant another provider's orphan row
+    // claimed (created) after it but before the owner's next edit.
+    const claimedAt = new Date("2026-01-01T00:00:00.000Z");
+    const owner = rows.get("anthropic::claude-new")!;
+    rows.set("anthropic::claude-new", { ...owner, createdAt: claimedAt, updatedAt: claimedAt });
+    const orphanAt = new Date("2026-02-01T00:00:00.000Z");
+    rows.set("openai::claude-new", rawRow({ modelId: "claude-new", createdAt: orphanAt, updatedAt: orphanAt }));
+
+    // The owner reprices: its updatedAt moves past the orphan's, its createdAt does not.
+    const repriced = await client.callTool({ name: "set_model", arguments: { ...NEW, outputPerMTok: 16 } });
+    expect(repriced.isError).toBeFalsy();
+    const got = JSON.parse(text(await client.callTool({ name: "get_model", arguments: { modelId: "claude-new" } })));
+    expect(got.model).toMatchObject({ provider: "anthropic", outputPerMTok: 16 });
+
+    // And the orphan's provider is still refused.
+    const orphanWrite = await client.callTool({
+      name: "set_model",
+      arguments: { ...NEW, provider: "openai", thinkingMode: "none", efforts: [] },
+    });
+    expect(orphanWrite.isError).toBe(true);
+    expect(text(orphanWrite)).toMatch(/already served by provider "anthropic"/);
+    await client.close();
+  });
+
   it("the post-write ownership-race error names reset_model and the true owner, not a blind retry", () => {
     const err = raceLostError("claude-new", "anthropic", "openai");
     expect(err.message).toMatch(/written for provider "anthropic"/);

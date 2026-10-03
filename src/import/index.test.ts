@@ -260,6 +260,7 @@ describe("runImport", () => {
                 thinkingMode: "none",
                 sourceUrl: "https://example.test/pricing",
                 updatedBy: "p-admin",
+                createdAt: new Date(),
                 updatedAt: new Date("2026-10-04T00:00:00Z"),
               },
             ],

@@ -671,6 +671,7 @@ describe("agent CRUD tools", () => {
         enabled: false,
         sourceUrl: "https://example.com/pricing",
         updatedBy: "admin",
+        createdAt: new Date(),
         updatedAt: new Date(),
       }));
       const store = new CatalogStore(

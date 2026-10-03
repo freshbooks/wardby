@@ -53,6 +53,8 @@ export interface CatalogRow extends CatalogEntry {
   enabled: boolean;
   sourceUrl: string;
   updatedBy: string;
+  /** When the row was first written: decides which provider owns a non-shipped id (ownerOf). */
+  createdAt: Date;
   updatedAt: Date;
 }
 

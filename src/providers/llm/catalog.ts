@@ -6,7 +6,7 @@
  * A row replaces the shipped entry with the same (provider, modelId)
  * completely; enabled=false removes the model; a row with no shipped match
  * adds one. Routing is by model id alone, so one model id can belong to only
- * one provider: a row that would claim an id another provider already serves
+ * one provider (ownerOf): a row that would claim an id another provider owns
  * is skipped (set_model refuses it at write time; this is the backstop).
  */
 import {
@@ -51,6 +51,51 @@ export class ModelCatalog {
   }
 }
 
+/** What deciding a model id's owner needs from one of its ModelCatalogEntry rows. */
+export interface CatalogClaim {
+  provider: string;
+  enabled: boolean;
+  createdAt: Date;
+}
+
+/**
+ * Orders claims on one model id: the earliest-created row first, ties broken
+ * by provider name. createdAt, never updatedAt: an owner editing its own row
+ * (set_model, disable_model) must not hand the id to a row claimed after it.
+ */
+export function compareClaims(a: CatalogClaim, b: CatalogClaim): number {
+  return a.createdAt.getTime() - b.createdAt.getTime() || a.provider.localeCompare(b.provider);
+}
+
+/**
+ * The one ownership rule, shared by buildCatalog (the merge) and set_model
+ * (its write-time conflict check), so the two can never disagree. A shipped
+ * model id ALWAYS belongs to its shipped provider: any row for it under
+ * another provider is a dead orphan, however many there are and whenever
+ * they were written. A non-shipped id belongs to the provider of its
+ * earliest-created row (compareClaims) until reset_model clears every row.
+ * `enabled` is the owner's row's (a disabled row still reserves the id); a
+ * shipped provider with no row is the untouched, enabled shipped entry.
+ * Null only for an id that is neither shipped nor claimed by any row.
+ *
+ * Which rows count as claims is the caller's call: buildCatalog passes only
+ * rows that passed rowFromRecord (CatalogStore drops malformed ones), while
+ * set_model passes every raw row, malformed included, so a malformed row
+ * still reserves its id until reset_model clears it.
+ */
+export function ownerOf(
+  shippedEntry: Pick<CatalogEntry, "provider"> | undefined,
+  claims: readonly CatalogClaim[],
+): { provider: string; enabled: boolean } | null {
+  if (shippedEntry) {
+    const ownRow = claims.find((claim) => claim.provider === shippedEntry.provider);
+    return { provider: shippedEntry.provider, enabled: ownRow ? ownRow.enabled : true };
+  }
+  if (claims.length === 0) return null;
+  const [first] = [...claims].sort(compareClaims);
+  return { provider: first.provider, enabled: first.enabled };
+}
+
 export function buildCatalog(
   shipped: readonly CatalogEntry[],
   rows: readonly CatalogRow[],
@@ -62,20 +107,19 @@ export function buildCatalog(
     shipped.map((e) => [e.modelId, { ...e, origin: "shipped", priceVersion: `shipped:${shippedVersion}` }]),
   );
   const disabled = new Map<string, ResolvedCatalogEntry>();
-  const sorted = [...rows].sort(
-    (a, b) => a.updatedAt.getTime() - b.updatedAt.getTime() || a.provider.localeCompare(b.provider),
-  );
-  const claimedByRow = new Map<string, string>(); // modelId -> provider of the first row that claimed it
+  const sorted = [...rows].sort(compareClaims);
+  const rowsById = new Map<string, CatalogRow[]>();
+  for (const row of sorted) rowsById.set(row.modelId, [...(rowsById.get(row.modelId) ?? []), row]);
   for (const row of sorted) {
     const shippedEntry = shippedById.get(row.modelId);
-    const owner = claimedByRow.get(row.modelId) ?? shippedEntry?.provider;
-    if (owner && owner !== row.provider) {
+    // ownerOf is never null here (the id has at least this row); the fallback only satisfies the type.
+    const owner = ownerOf(shippedEntry, rowsById.get(row.modelId) ?? [row])?.provider ?? row.provider;
+    if (owner !== row.provider) {
       onConflict(
         `ModelCatalogEntry (${row.provider}, ${row.modelId}) skipped: model id already served by provider "${owner}".`,
       );
       continue;
     }
-    claimedByRow.set(row.modelId, row.provider);
     const resolved: ResolvedCatalogEntry = {
       provider: row.provider,
       modelId: row.modelId,
@@ -117,13 +161,14 @@ export function rowFromRecord(record: Record<string, unknown>): CatalogRow | nul
   if (!entry) return null;
   if (typeof record.enabled !== "boolean") return null;
   if (typeof record.sourceUrl !== "string" || typeof record.updatedBy !== "string") return null;
-  if (!(record.updatedAt instanceof Date)) return null;
+  if (!(record.createdAt instanceof Date) || !(record.updatedAt instanceof Date)) return null;
   if (!(MODEL_PROVIDERS as readonly string[]).includes(entry.provider)) return null;
   return {
     ...entry,
     enabled: record.enabled,
     sourceUrl: record.sourceUrl,
     updatedBy: record.updatedBy,
+    createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
 }

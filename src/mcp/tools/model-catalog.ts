@@ -49,7 +49,7 @@ import {
   type ResolvedCatalogEntry,
 } from "../../providers/llm/catalog-types.js";
 import { LLM_EFFORT_LEVELS } from "../../providers/llm/types.js";
-import { rowFromRecord } from "../../providers/llm/catalog.js";
+import { ownerOf, rowFromRecord } from "../../providers/llm/catalog.js";
 import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
 import { SHIPPED_CATALOG_VERSION } from "../../providers/llm/catalog-shipped.js";
 import type { RoutingLlmProvider } from "../../providers/llm/routing.js";
@@ -158,7 +158,7 @@ async function refreshBestEffort(
 
 /**
  * `shipped` says whether `modelId` is a shipped model: if so, `provider` is
- * necessarily its shipped provider (catalogOwner), and no action — disabling
+ * necessarily its shipped provider (ownerOf), and no action — disabling
  * or resetting the override, or anything else — ever lets a different
  * provider claim it, so the message says that plainly rather than pointing
  * at a remedy that doesn't exist. For a non-shipped id, `reset_model` is the
@@ -188,38 +188,9 @@ function conflictError(modelId: string, provider: string, enabled: boolean, ship
 }
 
 /**
- * Mirrors buildCatalog's own ownership rule (catalog.ts) exactly, from the raw
- * rows a conflict check reads: for a model id the shipped catalog has, the
- * shipped provider ALWAYS owns it — buildCatalog seeds ownership from the
- * shipped provider before any row is even considered, so any row for that id
- * under a different provider is a dead orphan it permanently skips, no
- * matter how many such rows accumulate or what their timestamps are. For a
- * model id the shipped catalog doesn't have, the earliest-updated row's
- * provider owns it (ties broken by provider name), exactly as buildCatalog's
- * ascending-updatedAt sort + first-claim logic resolves it. A disabled row
- * still reserves the id for its provider; the shipped provider with no row
- * at all is implicitly "enabled" (it's just the untouched shipped entry).
- * Returns null only for a model id that is neither shipped nor ever written.
- */
-function catalogOwner(
-  shippedEntry: CatalogEntry | undefined,
-  rows: readonly { provider: string; enabled: boolean; updatedAt: unknown }[],
-): { provider: string; enabled: boolean } | null {
-  if (shippedEntry) {
-    const ownRow = rows.find((row) => row.provider === shippedEntry.provider);
-    return { provider: shippedEntry.provider, enabled: ownRow ? ownRow.enabled : true };
-  }
-  if (rows.length === 0) return null;
-  const updatedAtMs = (row: { updatedAt: unknown }) =>
-    row.updatedAt instanceof Date ? row.updatedAt.getTime() : new Date(String(row.updatedAt)).getTime();
-  const [earliest] = [...rows].sort((a, b) => updatedAtMs(a) - updatedAtMs(b) || a.provider.localeCompare(b.provider));
-  return { provider: earliest.provider, enabled: earliest.enabled };
-}
-
-/**
  * The post-write ownership-race error: our own row for `inputProvider` was
  * written, but a refresh right after showed `nowOwner` winning the merge
- * instead (buildCatalog's first-claim-wins rule — see `catalogOwner`). Named
+ * instead (the first-claim-wins rule — see `ownerOf` in catalog.ts). Named
  * after the thing that actually fixes it (reset_model, which clears every
  * row for the id, `nowOwner`'s included) rather than telling the caller to
  * "retry set_model", which would just hit the pre-write conflict check again
@@ -375,14 +346,17 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
       // by another process/replica must be caught even if this process
       // hasn't refreshed since. The static shipped catalog is never stale,
       // so it's safe to read from the in-memory catalog either way. The
-      // check itself mirrors buildCatalog's merge rule exactly (catalogOwner)
-      // rather than "any different-provider row blocks": for a shipped id,
-      // an orphaned other-provider row (dead in the merge no matter what) must
-      // not falsely block the true (shipped) owner, and must not be let through
+      // check is buildCatalog's own ownership function (ownerOf), not "any
+      // different-provider row blocks": for a shipped id, an orphaned
+      // other-provider row (dead in the merge no matter what) must not
+      // falsely block the true (shipped) owner, and must not be let through
       // just because it happens to share its own provider with input.provider.
+      // Every raw row counts as a claim here, malformed ones included (unlike
+      // the merge, which never sees them): a malformed row still occupies the
+      // id, and reset_model is what clears it.
       const existingRows = await ctx.db.modelCatalogEntry.findMany({ where: { modelId: input.modelId } });
       const shippedEntry = currentModelCatalog().shippedEntry(input.modelId);
-      const owner = catalogOwner(shippedEntry, existingRows);
+      const owner = ownerOf(shippedEntry, existingRows);
       if (owner && owner.provider !== input.provider) {
         throw conflictError(input.modelId, owner.provider, owner.enabled, !!shippedEntry);
       }
@@ -517,7 +491,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
       // occupy the id. Deciding "nothing to reset" or omitting a provider
       // from the audit based on parse success would delete a malformed row
       // silently and leave the id permanently stuck — set_model's
-      // DB-sourced conflict check would keep seeing it (via catalogOwner)
+      // DB-sourced conflict check would keep seeing it (via ownerOf)
       // and refusing every provider forever, with no tool able to clear it.
       const rawRows = await ctx.db.modelCatalogEntry.findMany({ where: { modelId } });
       if (rawRows.length === 0) {

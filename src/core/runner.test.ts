@@ -1384,7 +1384,14 @@ describe("native runs record and keep their catalog entry", () => {
   const sonnet = SHIPPED_CATALOG.find((e) => e.modelId === "claude-sonnet-5")!;
   const agent = { id: "a1", name: "writer", systemPrompt: "s", model: "claude-sonnet-5", budgetUsd: 10, maxTurns: 10 };
   const disabled: CatalogRow[] = [
-    { ...sonnet, enabled: false, sourceUrl: "x", updatedBy: "admin", updatedAt: new Date("2026-10-02T00:00:00Z") },
+    {
+      ...sonnet,
+      enabled: false,
+      sourceUrl: "x",
+      updatedBy: "admin",
+      createdAt: new Date("2026-10-02T00:00:00Z"),
+      updatedAt: new Date("2026-10-02T00:00:00Z"),
+    },
   ];
 
   /** A catalog-routed LLM whose adapter remembers which entry each run was bound to. */

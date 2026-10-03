@@ -28,7 +28,8 @@ id, the shipped provider owns it permanently: no other provider can ever
 register that id, no matter what — disabling or resetting an override of a
 shipped model never frees it, because the shipped provider still owns the id
 once the override is gone. For a model id the shipped catalog doesn't have,
-whichever provider registered it first owns it until someone with
+whichever provider registered it first owns it (editing that entry later
+does not change this) until someone with
 `models:admin` runs `reset_model` on that id — disabling it is not enough,
 since a disabled row still reserves the id for its provider.
 

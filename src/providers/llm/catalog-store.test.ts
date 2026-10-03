@@ -21,6 +21,7 @@ const ROW = {
   thinkingMode: "adaptive",
   sourceUrl: "https://platform.claude.com/docs/en/about-claude/pricing",
   updatedBy: "p-admin",
+  createdAt: new Date("2026-10-04T00:00:00Z"),
   updatedAt: new Date("2026-10-04T00:00:00Z"),
 };
 

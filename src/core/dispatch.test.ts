@@ -253,6 +253,7 @@ describe("dispatchRun", () => {
         enabled: false,
         sourceUrl: "https://example.com/pricing",
         updatedBy: "admin",
+        createdAt: new Date(),
         updatedAt: new Date(),
       },
     ];

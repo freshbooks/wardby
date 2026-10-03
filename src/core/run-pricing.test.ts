@@ -80,6 +80,7 @@ describe("pinNativeRunPricing", () => {
         enabled: false,
         sourceUrl: "x",
         updatedBy: "a",
+        createdAt: new Date(),
         updatedAt: new Date(),
       },
     ];

@@ -33,6 +33,7 @@ const row = (over: Partial<CatalogRow>): CatalogRow => ({
   enabled: true,
   sourceUrl: "https://platform.claude.com/docs/en/about-claude/pricing",
   updatedBy: "p-admin",
+  createdAt: AT,
   updatedAt: AT,
   ...over,
 });
@@ -109,6 +110,45 @@ describe("buildCatalog", () => {
     expect(conflicts).toHaveLength(1);
   });
 
+  it("gives a non-shipped id to the earliest-created row, whatever the rows' order or provider names", () => {
+    const t1 = new Date("2026-10-01T00:00:00.000Z");
+    const t2 = new Date("2026-10-02T00:00:00.000Z");
+    // Both last edited at the same moment: only createdAt says who claimed the id first.
+    const first = row({ provider: "openai", modelId: "x", thinkingMode: "none", createdAt: t1, updatedAt: AT });
+    const second = row({ provider: "anthropic", modelId: "x", createdAt: t2, updatedAt: AT });
+    for (const rows of [
+      [first, second],
+      [second, first],
+    ]) {
+      const conflicts: string[] = [];
+      const c = buildCatalog(SHIPPED, rows, "2026-10-03", (m) => conflicts.push(m));
+      expect(c.require("x").provider).toBe("openai");
+      expect(conflicts).toEqual([expect.stringMatching(/\(anthropic, x\) skipped: .*"openai"/)]);
+    }
+  });
+
+  it("owner edits its row, a later orphan does not take over (ownership is by createdAt, not updatedAt)", () => {
+    const created = new Date("2026-10-01T00:00:00.000Z");
+    const orphanAt = new Date("2026-10-02T00:00:00.000Z");
+    const repricedAt = new Date("2026-10-03T00:00:00.000Z");
+    const owner = row({
+      provider: "anthropic",
+      modelId: "x",
+      outputPerMTok: 7,
+      createdAt: created,
+      updatedAt: repricedAt,
+    });
+    const orphan = row({
+      provider: "openai",
+      modelId: "x",
+      thinkingMode: "none",
+      createdAt: orphanAt,
+      updatedAt: orphanAt,
+    });
+    const c = buildCatalog(SHIPPED, [orphan, owner], "2026-10-03");
+    expect(c.require("x")).toMatchObject({ provider: "anthropic", outputPerMTok: 7 });
+  });
+
   it("returns the shipped entry an override shadows", () => {
     const c = buildCatalog(SHIPPED, [row({ outputPerMTok: 6 })], "2026-10-03");
     expect(c.shippedEntry("claude-a")?.outputPerMTok).toBe(5);
@@ -124,6 +164,7 @@ describe("rowFromRecord", () => {
     ["thinkingMode", { thinkingMode: "sometimes" }],
     ["efforts", { efforts: ["turbo"] }],
     ["rate", { cachedInputPerMTok: -1 }],
+    ["createdAt", { createdAt: "2026-10-01" }],
   ])("rejects a bad %s", (_label, over) => {
     expect(rowFromRecord({ ...row({}), ...over })).toBeNull();
   });

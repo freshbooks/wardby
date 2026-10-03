@@ -10,6 +10,7 @@ const added = {
   enabled: true,
   sourceUrl: "x",
   updatedBy: "a",
+  createdAt: new Date(),
   updatedAt: new Date(),
 };
 
