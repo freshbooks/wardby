@@ -95,6 +95,18 @@ describe("FlowCanvas", () => {
     expect(layoutSpy.calls).toBe(before);
   });
 
+  it("keeps nodes visible through live updates without waiting for a re-measure", async () => {
+    // The test ResizeObserver never fires, as when updates outpace React Flow's re-measure.
+    const props = { filters: initialFilters, selectedId: null, onSelect: () => {} };
+    const live = (costUsd: number) => [makeRun("one", { status: "running", finishedAt: null, costUsd }), runs[1]!];
+    const { rerender, container } = render(<FlowCanvas runs={live(0.1)} {...props} />);
+    await screen.findByText("agent-one");
+    for (const cost of [0.2, 0.3, 0.4]) rerender(<FlowCanvas runs={live(cost)} {...props} />);
+    const wrappers = [...container.querySelectorAll<HTMLElement>(".react-flow__node")];
+    expect(wrappers.length).toBeGreaterThan(0);
+    for (const w of wrappers) expect(w.style.visibility).toBe("visible");
+  });
+
   it("drops a slower, earlier layout result", async () => {
     const resolvers: ((m: Map<string, { x: number; y: number }>) => void)[] = [];
     layoutSpy.impl = () => new Promise((res) => resolvers.push(res));

@@ -1,3 +1,6 @@
+import type { FlowNodeData } from "./build";
+import { trayServices } from "./services";
+
 /** Single source of truth for node boxes: the ELK layout reserves exactly these sizes. */
 export const TRIGGER_SIZE = { width: 180, height: 44 } as const;
 export const OUTCOME_SIZE = { width: 200, height: 56 } as const;
@@ -23,4 +26,16 @@ export const RUN_TITLE_MAX_CHARS = 18;
 export function tailTruncate(text: string, maxChars: number): string {
   if (maxChars < 1 || text.length <= maxChars) return text;
   return `…${text.slice(text.length - (maxChars - 1))}`;
+}
+
+/** Each node's fixed box; the canvas hands the same sizes to React Flow so it never has to measure. */
+export function nodeSize(data: FlowNodeData): { width: number; height: number } {
+  switch (data.kind) {
+    case "trigger":
+      return TRIGGER_SIZE;
+    case "run":
+      return { width: RUN_WIDTH, height: runHeight(trayServices(data.run).length) };
+    case "outcome":
+      return OUTCOME_SIZE;
+  }
 }

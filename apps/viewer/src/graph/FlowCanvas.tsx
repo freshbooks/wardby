@@ -7,6 +7,7 @@ import { buildGraph, type FlowGraph } from "./build";
 import { outcomeLabel, OutcomeNode } from "./nodes/OutcomeNode";
 import { RunNode } from "./nodes/RunNode";
 import { TriggerNode } from "./nodes/TriggerNode";
+import { nodeSize } from "./sizes";
 
 const nodeTypes = { trigger: TriggerNode, run: RunNode, outcome: OutcomeNode };
 
@@ -112,10 +113,17 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
     for (const n of graph.nodes) {
       const position = positions.get(n.id);
       if (position) {
+        // Sizes are known (sizes.ts), so pass them as already measured: React Flow resets a
+        // node's measurement whenever it gets a new node object, and a node updated faster
+        // than it re-measures could otherwise stay hidden.
+        const size = nodeSize(n.data);
         out.push({
           id: n.id,
           type: n.type,
           position,
+          width: size.width,
+          height: size.height,
+          measured: size,
           ariaLabel: nodeLabel(n.data),
           data: n.data as unknown as Record<string, unknown>,
         });

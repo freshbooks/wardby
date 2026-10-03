@@ -1,7 +1,6 @@
 import ELK from "elkjs/lib/elk.bundled.js";
 import type { FlowGraph, FlowNodeData } from "./build";
-import { trayServices } from "./services";
-import { OUTCOME_SIZE, RUN_WIDTH, TREE_GAP, TRIGGER_SIZE, runHeight } from "./sizes";
+import { nodeSize, TREE_GAP } from "./sizes";
 
 type Size = { width: number; height: number };
 
@@ -14,18 +13,7 @@ export async function layoutGraph(
   const positions = new Map<string, { x: number; y: number }>();
   if (graph.nodes.length === 0) return positions;
 
-  const sizeOf = (n: FlowGraph["nodes"][number]): Size => {
-    const override = sizes[n.type];
-    if (override) return override;
-    switch (n.data.kind) {
-      case "trigger":
-        return TRIGGER_SIZE;
-      case "run":
-        return { width: RUN_WIDTH, height: runHeight(trayServices(n.data.run).length) };
-      case "outcome":
-        return OUTCOME_SIZE;
-    }
-  };
+  const sizeOf = (n: FlowGraph["nodes"][number]): Size => sizes[n.type] ?? nodeSize(n.data);
 
   // Connected components (one run tree each), in first-node order: buildGraph emits newest root first.
   const parent = new Map<string, string>(graph.nodes.map((n) => [n.id, n.id]));
