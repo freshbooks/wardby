@@ -4,11 +4,21 @@ import type { FramePayload, ServerSummary } from "./api/client";
 
 let servers: ServerSummary[] = [];
 let handler: ((p: FramePayload) => void) | null = null;
+let canvasBoom = false;
+
+vi.mock("./graph/FlowCanvas", () => ({
+  FlowCanvas: () => {
+    if (canvasBoom) throw new Error("kaboom");
+    return null;
+  },
+}));
 
 vi.mock("./api/client", () => ({
   isAppError: (e: unknown) => typeof e === "object" && e !== null && "kind" in e && "message" in e,
   listServers: vi.fn(async () => servers),
   addServer: vi.fn(async () => undefined),
+  signOut: vi.fn(async () => undefined),
+  removeServer: vi.fn(async () => undefined),
   signIn: vi.fn(),
   cancelSignIn: vi.fn(async () => undefined),
   onFrame: vi.fn(async (cb: (p: FramePayload) => void) => {
@@ -34,6 +44,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   servers = [];
   handler = null;
+  canvasBoom = false;
 });
 
 describe("App", () => {
@@ -84,13 +95,80 @@ describe("App", () => {
     expect(screen.getByLabelText("Server")).toHaveValue("https://d.example");
   });
 
-  it("closes the server dialog on Escape when other servers exist", async () => {
+  it("closes the server dialog on Escape, returns focus, and keeps the live view running", async () => {
     servers = [{ name: "Prod", url: "https://w.example", signed_in: true }];
     render(<App />);
     await screen.findByText(/Today/);
-    fireEvent.change(screen.getByLabelText("Server"), { target: { value: "__add" } });
+    const select = screen.getByLabelText("Server");
+    select.focus();
+    fireEvent.change(select, { target: { value: "__add" } });
     const dialog = await screen.findByRole("dialog");
+    // The dashboard sits under the dialog: still rendered, stream untouched.
+    expect(screen.getByText(/Today/)).toBeInTheDocument();
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(select).toHaveFocus();
+    expect(client.connect).toHaveBeenCalledTimes(1);
+    expect(client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("signs out from the server menu and offers sign-in again", async () => {
+    servers = [{ name: "Prod", url: "https://w.example", signed_in: true }];
+    render(<App />);
+    await screen.findByText(/Today/);
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    servers = [{ name: "Prod", url: "https://w.example", signed_in: false }];
+    await waitFor(() => expect(client.signOut).toHaveBeenCalledWith("https://w.example"));
+    expect(await screen.findByRole("heading", { name: "Sign in to Prod" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+  });
+
+  it("removes a server only after confirmation", async () => {
+    servers = [
+      { name: "Prod", url: "https://w.example", signed_in: true },
+      { name: "Dev", url: "https://d.example", signed_in: true },
+    ];
+    render(<App />);
+    await screen.findByText(/Today/);
+    fireEvent.click(screen.getByRole("button", { name: "Remove server…" }));
+    const confirm = await screen.findByRole("alertdialog", { name: "Remove Prod?" });
+    fireEvent.keyDown(confirm, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(client.removeServer).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove server…" }));
+    servers = [servers[1]!];
+    fireEvent.click(await screen.findByRole("button", { name: "Remove server" }));
+    await waitFor(() => expect(client.removeServer).toHaveBeenCalledWith("https://w.example"));
+    await waitFor(() => expect(screen.getByLabelText("Server")).toHaveValue("https://d.example"));
+  });
+
+  it("asks to add a server again after the last one is removed", async () => {
+    servers = [{ name: "Prod", url: "https://w.example", signed_in: false }];
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove server…" }));
+    servers = [];
+    fireEvent.click(await screen.findByRole("button", { name: "Remove server" }));
+    expect(await screen.findByRole("dialog", { name: /add a wardby server/i })).toBeInTheDocument();
+  });
+
+  it("shows a failed sign-out instead of swallowing it", async () => {
+    servers = [{ name: "Prod", url: "https://w.example", signed_in: true }];
+    vi.mocked(client.signOut).mockRejectedValueOnce({ kind: "keychain", message: "locked" });
+    render(<App />);
+    await screen.findByText(/Today/);
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(await screen.findByText(/locked/)).toBeInTheDocument();
+  });
+
+  it("contains a rendering crash and offers a reload", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    servers = [{ name: "Prod", url: "https://w.example", signed_in: true }];
+    canvasBoom = true;
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Something went wrong" })).toBeInTheDocument();
+    expect(screen.getByText("kaboom")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reload" })).toBeInTheDocument();
+    vi.mocked(console.error).mockRestore();
   });
 });

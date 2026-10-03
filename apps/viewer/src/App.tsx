@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { listServers, type ServerSummary } from "./api/client";
+import { isAppError, listServers, removeServer, signOut, type AppError, type ServerSummary } from "./api/client";
 import { BottomBar } from "./chrome/BottomBar";
+import { ConfirmDialog } from "./chrome/ConfirmDialog";
+import { ErrorBoundary } from "./chrome/ErrorBoundary";
 import { ErrorLine } from "./chrome/ErrorLine";
 import { ServerDialog } from "./chrome/ServerDialog";
+import { ServerMenu } from "./chrome/ServerMenu";
 import { SignInGate } from "./chrome/SignInGate";
 import { TopBar } from "./chrome/TopBar";
 import { FlowCanvas } from "./graph/FlowCanvas";
@@ -17,10 +20,20 @@ interface DashboardProps {
   servers: ServerSummary[];
   onSelectServer: (url: string) => void;
   onAddServer: () => void;
+  onSignOut: () => void;
+  onRemoveServer: () => void;
   onChecked: (servers: ServerSummary[] | null, ok: boolean) => void;
 }
 
-function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: DashboardProps) {
+function Dashboard({
+  server,
+  servers,
+  onSelectServer,
+  onAddServer,
+  onSignOut,
+  onRemoveServer,
+  onChecked,
+}: DashboardProps) {
   const [filters, setFilters] = useState<Filters>(initialFilters);
   // The canvas highlights this run and the detail panel shows it.
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -54,6 +67,8 @@ function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: 
         selectedUrl={server.url}
         onSelectServer={onSelectServer}
         onAddServer={onAddServer}
+        onSignOut={onSignOut}
+        onRemoveServer={onRemoveServer}
         live={model.live}
         reconnecting={viewer.reconnecting}
         filters={view}
@@ -103,10 +118,17 @@ function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: 
   );
 }
 
+function toAppError(e: unknown): AppError {
+  return isAppError(e) ? e : { kind: "protocol", message: e instanceof Error ? e.message : String(e) };
+}
+
 export function App() {
   const [servers, setServers] = useState<ServerSummary[] | null>(null);
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  // A server whose removal awaits confirmation.
+  const [removing, setRemoving] = useState<ServerSummary | null>(null);
+  const [actionError, setActionError] = useState<AppError | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   // Bumped to restart the data flow (new connect) after a successful sign-in.
   const [epoch, setEpoch] = useState(0);
@@ -152,10 +174,52 @@ export function App() {
     }
   };
 
-  if (!selected || adding) {
+  // Signing out forgets this device's grant (Keychain entry and in-memory token);
+  // it is not revoked at the server.
+  const doSignOut = async (url: string) => {
+    setActionError(null);
+    try {
+      await signOut(url);
+    } catch (e) {
+      setActionError(toAppError(e));
+    }
+    await refresh();
+  };
+
+  const doRemove = async (server: ServerSummary) => {
+    setRemoving(null);
+    setActionError(null);
+    try {
+      await removeServer(server.url);
+    } catch (e) {
+      setActionError(toAppError(e));
+    }
+    if (selectedUrl === server.url) setSelectedUrl(null);
+    await refresh();
+  };
+
+  if (!selected) {
     return (
       <>
         {loadError && <ErrorLine error={{ kind: "storage", message: loadError }} />}
+        {actionError && <ErrorLine error={actionError} />}
+        <ServerDialog
+          onAdded={async () => {
+            const list = await listServers().catch(() => null);
+            if (list) {
+              setServers(list);
+              setSelectedUrl(list[0]?.url ?? null);
+            }
+          }}
+        />
+      </>
+    );
+  }
+
+  // The dashboard (and so its event stream) stays mounted under the dialogs.
+  const overlays = (
+    <>
+      {adding && (
         <ServerDialog
           onAdded={async () => {
             const list = await listServers().catch(() => null);
@@ -166,50 +230,75 @@ export function App() {
             }
             setAdding(false);
           }}
-          onCancel={selected ? () => setAdding(false) : undefined}
+          onCancel={() => setAdding(false)}
         />
+      )}
+      {removing && (
+        <ConfirmDialog
+          title={`Remove ${removing.name}?`}
+          message="This signs you out on this device and removes the server from the list. Nothing changes on the server."
+          confirmLabel="Remove server"
+          onConfirm={() => void doRemove(removing)}
+          onCancel={() => setRemoving(null)}
+        />
+      )}
+    </>
+  );
+
+  if (!selected.signed_in) {
+    return (
+      <>
+        <div className="app">
+          <header className="topbar">
+            <div className="topbar-row">
+              <span className="brand">wardby</span>
+              <label className="inline">
+                <span className="sr-only">Server</span>
+                <select
+                  aria-label="Server"
+                  value={selected.url}
+                  onChange={(e) => (e.target.value === "__add" ? setAdding(true) : setSelectedUrl(e.target.value))}
+                >
+                  {servers.map((s) => (
+                    <option key={s.url} value={s.url}>
+                      {s.name}
+                    </option>
+                  ))}
+                  <option value="__add">Add server…</option>
+                </select>
+              </label>
+              <ServerMenu signedIn={false} onSignOut={() => undefined} onRemove={() => setRemoving(selected)} />
+            </div>
+          </header>
+          <main className="main">
+            {actionError && <ErrorLine error={actionError} />}
+            <SignInGate key={selected.url} server={selected} onChecked={onChecked} />
+          </main>
+        </div>
+        {overlays}
       </>
     );
   }
 
-  if (!selected.signed_in) {
-    return (
-      <div className="app">
-        <header className="topbar">
-          <div className="topbar-row">
-            <span className="brand">wardby</span>
-            <label className="inline">
-              <span className="sr-only">Server</span>
-              <select
-                aria-label="Server"
-                value={selected.url}
-                onChange={(e) => (e.target.value === "__add" ? setAdding(true) : setSelectedUrl(e.target.value))}
-              >
-                {servers.map((s) => (
-                  <option key={s.url} value={s.url}>
-                    {s.name}
-                  </option>
-                ))}
-                <option value="__add">Add server…</option>
-              </select>
-            </label>
-          </div>
-        </header>
-        <main className="main">
-          <SignInGate key={selected.url} server={selected} onChecked={onChecked} />
-        </main>
-      </div>
-    );
-  }
-
   return (
-    <Dashboard
-      key={`${selected.url}#${epoch}`}
-      server={selected}
-      servers={servers}
-      onSelectServer={setSelectedUrl}
-      onAddServer={() => setAdding(true)}
-      onChecked={onChecked}
-    />
+    <>
+      <ErrorBoundary key={`${selected.url}#${epoch}`}>
+        <Dashboard
+          server={selected}
+          servers={servers}
+          onSelectServer={setSelectedUrl}
+          onAddServer={() => setAdding(true)}
+          onSignOut={() => void doSignOut(selected.url)}
+          onRemoveServer={() => setRemoving(selected)}
+          onChecked={onChecked}
+        />
+      </ErrorBoundary>
+      {actionError && (
+        <div className="toast">
+          <ErrorLine error={actionError} />
+        </div>
+      )}
+      {overlays}
+    </>
   );
 }

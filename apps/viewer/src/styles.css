@@ -153,18 +153,21 @@ button:disabled {
   padding: 0;
 }
 
-.agent-filter {
+.agent-filter,
+.server-menu {
   position: relative;
 }
 
-.agent-filter summary {
+.agent-filter summary,
+.server-menu summary {
   cursor: pointer;
   padding: 0.3rem 0.6rem;
   border: 1px solid var(--border);
   border-radius: 6px;
 }
 
-.agent-filter .popover {
+.agent-filter .popover,
+.server-menu .popover {
   position: absolute;
   z-index: 10;
   margin-top: 0.25rem;
@@ -274,6 +277,18 @@ button:disabled {
 .dialog label {
   display: grid;
   gap: 0.25rem;
+}
+
+.toast {
+  position: fixed;
+  bottom: 2.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 0.75rem;
 }
 
 .dialog-actions,

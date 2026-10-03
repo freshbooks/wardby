@@ -1,5 +1,6 @@
 import type { ServerSummary } from "../api/client";
 import type { ViewerModel } from "../state/reducer";
+import { ServerMenu } from "./ServerMenu";
 import { STATUS_GROUPS, WINDOWS, type Filters, type StatusGroup, type WindowSize } from "../state/filters";
 
 const GROUP_LABEL: Record<StatusGroup, string> = {
@@ -14,6 +15,8 @@ interface Props {
   selectedUrl: string | null;
   onSelectServer: (url: string) => void;
   onAddServer: () => void;
+  onSignOut: () => void;
+  onRemoveServer: () => void;
   live: boolean;
   reconnecting: boolean;
   filters: Filters;
@@ -63,6 +66,7 @@ export function TopBar(props: Props) {
             <option value="__add">Add server…</option>
           </select>
         </label>
+        <ServerMenu signedIn onSignOut={props.onSignOut} onRemove={props.onRemoveServer} />
         <span
           className={`badge ${props.live ? "live" : props.reconnecting ? "reconnecting" : "offline"}`}
           role="status"

@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { addServer, isAppError, type AppError } from "../api/client";
 import { ErrorLine } from "./ErrorLine";
+import { useFocusReturn } from "./useFocusReturn";
 
 interface Props {
   /** Called after the server was saved. */
@@ -17,12 +18,7 @@ export function ServerDialog({ onAdded, onCancel }: Props) {
   const [error, setError] = useState<AppError | null>(null);
 
   // Focus moves into the dialog (autoFocus) and returns to the opener on close.
-  useEffect(() => {
-    const opener = document.activeElement;
-    return () => {
-      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
-    };
-  }, []);
+  useFocusReturn();
 
   async function submit(e: FormEvent) {
     e.preventDefault();
