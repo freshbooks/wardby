@@ -5,6 +5,10 @@ import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../prov
 import type { LlmProvider } from "../providers/index.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { executeRun, runAgent, RunCancelledError, type RunnerDb } from "./runner.js";
+import { RoutingLlmProvider, type CatalogLlmAdapter } from "../providers/llm/routing.js";
+import { buildCatalog } from "../providers/llm/catalog.js";
+import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
+import type { CatalogEntry, CatalogRow } from "../providers/llm/catalog-types.js";
 
 // Phase 3: executeRun is a thin wrapper — budget/loop logic now lives in
 // the Engine (covered by engine-native.test.ts). These tests cover the
@@ -124,6 +128,7 @@ function fakeDb(
           const allowed = typeof where.status === "string" ? [where.status] : where.status.in;
           if (!allowed.includes(record.status)) return { count: 0 };
         }
+        if ("pricingVersion" in where && (record.pricingVersion ?? null) !== where.pricingVersion) return { count: 0 };
         runs.set(where.id, { ...record, ...data });
         return { count: 1 };
       }) as any,
@@ -1372,5 +1377,87 @@ describe("coding agents on a deployment without a container executor", () => {
     expect(result.error).toMatch(expectedCause);
     expect(result.error).not.toMatch(/Phase 5/);
     expect(Number(result.costUsd)).toBe(0);
+  });
+});
+
+describe("native runs record and keep their catalog entry", () => {
+  const sonnet = SHIPPED_CATALOG.find((e) => e.modelId === "claude-sonnet-5")!;
+  const agent = { id: "a1", name: "writer", systemPrompt: "s", model: "claude-sonnet-5", budgetUsd: 10, maxTurns: 10 };
+  const disabled: CatalogRow[] = [
+    { ...sonnet, enabled: false, sourceUrl: "x", updatedBy: "admin", updatedAt: new Date("2026-10-02T00:00:00Z") },
+  ];
+
+  /** A catalog-routed LLM whose adapter remembers which entry each run was bound to. */
+  function routed(rows: CatalogRow[] = []) {
+    const boundTo: CatalogEntry[] = [];
+    const adapter: CatalogLlmAdapter = {
+      async *stream() {},
+      countTokens: async () => 1,
+      priceUsd: () => 0,
+      withEntry: (entry) => {
+        boundTo.push(entry);
+        return adapter;
+      },
+    };
+    const llm = new RoutingLlmProvider([{ provider: "anthropic", adapter }], () =>
+      buildCatalog(SHIPPED_CATALOG, rows, "2026-10-03"),
+    );
+    return { llm, boundTo };
+  }
+
+  const usage = { tokensIn: 100, tokensOut: 10, costUsd: 0.01 };
+  const succeeded: EngineResult = { status: "succeeded", finalText: "ok", turns: 1, usage };
+  const providers = (llm: LlmProvider, engine: Engine) => ({
+    llm,
+    engine,
+    datastore: fakeDatastore(),
+    secrets: noopSecretCipher,
+    memory: fakeMemory(),
+  });
+
+  it("records the current entry on the run and runs the engine bound to it", async () => {
+    const db = fakeDb([agent]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const { llm, boundTo } = routed();
+
+    const finished = await executeRun(run.id, providers(llm, fakeEngine(succeeded)), db);
+
+    const row: any = await db.run.findUnique({ where: { id: run.id } });
+    expect(finished.status).toBe("succeeded");
+    expect(row.pricingVersion).toBe("shipped:2026-10-03");
+    expect(row.pricingSnapshot.modelId).toBe("claude-sonnet-5");
+    expect(boundTo).toEqual([expect.objectContaining({ modelId: "claude-sonnet-5" })]);
+  });
+
+  it("a stored entry beats the live catalog: a resumed run whose model was since disabled still runs at its own prices", async () => {
+    const db = fakeDb([agent]);
+    const stored = { ...sonnet, efforts: [...sonnet.efforts], outputPerMTok: 99 };
+    const run = await db.run.create({
+      data: { agentId: "a1", pricingVersion: "2026-10-01T00:00:00.000Z", pricingSnapshot: stored },
+    });
+    const { llm, boundTo } = routed(disabled);
+
+    const finished = await executeRun(run.id, providers(llm, fakeEngine(succeeded)), db);
+
+    expect(finished.status).not.toBe("failed");
+    expect(boundTo).toEqual([expect.objectContaining({ outputPerMTok: 99 })]);
+    const row: any = await db.run.findUnique({ where: { id: run.id } });
+    expect(row.pricingVersion).toBe("2026-10-01T00:00:00.000Z");
+  });
+
+  it("fails a run whose model is disabled before any spend, with model_unavailable", async () => {
+    const db = fakeDb([agent]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const { llm } = routed(disabled);
+    const engine = { run: vi.fn(async () => succeeded) };
+
+    const finished = await executeRun(run.id, providers(llm, engine), db);
+
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/^model_unavailable: .*reason: disabled/);
+    expect(finished.costUsd).toBe(0);
+    expect(engine.run).not.toHaveBeenCalled();
+    const row: any = await db.run.findUnique({ where: { id: run.id } });
+    expect(row.pricingVersion ?? null).toBeNull();
   });
 });
