@@ -40,6 +40,10 @@ async function main(): Promise<void> {
     // database client, or HTTP runtime just to search documentation.
     const { helpCommand } = await import("./help/cli.js");
     await helpCommand(process.argv.slice(3));
+  } else if (command === "knowledge") {
+    // Offline bundle validation: no environment, database, or HTTP runtime.
+    const { knowledgeCommand } = await import("./knowledge/cli.js");
+    await knowledgeCommand(process.argv.slice(3));
   } else {
     await import("./cli.js");
   }
