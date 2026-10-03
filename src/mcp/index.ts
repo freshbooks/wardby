@@ -53,7 +53,7 @@ import { createViewerEventBus } from "../viewer/event-bus.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerServiceTools } from "./tools/services.js";
 import { registerBudgetGroupTools } from "./tools/budget-groups.js";
-import { registerModelTools } from "./tools/models.js";
+import { registerModelCatalogTools } from "./tools/model-catalog.js";
 import { registerHelpTools } from "./tools/help.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
@@ -120,12 +120,17 @@ export function localOperatorContext(
 /** Registers the full Phase 4 tool surface — every module, in one place. */
 export function registerAllTools(
   mcp: WardbyMcpServer,
-  opts: { secretElicitationUrl: SecretElicitationUrlBuilder; secretElicitationProtocol: boolean },
+  opts: {
+    secretElicitationUrl: SecretElicitationUrlBuilder;
+    secretElicitationProtocol: boolean;
+    /** Rebuilds the process's installed model CatalogStore after set_model/disable_model/reset_model. */
+    refreshModelCatalog?: () => Promise<void>;
+  },
 ): void {
   registerAgentTools(mcp);
   registerServiceTools(mcp);
   registerBudgetGroupTools(mcp);
-  registerModelTools(mcp);
+  registerModelCatalogTools(mcp, { refresh: opts.refreshModelCatalog });
   registerHelpTools(mcp);
   registerTriggerTool(mcp);
   registerToolAuthoringTools(mcp);
@@ -262,6 +267,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     registerAllTools(mcp, {
       secretElicitationUrl: (token) => secretElicitationHost.urlFor(token),
       secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
+      refreshModelCatalog: () => modelCatalog.refreshNow(),
     });
 
     // stdio never carries per-call AuthInfo — one fixed, fully-trusted
@@ -301,6 +307,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     secretElicitationUrl: (token) =>
       Promise.resolve(`${httpOrigin}${SECRET_ELICITATION_PATH}?t=${encodeURIComponent(token)}`),
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
+    refreshModelCatalog: () => modelCatalog.refreshNow(),
   });
 
   const eventConfig = loadGitHubEventConfig();
