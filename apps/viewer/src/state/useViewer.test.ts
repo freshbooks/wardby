@@ -135,6 +135,65 @@ describe("useViewer", () => {
     expect(fetches()).toBe(0);
   });
 
+  it("Retry runs connect again after it failed for a reason other than sign-in", async () => {
+    vi.mocked(client.connect).mockRejectedValueOnce({ kind: "keychain", message: "locked" });
+    const { result } = renderHook(() => useViewer(URL_, { since: "1h", limit: 500 }));
+    await settle();
+    expect(result.current.error?.kind).toBe("keychain");
+    expect(client.connect).toHaveBeenCalledTimes(1);
+    expect(fetches()).toBe(0);
+    act(() => result.current.retry());
+    await settle();
+    expect(client.connect).toHaveBeenCalledTimes(2);
+    expect(result.current.error).toBeNull();
+    expect(result.current.loaded).toBe(true);
+  });
+
+  it("drops the live badge when the view is torn down or switches server", async () => {
+    const { result, rerender } = renderHook(
+      ({ url }: { url: string | null }) => useViewer(url, { since: "1h", limit: 500 }),
+      {
+        initialProps: { url: URL_ as string | null },
+      },
+    );
+    await settle();
+    await send({ type: "status", connected: true });
+    expect(result.current.model.live).toBe(true);
+    // No server left to show: nothing may keep claiming the stream is live.
+    rerender({ url: null });
+    expect(result.current.model.live).toBe(false);
+    expect(client.disconnect).toHaveBeenCalledWith(URL_);
+  });
+
+  it("a switched-to server is not live until its own stream says so", async () => {
+    const { result, rerender } = renderHook(({ url }) => useViewer(url, { since: "1h", limit: 500 }), {
+      initialProps: { url: URL_ },
+    });
+    await settle();
+    await send({ type: "status", connected: true });
+    expect(result.current.model.live).toBe(true);
+    rerender({ url: "https://b.example" });
+    await settle();
+    expect(result.current.model.live).toBe(false);
+    // A straggler from the old server's stream changes nothing.
+    await send({ type: "status", connected: true });
+    expect(result.current.model.live).toBe(false);
+    act(() => handler!({ server: "https://b.example", frame: { type: "status", connected: true } }));
+    expect(result.current.model.live).toBe(true);
+  });
+
+  it("ignores malformed event frames", async () => {
+    const { result } = renderHook(() => useViewer(URL_, { since: "1h", limit: 500 }));
+    await settle();
+    await send({ type: "event", kind: "run", data: null as unknown as ViewerEvent });
+    await send({ type: "event", kind: "run", data: { kind: "run" } as unknown as ViewerEvent });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(fetches()).toBe(1);
+    expect(result.current.model.ticker).toHaveLength(0);
+  });
+
   it("refetches when the window changes", async () => {
     const { rerender } = renderHook(({ since }) => useViewer(URL_, { since, limit: 500 }), {
       initialProps: { since: "1h" },

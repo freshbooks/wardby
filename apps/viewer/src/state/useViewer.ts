@@ -3,7 +3,7 @@
 // graph on every `resync` and (debounced) when an event references an unknown run.
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { connect, disconnect, fetchGraph, isAppError, onFrame, type AppError, type FramePayload } from "../api/client";
-import { initialModel, reduce, type ViewerModel } from "./reducer";
+import { initialModel, isViewerEvent, reduce, type ViewerModel } from "./reducer";
 
 export const REFETCH_DEBOUNCE_MS = 750;
 /** Delays before automatic retries of a failed load; after these, the user retries. */
@@ -55,6 +55,8 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
   const agentNames = useRef(new Map<string, string>());
   const knownRuns = useRef<ReadonlySet<string>>(new Set());
   const loadRef = useRef<(() => void) | null>(null);
+  /** Retry for the current server: reconnects first when connect itself failed. */
+  const retryRef = useRef<(() => void) | null>(null);
   /** A load has been requested for the current server (so a window change must refetch). */
   const requestedRef = useRef(false);
 
@@ -79,6 +81,7 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
     let timer: ReturnType<typeof setTimeout> | undefined;
     let lastFetchAt = 0;
     let failed = false;
+    let connectFailed = false;
     let failures = 0;
     // Events that needed a refetch vs. how many the last fetch started after.
     let needSeq = 0;
@@ -130,6 +133,26 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
     };
     loadRef.current = () => void load();
 
+    // Connect failures that need no sign-in (the Keychain, a broken config) do not heal
+    // by themselves, so Retry runs connect again before loading.
+    const open = async () => {
+      try {
+        await connect(serverUrl);
+        connectFailed = false;
+        if (active && !requestedRef.current) void load();
+      } catch (e) {
+        if (!active) return;
+        const err = toAppError(e);
+        connectFailed = err.kind !== "not_signed_in" && err.kind !== "forbidden";
+        patch({ error: err });
+      }
+    };
+    retryRef.current = () => {
+      if (!connectFailed) return void load();
+      patch({ error: null });
+      void open();
+    };
+
     const handle = ({ server, frame }: FramePayload) => {
       if (!active || server !== serverUrl) return;
       switch (frame.type) {
@@ -146,6 +169,8 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
           void load();
           break;
         case "event": {
+          // Dropped, not thrown on: a newer server may send shapes this build predates.
+          if (!isViewerEvent(frame.data)) break;
           const unknown = frame.data.kind === "outcome" || !knownRuns.current.has(frame.data.runId);
           if (unknown) {
             needSeq += 1;
@@ -178,8 +203,7 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
           return;
         }
         unlisten = off;
-        await connect(serverUrl);
-        if (active && !requestedRef.current) void load();
+        await open();
       } catch (e) {
         if (active) patch({ error: toAppError(e) });
       }
@@ -188,13 +212,17 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
     return () => {
       active = false;
       loadRef.current = null;
+      retryRef.current = null;
+      // The stream is stopped below, so nothing may go on claiming it is live
+      // (also covers a view that is torn down without a new server to reset for).
+      dispatch({ type: "status", connected: false });
       clearTimeout(timer);
       unlisten?.();
       void disconnect(serverUrl).catch(() => undefined);
     };
   }, [serverUrl]);
 
-  const retry = useCallback(() => loadRef.current?.(), []);
+  const retry = useCallback(() => retryRef.current?.(), []);
 
   return {
     model,

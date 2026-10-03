@@ -11,8 +11,6 @@ export interface ViewerModel {
   truncated: boolean;
   /** From SSE status frames. */
   live: boolean;
-  /** An event referenced something the snapshot lacks. */
-  needsRefetch: boolean;
   /** Newest first, max TICKER_MAX. */
   ticker: TickerItem[];
 }
@@ -30,7 +28,6 @@ export const initialModel: ViewerModel = {
   spend: null,
   truncated: false,
   live: false,
-  needsRefetch: false,
   ticker: [],
 };
 
@@ -71,10 +68,14 @@ function upsertService(
   return services.map((s, i) => (i === index ? { ...s, state: event.state, attempts: event.attempts } : s));
 }
 
-function applyEvent(model: ViewerModel, event: ViewerEvent, at: number): Pick<ViewerModel, "runs" | "needsRefetch"> {
-  if (event.kind === "outcome") return { runs: model.runs, needsRefetch: true };
+/**
+ * Events with an unknown run or an outcome change nothing here: the hook sees
+ * them first and refetches the graph, which is where they show up.
+ */
+function applyEvent(model: ViewerModel, event: ViewerEvent, at: number): ViewerModel["runs"] {
+  if (event.kind === "outcome") return model.runs;
   const run = model.runs.get(event.runId);
-  if (!run) return { runs: model.runs, needsRefetch: true };
+  if (!run) return model.runs;
   const updated: GraphRun =
     event.kind === "run"
       ? {
@@ -90,7 +91,37 @@ function applyEvent(model: ViewerModel, event: ViewerEvent, at: number): Pick<Vi
       : { ...run, services: upsertService(run.services, event, at) };
   const runs = new Map(model.runs);
   runs.set(run.id, updated);
-  return { runs, needsRefetch: model.needsRefetch };
+  return runs;
+}
+
+const isString = (v: unknown): v is string => typeof v === "string";
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const isNullable = <T>(v: unknown, is: (x: unknown) => x is T): v is T | null => v === null || is(v);
+
+/** Cheap shape check for an event off the wire, so a malformed one is dropped, not thrown on. */
+export function isViewerEvent(v: unknown): v is ViewerEvent {
+  if (typeof v !== "object" || v === null) return false;
+  const e = v as Record<string, unknown>;
+  if (!isString(e.runId)) return false;
+  switch (e.kind) {
+    case "run":
+      return (
+        isString(e.agentId) &&
+        isString(e.status) &&
+        isNum(e.turns) &&
+        isNum(e.tokensIn) &&
+        isNum(e.tokensOut) &&
+        isNum(e.costUsd) &&
+        isNullable(e.finishedAt, isString) &&
+        isNullable(e.parentRunId, isString)
+      );
+    case "service":
+      return isString(e.name) && isString(e.state) && isNullable(e.attempts, isNum);
+    case "outcome":
+      return isString(e.source);
+    default:
+      return false;
+  }
 }
 
 export function reduce(model: ViewerModel, action: Action): ViewerModel {
@@ -101,12 +132,12 @@ export function reduce(model: ViewerModel, action: Action): ViewerModel {
         runs: new Map(action.snapshot.runs.map((r) => [r.id, r])),
         spend: action.snapshot.spend,
         truncated: action.snapshot.truncated,
-        needsRefetch: false,
       };
     case "event": {
-      const applied = applyEvent(model, action.event, action.at);
+      if (!isViewerEvent(action.event)) return model;
+      const runs = applyEvent(model, action.event, action.at);
       const item: TickerItem = { at: action.at, text: tickerText(action.event, action.agentName) };
-      return { ...model, ...applied, ticker: [item, ...model.ticker].slice(0, TICKER_MAX) };
+      return { ...model, runs, ticker: [item, ...model.ticker].slice(0, TICKER_MAX) };
     }
     case "status":
       return { ...model, live: action.connected };

@@ -71,13 +71,12 @@ const runEvent = (over: Partial<Extract<ViewerEvent, { kind: "run" }>> = {}): Vi
 });
 
 describe("reduce", () => {
-  it("snapshot replaces runs, spend, truncated and clears needsRefetch", () => {
-    const stale = { ...initialModel, needsRefetch: true, runs: new Map([["old", makeRun("old")]]) };
+  it("snapshot replaces runs, spend and truncated", () => {
+    const stale = { ...initialModel, runs: new Map([["old", makeRun("old")]]) };
     const next = reduce(stale, { type: "snapshot", snapshot: makeSnapshot([makeRun("a"), makeRun("b")], true) });
     expect([...next.runs.keys()]).toEqual(["a", "b"]);
     expect(next.spend).toEqual({ todayUsd: 1.5, groups: [] });
     expect(next.truncated).toBe(true);
-    expect(next.needsRefetch).toBe(false);
   });
 
   it("run event on a known run merges fields", () => {
@@ -93,12 +92,12 @@ describe("reduce", () => {
       parentRunId: "parent-1",
       agentName: "Triage",
     });
-    expect(next.needsRefetch).toBe(false);
   });
 
-  it("run event on an unknown run sets needsRefetch", () => {
-    const next = reduce(loaded(), { type: "event", event: runEvent({ runId: "zzz-unknown" }), at: 1 });
-    expect(next.needsRefetch).toBe(true);
+  it("run event on an unknown run leaves the runs alone (the hook refetches)", () => {
+    const before = loaded();
+    const next = reduce(before, { type: "event", event: runEvent({ runId: "zzz-unknown" }), at: 1 });
+    expect(next.runs).toBe(before.runs);
     expect(next.runs.has("zzz-unknown")).toBe(false);
   });
 
@@ -131,14 +130,43 @@ describe("reduce", () => {
     });
   });
 
-  it("service event on an unknown run sets needsRefetch", () => {
+  it("service event on an unknown run leaves the runs alone", () => {
+    const before = loaded();
     const event: ViewerEvent = { kind: "service", runId: "nope", name: "db", state: "ready", attempts: 1 };
-    expect(reduce(loaded(), { type: "event", event, at: 1 }).needsRefetch).toBe(true);
+    expect(reduce(before, { type: "event", event, at: 1 }).runs).toBe(before.runs);
   });
 
-  it("outcome event sets needsRefetch", () => {
+  it("outcome event leaves the runs alone but is shown in the ticker", () => {
+    const before = loaded();
     const event: ViewerEvent = { kind: "outcome", runId: "run-abcdef123456", source: "pull_request" };
-    expect(reduce(loaded(), { type: "event", event, at: 1 }).needsRefetch).toBe(true);
+    const next = reduce(before, { type: "event", event, at: 1 });
+    expect(next.runs).toBe(before.runs);
+    expect(next.ticker).toHaveLength(1);
+  });
+
+  it("ignores malformed events instead of throwing", () => {
+    const before = loaded();
+    const bad: unknown[] = [
+      null,
+      undefined,
+      "run",
+      42,
+      {},
+      { kind: "mystery", runId: "run-abcdef123456" },
+      { kind: "run" },
+      { kind: "run", runId: 7 },
+      { ...runEvent(), turns: "3" },
+      { ...runEvent(), costUsd: null },
+      { ...runEvent(), status: undefined },
+      { ...runEvent(), finishedAt: 5 },
+      { kind: "service", runId: "run-abcdef123456", name: "db" },
+      { kind: "service", runId: "run-abcdef123456", name: "db", state: "ready", attempts: "2" },
+      { kind: "outcome", runId: "run-abcdef123456" },
+    ];
+    for (const event of bad) {
+      const next = reduce(before, { type: "event", event: event as ViewerEvent, at: 1 });
+      expect(next, JSON.stringify(event)).toBe(before);
+    }
   });
 
   it("pushes ticker lines for each event kind", () => {
