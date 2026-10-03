@@ -1,6 +1,7 @@
 import type { ServerSummary } from "../api/client";
 import type { ViewerModel } from "../state/reducer";
 import { ServerMenu } from "./ServerMenu";
+import { formatSpanTime, plural } from "../timeline/Timeline";
 import { STATUS_GROUPS, WINDOWS, type Filters, type StatusGroup, type WindowSize } from "../state/filters";
 
 const GROUP_LABEL: Record<StatusGroup, string> = {
@@ -25,6 +26,9 @@ interface Props {
   spend: ViewerModel["spend"];
   /** Sum of costUsd over the runs in the current snapshot (the selected window). */
   windowSpendUsd: number;
+  /** Runs (matching the other filters) that fall inside the brushed range. */
+  rangeRunCount: number;
+  onClearRange: () => void;
 }
 
 function toggled<T>(set: ReadonlySet<T>, value: T): Set<T> {
@@ -134,6 +138,17 @@ export function TopBar(props: Props) {
           value={filters.search}
           onChange={(e) => set({ search: e.target.value })}
         />
+        {filters.timeRange && (
+          <div className="range-chip">
+            <span>
+              {formatSpanTime(filters.window, filters.timeRange.from)} →{" "}
+              {formatSpanTime(filters.window, filters.timeRange.to)} · {plural(props.rangeRunCount, "run")}
+            </span>
+            <button type="button" aria-label="Clear time range" title="Clear time range" onClick={props.onClearRange}>
+              ✕
+            </button>
+          </div>
+        )}
         {spend && (
           <div className="spend" aria-label="Today's spend">
             <span>

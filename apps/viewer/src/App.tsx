@@ -11,7 +11,7 @@ import { TopBar, windowSpend } from "./chrome/TopBar";
 import { FlowCanvas } from "./graph/FlowCanvas";
 import { DetailPanel } from "./panel/DetailPanel";
 import { Timeline } from "./timeline/Timeline";
-import { changeFilters, initialFilters, visibleRuns, type Filters } from "./state/filters";
+import { changeFilters, initialFilters, matchesFilters, visibleRuns, type Filters } from "./state/filters";
 import { useViewer } from "./state/useViewer";
 
 const GRAPH_LIMIT = 500;
@@ -62,6 +62,19 @@ function Dashboard({
   }, [filters, agents]);
 
   const shown = useMemo(() => visibleRuns(runs, view), [runs, view]);
+  // The timeline follows every filter except the brushed range itself.
+  const timelineRuns = useMemo(
+    () => runs.filter((r) => matchesFilters(r, view, { ignoreTimeRange: true })),
+    [runs, view],
+  );
+  const rangeRunCount = useMemo(() => {
+    const range = view.timeRange;
+    if (!range) return 0;
+    return timelineRuns.filter((r) => {
+      const t = Date.parse(r.startedAt);
+      return t >= range.from && t <= range.to;
+    }).length;
+  }, [timelineRuns, view.timeRange]);
   const setRange = useCallback((timeRange: Filters["timeRange"]) => setFilters((f) => ({ ...f, timeRange })), []);
 
   return (
@@ -80,6 +93,8 @@ function Dashboard({
         agents={agents}
         spend={model.spend}
         windowSpendUsd={windowSpend(runs)}
+        rangeRunCount={rangeRunCount}
+        onClearRange={() => setRange(null)}
       />
       <main className="main">
         {viewer.needsSignIn ? (
@@ -106,7 +121,7 @@ function Dashboard({
             {!viewer.loaded && !viewer.error && <p className="muted">Loading…</p>}
             {viewer.loaded && (
               <Timeline
-                runs={runs}
+                runs={timelineRuns}
                 window={filters.window}
                 timeRange={filters.timeRange}
                 onRangeChange={setRange}

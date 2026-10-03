@@ -42,7 +42,20 @@ export const hhmm = (t: number) => {
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const withDay = (t: number) => `${WEEKDAYS[new Date(t).getDay()]} ${hhmm(t)}`;
 
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** Time label for a window: weekday plus time on the 7d view. */
+export const formatSpanTime = (win: WindowSize, t: number) => (win === "7d" ? withDay(t) : hhmm(t));
+
+const TICK_CHAR_W = 6.5;
+
+/** Anchor a tick label so it stays inside [0, width]: start at the left edge, end at the right. */
+export function tickAnchor(x: number, label: string, width: number): "start" | "middle" | "end" {
+  const half = (label.length * TICK_CHAR_W) / 2;
+  if (x - half < 0) return "start";
+  if (x + half > width) return "end";
+  return "middle";
+}
 
 export function bucketCountFor(width: number): number {
   return Math.max(MIN_BUCKETS, Math.min(MAX_BUCKETS, Math.floor(width / 10)));
@@ -113,7 +126,7 @@ export function Timeline({ runs, window: win, timeRange, onRangeChange, onSelect
 
   const ticks = useMemo(() => ticksFor(start, end, TICK_STEP_MS[win]), [start, end, win]);
   const fmtTick = win === "7d" ? (t: number) => WEEKDAYS[new Date(t).getDay()]! : hhmm;
-  const fmtSpan = win === "7d" ? withDay : hhmm;
+  const fmtSpan = (t: number) => formatSpanTime(win, t);
 
   // Pointer position in SVG user units.
   const localX = (e: PointerEvent) => {
@@ -190,7 +203,6 @@ export function Timeline({ runs, window: win, timeRange, onRangeChange, onSelect
     : timeRange
       ? { a: xOf(Math.max(start, timeRange.from)), b: xOf(Math.min(end, timeRange.to)) }
       : null;
-  const inRange = timeRange ? markers.filter((m) => m.t >= timeRange.from && m.t <= timeRange.to).length : 0;
 
   return (
     <div className="timeline" role="group" aria-label="Timeline" tabIndex={0} onKeyDown={onKeyDown}>
@@ -211,14 +223,18 @@ export function Timeline({ runs, window: win, timeRange, onRangeChange, onSelect
         onPointerLeave={() => setHover(null)}
       >
         <line className="timeline-baseline" x1={x0} x2={x1} y1={BASELINE} y2={BASELINE} />
-        {ticks.map((t) => (
-          <g key={t} className="timeline-tick">
-            <line x1={xOf(t)} x2={xOf(t)} y1={BASELINE} y2={BASELINE + 3} />
-            <text x={xOf(t)} y={TICK_Y} textAnchor="middle">
-              {fmtTick(t)}
-            </text>
-          </g>
-        ))}
+        {ticks.map((t) => {
+          const label = fmtTick(t);
+          const x = xOf(t);
+          return (
+            <g key={t} className="timeline-tick">
+              <line x1={x} x2={x} y1={BASELINE} y2={BASELINE + 3} />
+              <text x={x} y={TICK_Y} textAnchor={tickAnchor(x, label, width)}>
+                {label}
+              </text>
+            </g>
+          );
+        })}
         {shownBand && (
           <rect
             className="timeline-band"
@@ -309,21 +325,6 @@ export function Timeline({ runs, window: win, timeRange, onRangeChange, onSelect
       {hover && (
         <div role="tooltip" className="timeline-tooltip" style={{ left: `${(hover.x / width) * 100}%` }}>
           {hover.text}
-        </div>
-      )}
-      {timeRange && (
-        <div className="timeline-chip">
-          <span>
-            {fmtSpan(timeRange.from)} → {fmtSpan(timeRange.to)} · {plural(inRange, "run")}
-          </span>
-          <button
-            type="button"
-            aria-label="Clear time range"
-            title="Clear time range"
-            onClick={() => onRangeChange(null)}
-          >
-            ✕
-          </button>
         </div>
       )}
     </div>

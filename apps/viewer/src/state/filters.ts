@@ -58,9 +58,9 @@ export function statusGroup(status: RunStatus): StatusGroup {
   }
 }
 
-export function matchesFilters(run: GraphRun, filters: Filters): boolean {
+export function matchesFilters(run: GraphRun, filters: Filters, opts: { ignoreTimeRange?: boolean } = {}): boolean {
   if (!filters.statuses.has(statusGroup(run.status))) return false;
-  if (filters.timeRange) {
+  if (filters.timeRange && !opts.ignoreTimeRange) {
     const t = Date.parse(run.startedAt);
     if (!(t >= filters.timeRange.from && t <= filters.timeRange.to)) return false;
   }

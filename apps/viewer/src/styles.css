@@ -756,10 +756,7 @@ button:disabled {
   z-index: 2;
 }
 
-.timeline-chip {
-  position: absolute;
-  top: 4px;
-  left: 10px;
+.range-chip {
   display: flex;
   align-items: center;
   gap: 0.35rem;
@@ -769,10 +766,10 @@ button:disabled {
   border-radius: 999px;
   font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
-  z-index: 1;
+  white-space: nowrap;
 }
 
-.timeline-chip button {
+.range-chip button {
   padding: 0 0.35rem;
   border: 0;
   border-radius: 999px;

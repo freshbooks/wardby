@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GraphRun } from "../api/types";
-import { Timeline, hhmm } from "./Timeline";
+import { Timeline, hhmm, tickAnchor } from "./Timeline";
 
 const NOW = Date.UTC(2026, 0, 1, 13, 0, 0);
 const MIN = 60_000;
@@ -104,15 +104,34 @@ describe("Timeline", () => {
     expect(onRangeChange).toHaveBeenCalledWith(null);
   });
 
-  it("shows the range chip with a run count; the cross and Escape clear it", () => {
-    const range = { from: NOW - 30 * MIN, to: NOW };
-    const { onRangeChange } = setup({ timeRange: range });
-    expect(screen.getByText(`${hhmm(range.from)} → ${hhmm(range.to)} · 3 runs`)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /clear time range/i }));
-    expect(onRangeChange).toHaveBeenLastCalledWith(null);
-    onRangeChange.mockClear();
+  it("Escape clears the range", () => {
+    const { onRangeChange } = setup({ timeRange: { from: NOW - 30 * MIN, to: NOW } });
     fireEvent.keyDown(screen.getByRole("group", { name: "Timeline" }), { key: "Escape" });
     expect(onRangeChange).toHaveBeenCalledWith(null);
+    expect(screen.queryByRole("button", { name: /clear time range/i })).toBeNull();
+  });
+
+  it("keeps every tick label inside the bar", () => {
+    for (const win of ["1h", "6h", "24h", "7d"] as const) {
+      const { container, unmount } = setup({ window: win });
+      const texts = [...container.querySelectorAll<SVGTextElement>(".timeline-tick text")];
+      expect(texts.length).toBeGreaterThan(1);
+      for (const t of texts) {
+        const x = Number(t.getAttribute("x"));
+        const half = ((t.textContent ?? "").length * 6.5) / 2;
+        const a = t.getAttribute("text-anchor");
+        const left = a === "start" ? x : a === "end" ? x - 2 * half : x - half;
+        expect(left).toBeGreaterThanOrEqual(0);
+        expect(left + 2 * half).toBeLessThanOrEqual(800);
+      }
+      unmount();
+    }
+  });
+
+  it("anchors edge labels inward", () => {
+    expect(tickAnchor(10, "04:00", 800)).toBe("start");
+    expect(tickAnchor(400, "04:00", 800)).toBe("middle");
+    expect(tickAnchor(795, "04:00", 800)).toBe("end");
   });
 
   it("selects a run from its marker by click and Enter, with an accessible name", () => {
