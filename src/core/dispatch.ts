@@ -276,10 +276,67 @@ interface CodingBranch {
   rootCodingRunId?: string;
 }
 
+export type ContinuationRefusal = "unknown_run" | "other_repository" | "no_pull_request";
+
+const CONTINUATION_REFUSALS: Readonly<Record<ContinuationRefusal, string>> = {
+  unknown_run: "Cannot continue an unknown coding run.",
+  other_repository: "Cannot continue a coding run from a different repository.",
+  no_pull_request: "Cannot continue a coding run that never opened a pull request.",
+};
+
+/** A continuation refused because of the run it names. Its message is fixed text, safe to show the model. */
+export class ContinuationRefusedError extends Error {
+  constructor(readonly reason: ContinuationRefusal) {
+    super(CONTINUATION_REFUSALS[reason]);
+    this.name = "ContinuationRefusedError";
+  }
+}
+
+export type ContinuationCheck =
+  | { ok: true; root: { runId: string; baseRef: string; headRef: string; pullRequestNumber: number } }
+  | { ok: false; reason: ContinuationRefusal };
+
+/**
+ * Whether this deployment can continue coding run `runId` in `repository`: the
+ * run (or its root) is in this database, in that repository, and opened a pull
+ * request. A run id read from a pull request can name a run that another
+ * deployment sharing the same App made, so check before relying on one.
+ */
+export async function checkContinuation(
+  reader: Pick<DispatchTx, "codingRun">,
+  runId: string,
+  repository: string,
+): Promise<ContinuationCheck> {
+  const candidate = await reader.codingRun.findUnique({ where: { runId } });
+  if (!candidate) return { ok: false, reason: "unknown_run" };
+  const root = candidate.rootCodingRunId
+    ? await reader.codingRun.findUnique({ where: { runId: candidate.rootCodingRunId } })
+    : candidate;
+  if (!root) return { ok: false, reason: "unknown_run" };
+  if (normalizeGitHubRepository(root.repository) !== normalizeGitHubRepository(repository)) {
+    return { ok: false, reason: "other_repository" };
+  }
+  const rootResult = publicCodingRunResult(root.result);
+  if (
+    (rootResult?.outcome !== "pull_request_opened" && rootResult?.outcome !== "pull_request_updated") ||
+    rootResult.pullRequestNumber === undefined
+  ) {
+    return { ok: false, reason: "no_pull_request" };
+  }
+  return {
+    ok: true,
+    root: {
+      runId: root.runId,
+      baseRef: root.baseRef,
+      headRef: root.headRef,
+      pullRequestNumber: rootResult.pullRequestNumber,
+    },
+  };
+}
+
 /**
  * Resolves a coding run's branch: an override, else a continuation root's
- * (verified to be in the same repository and to have opened a pull request),
- * else the profile's base.
+ * (see checkContinuation), else the profile's base.
  */
 async function resolveCodingBranch(
   reader: Pick<DispatchTx, "codingRun">,
@@ -290,19 +347,9 @@ async function resolveCodingBranch(
   if (options.codingBaseRef !== undefined) {
     throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
   }
-  const candidate = await reader.codingRun.findUnique({ where: { runId: options.continuesCodingRunId } });
-  if (!candidate) throw new Error("Cannot continue an unknown coding run.");
-  const root = candidate.rootCodingRunId
-    ? await reader.codingRun.findUnique({ where: { runId: candidate.rootCodingRunId } })
-    : candidate;
-  if (!root) throw new Error("Cannot continue an unknown coding run.");
-  if (normalizeGitHubRepository(root.repository) !== normalizeGitHubRepository(profile.repository)) {
-    throw new Error("Cannot continue a coding run from a different repository.");
-  }
-  const rootResult = publicCodingRunResult(root.result);
-  if (rootResult?.outcome !== "pull_request_opened" && rootResult?.outcome !== "pull_request_updated") {
-    throw new Error("Cannot continue a coding run that never opened a pull request.");
-  }
+  const check = await checkContinuation(reader, options.continuesCodingRunId, profile.repository);
+  if (!check.ok) throw new ContinuationRefusedError(check.reason);
+  const { root } = check;
   return {
     baseRef: root.baseRef,
     headRef: root.headRef,

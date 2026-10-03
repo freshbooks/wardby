@@ -31,7 +31,7 @@ import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
 import { withRunHeartbeat } from "./run-heartbeat.js";
-import { dispatchRun } from "./dispatch.js";
+import { ContinuationRefusedError, dispatchRun } from "./dispatch.js";
 import { canDelegate } from "./grants.js";
 import { MEMORY_TOOL_DEFS, MEMORY_TOOL_NAMES, handleMemoryTool } from "./memory-tools.js";
 import { DELEGATE_TOOL_PREFIX, duplicateToolNames } from "./tool-names.js";
@@ -798,20 +798,34 @@ async function executeTrackedRun(
           // dispatchRun reserves the child's budget itself, inside its persist
           // transaction: the agent's budgetUsd tightened by its budget group and
           // by this run tree (parentRunId), or refused when either is spent.
-          const dispatched = await dispatchRun({
-            db,
-            executor: providers.executor,
-            selfDefects: { db, issueTrackers },
-            agentId: edge.childAgentId,
-            trigger: "subagent",
-            codingTask: args.task,
-            continuesCodingRunId: args.continuePriorRun,
-            parentRunId: runId,
-            // The child's result flows back into this run, which the
-            // triggerer sees, so the child is visible to them too.
-            triggeredById: existingRun.triggeredById,
-            awaitExecution: true,
-          });
+          let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+          try {
+            dispatched = await dispatchRun({
+              db,
+              executor: providers.executor,
+              selfDefects: { db, issueTrackers },
+              agentId: edge.childAgentId,
+              trigger: "subagent",
+              codingTask: args.task,
+              continuesCodingRunId: args.continuePriorRun,
+              parentRunId: runId,
+              // The child's result flows back into this run, which the
+              // triggerer sees, so the child is visible to them too.
+              triggeredById: existingRun.triggeredById,
+              awaitExecution: true,
+            });
+          } catch (err) {
+            // A continuation this deployment cannot make (the run id came from
+            // a pull request another deployment opened, say) is the model's to
+            // report, not a reason to fail the whole run.
+            if (!(err instanceof ContinuationRefusedError)) throw err;
+            return JSON.stringify({
+              error: "continuation_refused",
+              message:
+                `${err.message} No sub-agent run was started. Do not open a new pull request in its place: ` +
+                "tell the requester that this wardby deployment cannot continue that pull request's branch.",
+            });
+          }
           if (!dispatched) {
             return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
           }

@@ -884,6 +884,55 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     expect(childCodingRun).toMatchObject({ rootCodingRunId: "plan-run-1", headRef: "wardby/run-plan-run-1" });
   });
 
+  it("a continuePriorRun naming a run this deployment never made reaches the model as a tool error, not a failed run", async () => {
+    const dispatcher: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "knock-knock-delivery",
+      systemPrompt: "You classify and delegate.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const implementer: FakeAgent = {
+      id: "implement-agent",
+      name: "knock-knock-implement",
+      systemPrompt: "unused for coding agents",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb(
+      [dispatcher, implementer],
+      [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+    );
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+    const started: string[] = [];
+    const executor = {
+      async start(runId: string) {
+        started.push(runId);
+      },
+      async stop() {},
+    };
+
+    const llm = scriptedLlm([
+      toolCall(
+        "delegate_to_implement",
+        JSON.stringify({ task: "resolve the conflicts", continuePriorRun: "elsewhere" }),
+      ),
+      finalAnswer("This deployment can't continue that pull request."),
+    ]);
+    const result = await executeRun(parentRun.id, providers(llm, executor), db);
+
+    expect(result.status).toBe("succeeded");
+    expect(started).toEqual([]);
+    expect(toolResultSeen(llm, 1)).toMatchObject({
+      error: "continuation_refused",
+      message: expect.stringContaining("Cannot continue an unknown coding run."),
+    });
+  });
+
   it("refuses a second delegate_to_* call in the same run, even to a different bound sub-agent", async () => {
     const dispatcher: FakeAgent = {
       id: "dispatcher-agent",

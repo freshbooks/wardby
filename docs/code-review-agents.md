@@ -136,6 +136,14 @@ PR description:
   the same GitHub App that receives the mention. A router agent that
   delegates coding work can pass that run id on so the existing branch and
   PR are continued rather than a new one being opened.
+- Before the mention runs, wardby checks that the marker's run is one this
+  deployment recorded, in the same repository, and that it opened this PR.
+  When it is not (most often because another wardby deployment sharing the
+  same GitHub App opened the PR), no run starts: the App replies that this
+  deployment cannot continue the PR, so ask the deployment that opened it.
+  If a router agent passes a `continuePriorRun` id that this deployment
+  cannot continue, the delegation returns a `continuation_refused` tool
+  error to the agent instead of failing its run.
 - The header reads `[GitHub issue #<n>]` on an issue. For a mention inside an
   inline review thread, the `Requested by` line ends with
   `(in review thread <id>)`.
