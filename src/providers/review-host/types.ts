@@ -87,7 +87,10 @@ export interface FileListView {
   ref: string;
   count: number;
   truncated: boolean;
+  /** Display strings (path plus size) shown to agents. */
   files: string[];
+  /** Bare repository paths, same order and length as `files`. */
+  paths: string[];
 }
 
 export interface InlineComment {
@@ -265,6 +268,19 @@ export type HostUserAuthorizerRegistry = Partial<Record<ReviewHostProvider, Host
  * provider payload into, for src/core/host-events.ts to route.
  */
 export type HostEvent =
+  | {
+      kind: "push";
+      provider: ReviewHostProvider;
+      repository: string;
+      /** The branch pushed (without refs/heads/), always the repository's default branch. */
+      branch: string;
+      before: string;
+      after: string;
+      /** Union of added/modified/removed paths over the payload's commits, deduplicated, at most 1000. */
+      changedPaths: string[];
+      /** False when GitHub truncated the commit list (> 20 commits) or paths were capped: treat every concept as in scope. */
+      changedPathsComplete: boolean;
+    }
   | {
       kind: "pr_updated";
       provider: ReviewHostProvider;

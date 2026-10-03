@@ -342,7 +342,8 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
       }
       case "repo_list_files": {
         const a = ListFilesArgs.parse(parsed);
-        return JSON.stringify(await host.listFiles(link.repository, a.ref, a.pathPrefix));
+        const { ref, count, truncated, files } = await host.listFiles(link.repository, a.ref, a.pathPrefix);
+        return JSON.stringify({ ref, count, truncated, files });
       }
       case "repo_publish_review": {
         const a = PublishArgs.parse(parsed);

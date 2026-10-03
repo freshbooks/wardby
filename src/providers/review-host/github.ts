@@ -421,15 +421,15 @@ export class GitHubReviewHost implements CodeReviewHost {
     return this.withToken(repository, { contents: "read" }, async (get) => {
       const resolvedRef = ref ?? str(record(await (await get(base)).json()).default_branch);
       const tree = record(await (await get(`${base}/git/trees/${encodeURIComponent(resolvedRef)}?recursive=1`)).json());
-      const files = list(tree.tree)
+      const entries = list(tree.tree)
         .filter((e) => e.type === "blob" && typeof e.path === "string" && e.path.startsWith(pathPrefix))
-        .filter((e) => !VENDORED.test(str(e.path)) && !str(e.path).endsWith("package-lock.json"))
-        .map((e) => `${str(e.path)} (${num(e.size)} bytes)`);
+        .filter((e) => !VENDORED.test(str(e.path)) && !str(e.path).endsWith("package-lock.json"));
       return {
         ref: resolvedRef,
-        count: files.length,
-        truncated: tree.truncated === true || files.length > MAX_LISTED_FILES,
-        files: files.slice(0, MAX_LISTED_FILES),
+        count: entries.length,
+        truncated: tree.truncated === true || entries.length > MAX_LISTED_FILES,
+        files: entries.slice(0, MAX_LISTED_FILES).map((e) => `${str(e.path)} (${num(e.size)} bytes)`),
+        paths: entries.slice(0, MAX_LISTED_FILES).map((e) => str(e.path)),
       };
     });
   }

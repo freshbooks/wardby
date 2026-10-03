@@ -1059,7 +1059,7 @@ model AgentRepository {
   repository String
   /// "read" or "write".
   access     String
-  /// Subset of "pull_request", "mention".
+  /// Subset of "pull_request", "mention", "push".
   triggers   String[] @default([])
   /// Only with the "pull_request" trigger (required there); names the agent's
   /// check. Unique per repository across all links (NULLs are distinct).
