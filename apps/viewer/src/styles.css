@@ -18,8 +18,18 @@
   font-size: 14px;
 }
 
+/* Explicit per theme: WebKit draws scrollbars and form controls from color-scheme,
+   and "light dark" lets it pick its own preference rather than the window theme
+   chosen in View ▸ Appearance. */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
+    color-scheme: dark;
     --bg: #14171c;
     --surface: #1c2027;
     --border: #2f3541;
@@ -218,6 +228,8 @@ button:disabled {
 
 .main {
   overflow: auto;
+  /* Nothing here scrolls sideways; the timeline's full-bleed margins could tip it by a pixel. */
+  overflow-x: hidden;
   padding: 0.75rem;
 }
 

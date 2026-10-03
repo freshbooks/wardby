@@ -1,4 +1,5 @@
 pub mod api;
+pub mod appearance;
 pub mod commands;
 pub mod error;
 pub mod events;
@@ -12,6 +13,18 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(commands::AppState::default())
+        .setup(|app| {
+            let handle = app.handle();
+            let current = appearance::load(handle);
+            app.set_menu(appearance::build_menu(handle, current)?)?;
+            appearance::apply(handle, current);
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if let Some(choice) = appearance::Appearance::from_menu_id(event.id().as_ref()) {
+                appearance::apply(app, choice);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_servers,
             commands::add_server,
