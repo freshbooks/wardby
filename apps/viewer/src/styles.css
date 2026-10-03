@@ -359,7 +359,7 @@ button:disabled {
 .flow-node {
   box-sizing: border-box;
   overflow: hidden;
-  align-content: start;
+  align-content: center;
 }
 
 .node-head {
@@ -582,4 +582,58 @@ button:disabled {
 
 .panel-foot {
   margin-top: 1rem;
+}
+
+/* Zoom controls: one compact pill floating over the canvas. */
+.flow-canvas .react-flow__controls.viewport-controls {
+  display: flex;
+  flex-direction: row;
+  margin: 0 12px 12px 0;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.18);
+}
+
+.flow-canvas .react-flow__controls-button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: var(--surface);
+  color: var(--text);
+  border: 0;
+  border-radius: 0;
+  border-right: 1px solid var(--border);
+}
+
+.flow-canvas .react-flow__controls-button:last-child {
+  border-right: 0;
+}
+
+.flow-canvas .react-flow__controls-button svg {
+  width: 14px;
+  height: 14px;
+  max-width: none;
+  max-height: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flow-canvas .react-flow__controls-button:hover {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+}
+
+.flow-canvas .react-flow__controls-button:active {
+  background: color-mix(in srgb, var(--accent) 28%, var(--surface));
+}
+
+.flow-canvas .react-flow__controls-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
 }

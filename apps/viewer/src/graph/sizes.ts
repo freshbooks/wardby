@@ -1,8 +1,8 @@
 /** Single source of truth for node boxes: the ELK layout reserves exactly these sizes. */
-export const TRIGGER_SIZE = { width: 180, height: 64 } as const;
+export const TRIGGER_SIZE = { width: 180, height: 44 } as const;
 export const OUTCOME_SIZE = { width: 200, height: 56 } as const;
 export const RUN_WIDTH = 240;
-export const RUN_BASE_HEIGHT = 96;
+export const RUN_BASE_HEIGHT = 70;
 export const RUN_SERVICE_HEIGHT = 22;
 /** Vertical gap between stacked run trees. */
 export const TREE_GAP = 40;

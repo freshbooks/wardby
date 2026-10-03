@@ -4,6 +4,15 @@ import type { GraphRun } from "../api/types";
 import { initialFilters } from "../state/filters";
 import { FlowCanvas } from "./FlowCanvas";
 
+const viewportSpy = vi.hoisted(() => ({ setViewport: vi.fn() }));
+vi.mock("@xyflow/react", async (orig) => {
+  const m = await orig<typeof import("@xyflow/react")>();
+  return {
+    ...m,
+    useReactFlow: () => ({ ...m.useReactFlow(), setViewport: viewportSpy.setViewport }),
+  };
+});
+
 const layoutSpy = vi.hoisted(() => ({
   impl: async (g: { nodes: { id: string }[] }): Promise<Map<string, { x: number; y: number }>> =>
     new Map(g.nodes.map((n, i) => [n.id, { x: i * 300, y: 0 }])),
@@ -101,5 +110,27 @@ describe("FlowCanvas", () => {
     await act(async () => resolvers[0]!(new Map([["t:two", { x: 0, y: 0 }]])));
     expect(container.querySelectorAll(".react-flow__node")).toHaveLength(5);
     layoutSpy.impl = async (g) => new Map(g.nodes.map((n, i) => [n.id, { x: i * 300, y: 0 }]));
+  });
+
+  it("moves to the top-left at zoom 1 after a layout, not on live data changes", async () => {
+    const props = { filters: initialFilters, selectedId: null, onSelect: () => {} };
+    const { rerender } = render(<FlowCanvas runs={[runs[1]!]} {...props} />);
+    await screen.findByText("agent-two");
+    await waitFor(() => expect(viewportSpy.setViewport).toHaveBeenCalled());
+    expect(viewportSpy.setViewport).toHaveBeenLastCalledWith(expect.objectContaining({ zoom: 1 }));
+    // Live update: same node set.
+    viewportSpy.setViewport.mockClear();
+    rerender(<FlowCanvas runs={[makeRun("two", { costUsd: 0.9, startedAt: runs[1]!.startedAt })]} {...props} />);
+    await screen.findByText("agent-two");
+    expect(viewportSpy.setViewport).not.toHaveBeenCalled();
+    // Node set changes: new layout, back home.
+    rerender(<FlowCanvas runs={runs} {...props} />);
+    await screen.findByText("agent-one");
+    await waitFor(() => expect(viewportSpy.setViewport).toHaveBeenCalledTimes(1));
+    expect(viewportSpy.setViewport.mock.calls[0]![0]).toMatchObject({
+      zoom: 1,
+      x: expect.any(Number),
+      y: expect.any(Number),
+    });
   });
 });
