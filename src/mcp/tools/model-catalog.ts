@@ -156,9 +156,31 @@ async function refreshBestEffort(
   }
 }
 
-function conflictError(modelId: string, provider: string, enabled: boolean): McpError {
+/**
+ * `shipped` says whether `modelId` is a shipped model: if so, `provider` is
+ * necessarily its shipped provider (catalogOwner), and no action — disabling
+ * or resetting the override, or anything else — ever lets a different
+ * provider claim it, so the message says that plainly rather than pointing
+ * at a remedy that doesn't exist. For a non-shipped id, `reset_model` is the
+ * only thing that frees it for another provider: `disable_model` keeps the
+ * row (and its provider claim) in place, it just flips `enabled`, so
+ * disabling never frees the id either, whether `enabled` is currently true
+ * or false.
+ */
+function conflictError(modelId: string, provider: string, enabled: boolean, shipped: boolean): McpError {
+  if (shipped) {
+    return new McpError(
+      409,
+      `Model "${modelId}" is a shipped model: it always belongs to provider "${provider}" and can never be ` +
+        `served by another provider — disabling or resetting the override does not change that.`,
+    );
+  }
   return enabled
-    ? new McpError(409, `Model "${modelId}" is already served by provider "${provider}"; reset or disable it first.`)
+    ? new McpError(
+        409,
+        `Model "${modelId}" is already served by provider "${provider}"; reset_model it first to free the id ` +
+          `for another provider (disable_model does not free it).`,
+      )
     : new McpError(
         409,
         `Model "${modelId}" is reserved by a disabled entry for provider "${provider}"; reset_model it first.`,
@@ -326,7 +348,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
     name: "set_model",
     scope: "models:admin",
     description:
-      "Model managers (models:admin): add or override a catalog entry. Every field is required — there is no partial update, so the whole entry is always literal and auditable. Refused when the model id is already claimed, under a different provider, by an active entry, a disabled entry, or a shipped model (reset or disable it first). Zero rates come back as warnings, not errors.",
+      "Model managers (models:admin): add or override a catalog entry. Every field is required — there is no partial update, so the whole entry is always literal and auditable. Refused (409) when the model id belongs to a different provider: a shipped id always belongs to its shipped provider and can never be reassigned; a non-shipped id already claimed by another provider (its row active or disabled) is freed only by that provider's reset_model, never by disable_model. Zero rates come back as warnings, not errors.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -362,7 +384,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
       const shippedEntry = currentModelCatalog().shippedEntry(input.modelId);
       const owner = catalogOwner(shippedEntry, existingRows);
       if (owner && owner.provider !== input.provider) {
-        throw conflictError(input.modelId, owner.provider, owner.enabled);
+        throw conflictError(input.modelId, owner.provider, owner.enabled, !!shippedEntry);
       }
 
       const ownRow = existingRows.find((row) => row.provider === input.provider);

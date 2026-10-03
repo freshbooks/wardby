@@ -217,7 +217,7 @@ AUTH_JWKS_URI=https://identity.example.com/your-tenant/.well-known/jwks.json
 AUTH_AUDIENCE=https://wardby.example.com/mcp
 # Optional: Wardby roles (see "Wardby roles" above).
 AUTH_ROLE_CLAIM=groups
-AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager
+AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-services=service-manager,wardby-models=model-manager
 ```
 
 Copy `AUTH_ISSUER` exactly from the token's `iss` claim or the provider's

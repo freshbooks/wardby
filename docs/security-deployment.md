@@ -50,6 +50,7 @@ node dist/cli.js auth user list
 node dist/cli.js auth user grant --subject user-identifier --role package-approver
 node dist/cli.js auth user grant --subject user-identifier --revoke-role package-approver
 node dist/cli.js auth user grant --subject user-identifier --role service-manager
+node dist/cli.js auth user grant --subject user-identifier --role model-manager
 node dist/cli.js auth key create --subject user-identifier
 node dist/cli.js auth key list --subject user-identifier
 node dist/cli.js auth key revoke PUBLIC-KEY-ID
@@ -78,14 +79,15 @@ Scopes and roles do different jobs:
 - **Roles authorize.** A user has a set of roles. With no roles, the user is a
   member:
 
-| Role               | Grants                                                                 |
-| ------------------ | ---------------------------------------------------------------------- |
-| `admin`            | `agents:admin`, `packages:approve`, `services:manage` and `admin:view` |
-| `package-approver` | `packages:approve`                                                     |
-| `service-manager`  | `services:manage`                                                      |
-| (none)             | nothing privileged; every other scope works as the token allows        |
+| Role               | Grants                                                                                 |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| `admin`            | `agents:admin`, `packages:approve`, `services:manage`, `admin:view` and `models:admin` |
+| `package-approver` | `packages:approve`                                                                     |
+| `service-manager`  | `services:manage`                                                                      |
+| `model-manager`    | `models:admin`                                                                         |
+| (none)             | nothing privileged; every other scope works as the token allows                        |
 
-Six operations are privileged:
+Seven operations are privileged:
 
 - `make_owner`, which reassigns any agent's owner, including another
   principal's private agent (see [Sharing agents](#sharing-agents) for what
@@ -98,6 +100,9 @@ Six operations are privileged:
 - creating, updating or deleting coding-run service catalog entries
   (`create_service`, `update_service`, `delete_service`; reading the catalog
   is `agents:read`, see [coding-services.md](coding-services.md));
+- adding, overriding, disabling or resetting model catalog entries
+  (`set_model`, `disable_model`, `reset_model`; reading the catalog is
+  `agents:read`, see [models.md](models.md));
 - reading every owner's runs through the admin viewer API (see
   [viewer-api.md](viewer-api.md)).
 
@@ -107,13 +112,15 @@ permission:
 - `make_owner`, `workerImageRef`, and repository approval need `agents:admin`.
 - Package approval needs `packages:approve`, or `agents:admin`.
 - Service catalog changes need `services:manage`.
+- Model catalog changes need `models:admin`.
 - The admin viewer API needs `admin:view`, which only the `admin` role grants.
 
 In practice:
 
-- an `admin` can do all six;
+- an `admin` can do all seven;
 - a `package-approver` can approve packages only;
 - a `service-manager` can change the service catalog only;
+- a `model-manager` can change the model catalog only;
 - a member can do none of them.
 
 Callers who fail the check get `403`:

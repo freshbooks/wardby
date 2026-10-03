@@ -24,9 +24,13 @@ wardby needs to route, price, tokenize and shape calls to one model:
   and effort" below.
 
 A model id belongs to exactly one provider. If the shipped catalog has that
-id, the shipped provider always owns it — an admin cannot register a
-different provider under a shipped id without first disabling or resetting
-it.
+id, the shipped provider owns it permanently: no other provider can ever
+register that id, no matter what — disabling or resetting an override of a
+shipped model never frees it, because the shipped provider still owns the id
+once the override is gone. For a model id the shipped catalog doesn't have,
+whichever provider registered it first owns it until an admin runs
+`reset_model` on that id — disabling it is not enough, since a disabled row
+still reserves the id for its provider.
 
 ## Reading it
 
@@ -106,10 +110,13 @@ provider, and a formula that was once correct goes stale silently.
 so it never blocks a genuinely free or not-yet-priced entry — confirm the
 zero against the source before leaving it.
 
-`set_model` refuses (409) a `modelId` another provider already owns —
-whether that provider's row is active, disabled, or (for a shipped id) the
-shipped entry itself. `reset_model` (below) clears every row for that id
-first if you need to reassign it.
+`set_model` refuses (409) a `modelId` another provider already owns. For a
+shipped id, that's permanent: the shipped provider owns it no matter what,
+so no `set_model` call under a different provider can ever succeed for that
+id. For a non-shipped id, the owning provider's row — active or disabled —
+blocks every other provider until that provider's `reset_model` clears it;
+`disable_model` alone never frees the id, since the disabled row still
+reserves it.
 
 ## Thinking mode and effort
 
@@ -133,7 +140,9 @@ adding it.
 
 `disable_model` removes a model from routing without deleting its pricing
 history: it keeps a disabled row under the model's own provider, so no other
-provider can claim that id until `reset_model` clears it. A disabled model
+provider can claim that id. For a non-shipped id, only `reset_model` frees
+it; for a shipped id, nothing ever does, since the shipped provider owns the
+id regardless of whether an override row exists. A disabled model
 still appears in `list_models` with `includeDisabled: true` and in
 `get_model`, but `routable` is no longer meaningful for it and new runs
 cannot select it.

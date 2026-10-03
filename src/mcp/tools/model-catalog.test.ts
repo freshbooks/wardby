@@ -249,30 +249,64 @@ describe("model catalog tools", () => {
     await client.close();
   });
 
-  it("set_model refuses a model id another provider already serves", async () => {
+  it("set_model refuses another provider for a shipped id, and says it can never be reassigned", async () => {
     const { client } = await connect(MODEL_MANAGER);
     const r = await client.callTool({
       name: "set_model",
       arguments: { ...NEW, provider: "openai", modelId: "claude-sonnet-5", thinkingMode: "none", efforts: [] },
     });
     expect(r.isError).toBe(true);
-    expect(text(r)).toMatch(/already served by provider "anthropic"/);
+    expect(text(r)).toMatch(/shipped model.*belongs to provider "anthropic"/);
+    expect(text(r)).toMatch(/can never be served by another provider/);
     await client.close();
   });
 
-  it("set_model refuses a model id reserved by a disabled entry for another provider", async () => {
+  it("disabling a shipped model's override still refuses another provider, with the same never-reassignable message", async () => {
     const { client } = await connect(MODEL_MANAGER);
     // Disabling claude-sonnet-5 keeps a disabled row under its original provider
-    // (anthropic); that claim must still block a different provider, even
-    // though the model no longer appears in the active merged view.
+    // (anthropic); a shipped id belongs to its shipped provider no matter what
+    // its override row says, so this must refuse exactly like the active case —
+    // reset_model would not change that either, since the id is shipped.
     await client.callTool({ name: "disable_model", arguments: { modelId: "claude-sonnet-5" } });
     const r = await client.callTool({
       name: "set_model",
       arguments: { ...NEW, provider: "openai", modelId: "claude-sonnet-5", thinkingMode: "none", efforts: [] },
     });
     expect(r.isError).toBe(true);
-    expect(text(r)).toMatch(/reserved by a disabled entry for provider "anthropic"/);
-    expect(text(r)).toMatch(/reset_model it first/);
+    expect(text(r)).toMatch(/shipped model.*belongs to provider "anthropic"/);
+    expect(text(r)).toMatch(/can never be served by another provider/);
+    await client.close();
+  });
+
+  it("set_model refuses another provider for a non-shipped id already claimed, enabled or disabled, until reset_model", async () => {
+    const { client } = await connect(MODEL_MANAGER);
+    await client.callTool({ name: "set_model", arguments: NEW }); // claude-new, anthropic
+    const whileEnabled = await client.callTool({
+      name: "set_model",
+      arguments: { ...NEW, provider: "openai" },
+    });
+    expect(whileEnabled.isError).toBe(true);
+    expect(text(whileEnabled)).toMatch(/already served by provider "anthropic"/);
+    expect(text(whileEnabled)).toMatch(/reset_model it first/);
+
+    // disable_model does not free the id for another provider: the row (and
+    // its provider claim) stays, only `enabled` flips.
+    await client.callTool({ name: "disable_model", arguments: { modelId: "claude-new" } });
+    const whileDisabled = await client.callTool({
+      name: "set_model",
+      arguments: { ...NEW, provider: "openai" },
+    });
+    expect(whileDisabled.isError).toBe(true);
+    expect(text(whileDisabled)).toMatch(/reserved by a disabled entry for provider "anthropic"/);
+    expect(text(whileDisabled)).toMatch(/reset_model it first/);
+
+    // reset_model does free it: a non-shipped id has no shipped owner to fall back to.
+    await client.callTool({ name: "reset_model", arguments: { modelId: "claude-new" } });
+    const afterReset = await client.callTool({
+      name: "set_model",
+      arguments: { ...NEW, provider: "openai" },
+    });
+    expect(afterReset.isError).toBeFalsy();
     await client.close();
   });
 
@@ -300,7 +334,7 @@ describe("model catalog tools", () => {
       arguments: { ...NEW, provider: "openai", modelId: "claude-sonnet-5", thinkingMode: "none", efforts: [] },
     });
     expect(r.isError).toBe(true);
-    expect(text(r)).toMatch(/already served by provider "anthropic"/);
+    expect(text(r)).toMatch(/shipped model.*belongs to provider "anthropic"/);
     // Nothing was written: the orphan row is untouched.
     expect(rows.get("openai::claude-sonnet-5")).toMatchObject({ outputPerMTok: 5 });
     await client.close();

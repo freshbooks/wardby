@@ -54,8 +54,14 @@ full field reference.
 The rates above are placeholders. Copy the provider's own published rates for
 that exact model — including its cache read and cache write rates — from its
 pricing page, and point `sourceUrl` at that page; never compute cache rates
-from `inputPerMTok` with a multiplier. `set_model` refuses (409) a `modelId`
-another provider already owns, active or disabled.
+from `inputPerMTok` with a multiplier.
+
+`set_model` refuses (409) a `modelId` another provider already owns. A
+shipped id always belongs to its shipped provider — permanently; no other
+provider can ever claim it, not even by disabling or resetting the override.
+A non-shipped id already claimed by another provider (its row active or
+disabled) is freed only by that provider's `reset_model`; `disable_model`
+alone never frees it, since the disabled row still reserves the id.
 
 `thinkingMode` (`adaptive`, `manual`, or `none`) must match what the exact
 model accepts. Getting it wrong doesn't fail at `set_model` — it fails later,
