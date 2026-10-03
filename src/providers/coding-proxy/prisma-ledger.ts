@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient } from "#prisma";
 import { logger } from "../../core/logger.js";
-import { parseStoredEntry } from "../llm/catalog-types.js";
+import { normalizeProxyModelTerms } from "./types.js";
 import type {
   CreateProxySessionInput,
   PricingSnapshot,
@@ -95,10 +95,16 @@ function sessionFromRow(row: SessionRow): ProxySession {
   };
 }
 
-/** The session's stored model terms; null when absent (a session from before the catalog) or malformed. */
+/**
+ * The session's stored model terms. Null only when both columns are null (a session from before
+ * the catalog, which prices from the shipped fallback); terms that are partly present or cannot be
+ * read throw, so the session is refused rather than billed at fallback rates.
+ */
 function sessionTerms(row: SessionRow): ProxySession["terms"] {
-  const entry = parseStoredEntry(row.catalogEntry);
-  return row.pricingVersion && entry ? { version: row.pricingVersion, entry } : null;
+  const version = row.pricingVersion ?? null;
+  const stored = row.catalogEntry ?? null;
+  if (version === null && stored === null) return null;
+  return normalizeProxyModelTerms({ version, entry: stored });
 }
 
 function requestFromRow(row: RequestRow): ProxyRequest {
@@ -150,6 +156,7 @@ export class PrismaProxyLedger implements ProxyLedger {
 
   async createSession(input: CreateProxySessionInput): Promise<void> {
     const models = JSON.stringify(input.allowedModels);
+    const terms = input.terms ? normalizeProxyModelTerms(input.terms) : undefined;
     await this.db.$executeRaw`
       INSERT INTO "CodingProxySession"
         ("id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt",
@@ -157,7 +164,7 @@ export class PrismaProxyLedger implements ProxyLedger {
       VALUES
         (${input.id}, ${input.runId}, ${input.capabilityHash}, ${input.credentialRef}, ${input.protocol}, ${models}::jsonb,
          ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash},
-         ${input.terms?.version ?? null}, ${input.terms ? JSON.stringify(input.terms.entry) : null}::jsonb,
+         ${terms?.version ?? null}, ${terms ? JSON.stringify(terms.entry) : null}::jsonb,
          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `;
   }

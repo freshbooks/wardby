@@ -1,4 +1,4 @@
-import type { CatalogEntry } from "../llm/catalog-types.js";
+import { parseStoredEntry, type CatalogEntry } from "../llm/catalog-types.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
 
 export type ProxySessionStatus = "active" | "cancelled";
@@ -13,6 +13,18 @@ export interface PricingSnapshot extends ModelPricing {
 export interface ProxyModelTerms {
   version: string;
   entry: CatalogEntry;
+}
+
+/**
+ * Validates and copies model terms, for both ledgers on write and the database ledger on read.
+ * Throws invalid_proxy_session_terms: unreadable terms must refuse the session, never fall back.
+ */
+export function normalizeProxyModelTerms(terms: { version: unknown; entry: unknown }): ProxyModelTerms {
+  const entry = parseStoredEntry(terms.entry);
+  if (typeof terms.version !== "string" || terms.version.length === 0 || !entry) {
+    throw new Error("invalid_proxy_session_terms");
+  }
+  return { version: terms.version, entry };
 }
 
 export interface ProxyUsage {

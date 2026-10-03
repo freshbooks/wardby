@@ -588,6 +588,23 @@ describe("model terms from the session", () => {
     ).rejects.toThrow(/invalid_proxy_model_terms/);
   });
 
+  it("refuses terms the ledger cannot read back (the in-memory ledger validates like the database one)", async () => {
+    await expect(
+      harness({
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-sonnet-5"],
+        terms: { version: "v", entry: { ...entryOf(sonnet), cachedInputPerMTok: -1 } },
+      }),
+    ).rejects.toThrow(/invalid_proxy_session_terms/);
+    await expect(
+      harness({
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-sonnet-5"],
+        terms: { version: "", entry: entryOf(sonnet) },
+      }),
+    ).rejects.toThrow(/invalid_proxy_session_terms/);
+  });
+
   it("refuses terms on a session that allows more than one model", async () => {
     await expect(
       harness({

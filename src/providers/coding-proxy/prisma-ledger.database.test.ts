@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createPrismaClient } from "../../core/db.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
+import { CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { entryOf } from "../llm/catalog-types.js";
 
@@ -109,13 +110,20 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     const tAgent = `terms-agent-${suffix}`;
     const tRun = `terms-run-${suffix}`;
     const tSession = `terms-session-${suffix}`;
+    const pRun = `terms-proxy-run-${suffix}`;
 
     afterAll(async () => {
-      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${tSession}`;
-      await db.codingRun.deleteMany({ where: { runId: tRun } });
-      await db.run.deleteMany({ where: { id: tRun } });
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "runId" IN (${tRun}, ${pRun})`;
+      await db.codingRun.deleteMany({ where: { runId: { in: [tRun, pRun] } } });
+      await db.run.deleteMany({ where: { id: { in: [tRun, pRun] } } });
       await db.agent.deleteMany({ where: { id: tAgent } });
     });
+
+    const corruptions: Array<[string, string | null, string | null]> = [
+      ["a version with an unreadable entry", "v1", JSON.stringify({ modelId: "gpt-5.6-luna", inputPerMTok: -1 })],
+      ["a version with no entry", "v1", null],
+      ["an entry with no version", null, JSON.stringify(entryOf(shippedCatalog().require("gpt-5.6-luna")))],
+    ];
 
     it("round-trips a session's catalog entry and its version", async () => {
       const entry = { ...entryOf(shippedCatalog().require("gpt-5.6-luna")), outputPerMTok: 99 };
@@ -153,6 +161,88 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       });
       const session = await new PrismaProxyLedger(db).findSessionByCapabilityHash(`terms-hash-${suffix}`);
       expect(session?.terms).toEqual({ version: "2026-10-04T00:00:00.000Z", entry });
+    });
+
+    it.each(corruptions)("refuses to read a session with %s", async (_label, version, entry) => {
+      await db.$executeRaw`
+        UPDATE "CodingProxySession" SET "pricingVersion" = ${version}, "catalogEntry" = ${entry}::jsonb
+        WHERE "id" = ${tSession}
+      `;
+      await expect(new PrismaProxyLedger(db).findSessionByCapabilityHash(`terms-hash-${suffix}`)).rejects.toThrow(
+        "invalid_proxy_session_terms",
+      );
+    });
+
+    it("refuses to store unreadable terms", async () => {
+      const entry = entryOf(shippedCatalog().require("gpt-5.6-luna"));
+      await expect(
+        new PrismaProxyLedger(db).createSession({
+          id: `terms-bad-${suffix}`,
+          runId: tRun,
+          capabilityHash: `terms-bad-hash-${suffix}`,
+          credentialRef: "openai/test",
+          protocol: "openai-responses",
+          allowedModels: [entry.modelId],
+          deadlineAt: new Date(Date.now() + 60_000),
+          budgetUsd: 1,
+          registryTokenHash: `terms-bad-registry-${suffix}`,
+          terms: { version: "", entry },
+        }),
+      ).rejects.toThrow("invalid_proxy_session_terms");
+    });
+
+    it("refuses, without billing or calling upstream, a request on a session whose stored terms were corrupted", async () => {
+      const entry = entryOf(shippedCatalog().require("gpt-5.6-luna"));
+      await db.run.create({ data: { id: pRun, agentId: tAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: pRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${pRun}`,
+          provider: "codex",
+          model: entry.modelId,
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      const fetch = async () => {
+        throw new Error("upstream must not be called");
+      };
+      const proxy = new CodingProxy({
+        ledger: new PrismaProxyLedger(db),
+        credentials: { resolve: async () => "secret" },
+        fetch,
+      });
+      const session = await proxy.createSession({
+        runId: pRun,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: [entry.modelId],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        terms: { version: "v1", entry },
+      });
+      await db.$executeRaw`UPDATE "CodingProxySession" SET "catalogEntry" = '{"bad":true}'::jsonb WHERE "id" = ${session.id}`;
+      const sink: ProxyResponseSink = { start() {}, write() {}, end() {}, destroy() {} };
+      await expect(
+        proxy.execute(
+          {
+            bearer: session.capability,
+            protocol: "openai-responses",
+            rawBody: JSON.stringify({ model: entry.modelId, input: "hi", max_output_tokens: 10, stream: false }),
+            requestKey: "corrupt-terms",
+          },
+          sink,
+        ),
+      ).rejects.toThrow("invalid_proxy_session_terms");
+      const requests = await db.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*)::bigint AS "count" FROM "CodingProxyRequest" WHERE "sessionId" = ${session.id}
+      `;
+      expect(Number(requests[0].count)).toBe(0);
     });
   });
 

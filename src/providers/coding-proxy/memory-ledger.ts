@@ -1,11 +1,12 @@
-import type {
-  CreateProxySessionInput,
-  ProxyLedger,
-  ProxyRequest,
-  ProxySession,
-  ProxyUsage,
-  ReserveProxyRequestInput,
-  ReserveProxyRequestResult,
+import {
+  normalizeProxyModelTerms,
+  type CreateProxySessionInput,
+  type ProxyLedger,
+  type ProxyRequest,
+  type ProxySession,
+  type ProxyUsage,
+  type ReserveProxyRequestInput,
+  type ReserveProxyRequestResult,
 } from "./types.js";
 
 function cloneSession(session: ProxySession): ProxySession {
@@ -45,7 +46,7 @@ export class MemoryProxyLedger implements ProxyLedger {
       ...input,
       allowedModels: [...input.allowedModels],
       status: "active",
-      terms: input.terms ?? null,
+      terms: input.terms ? normalizeProxyModelTerms(input.terms) : null,
     };
     this.sessions.set(session.id, session);
     this.sessionByCapability.set(session.capabilityHash, session.id);
