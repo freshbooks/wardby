@@ -34,6 +34,9 @@ export const SCOPES_SUPPORTED = [
   // Read-only, deployment-wide view of runs for the admin viewer (docs/viewer-api.md).
   // Privileged: it shows every owner's runs, so only the admin role grants it.
   "admin:view",
+  // Add, override, disable and reset model catalog entries (see docs/models.md).
+  // Reading the catalog (list_models, get_model) is agents:read.
+  "models:admin",
 ];
 
 /**
@@ -43,7 +46,8 @@ export const SCOPES_SUPPORTED = [
  * workerImageRef; packages:approve widens coding agents' package allowlists;
  * services:manage changes the coding-run service catalog, which decides what
  * runs next to every coding run that names an entry; admin:view reads every
- * owner's runs (the admin viewer API).
+ * owner's runs (the admin viewer API); models:admin changes the model catalog,
+ * which prices every principal's runs.
  * A token scope only DELEGATES — it never authorizes on its own:
  * requireScope/requireAnyScope honour one only when one of the caller's
  * roles (McpRequestContext.roles, resolved live per request) grants it.
@@ -53,6 +57,7 @@ export const PRIVILEGED_SCOPES: readonly string[] = [
   "packages:approve",
   "services:manage",
   "admin:view",
+  "models:admin",
 ];
 
 /**
@@ -60,9 +65,10 @@ export const PRIVILEGED_SCOPES: readonly string[] = [
  * grants. No roles = member: every non-privileged scope, nothing privileged.
  */
 export const ROLE_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
-  admin: ["agents:admin", "packages:approve", "services:manage", "admin:view"],
+  admin: ["agents:admin", "packages:approve", "services:manage", "admin:view", "models:admin"],
   "package-approver": ["packages:approve"],
   "service-manager": ["services:manage"],
+  "model-manager": ["models:admin"],
 };
 export const ROLE_NAMES: readonly string[] = Object.keys(ROLE_PERMISSIONS);
 
