@@ -121,7 +121,7 @@ async function runQuery(baseUrl, abortController = new AbortController(), tools 
     options: {
       abortController,
       cwd: workspace,
-      model: MODEL,
+      model: overrides.model ?? MODEL,
       maxTurns: overrides.maxTurns ?? (tools.length > 0 ? 2 : 1),
       maxBudgetUsd: 0.25,
       tools,
@@ -168,53 +168,64 @@ async function runQuery(baseUrl, abortController = new AbortController(), tools 
   return messages;
 }
 
-test("pinned SDK uses only the configured Messages endpoint and capability", async () => {
-  const fake = await fakeAnthropic((_request, response) => {
-    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
-    response.end(sse("compatibility-ok"));
+const BASE_BETAS = [
+  "claude-code-20250219",
+  "context-management-2025-06-27",
+  "effort-2025-11-24",
+  "interleaved-thinking-2025-05-14",
+  "mid-conversation-system-2026-04-07",
+  "prompt-caching-scope-2026-01-05",
+  "thinking-token-count-2026-05-13",
+];
+
+// The coding proxy accepts exactly these shapes (CLAUDE_CODE_ANTHROPIC_BETAS plus
+// OPTIONAL_ANTHROPIC_BETAS, and the effort levels a model's catalog entry lists), so each model
+// the shipped catalog offers for Claude Code is pinned here, not only the default one.
+const MODEL_SHAPES = [
+  { model: "claude-sonnet-5", betas: BASE_BETAS, effort: "high" },
+  { model: "claude-opus-5-5", betas: [...BASE_BETAS, "per-turn-control-2026-07-01"].sort(), effort: "medium" },
+];
+
+for (const shape of MODEL_SHAPES)
+  test(`pinned SDK uses only the configured Messages endpoint and capability (${shape.model})`, async () => {
+    const fake = await fakeAnthropic((_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+      response.end(sse("compatibility-ok"));
+    });
+    try {
+      const messages = await runQuery(fake.baseUrl, new AbortController(), [], { model: shape.model });
+      const result = messages.find((message) => message.type === "result");
+      assert.equal(result?.subtype, "success");
+      assert.equal(result?.result, "compatibility-ok");
+      assert.deepEqual(
+        fake.requests.map((request) => [request.method, request.url]),
+        [
+          ["HEAD", "/api/hello"],
+          ["POST", "/v1/messages?beta=true"],
+        ],
+      );
+      const messageRequest = fake.requests[1];
+      assert.equal(messageRequest.headers["x-api-key"], CAPABILITY);
+      assert.equal(messageRequest.headers.authorization, undefined);
+      assert.match(String(messageRequest.headers["anthropic-version"]), /^\d{4}-\d{2}-\d{2}$/);
+      assert.deepEqual(
+        String(messageRequest.headers["anthropic-beta"])
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .sort(),
+        shape.betas,
+      );
+      const body = JSON.parse(messageRequest.body);
+      assert.equal(body.model, shape.model);
+      assert.equal(body.stream, true);
+      assert.equal(body.max_tokens, 4096);
+      assert.equal(body.output_config.effort, shape.effort);
+      assert.equal(typeof JSON.parse(body.metadata.user_id).device_id, "string");
+    } finally {
+      await fake.close();
+    }
   });
-  try {
-    const messages = await runQuery(fake.baseUrl);
-    const result = messages.find((message) => message.type === "result");
-    assert.equal(result?.subtype, "success");
-    assert.equal(result?.result, "compatibility-ok");
-    assert.deepEqual(
-      fake.requests.map((request) => [request.method, request.url]),
-      [
-        ["HEAD", "/api/hello"],
-        ["POST", "/v1/messages?beta=true"],
-      ],
-    );
-    const messageRequest = fake.requests[1];
-    assert.equal(messageRequest.headers["x-api-key"], CAPABILITY);
-    assert.equal(messageRequest.headers.authorization, undefined);
-    assert.match(String(messageRequest.headers["anthropic-version"]), /^\d{4}-\d{2}-\d{2}$/);
-    assert.deepEqual(
-      String(messageRequest.headers["anthropic-beta"])
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean)
-        .sort(),
-      [
-        "claude-code-20250219",
-        "context-management-2025-06-27",
-        "effort-2025-11-24",
-        "interleaved-thinking-2025-05-14",
-        "mid-conversation-system-2026-04-07",
-        "prompt-caching-scope-2026-01-05",
-        "thinking-token-count-2026-05-13",
-      ],
-    );
-    const body = JSON.parse(messageRequest.body);
-    assert.equal(body.model, MODEL);
-    assert.equal(body.stream, true);
-    assert.equal(body.max_tokens, 4096);
-    assert.equal(body.output_config.effort, "high");
-    assert.equal(typeof JSON.parse(body.metadata.user_id).device_id, "string");
-  } finally {
-    await fake.close();
-  }
-});
 
 test("provider budget rejection terminates with an error result", async () => {
   const fake = await fakeAnthropic((_request, response) => {

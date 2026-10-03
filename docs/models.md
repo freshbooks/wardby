@@ -138,6 +138,12 @@ run actually calls the model, with `unsupported_anthropic_feature`. Check the
 model's own documentation for which mode and effort levels it supports before
 adding it.
 
+For Claude Code coding runs, `efforts` is also exactly the set of effort levels
+the coding proxy lets a run send for that model; any other level is refused
+with `unsupported_anthropic_feature`. Always include the model's default level
+(Claude Code sends the default unless told otherwise; most Claude models default
+to `high`, some to `medium`), or every coding run on the model is refused.
+
 A newly released Claude model can also require a newer Claude Code than the
 one built into your Claude Code worker image. The provider then refuses the
 coding run's requests, and the run fails with the `provider_rejected` category

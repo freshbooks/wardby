@@ -67,6 +67,8 @@ never frees it, since the disabled row still reserves the id.
 `thinkingMode` (`adaptive`, `manual`, or `none`) must match what the exact
 model accepts. Getting it wrong doesn't fail at `set_model` — it fails later,
 when a run calls the model, with `unsupported_anthropic_feature`.
+For Claude Code coding runs, `efforts` is also the exact set of levels a run
+may send, so always include the model's default effort level.
 
 A newly released Claude model may also need a newer Claude Code than your
 Claude Code worker image has: coding runs on it then fail as

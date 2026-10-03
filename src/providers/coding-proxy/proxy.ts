@@ -43,7 +43,13 @@ const MAX_UPSTREAM_JSON_BYTES = 16 * 1024 * 1024;
 /** A rejected upstream's error body is read only this far, for its error code. */
 const MAX_UPSTREAM_ERROR_BYTES = 64 * 1024;
 const REQUEST_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
-const APPROVED_ANTHROPIC_BETAS = new Set<string>(CLAUDE_CODE_ANTHROPIC_BETAS);
+/**
+ * Betas Claude Code sends only for some models, accepted but never required: per-turn-control is
+ * sent for Claude Opus 5.5 (it lets a later turn change effort; every body field is still checked
+ * against the reviewed shape below, so the header alone unlocks nothing).
+ */
+export const OPTIONAL_ANTHROPIC_BETAS = ["per-turn-control-2026-07-01"] as const;
+const APPROVED_ANTHROPIC_BETAS = new Set<string>([...CLAUDE_CODE_ANTHROPIC_BETAS, ...OPTIONAL_ANTHROPIC_BETAS]);
 const WARDBY_COMMAND_TOOL = "mcp__wardby_tools__run_command";
 const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 const MAX_COMMAND_BYTES = 16 * 1024;
@@ -691,10 +697,17 @@ function requireAnthropicBeta(values: Set<string>, beta: (typeof CLAUDE_CODE_ANT
   if (!values.has(beta)) throw new CodingProxyError(400, "anthropic_beta_required");
 }
 
+/** What the session's catalog entry allows a request for its model to ask for. */
+interface AnthropicModelShape {
+  thinkingMode: ThinkingMode;
+  /** Effort levels the model accepts; a request may send any of them, and none when empty. */
+  efforts: readonly string[];
+}
+
 function parseAnthropicRequest(
   rawBody: string,
   betaHeader: string | undefined,
-  thinkingMode: ThinkingMode,
+  { thinkingMode, efforts }: AnthropicModelShape,
 ): ParsedRequest {
   const beta = parseAnthropicBeta(betaHeader);
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
@@ -804,7 +817,11 @@ function parseAnthropicRequest(
     requireAnthropicBeta(beta.values, "effort-2025-11-24");
     const output = record(body.output_config);
     onlyKeys(output, ["effort"]);
-    if (output.effort !== "high") throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    // Any level the run's catalog entry lists (Claude Opus 5.5 defaults to medium). Budget is still
+    // reserved from max_tokens per request, so effort only changes how much of it the model uses.
+    if (typeof output.effort !== "string" || !efforts.includes(output.effort)) {
+      throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    }
   }
   const normalized: Record<string, unknown> = { ...body };
   delete normalized.metadata;
@@ -825,14 +842,14 @@ function parseRequest(
   protocol: ProxyProtocol,
   rawBody: string,
   anthropicBeta: string | undefined,
-  thinkingMode: ThinkingMode,
+  shape: AnthropicModelShape,
 ): ParsedRequest {
   if (protocol !== "anthropic-messages" && anthropicBeta !== undefined) {
     throw new CodingProxyError(400, "invalid_anthropic_beta");
   }
   try {
     return protocol === "anthropic-messages"
-      ? parseAnthropicRequest(rawBody, anthropicBeta, thinkingMode)
+      ? parseAnthropicRequest(rawBody, anthropicBeta, shape)
       : parseOpenAiRequest(rawBody);
   } catch (error) {
     // JSON nested deeply enough (inside a free-form tool schema, say) overflows
@@ -979,11 +996,15 @@ export class CodingProxy {
       this.audit({ type: "request.rejected", runId: session.runId, reason: "protocol_mismatch" });
       throw new CodingProxyError(403, "protocol_mismatch");
     }
-    const thinkingMode =
-      session.terms?.entry.thinkingMode ?? shippedCatalog().get(session.allowedModels[0])?.thinkingMode ?? "adaptive";
+    // A session from before the model catalog has no stored entry: take the shape from the shipped one.
+    const entry = session.terms?.entry ?? shippedCatalog().get(session.allowedModels[0]);
+    const shape: AnthropicModelShape = {
+      thinkingMode: entry?.thinkingMode ?? "adaptive",
+      efforts: entry?.efforts ?? [],
+    };
     let parsed: ParsedRequest;
     try {
-      parsed = parseRequest(input.protocol, input.rawBody, input.anthropicBeta, thinkingMode);
+      parsed = parseRequest(input.protocol, input.rawBody, input.anthropicBeta, shape);
     } catch (error) {
       // The session is already authenticated and no credential has been
       // resolved; record the refusal against the run so a smuggling attempt
