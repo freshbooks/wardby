@@ -330,6 +330,12 @@ model Run {
   /// finalText — MCP's list_runs/get_run need it and it was previously
   /// dropped after the engine returned.
   turns            Int           @default(0)
+  /// The run's model catalog entry, recorded when it started (native: the
+  /// runner's load step; coding: dispatch). The run is billed at these rates
+  /// for its whole life, resumes included. Null on runs from before the
+  /// model catalog.
+  pricingVersion   String?
+  pricingSnapshot  Json?
   /// Detached executors are recovered by handle rather than inferred from trigger.
   executionManaged Boolean       @default(false)
   /// Phase 6: which durable executor backend holds this run, if any
@@ -595,6 +601,12 @@ model CodingProxySession {
   /// first provider failure the proxy relayed for this session; lets the
   /// executor say the model provider refused the run.
   upstreamFailure   String?
+  /// The run's catalog entry, copied from Run.pricingSnapshot when the session
+  /// is created; the proxy prices and shapes requests from it. Null on
+  /// sessions from before the model catalog (the proxy falls back to the
+  /// shipped catalog).
+  pricingVersion String?
+  catalogEntry   Json?
 
   @@index([deadlineAt])
 }
@@ -1334,4 +1346,28 @@ model RunModelUsage {
   costUsd           Decimal @default(0) @db.Decimal(18, 10)
 
   @@id([runId, model])
+}
+
+/// A deployment's override of the shipped model catalog
+/// (src/providers/llm/catalog-shipped.ts), written by set_model /
+/// disable_model (models:admin). A row fully replaces the shipped entry with
+/// the same key; enabled=false removes the model; a row with no shipped match
+/// adds one. Rates are the provider's exact published numbers (sourceUrl).
+model ModelCatalogEntry {
+  provider           String
+  modelId            String
+  enabled            Boolean
+  encoding           String
+  inputPerMTok       Float
+  outputPerMTok      Float
+  cachedInputPerMTok Float
+  cacheWritePerMTok  Float
+  efforts            String[]
+  thinkingMode       String
+  sourceUrl          String
+  updatedBy          String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@id([provider, modelId])
 }
