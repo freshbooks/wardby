@@ -11,6 +11,7 @@ import {
   protectsSomePath,
 } from "../../coding/protected-paths.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
+import { globRegex } from "../../core/glob.js";
 import type { Writable } from "node:stream";
 import {
   MAX_REDACTED_SPAN,
@@ -209,26 +210,6 @@ function validateProtectedPath(value: string): string {
     throw new Error("vcs_protected_path_invalid");
   }
   return path;
-}
-
-function globRegex(pattern: string): RegExp {
-  let source = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index];
-    if (character === "*") {
-      if (pattern[index + 1] === "*") {
-        source += ".*";
-        index += 1;
-      } else {
-        source += "[^/]*";
-      }
-    } else if (character === "?") {
-      source += "[^/]";
-    } else {
-      source += character.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
-    }
-  }
-  return new RegExp(`${source}$`);
 }
 
 /** The fixed baseline, split once: its literal exceptions and its protected globs. */
