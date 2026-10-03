@@ -83,8 +83,11 @@ try {
 
   // Consumer install + run, inside a clean linux/amd64 container: portability
   // is proven on the platform the images and most servers use, not on the
-  // machine that built the tarball. Same pinned node image as deploy/Dockerfile.
-  const nodeImage = /^FROM (\S+)/m.exec(readFileSync(join(projectRoot, "deploy/Dockerfile"), "utf8"))?.[1];
+  // machine that built the tarball. Same pinned node image as deploy/Dockerfile (whose first
+  // stage carries a --platform flag, skipped here).
+  const nodeImage = /^FROM (?:--platform=\S+\s+)?(\S+)/m.exec(
+    readFileSync(join(projectRoot, "deploy/Dockerfile"), "utf8"),
+  )?.[1];
   if (!nodeImage) throw new Error("could not read the node base image from deploy/Dockerfile");
   // Tagged through a one-line build rather than `docker run <image@digest>`:
   // Docker Desktop's containerd store refuses to run a digest-pinned reference
