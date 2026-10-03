@@ -10,6 +10,7 @@ import { SignInGate } from "./chrome/SignInGate";
 import { TopBar } from "./chrome/TopBar";
 import { windowSpend } from "./format/spend";
 import { FlowCanvas } from "./graph/FlowCanvas";
+import type { RunFocus } from "./graph/selection";
 import { DetailPanel } from "./panel/DetailPanel";
 import { Timeline } from "./timeline/Timeline";
 import { changeFilters, initialFilters, matchesFilters, type Filters } from "./state/filters";
@@ -43,12 +44,19 @@ function Dashboard({
   const { model } = viewer;
   const selectedRun = selectedRunId ? model.runs.get(selectedRunId) : undefined;
 
-  const onSelect = useCallback(
-    (id: string | null) => setSelectedRunId((cur) => (id === null || id === cur ? null : id)),
-    [],
-  );
+  // A clicked trigger or outcome: highlighted in the panel of the run it belongs to.
+  const [focus, setFocus] = useState<RunFocus | null>(null);
+
+  // A run toggles; a trigger or outcome always shows its run, with that item highlighted.
+  const onSelect = useCallback((id: string | null, picked?: RunFocus) => {
+    setFocus(picked ?? null);
+    setSelectedRunId((cur) => (picked ? id : id === null || id === cur ? null : id));
+  }, []);
   // The panel navigates to a run (children/parent) or closes; unlike the canvas it never toggles.
-  const selectPanel = useCallback((id: string | null) => setSelectedRunId(id), []);
+  const selectPanel = useCallback((id: string | null) => {
+    setFocus(null);
+    setSelectedRunId(id);
+  }, []);
 
   const runs = useMemo(() => [...model.runs.values()], [model.runs]);
   const agents = useMemo(() => {
@@ -138,7 +146,13 @@ function Dashboard({
               <div className="workspace">
                 <FlowCanvas runs={runs} filters={view} selectedId={selectedRunId} onSelect={onSelect} />
                 {selectedRun && (
-                  <DetailPanel serverUrl={server.url} run={selectedRun} runs={model.runs} onSelect={selectPanel} />
+                  <DetailPanel
+                    serverUrl={server.url}
+                    run={selectedRun}
+                    runs={model.runs}
+                    focus={focus}
+                    onSelect={selectPanel}
+                  />
                 )}
               </div>
             )}

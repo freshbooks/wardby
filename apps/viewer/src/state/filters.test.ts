@@ -98,6 +98,7 @@ describe("one search rule across graph, counts, cost and timeline", () => {
       number,
       url: "u",
       state: "open",
+      at: null,
     }) as GraphRun["outcomes"][number];
   const runs = [
     mk("r1", { outcomes: [pr("owner/repo", 12)] }),

@@ -50,6 +50,7 @@ function makeDetail(overrides: Partial<RunDetail> = {}): RunDetail {
         number: 7,
         url: "https://github.com/o/r/pull/7",
         state: "open",
+        at: null,
       },
     ],
     coding: {
@@ -91,6 +92,31 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("DetailPanel", () => {
+  it("highlights the outcome or trigger clicked in the graph", async () => {
+    const view = render(
+      <DetailPanel
+        serverUrl="https://w.example"
+        run={makeRun()}
+        runs={known}
+        onSelect={vi.fn()}
+        focus={{ kind: "outcome", index: 0 }}
+      />,
+    );
+    const link = (await screen.findByText("⎇ o/r#7")).closest("li")!;
+    expect(link).toHaveClass("focused");
+    view.rerender(
+      <DetailPanel
+        serverUrl="https://w.example"
+        run={makeRun()}
+        runs={known}
+        onSelect={vi.fn()}
+        focus={{ kind: "trigger" }}
+      />,
+    );
+    expect(link).not.toHaveClass("focused");
+    expect(screen.getByText("manual").closest("p")).toHaveClass("focused");
+  });
+
   it("shows a native run's turn count", async () => {
     setup(makeRun({ agentKind: "native", services: [] }));
     expect(await screen.findByText(/Turn 6 · last activity 12s ago/)).toBeInTheDocument();
@@ -166,7 +192,8 @@ describe("DetailPanel", () => {
 
   it("offers no Open button for a non-https link", async () => {
     const d = makeDetail();
-    (d.outcomes[0] as { url: string }).url = "javascript:alert(1)";
+    // Off GitHub, so there is no link to fall back to either.
+    Object.assign(d.outcomes[0]!, { url: "javascript:alert(1)", provider: "gitlab" });
     api.fetchRun.mockResolvedValue(d);
     setup();
     await screen.findByText("DATABASE_URL");

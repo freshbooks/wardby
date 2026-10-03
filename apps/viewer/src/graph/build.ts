@@ -7,7 +7,7 @@ import { triggerLabel } from "./labels";
 export { triggerLabel };
 
 export type FlowNodeData =
-  | { kind: "trigger"; trigger: GraphRun["trigger"]; label: string }
+  | { kind: "trigger"; trigger: GraphRun["trigger"]; label: string; at: string }
   | { kind: "run"; run: GraphRun; selected: boolean }
   | { kind: "outcome"; outcome: Outcome };
 
@@ -77,7 +77,7 @@ export function buildGraph(runs: readonly GraphRun[], filters: Filters, selected
     graph.nodes.push({
       id: tid,
       type: "trigger",
-      data: { kind: "trigger", trigger: root.trigger, label: triggerLabel(root.trigger) },
+      data: { kind: "trigger", trigger: root.trigger, label: triggerLabel(root.trigger), at: root.startedAt },
     });
     link(tid, `r:${root.id}`, isLive(root));
     emitRun(root);

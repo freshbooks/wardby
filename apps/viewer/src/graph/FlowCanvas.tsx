@@ -8,6 +8,7 @@ import { outcomeLabel, OutcomeNode } from "./nodes/OutcomeNode";
 import { RunNode } from "./nodes/RunNode";
 import { TriggerNode } from "./nodes/TriggerNode";
 import { nodeSize } from "./sizes";
+import { selectionForNode, type RunFocus } from "./selection";
 
 const nodeTypes = { trigger: TriggerNode, run: RunNode, outcome: OutcomeNode };
 
@@ -77,7 +78,8 @@ interface Props {
   runs: readonly GraphRun[];
   filters: UiFilters;
   selectedId: string | null;
-  onSelect: (runId: string | null) => void;
+  /** A run, or the run behind a clicked trigger or outcome (with what to highlight). */
+  onSelect: (runId: string | null, focus?: RunFocus) => void;
 }
 
 export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
@@ -106,6 +108,9 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
       cancelled = true;
     };
   }, [layoutInput]);
+
+  const pick = ({ runId, focus }: { runId: string; focus: RunFocus | null }) =>
+    focus ? onSelect(runId, focus) : onSelect(runId);
 
   const nodes = useMemo<Node[]>(() => {
     if (!positions) return [];
@@ -140,16 +145,17 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
   if (positions === null && graph.nodes.length > 0) return <p className="muted">Laying out…</p>;
 
   return (
-    // Enter/Space on a focused run node selects it (React Flow only handles click).
+    // Enter/Space on a focused node selects its run (React Flow only handles click).
     <div
       className="flow-canvas"
       aria-label="Run graph"
       onKeyDown={(e) => {
         if (e.key !== "Enter" && e.key !== " ") return;
         const id = (e.target as HTMLElement).closest?.(".react-flow__node")?.getAttribute("data-id");
-        if (id?.startsWith("r:")) {
+        const picked = id ? selectionForNode(id) : null;
+        if (picked) {
           e.preventDefault();
-          onSelect(id.slice(2));
+          pick(picked);
         }
       }}
     >
@@ -166,7 +172,8 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
         nodesConnectable={false}
         proOptions={{ hideAttribution: true }}
         onNodeClick={(_, node) => {
-          if (node.id.startsWith("r:")) onSelect(node.id.slice(2));
+          const picked = selectionForNode(node.id);
+          if (picked) pick(picked);
         }}
         onPaneClick={() => onSelect(null)}
       >

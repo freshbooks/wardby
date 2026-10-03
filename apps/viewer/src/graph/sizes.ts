@@ -2,7 +2,7 @@ import type { FlowNodeData } from "./build";
 import { trayServices } from "./services";
 
 /** Single source of truth for node boxes: the ELK layout reserves exactly these sizes. */
-export const TRIGGER_SIZE = { width: 180, height: 44 } as const;
+export const TRIGGER_SIZE = { width: 200, height: 56 } as const;
 export const OUTCOME_SIZE = { width: 200, height: 56 } as const;
 export const RUN_WIDTH = 240;
 export const RUN_BASE_HEIGHT = 70;
@@ -18,6 +18,9 @@ export const trayHeight = (serviceCount: number): number =>
   serviceCount === 0 ? 0 : TRAY_PAD + TRAY_ROW_HEIGHT * Math.ceil(serviceCount / TRAY_PER_ROW);
 
 export const runHeight = (serviceCount: number): number => RUN_BASE_HEIGHT + trayHeight(serviceCount);
+
+/** Approx. title characters that fit a trigger or outcome node beside its "↗" button (icons count double). */
+export const LINK_NODE_TITLE_MAX_CHARS = 18;
 
 /** Approx. characters of a run node's agent name that fit its fixed width. */
 export const RUN_TITLE_MAX_CHARS = 18;

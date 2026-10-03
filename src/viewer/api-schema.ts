@@ -35,6 +35,9 @@ export const RunTriggerSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("host_event") }),
 ]);
 
+/** When the outcome happened (PR opened, comment last updated, check completed); null while a check is pending. */
+const OutcomeAtSchema = z.string().nullable();
+
 export const OutcomeSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("pull_request"),
@@ -43,20 +46,23 @@ export const OutcomeSchema = z.discriminatedUnion("kind", [
     number: z.number().int(),
     url: z.string(),
     state: z.string().nullable(),
+    at: OutcomeAtSchema,
   }),
   z.object({
     kind: z.literal("code_host_comment"),
     provider: z.string(),
     repository: z.string(),
     number: z.number().int(),
+    at: OutcomeAtSchema,
   }),
-  z.object({ kind: z.literal("issue_comment"), provider: z.string(), issueKey: z.string() }),
+  z.object({ kind: z.literal("issue_comment"), provider: z.string(), issueKey: z.string(), at: OutcomeAtSchema }),
   z.object({
     kind: z.literal("check"),
     provider: z.string(),
     repository: z.string(),
     number: z.number().int().nullable(),
     completed: z.boolean(),
+    at: OutcomeAtSchema,
   }),
 ]);
 

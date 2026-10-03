@@ -59,17 +59,20 @@ export interface GraphSnapshot {
           number: number;
           url: string;
           state: string | null;
+          at: string | null;
         }
       | {
           kind: "code_host_comment";
           provider: string;
           repository: string;
           number: number;
+          at: string | null;
         }
       | {
           kind: "issue_comment";
           provider: string;
           issueKey: string;
+          at: string | null;
         }
       | {
           kind: "check";
@@ -77,6 +80,7 @@ export interface GraphSnapshot {
           repository: string;
           number: number | null;
           completed: boolean;
+          at: string | null;
         }
     )[];
     declaredServices: {
@@ -158,17 +162,20 @@ export interface RunDetail {
         number: number;
         url: string;
         state: string | null;
+        at: string | null;
       }
     | {
         kind: "code_host_comment";
         provider: string;
         repository: string;
         number: number;
+        at: string | null;
       }
     | {
         kind: "issue_comment";
         provider: string;
         issueKey: string;
+        at: string | null;
       }
     | {
         kind: "check";
@@ -176,6 +183,7 @@ export interface RunDetail {
         repository: string;
         number: number | null;
         completed: boolean;
+        at: string | null;
       }
   )[];
   declaredServices: {

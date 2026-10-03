@@ -94,6 +94,7 @@ function outcomesFor(row: RunRow, pullRequests: readonly PullRequestRow[]): Outc
     number: pr.number,
     url: pr.url,
     state: pr.state,
+    at: pr.createdAt.toISOString(),
   }));
   const result = publicCodingRunResult(row.codingRun?.result);
   if (
@@ -108,6 +109,7 @@ function outcomesFor(row: RunRow, pullRequests: readonly PullRequestRow[]): Outc
       number: result.pullRequestNumber,
       url: result.pullRequestUrl,
       state: null,
+      at: iso(row.finishedAt),
     });
   }
   if (row.hostStatus?.commentId) {
@@ -116,10 +118,16 @@ function outcomesFor(row: RunRow, pullRequests: readonly PullRequestRow[]): Outc
       provider: row.hostStatus.provider,
       repository: row.hostStatus.repository,
       number: row.hostStatus.number,
+      at: (row.hostStatus.completedAt ?? row.hostStatus.createdAt).toISOString(),
     });
   }
   if (row.issueStatus?.commentId) {
-    outcomes.push({ kind: "issue_comment", provider: row.issueStatus.provider, issueKey: row.issueStatus.issueKey });
+    outcomes.push({
+      kind: "issue_comment",
+      provider: row.issueStatus.provider,
+      issueKey: row.issueStatus.issueKey,
+      at: (row.issueStatus.completedAt ?? row.issueStatus.createdAt).toISOString(),
+    });
   }
   if (row.hostCheck) {
     outcomes.push({
@@ -128,6 +136,7 @@ function outcomesFor(row: RunRow, pullRequests: readonly PullRequestRow[]): Outc
       repository: row.hostCheck.repository,
       number: row.hostCheck.prNumber,
       completed: row.hostCheck.completedAt !== null,
+      at: iso(row.hostCheck.completedAt),
     });
   }
   return outcomes;
