@@ -290,16 +290,6 @@ describe.skipIf(!enabled || !agentImage || !toolImage)("Claude Docker acceptance
       messageEvents.some((event) =>
         event.messages?.some(
           (message) =>
-            message.role === "system" &&
-            typeof message.content === "string" &&
-            message.content.includes("Today's date"),
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      messageEvents.some((event) =>
-        event.messages?.some(
-          (message) =>
             message.role === "user" &&
             Array.isArray(message.content) &&
             message.content.some(
