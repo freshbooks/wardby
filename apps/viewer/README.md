@@ -31,8 +31,11 @@ To build an application bundle:
 npm run tauri build
 ```
 
-Builds are not code signed or notarized. The first time you open one, use
-right-click, then Open.
+Builds are not code signed or notarized. A bundle you built on your own
+machine opens normally, because macOS only checks apps that were downloaded.
+For a build that was downloaded or copied from another machine, macOS blocks
+the first launch: open System Settings, then Privacy & Security, scroll to the
+message about the app, and choose Open Anyway.
 
 ## Add a server and sign in
 
@@ -45,6 +48,11 @@ right-click, then Open.
    browser returns to a short-lived listener on `127.0.0.1` that the app opens
    for the duration of the sign-in.
 3. The graph loads and then updates live.
+
+The `⋯` menu next to the server name signs out of the server or removes it
+from the list (after a confirmation). Signing out deletes the Keychain entry
+and forgets the access token; the grant is not revoked at the server. Removing
+a server also signs out of it.
 
 The signed-in user needs the Wardby `admin` role, because the viewer API
 requires the `admin:view` scope and only that role grants it. See
@@ -72,10 +80,14 @@ enter its client id when adding the server. The client must:
 
 Tokens never reach the UI. The refresh token is stored in the macOS Keychain
 (service `wardby-viewer`), one entry per server; the access token is held in
-memory by the app's Rust core only. Signing out revokes the token at the server
-where the server supports it and deletes the Keychain entry. The UI runs under
-a strict content security policy with no network access of its own: all
+memory by the app's Rust core only. Signing out deletes the Keychain entry and
+forgets the access token; the grant is not revoked at the server. The UI runs
+under a strict content security policy with no network access of its own: all
 requests go through the Rust core.
+
+Because builds are not code signed, macOS may ask for your login password
+again to let the app read its Keychain entry after you rebuild or update it.
+Choose Always Allow to stop the prompts for that build.
 
 ## Development
 
