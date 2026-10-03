@@ -78,6 +78,10 @@ Choose a coding agent when any of these are true:
 
 Do not use a coding agent merely because a task is complex. Start with the
 least powerful execution model that can safely produce the required outcome.
+A coding agent can also keep a repository's architecture knowledge current; see
+[Set up an architecture agent](help://architecture-agent) and
+[Architecture knowledge bundles](help://knowledge).
+
 Read [Connect GitHub repositories](github.md) and
 [Troubleshoot coding workers](troubleshooting/coding-workers.md) before
 enabling repository-changing work.
