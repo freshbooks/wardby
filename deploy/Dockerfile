@@ -26,6 +26,10 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY prisma ./prisma
 COPY prisma.config.ts ./
+# npm ci ran with --ignore-scripts, so Prisma's schema engine (which `migrate deploy` needs) isn't
+# installed yet. The migration Job runs as a non-root user on a read-only root filesystem, where
+# the CLI can't fetch it on first use, so fetch it here, for this image's platform.
+RUN npx prisma generate
 CMD ["npm", "run", "prisma:migrate"]
 
 FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
