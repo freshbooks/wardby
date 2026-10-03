@@ -665,6 +665,9 @@ button:disabled {
   flex: 0 0 22rem;
   max-width: 45%;
   overflow-y: auto;
+  /* Long names and image references wrap rather than scroll the panel sideways. */
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
   padding: 0.75rem;
   background: var(--surface);
   border-left: 1px solid var(--border);
