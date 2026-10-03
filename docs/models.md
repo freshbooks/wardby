@@ -161,6 +161,15 @@ shipped fallback, fails to start a new run with `model_unavailable` (see
 `create_agent`/`update_agent` refuse to set or change an agent's model to
 one that is unavailable.
 
+Either way the run is recorded: it ends with status `failed`, zero spend, and
+the `model_unavailable` message as its error, visible in `list_runs` and
+`get_run`. A coding agent's run fails this way at dispatch, before a worker
+starts — including when its model now belongs to a provider its coding
+provider cannot drive (`Model "<id>" is not supported by coding provider
+"<provider>"`). A scheduled agent still advances to its next window, rather
+than retrying the same one, and `trigger_agent` returns the failed status and
+its error straight away.
+
 ## When changes take effect
 
 Each wardby process (the MCP server, the scheduler, `wardby run`) polls the

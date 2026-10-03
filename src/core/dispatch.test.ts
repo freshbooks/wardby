@@ -246,7 +246,7 @@ describe("dispatchRun", () => {
     expect(state.runs[0].pricingSnapshot.modelId).toBe(agent.model);
   });
 
-  it("refuses a coding dispatch for a disabled model with model_unavailable, writing no run", async () => {
+  it("fails a coding dispatch for a disabled model with a terminal run carrying model_unavailable, never started", async () => {
     const rows = [
       {
         ...SHIPPED_CATALOG.find((e) => e.modelId === "gpt-5.6-luna")!,
@@ -274,14 +274,74 @@ describe("dispatchRun", () => {
         },
       };
       const state = fakeDb(agent);
-      await expect(
-        dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id }),
-      ).rejects.toThrow(/model_unavailable: .*reason: disabled/);
-      expect(state.runs).toHaveLength(0);
+      const start = vi.fn(async () => undefined);
+      const beforePersist = vi.fn(async () => true);
+      const afterPersist = vi.fn(async () => undefined);
+      const now = new Date("2026-10-03T12:00:00.000Z");
+      const result = await dispatchRun({
+        db: state.db,
+        executor: { start, async stop() {} },
+        agentId: agent.id,
+        now,
+        beforePersist,
+        afterPersist,
+      });
+      // Committed, not thrown: the caller's beforePersist effects (a scheduler's
+      // lastScheduledAt) stand, and afterPersist's host rows are written.
+      expect(result?.run).toMatchObject({ status: "failed", finishedAt: now });
+      expect(result?.run.error).toMatch(/^model_unavailable: .*reason: disabled/);
+      expect(state.runs).toHaveLength(1);
+      expect(state.runs[0]).not.toHaveProperty("pricingVersion");
+      expect(state.codingRuns).toHaveLength(0);
+      expect(beforePersist).toHaveBeenCalledTimes(1);
+      expect(afterPersist).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ status: "failed" }));
+      expect(start).not.toHaveBeenCalled();
     } finally {
       uninstallModelCatalogForTests();
       store.close();
     }
+  });
+
+  it("fails a coding dispatch for a model not in the catalog the same way", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      model: "gpt-nonexistent",
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+      },
+    };
+    const state = fakeDb(agent);
+    const start = vi.fn(async () => undefined);
+    const result = await dispatchRun({ db: state.db, executor: { start, async stop() {} }, agentId: agent.id });
+    expect(result?.run.status).toBe("failed");
+    expect(result?.run.error).toMatch(/^model_unavailable: .*reason: not_in_catalog/);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("still throws for a coding profile naming an unknown coding provider", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      codingProfile: {
+        provider: "cobol-bot",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+      },
+    };
+    const state = fakeDb(agent);
+    await expect(
+      dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id }),
+    ).rejects.toThrow(/Unsupported coding provider "cobol-bot"/);
+    expect(state.runs).toHaveLength(0);
   });
 
   it("leaves a native run's catalog entry for the runner to record", async () => {
@@ -582,7 +642,7 @@ describe("dispatchRun", () => {
     ]);
   });
 
-  it("rejects a model that does not belong to the selected coding provider", async () => {
+  it("fails, at dispatch, a run whose model does not belong to the selected coding provider", async () => {
     const agent = {
       ...nativeAgent(),
       kind: "coding",
@@ -596,10 +656,15 @@ describe("dispatchRun", () => {
         protectedPaths: [],
       },
     };
+    const state = fakeDb(agent);
+    const start = vi.fn(async () => undefined);
 
-    await expect(
-      dispatchRun({ db: fakeDb(agent).db, executor: { async start() {}, async stop() {} }, agentId: agent.id }),
-    ).rejects.toThrow(/not supported by coding provider/);
+    const result = await dispatchRun({ db: state.db, executor: { start, async stop() {} }, agentId: agent.id });
+
+    expect(result?.run.status).toBe("failed");
+    expect(result?.run.error).toMatch(/not supported by coding provider "claude-code"/);
+    expect(state.codingRuns).toHaveLength(0);
+    expect(start).not.toHaveBeenCalled();
   });
 
   it("an unresolvable toolchain rejects dispatchRun's promise (a real transaction rolls the rest back; this fake's $transaction has no rollback semantics, so only the rejection itself is asserted here)", async () => {

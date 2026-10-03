@@ -31,6 +31,15 @@ coding proxy's own credentials rather than looking up a provider adapter:
   any native agent can use a model under it; see
   [Getting started](../getting-started.md).
 
+Whatever the reason, the run is not lost: it ends with status `failed`, zero spend, and
+the `model_unavailable` message as its error, so `list_runs` and `get_run`
+show why. A coding agent's run fails at dispatch, before any worker starts,
+and a scheduled agent moves on to its next window instead of retrying the
+same one. A coding agent whose model now belongs to a different provider than
+its coding provider drives (for example a Claude model on a Codex agent)
+fails the same way, with `Model "<id>" is not supported by coding provider
+"<provider>"` as its error.
+
 A coding agent's model is checked against the catalog only
 (`not_in_catalog`/`disabled`), never `provider_not_configured`: coding runs
 never look up a provider adapter at all, so a model can pass this check and

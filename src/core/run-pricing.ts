@@ -68,7 +68,18 @@ export async function pinNativeRunPricing(
   return (row && stored(row)) ?? { entry, priceVersion: resolved.priceVersion };
 }
 
-/** A coding run's entry at dispatch: in the catalog, enabled, and of this coding provider's model provider. */
+/** A coding agent's model is in the catalog but belongs to a model provider its coding provider cannot drive. */
+export class CodingModelProviderMismatchError extends Error {
+  constructor(model: string, provider: CodingProvider) {
+    super(`Model "${model}" is not supported by coding provider "${provider}".`);
+    this.name = "CodingModelProviderMismatchError";
+  }
+}
+
+/**
+ * A coding run's entry at dispatch: in the catalog, enabled, and of this coding provider's model provider.
+ * Throws ModelUnavailableError or CodingModelProviderMismatchError; dispatchRun turns either into a failed run.
+ */
 export function resolveCodingEntry(
   provider: CodingProvider,
   model: string,
@@ -76,7 +87,7 @@ export function resolveCodingEntry(
 ): ResolvedCatalogEntry {
   const entry = catalog.require(model);
   if (codingProviderForModelProvider(entry.provider) !== provider) {
-    throw new Error(`Model "${model}" is not supported by coding provider "${provider}".`);
+    throw new CodingModelProviderMismatchError(model, provider);
   }
   return entry;
 }
