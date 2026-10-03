@@ -60,8 +60,9 @@ from `inputPerMTok` with a multiplier.
 shipped id always belongs to its shipped provider — permanently; no other
 provider can ever claim it, not even by disabling or resetting the override.
 A non-shipped id already claimed by another provider (its row active or
-disabled) is freed only by that provider's `reset_model`; `disable_model`
-alone never frees it, since the disabled row still reserves the id.
+disabled) is freed only by `reset_model` — it takes only the `modelId` and
+clears every row for it, whichever provider owns it; `disable_model` alone
+never frees it, since the disabled row still reserves the id.
 
 `thinkingMode` (`adaptive`, `manual`, or `none`) must match what the exact
 model accepts. Getting it wrong doesn't fail at `set_model` — it fails later,

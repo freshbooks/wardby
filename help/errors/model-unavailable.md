@@ -34,14 +34,21 @@ coding proxy's own credentials rather than looking up a provider adapter:
 A coding agent's model is checked against the catalog only
 (`not_in_catalog`/`disabled`), never `provider_not_configured`: coding runs
 never look up a provider adapter at all, so a model can pass this check and
-still fail at dispatch if the coding proxy itself has no credentials for that
-model's provider. That failure is not `model_unavailable` — it fails the
-coding run directly, with the proxy's own diagnostic
-(`coding_provider_not_configured:<provider>` in the control-plane log,
-alongside the run's diagnostic id). An operator fixes it by configuring that
-provider's coding-proxy credential (`CODING_OPENAI_CREDENTIAL_REF` for Codex,
-`CODING_ANTHROPIC_CREDENTIAL_REF` for Claude Code); see
-[Local coding-agent setup](../../docs/coding-agent-setup.md).
+still fail later for reasons `model_unavailable` never reports.
+
+One such failure has a specific name: dispatching a Claude Code run throws
+`coding_provider_not_configured:claude-code` when this deployment's
+`CODING_CLAUDE_WORKER_IMAGE` or `CODING_CLAUDE_TOOL_RUNNER_IMAGE` isn't set —
+it means the Claude Code worker or tool-runner image itself isn't configured,
+not a missing credential, and there is no equivalent error or string for
+Codex. See [Local coding-agent setup](../../docs/coding-agent-setup.md).
+
+A missing or invalid API key behind a coding run's model-provider credential
+(`CODING_OPENAI_CREDENTIAL_REF` for Codex, `CODING_ANTHROPIC_CREDENTIAL_REF`
+for Claude Code) is a different problem with no dedicated error code
+documented here: the run starts, then fails when it actually calls the
+model — not as `model_unavailable`, and not at dispatch. Check the coding
+proxy's own logs for that run.
 
 See [Models and pricing](../models.md) for how the catalog works and who can
 change it.

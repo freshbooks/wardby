@@ -348,7 +348,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
     name: "set_model",
     scope: "models:admin",
     description:
-      "Model managers (models:admin): add or override a catalog entry. Every field is required — there is no partial update, so the whole entry is always literal and auditable. Refused (409) when the model id belongs to a different provider: a shipped id always belongs to its shipped provider and can never be reassigned; a non-shipped id already claimed by another provider (its row active or disabled) is freed only by that provider's reset_model, never by disable_model. Zero rates come back as warnings, not errors.",
+      "Model managers (models:admin): add or override a catalog entry. Every field is required — there is no partial update, so the whole entry is always literal and auditable. Refused (409) when the model id belongs to a different provider: a shipped id always belongs to its shipped provider and can never be reassigned; a non-shipped id already claimed by another provider (its row active or disabled) is freed only by reset_model on that id, never by disable_model. Zero rates come back as warnings, not errors.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
