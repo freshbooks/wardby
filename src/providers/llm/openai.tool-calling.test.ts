@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type OpenAI from "openai";
-import { OpenAiLlmProvider, estimateTokens } from "./openai.js";
+import { OpenAiLlmProvider, estimateTokens, openaiCredentialsPresent } from "./openai.js";
 import { shippedCatalog } from "./catalog.js";
 import type { LlmMessage, LlmStreamEvent, LlmToolDef } from "./types.js";
 
@@ -180,5 +180,12 @@ describe("OpenAiLlmProvider.withEntry", () => {
     const done = events.find((e) => e.type === "done");
     expect(done?.type === "done" && done.usage.costUsd).toBeCloseTo(7, 9);
     expect(() => pinned.priceUsd("gpt-4o", { inputTokens: 1, outputTokens: 0 })).toThrow(/reason: not_in_catalog/);
+  });
+});
+
+describe("openaiCredentialsPresent", () => {
+  it("is true only when OPENAI_API_KEY is set in the given environment", () => {
+    expect(openaiCredentialsPresent({ OPENAI_API_KEY: "sk-x" })).toBe(true);
+    expect(openaiCredentialsPresent({})).toBe(false);
   });
 });
