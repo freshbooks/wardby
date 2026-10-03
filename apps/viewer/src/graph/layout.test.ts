@@ -3,6 +3,7 @@ import type { GraphRun } from "../api/types";
 import { initialFilters } from "../state/filters";
 import { buildGraph } from "./build";
 import { layoutGraph } from "./layout";
+import { trayServices } from "./services";
 import { OUTCOME_SIZE, RUN_WIDTH, TRIGGER_SIZE, runHeight } from "./sizes";
 
 function run(id: string, parentRunId: string | null, startedAt: string): GraphRun {
@@ -14,6 +15,7 @@ function run(id: string, parentRunId: string | null, startedAt: string): GraphRu
     agentKind: "native",
     model: "m",
     codingProvider: null,
+    declaredServices: [],
     status: "running",
     trigger: { kind: "manual" },
     turns: 0,
@@ -58,7 +60,7 @@ describe("layoutGraph", () => {
           ? TRIGGER_SIZE.height
           : n.data.kind === "outcome"
             ? OUTCOME_SIZE.height
-            : runHeight(n.data.run.services.length);
+            : runHeight(trayServices(n.data.run).length);
       const root = n.id.startsWith("t:") ? n.id.slice(2) : n.id.startsWith("r:") ? n.id.slice(2) : n.id.split(":")[1];
       const tree = root === "c" ? "p" : root;
       const b = boxes.get(tree) ?? { top: Infinity, bottom: -Infinity, left: Infinity };

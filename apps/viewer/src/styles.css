@@ -488,12 +488,76 @@ button:disabled {
   background: var(--accent);
 }
 
-.chips {
-  list-style: none;
+.flow-node.run {
+  position: relative;
+}
+
+/* Service tray: pinned under the run's stats, two pills per row (graph/sizes.ts). */
+.tray {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  box-sizing: border-box;
   margin: 0;
-  padding: 0;
+  padding: 4px 0.6rem;
+  list-style: none;
   display: grid;
-  gap: 0.15rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: 20px;
+  column-gap: 0.4rem;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 70%, var(--bg));
+  font-size: 0.78rem;
+}
+
+.pill {
+  display: flex;
+  gap: 0.3em;
+  align-items: baseline;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.pill-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pill-attempts {
+  flex: none;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.pill-dot {
+  flex: none;
+}
+
+.pill.ready .pill-dot {
+  color: var(--ok);
+}
+
+.pill.probing .pill-dot {
+  color: var(--warn);
+}
+
+.pill.failed .pill-dot,
+.pill.failed .pill-label {
+  color: var(--bad);
+}
+
+.pill.pending,
+.pill.unrecorded {
+  color: var(--muted);
+}
+
+/* Old runs: the service ran, but no state was recorded. */
+.pill.unrecorded {
+  opacity: 0.55;
+  font-style: italic;
 }
 
 .chip {

@@ -63,6 +63,10 @@ budget, outcomes, and coding-run services. `model` is the model the run used
 (a coding run's own model, otherwise the agent's). `codingProvider` names the
 coding worker, such as `codex` or `claude-code`, and is `null` for runs that
 aren't coding runs.
+`declaredServices` lists the services (name and version) a coding run was
+started with; `services` holds their recorded readiness. A finished run can
+declare a service that has no readiness record, for example a run from before
+the server recorded service status.
 
 ### `GET /admin/api/runs/<id>`
 

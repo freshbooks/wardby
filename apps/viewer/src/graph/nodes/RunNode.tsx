@@ -5,10 +5,11 @@ import type { GraphRun, ServiceStatus } from "../../api/types";
 import { statusGroup } from "../../state/filters";
 import type { FlowNodeData } from "../build";
 import { sameNodeProps } from "../sameData";
-import { RUN_TITLE_MAX_CHARS, RUN_WIDTH, runHeight, tailTruncate } from "../sizes";
+import { RUN_TITLE_MAX_CHARS, RUN_WIDTH, runHeight, tailTruncate, trayHeight } from "../sizes";
 import { exactUsd, formatUsd } from "../../format/money";
 import { codingBadge, shortModel } from "../labels";
 import { formatTokens } from "../../format/text";
+import { trayServices, type TrayService } from "../services";
 
 const FADE_AFTER_MS = 60_000;
 /** Title characters the coding badge takes up. */
@@ -56,6 +57,16 @@ export function progressText(run: GraphRun): string {
   return run.agentKind === "coding" ? `${formatTokens(run.tokensIn + run.tokensOut)} tok` : `turn ${run.turns}`;
 }
 
+const TRAY_GLYPH: Record<TrayService["state"], string> = {
+  ready: "●",
+  probing: "◐",
+  pending: "○",
+  failed: "✗",
+  unrecorded: "○",
+};
+
+const trayGlyph = (t: TrayService): string => TRAY_GLYPH[t.state];
+
 /** True once a succeeded run has been finished for 60 s (one timer, no polling). */
 function useFaded(run: GraphRun): boolean {
   const fadeAt = run.status === "succeeded" && run.finishedAt ? Date.parse(run.finishedAt) + FADE_AFTER_MS : null;
@@ -74,6 +85,7 @@ function RunNodeImpl({ data }: NodeProps) {
   const now = useClock(running);
   const faded = useFaded(run);
   const group = statusGroup(run.status);
+  const tray = trayServices(run);
   const badge = run.codingProvider ? codingBadge(run.codingProvider) : null;
   const pct = run.budgetUsd > 0 ? Math.min(100, (run.costUsd / run.budgetUsd) * 100) : 0;
   const cls = ["flow-node", "run", group, selected ? "selected" : "", faded ? "faded" : "", running ? "pulse" : ""]
@@ -81,7 +93,15 @@ function RunNodeImpl({ data }: NodeProps) {
     .join(" ");
 
   return (
-    <div className={cls} style={{ width: RUN_WIDTH, height: runHeight(run.services.length) }}>
+    <div
+      className={cls}
+      // The tray is pinned to the bottom edge; the rest stays centred in the space above it.
+      style={{
+        width: RUN_WIDTH,
+        height: runHeight(tray.length),
+        paddingBottom: tray.length ? `calc(${trayHeight(tray.length)}px + 0.4rem)` : undefined,
+      }}
+    >
       <Handle type="target" position={Position.Left} className="flow-handle" isConnectable={false} />
       <div className="node-head">
         <span className="glyph" role="img" aria-label={run.status}>
@@ -124,11 +144,16 @@ function RunNodeImpl({ data }: NodeProps) {
       >
         <div style={{ width: `${pct}%` }} />
       </div>
-      {run.services.length > 0 && (
-        <ul className="chips" aria-label="Services">
-          {run.services.map((s) => (
-            <li key={s.name} className={`chip ${s.state}`} title={`${s.name} ${serviceChip(s)}`}>
-              {s.name} {serviceChip(s)}
+      {tray.length > 0 && (
+        <ul className="tray" aria-label="Services">
+          {tray.map((t) => (
+            <li key={t.name} className={`pill ${t.state}`} title={t.title}>
+              <span className="pill-dot" aria-hidden="true">
+                {trayGlyph(t)}
+              </span>
+              <span className="pill-label">{t.label}</span>
+              {t.attempts !== null && <span className="pill-attempts">{t.attempts}</span>}
+              <span className="sr-only">{t.title}</span>
             </li>
           ))}
         </ul>

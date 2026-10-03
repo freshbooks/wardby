@@ -3,11 +3,18 @@ export const TRIGGER_SIZE = { width: 180, height: 44 } as const;
 export const OUTCOME_SIZE = { width: 200, height: 56 } as const;
 export const RUN_WIDTH = 240;
 export const RUN_BASE_HEIGHT = 70;
-export const RUN_SERVICE_HEIGHT = 22;
+/** The service tray under a run: services per row, row height, and its padding and border. */
+export const TRAY_PER_ROW = 2;
+export const TRAY_ROW_HEIGHT = 20;
+export const TRAY_PAD = 9;
 /** Vertical gap between stacked run trees. */
 export const TREE_GAP = 40;
 
-export const runHeight = (serviceCount: number): number => RUN_BASE_HEIGHT + RUN_SERVICE_HEIGHT * serviceCount;
+/** Height of the service tray pinned to a run node's bottom edge; 0 without services. */
+export const trayHeight = (serviceCount: number): number =>
+  serviceCount === 0 ? 0 : TRAY_PAD + TRAY_ROW_HEIGHT * Math.ceil(serviceCount / TRAY_PER_ROW);
+
+export const runHeight = (serviceCount: number): number => RUN_BASE_HEIGHT + trayHeight(serviceCount);
 
 /** Approx. characters of a run node's agent name that fit its fixed width. */
 export const RUN_TITLE_MAX_CHARS = 18;

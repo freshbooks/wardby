@@ -340,6 +340,25 @@
             ]
           }
         },
+        "declaredServices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "version"
+            ],
+            "additionalProperties": false
+          }
+        },
         "services": {
           "type": "array",
           "items": {
@@ -515,6 +534,7 @@
         "finishedAt",
         "heartbeatAt",
         "outcomes",
+        "declaredServices",
         "services",
         "error",
         "finalText",

@@ -1,5 +1,6 @@
 import ELK from "elkjs/lib/elk.bundled.js";
 import type { FlowGraph, FlowNodeData } from "./build";
+import { trayServices } from "./services";
 import { OUTCOME_SIZE, RUN_WIDTH, TREE_GAP, TRIGGER_SIZE, runHeight } from "./sizes";
 
 type Size = { width: number; height: number };
@@ -20,7 +21,7 @@ export async function layoutGraph(
       case "trigger":
         return TRIGGER_SIZE;
       case "run":
-        return { width: RUN_WIDTH, height: runHeight(n.data.run.services.length) };
+        return { width: RUN_WIDTH, height: runHeight(trayServices(n.data.run).length) };
       case "outcome":
         return OUTCOME_SIZE;
     }

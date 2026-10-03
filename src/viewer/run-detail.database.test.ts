@@ -86,6 +86,7 @@ describe.skipIf(!process.env.DATABASE_URL)("loadRunDetail (PostgreSQL)", () => {
     expect(RunDetailSchema.parse(detail)).toEqual(detail);
     expect(detail!.model).toBe("coding-model");
     expect(detail!.codingProvider).toBe("codex");
+    expect(detail!.declaredServices).toEqual([{ name: "postgres", version: "16" }]);
     expect(detail!.coding).toMatchObject({
       provider: "codex",
       repository: "your-org/app",
@@ -109,6 +110,7 @@ describe.skipIf(!process.env.DATABASE_URL)("loadRunDetail (PostgreSQL)", () => {
     expect(detail).toMatchObject({
       model: "agent-model",
       codingProvider: null,
+      declaredServices: [],
       error: "boom",
       finalText: "final words",
       coding: null,

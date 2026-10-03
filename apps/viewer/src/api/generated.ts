@@ -79,6 +79,10 @@ export interface GraphSnapshot {
           completed: boolean;
         }
     )[];
+    declaredServices: {
+      name: string;
+      version: string;
+    }[];
     services: {
       name: string;
       state: "pending" | "probing" | "ready" | "failed";
@@ -174,6 +178,10 @@ export interface RunDetail {
         completed: boolean;
       }
   )[];
+  declaredServices: {
+    name: string;
+    version: string;
+  }[];
   services: {
     name: string;
     state: "pending" | "probing" | "ready" | "failed";

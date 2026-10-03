@@ -91,6 +91,9 @@ export const GraphRunSchema = z.object({
   finishedAt: z.string().nullable(),
   heartbeatAt: z.string().nullable(),
   outcomes: z.array(OutcomeSchema),
+  /** The services a coding run was started with, recorded or not; empty for native runs. */
+  declaredServices: z.array(z.object({ name: z.string(), version: z.string() })),
+  /** Recorded readiness of the run's services (none before status tracking existed). */
   services: z.array(ServiceStatusSchema),
 });
 
