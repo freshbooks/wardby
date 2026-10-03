@@ -1,7 +1,7 @@
 // Generates src/api/generated.ts from the server's published JSON Schemas.
 // The app never imports server TypeScript source — only these JSON files.
 import { readFile, writeFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { compile } from "json-schema-to-typescript";
 import { format, resolveConfig } from "prettier";
 
@@ -33,7 +33,7 @@ export async function render() {
   return format(out, { ...config, parser: "typescript" });
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await writeFile(outFile, await render());
   console.log(`wrote ${fileURLToPath(outFile)}`);
 }

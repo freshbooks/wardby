@@ -1,7 +1,7 @@
 {
   "name": "wardby-viewer",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,6 @@
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.1",
-    "@tauri-apps/plugin-opener": "2.7.0",
     "@xyflow/react": "12.12.0",
     "elkjs": "0.12.0",
     "react": "19.3.0",
