@@ -284,6 +284,8 @@ button:disabled {
 .dialog-backdrop {
   position: fixed;
   inset: 0;
+  /* Above every in-app layer: canvas messages, menus, the timeline tooltip, toasts. */
+  z-index: 100;
   display: grid;
   place-items: center;
   background: rgb(0 0 0 / 0.4);
