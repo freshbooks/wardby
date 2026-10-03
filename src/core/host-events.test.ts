@@ -707,7 +707,13 @@ describe("routeHostEvent push (merge watcher)", () => {
     vi.mocked(h.listFiles).mockImplementation(async () => {
       if (files === null) throw new Error("boom");
       const names = Object.keys(files).map((f) => `docs/knowledge/${f}`);
-      return { ref: AFTER, count: names.length, truncated: false, files: names };
+      return {
+        ref: AFTER,
+        count: names.length,
+        truncated: false,
+        files: names.map((n) => `${n} (812 bytes)`),
+        paths: names,
+      };
     });
     vi.mocked(h.readFile).mockImplementation(async (_r, path) => {
       const content = files?.[path.replace("docs/knowledge/", "")] ?? "";
@@ -806,5 +812,49 @@ describe("routeHostEvent push (merge watcher)", () => {
     const result = await routeHostEvent(push(["x"]), d);
     expect(result.runIds).toEqual([]);
     expect(h.listFiles).not.toHaveBeenCalled();
+  });
+
+  it("contains a failing watcher: the others are still dispatched", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    vi.mocked(dispatchRun).mockRejectedValueOnce(new Error("dispatch down"));
+    const d = deps([link("w1"), link("w2")], bundleHost({}));
+    const result = await routeHostEvent(push(["README.md"]), d);
+    expect(result.runIds).toEqual(["run-w2"]);
+    expect(vi.mocked(dispatchRun)).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the concepts it could read when one file fails to read", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = bundleHost({ "bad.md": "x", "seed.md": concept("src/a.ts") });
+    const read = vi.mocked(h.readFile).getMockImplementation()!;
+    vi.mocked(h.readFile).mockImplementation(async (r, path, ref, w) => {
+      if (path.endsWith("bad.md")) throw new Error("read failed");
+      return read(r, path, ref, w);
+    });
+    const d = deps([link("w1")], h);
+    await routeHostEvent(push(["src/a.ts"]), d);
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("- docs/knowledge/seed.md");
+  });
+
+  it("continues with what was listed when the listing is truncated", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = bundleHost({ "seed.md": concept("src/a.ts") });
+    const list = vi.mocked(h.listFiles).getMockImplementation()!;
+    vi.mocked(h.listFiles).mockImplementation(async (...a) => ({ ...(await list(...a)), truncated: true }));
+    const d = deps([link("w1")], h);
+    await routeHostEvent(push(["src/a.ts"]), d);
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("- docs/knowledge/seed.md");
+  });
+
+  it("caps the changed-file list in the context, scoping on the full list", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const paths = Array.from({ length: 250 }, (_, i) => `f${String(i).padStart(3, "0")}.txt`);
+    const d = deps([link("w1")], bundleHost({ "seed.md": concept("f249.txt") }));
+    await routeHostEvent(push(paths), d);
+    const { untrustedContext } = splitTaskOverride(taskOf());
+    expect(untrustedContext).toContain("- f199.txt");
+    expect(untrustedContext).not.toContain("- f200.txt");
+    expect(untrustedContext).toContain("… and 50 more changed files");
+    expect(untrustedContext).toContain("- docs/knowledge/seed.md");
   });
 });

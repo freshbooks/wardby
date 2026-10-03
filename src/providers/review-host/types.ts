@@ -87,7 +87,10 @@ export interface FileListView {
   ref: string;
   count: number;
   truncated: boolean;
+  /** Display strings (path plus size) shown to agents. */
   files: string[];
+  /** Bare repository paths, same order and length as `files`. */
+  paths: string[];
 }
 
 export interface InlineComment {

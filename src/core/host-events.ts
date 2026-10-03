@@ -74,6 +74,7 @@ export function isReviewCommand(body: string, mentionHandle: string): boolean {
 type PushEvent = Extract<HostEvent, { kind: "push" }>;
 const MAX_BUNDLE_FILES = 200;
 const BUNDLE_FILE_LINES = 2000;
+const MAX_LISTED_CHANGES = 200;
 
 /**
  * The merge watcher's task text. The task holds only trusted facts (repository,
@@ -83,7 +84,12 @@ const BUNDLE_FILE_LINES = 2000;
  */
 export function mergeTaskText(event: PushEvent, scope: DriftScope | null): string {
   const changed = event.changedPathsComplete
-    ? `Changed files:\n${event.changedPaths.map((p) => `- ${p}`).join("\n")}`
+    ? `Changed files:\n${[
+        ...event.changedPaths.slice(0, MAX_LISTED_CHANGES).map((p) => `- ${p}`),
+        ...(event.changedPaths.length > MAX_LISTED_CHANGES
+          ? [`… and ${event.changedPaths.length - MAX_LISTED_CHANGES} more changed files`]
+          : []),
+      ].join("\n")}`
     : "The changed-file list is incomplete (more than 20 commits); treat every knowledge concept as possibly affected.";
   const concepts = scope
     ? `Knowledge concepts whose citations, affects globs, or files changed (${scope.reason}):\n` +
@@ -102,10 +108,24 @@ export function mergeTaskText(event: PushEvent, scope: DriftScope | null): strin
 async function loadBundle(host: CodeReviewHost, event: PushEvent): Promise<ParsedConcept[]> {
   const prefix = `${DEFAULT_KNOWLEDGE_BUNDLE_PATH}/`;
   const concepts: ParsedConcept[] = [];
+  let listing: Awaited<ReturnType<CodeReviewHost["listFiles"]>>;
   try {
-    const listing = await host.listFiles(event.repository, event.after, prefix);
-    const files = listing.files.filter((f) => f.startsWith(prefix) && f.endsWith(".md")).slice(0, MAX_BUNDLE_FILES);
-    for (const file of files) {
+    listing = await host.listFiles(event.repository, event.after, prefix);
+  } catch (err) {
+    log.warn({ err, repository: event.repository, after: event.after }, "could not read the knowledge bundle");
+    return [];
+  }
+  if (listing.truncated) {
+    log.warn(
+      { repository: event.repository, after: event.after },
+      "the knowledge bundle listing is truncated; continuing with the files listed",
+    );
+  }
+  const files = listing.paths.filter((f) => f.startsWith(prefix) && f.endsWith(".md")).slice(0, MAX_BUNDLE_FILES);
+  let skipped = 0;
+  let lastError: unknown;
+  for (const file of files) {
+    try {
       const read = await host.readFile(event.repository, file, event.after, {
         startLine: 1,
         maxLines: BUNDLE_FILE_LINES,
@@ -113,10 +133,16 @@ async function loadBundle(host: CodeReviewHost, event: PushEvent): Promise<Parse
       if (read.kind !== "file" || read.truncated) continue;
       const parsed = parseConcept(file.slice(prefix.length), read.content);
       if (parsed.ok) concepts.push(parsed.concept);
+    } catch (err) {
+      skipped += 1;
+      lastError = err;
     }
-  } catch (err) {
-    log.warn({ err, repository: event.repository, after: event.after }, "could not read the knowledge bundle");
-    return [];
+  }
+  if (skipped > 0) {
+    log.warn(
+      { err: lastError, repository: event.repository, after: event.after, skipped },
+      "skipped knowledge files that could not be read",
+    );
   }
   return concepts;
 }
@@ -377,21 +403,30 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const taskOverride = mergeTaskText(event, scope);
       const runIds: string[] = [];
       for (const watcher of watchers) {
-        const dispatched = await dispatchRun({
-          db: deps.db,
-          executor: deps.executor,
-          selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
-          agentId: watcher.agentId,
-          trigger: "host_event",
-          taskOverride,
-          lockAgent: true,
-          // D3: one merge run at a time per watcher; a push during a run is skipped.
-          beforePersist: async (tx, agent) =>
-            !(await tx.run.findFirst({
-              where: { agentId: agent.id, status: { in: ["pending", "running"] } },
-              select: { id: true },
-            })),
-        });
+        let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+        try {
+          dispatched = await dispatchRun({
+            db: deps.db,
+            executor: deps.executor,
+            selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
+            agentId: watcher.agentId,
+            trigger: "host_event",
+            taskOverride,
+            lockAgent: true,
+            // D3: one merge run at a time per watcher; a push during a run is skipped.
+            beforePersist: async (tx, agent) =>
+              !(await tx.run.findFirst({
+                where: { agentId: agent.id, status: { in: ["pending", "running"] } },
+                select: { id: true },
+              })),
+          });
+        } catch (err) {
+          log.warn(
+            { err, agentId: watcher.agentId, repository: event.repository, after: event.after },
+            "merge watcher run could not be dispatched",
+          );
+          continue;
+        }
         if (dispatched) runIds.push(dispatched.run.id);
         else {
           log.info(

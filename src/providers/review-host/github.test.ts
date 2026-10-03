@@ -187,6 +187,7 @@ describe("GitHubReviewHost reads", () => {
       count: 1,
       truncated: false,
       files: ["tests/test_a.py (10 bytes)"],
+      paths: ["tests/test_a.py"],
     });
   });
 
