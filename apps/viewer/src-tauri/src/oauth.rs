@@ -194,7 +194,14 @@ pub async fn read_capped_to(mut resp: reqwest::Response, max: usize) -> Result<V
 /// Protected-resource metadata: the path-inserted URL first (RFC 9728), then
 /// the origin root, which wardby always serves. A 404 on both means the URL is
 /// not a wardby server.
-async fn fetch_prm(http: &reqwest::Client, server: &Url) -> Result<ProtectedResource, AppError> {
+///
+/// Also reports whether the path-inserted document is the one that answered:
+/// only then does RFC 9728 section 3.3 let us demand that `resource` equal the
+/// entered URL exactly (the root fallback describes the whole origin).
+async fn fetch_prm(
+    http: &reqwest::Client,
+    server: &Url,
+) -> Result<(ProtectedResource, bool), AppError> {
     let first = well_known(server, "oauth-protected-resource")?;
     let mut root = server.clone();
     root.set_path("/");
@@ -204,9 +211,10 @@ async fn fetch_prm(http: &reqwest::Client, server: &Url) -> Result<ProtectedReso
     } else {
         vec![first, root]
     };
-    for url in candidates {
+    let path_inserted = candidates.len() == 2;
+    for (i, url) in candidates.into_iter().enumerate() {
         match get_json::<ProtectedResource>(http, url).await {
-            Ok(prm) => return Ok(prm),
+            Ok(prm) => return Ok((prm, path_inserted && i == 0)),
             Err(AppError::Http { status: 404 }) => {}
             Err(e) => return Err(e),
         }
@@ -214,12 +222,42 @@ async fn fetch_prm(http: &reqwest::Client, server: &Url) -> Result<ProtectedReso
     Err(AppError::NotWardby)
 }
 
+/// RFC 9728 section 3.3: the `resource` a document advertises is used as the
+/// token audience, so it must belong to the server the user entered, or a
+/// hostile server could collect tokens meant for another deployment that shares
+/// its identity provider. The origin must match; when the path-inserted
+/// document answered, the whole URL must match (ignoring a trailing slash).
+fn check_resource(server: &Url, resource: &str, exact: bool) -> Result<(), AppError> {
+    let mismatch = || AppError::Protocol("resource mismatch".to_string());
+    let resource = Url::parse(resource).map_err(|_| mismatch())?;
+    if resource.origin() != server.origin() {
+        return Err(mismatch());
+    }
+    if exact {
+        let norm = |u: &Url| {
+            format!(
+                "{}{}",
+                u.origin().ascii_serialization(),
+                u.path().trim_end_matches('/')
+            )
+        };
+        if resource.query().is_some()
+            || resource.fragment().is_some()
+            || norm(&resource) != norm(server)
+        {
+            return Err(mismatch());
+        }
+    }
+    Ok(())
+}
+
 pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthServer, AppError> {
     let server = Url::parse(server_url.trim())
         .map_err(|_| AppError::Protocol("invalid server URL".to_string()))?;
     require_secure(&server, "server URL")?;
 
-    let prm = fetch_prm(http, &server).await?;
+    let (prm, path_inserted) = fetch_prm(http, &server).await?;
+    check_resource(&server, &prm.resource, path_inserted)?;
     let advertised = prm
         .authorization_servers
         .first()
@@ -624,6 +662,105 @@ mod tests {
             .unwrap();
         // The OAuth resource is what the server's metadata says, not the entered URL.
         assert_eq!(a.resource, format!("{base}/"));
+    }
+
+    async fn mount_as(s: &MockServer, base: &str) {
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta(base, base)))
+            .mount(s)
+            .await;
+    }
+
+    async fn mount_prm_at(s: &MockServer, at: &str, resource: &str, issuer: &str) {
+        Mock::given(method("GET"))
+            .and(path(at))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "resource": resource, "authorization_servers": [issuer],
+            })))
+            .mount(s)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn resource_on_another_origin_is_rejected() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        mount_prm_at(
+            &s,
+            "/.well-known/oauth-protected-resource",
+            "https://other-deployment.example/mcp",
+            &base,
+        )
+        .await;
+        mount_as(&s, &base).await;
+        let err = discover(&http_client().unwrap(), &base).await.unwrap_err();
+        assert!(matches!(err, AppError::Protocol(m) if m == "resource mismatch"));
+    }
+
+    #[tokio::test]
+    async fn unparseable_resource_is_rejected() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        mount_prm_at(
+            &s,
+            "/.well-known/oauth-protected-resource",
+            "not a url",
+            &base,
+        )
+        .await;
+        mount_as(&s, &base).await;
+        let err = discover(&http_client().unwrap(), &base).await.unwrap_err();
+        assert!(matches!(err, AppError::Protocol(m) if m == "resource mismatch"));
+    }
+
+    #[tokio::test]
+    async fn path_inserted_prm_must_name_exactly_the_entered_url() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        mount_as(&s, &base).await;
+        // Same origin but a different path: the path-inserted document claims
+        // to describe /mcp yet names /other.
+        mount_prm_at(
+            &s,
+            "/.well-known/oauth-protected-resource/mcp",
+            &format!("{base}/other"),
+            &base,
+        )
+        .await;
+        let http = http_client().unwrap();
+        let err = discover(&http, &format!("{base}/mcp")).await.unwrap_err();
+        assert!(matches!(err, AppError::Protocol(m) if m == "resource mismatch"));
+
+        s.reset().await;
+        mount_as(&s, &base).await;
+        mount_prm_at(
+            &s,
+            "/.well-known/oauth-protected-resource/mcp",
+            &format!("{base}/mcp"),
+            &base,
+        )
+        .await;
+        let a = discover(&http, &format!("{base}/mcp")).await.unwrap();
+        assert_eq!(a.resource, format!("{base}/mcp"));
+    }
+
+    #[tokio::test]
+    async fn root_fallback_may_name_a_different_path_on_the_same_origin() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        mount_as(&s, &base).await;
+        mount_prm_at(
+            &s,
+            "/.well-known/oauth-protected-resource",
+            &format!("{base}/mcp"),
+            &base,
+        )
+        .await;
+        let a = discover(&http_client().unwrap(), &format!("{base}/admin"))
+            .await
+            .unwrap();
+        assert_eq!(a.resource, format!("{base}/mcp"));
     }
 
     #[tokio::test]
