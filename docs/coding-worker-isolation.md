@@ -125,7 +125,9 @@ deeply to process is refused with `request_nesting_too_deep`.
 
 - **Anthropic Messages** (`parseAnthropicRequest`): a fixed set of keys,
   text/`tool_use`/`tool_result`/thinking blocks, exactly the two Wardby tool
-  names, and the reviewed beta values.
+  names, the reviewed beta values, the thinking mode the run's model catalog
+  entry names, and only effort levels that entry lists in `efforts` (top-level,
+  or on an effort-only system message for models that change effort per turn).
 - **OpenAI Responses** (`parseOpenAiRequest`), built from what the pinned
   Codex CLI actually sends (recorded in
   `src/providers/coding-proxy/fixtures/codex-<version>-responses-requests.json`

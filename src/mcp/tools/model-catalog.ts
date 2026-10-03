@@ -248,7 +248,8 @@ const setModelProperties = {
   efforts: {
     type: "array",
     items: { type: "string", enum: [...LLM_EFFORT_LEVELS] },
-    description: "Reasoning effort levels this model accepts, lowest to highest; empty = never send one.",
+    description:
+      "Reasoning effort levels this model accepts, lowest to highest; empty = never send one. Claude Code coding runs may send only these levels, so include the model's default (usually high; medium on some models).",
   },
   thinkingMode: {
     type: "string",

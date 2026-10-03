@@ -17,6 +17,7 @@ import { deriveRegistryToken } from "../../coding/registry/token.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { entryOf } from "../llm/catalog-types.js";
+import type { LlmEffort } from "../llm/types.js";
 import type { ProxyAuditEvent, ProxyModelTerms, ProxyProtocol } from "./types.js";
 
 const NOW = new Date("2026-09-07T12:00:00.000Z");
@@ -568,6 +569,215 @@ describe("model terms from the session", () => {
     expect(h.fetch).not.toHaveBeenCalled();
   });
 
+  describe("effort levels come from the session's catalog entry", () => {
+    const opus = {
+      ...entryOf(sonnet),
+      modelId: "claude-opus-5-5",
+      efforts: ["low", "medium", "high", "xhigh", "max"] as const,
+    };
+    const withEffort = async (model: string, effort: unknown) => {
+      const body = JSON.parse(await anthropicBody(model));
+      body.output_config = { effort };
+      return JSON.stringify(body);
+    };
+    const run = (h: Awaited<ReturnType<typeof harness>>, key: string, body: string, beta: string) =>
+      h.proxy.execute(
+        {
+          bearer: h.session.capability,
+          protocol: "anthropic-messages",
+          rawBody: body,
+          requestKey: key,
+          anthropicBeta: beta,
+        },
+        new TestSink(),
+      );
+
+    it("forwards the effort level a model defaults to when its entry accepts it (Opus 5.5 sends medium)", async () => {
+      const h = await harness({
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-opus-5-5"],
+        terms: { version: "v", entry: { ...opus, efforts: [...opus.efforts] } },
+        fetch: await anthropicResponse(),
+      });
+      const beta = [...CLAUDE_CODE_ANTHROPIC_BETAS, "per-turn-control-2026-07-01"].join(",");
+      await run(h, "opus-medium", await withEffort("claude-opus-5-5", "medium"), beta);
+      expect(h.fetch).toHaveBeenCalledTimes(1);
+      const init = h.fetch.mock.calls[0][1] as RequestInit;
+      expect(JSON.parse(init.body as string).output_config).toEqual({ effort: "medium" });
+      expect(new Headers(init.headers).get("anthropic-beta")?.split(",")).toContain("per-turn-control-2026-07-01");
+    });
+
+    it("forwards the request the pinned Agent SDK sends for Opus 5.5, with its real beta header", async () => {
+      const h = await harness({
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-opus-5-5"],
+        terms: { version: "v", entry: { ...opus, efforts: [...opus.efforts] } },
+        fetch: await anthropicResponse(),
+      });
+      const body = JSON.parse(await fixture("anthropic-sdk-request-opus-5-5.json"));
+      body.stream = false;
+      // Exactly what Claude Code 2.1.286 sent for this model (compatibility.test.mjs pins the same set).
+      const beta =
+        "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,effort-2025-11-24";
+      await run(h, "opus-captured", JSON.stringify(body), beta);
+      expect(h.fetch).toHaveBeenCalledTimes(1);
+      const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(forwarded.model).toBe("claude-opus-5-5");
+      expect(forwarded.output_config).toEqual({ effort: "medium" });
+      expect(forwarded.thinking).toEqual({ type: "adaptive" });
+    });
+
+    it.each(["low", "xhigh", "max"])("forwards %s when the entry lists it", async (effort) => {
+      const h = await harness({
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-opus-5-5"],
+        terms: { version: "v", entry: { ...opus, efforts: [...opus.efforts] } },
+        fetch: await anthropicResponse(),
+      });
+      await run(
+        h,
+        `opus-${effort}`,
+        await withEffort("claude-opus-5-5", effort),
+        CLAUDE_CODE_ANTHROPIC_BETAS.join(","),
+      );
+      expect(h.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["a level the entry does not list", ["high"], "medium"],
+      ["any level when the entry lists none", [], "high"],
+      ["an unknown level", ["low", "medium", "high", "xhigh", "max"], "ultra"],
+      ["a non-string level", ["high"], 3],
+    ])("refuses %s before calling upstream", async (_label, efforts, effort) => {
+      const h = await harness({
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-opus-5-5"],
+        terms: {
+          version: "v",
+          entry: { ...opus, efforts: efforts as LlmEffort[] },
+        },
+        fetch: await anthropicResponse(),
+      });
+      await expect(
+        run(
+          h,
+          `opus-refused-${String(effort)}`,
+          await withEffort("claude-opus-5-5", effort),
+          CLAUDE_CODE_ANTHROPIC_BETAS.join(","),
+        ),
+      ).rejects.toMatchObject({ status: 400, code: "unsupported_anthropic_feature" });
+      expect(h.fetch).not.toHaveBeenCalled();
+    });
+
+    describe("per-turn effort (an effort-only system message)", () => {
+      const CAPTURED_BETA = [...CLAUDE_CODE_ANTHROPIC_BETAS, "per-turn-control-2026-07-01"].join(",");
+      const capturedWith = async (edit: (body: { messages: Array<Record<string, unknown>> }) => void) => {
+        const body = JSON.parse(await fixture("anthropic-sdk-request-opus-5-5.json"));
+        body.stream = false;
+        edit(body);
+        return JSON.stringify(body);
+      };
+      const opusHarness = async (efforts: LlmEffort[] = [...opus.efforts]) =>
+        harness({
+          protocol: "anthropic-messages",
+          allowedModels: ["claude-opus-5-5"],
+          terms: { version: "v", entry: { ...opus, efforts } },
+          fetch: await anthropicResponse(),
+        });
+      const effortMessage = (body: { messages: Array<Record<string, unknown>> }) =>
+        body.messages.find((m) => m.role === "system" && m.output_config)!;
+
+      it.each([
+        [
+          "without the per-turn-control beta",
+          CLAUDE_CODE_ANTHROPIC_BETAS.join(","),
+          () => {},
+          "anthropic_beta_required",
+        ],
+        [
+          "with text alongside the effort",
+          CAPTURED_BETA,
+          (b: { messages: Array<Record<string, unknown>> }) =>
+            (effortMessage(b).content = [{ type: "text", text: "x" }]),
+          "unsupported_anthropic_feature",
+        ],
+        [
+          "at a level the entry does not list",
+          CAPTURED_BETA,
+          (b: { messages: Array<Record<string, unknown>> }) => (effortMessage(b).output_config = { effort: "ultra" }),
+          "unsupported_anthropic_feature",
+        ],
+        [
+          "with another output_config field",
+          CAPTURED_BETA,
+          (b: { messages: Array<Record<string, unknown>> }) =>
+            (effortMessage(b).output_config = { effort: "medium", format: { type: "json_schema" } }),
+          "unsupported_anthropic_feature",
+        ],
+        [
+          "on a user message",
+          CAPTURED_BETA,
+          (b: { messages: Array<Record<string, unknown>> }) => (b.messages[0].output_config = { effort: "medium" }),
+          "unsupported_anthropic_feature",
+        ],
+      ])("refuses it %s before calling upstream", async (_label, beta, edit, code) => {
+        const h = await opusHarness();
+        await expect(run(h, `per-turn-${_label}`, await capturedWith(edit), beta)).rejects.toMatchObject({
+          status: 400,
+          code,
+        });
+        expect(h.fetch).not.toHaveBeenCalled();
+      });
+
+      it("refuses it without the mid-conversation-system beta", async () => {
+        const h = await opusHarness();
+        const beta = [...CLAUDE_CODE_ANTHROPIC_BETAS, "per-turn-control-2026-07-01"]
+          .filter((b) => b !== "mid-conversation-system-2026-04-07")
+          .join(",");
+        await expect(run(h, "per-turn-no-midconv", await capturedWith(() => {}), beta)).rejects.toMatchObject({
+          status: 400,
+          code: "anthropic_beta_required",
+        });
+        expect(h.fetch).not.toHaveBeenCalled();
+      });
+
+      it("refuses it for a manual-thinking model", async () => {
+        const h = await harness({
+          protocol: "anthropic-messages",
+          allowedModels: ["claude-opus-5-5"],
+          terms: { version: "v", entry: { ...opus, efforts: [...opus.efforts], thinkingMode: "manual" } },
+          fetch: await anthropicResponse(),
+        });
+        const body = await capturedWith((b) => {
+          delete (b as Record<string, unknown>).output_config;
+          delete (b as Record<string, unknown>).thinking;
+        });
+        await expect(run(h, "per-turn-manual", body, CAPTURED_BETA)).rejects.toMatchObject({
+          status: 400,
+          code: "unsupported_anthropic_feature",
+        });
+        expect(h.fetch).not.toHaveBeenCalled();
+      });
+    });
+
+    it("still refuses a beta header outside the reviewed set", async () => {
+      const h = await harness({
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-opus-5-5"],
+        terms: { version: "v", entry: { ...opus, efforts: [...opus.efforts] } },
+        fetch: await anthropicResponse(),
+      });
+      const beta = [...CLAUDE_CODE_ANTHROPIC_BETAS, "afk-mode-2026-01-31"].join(",");
+      await expect(
+        run(h, "opus-unknown-beta", await withEffort("claude-opus-5-5", "medium"), beta),
+      ).rejects.toMatchObject({
+        status: 400,
+        code: "invalid_anthropic_beta",
+      });
+      expect(h.fetch).not.toHaveBeenCalled();
+    });
+  });
+
   it("refuses a session whose terms are for a different model", async () => {
     await expect(
       harness({
@@ -953,7 +1163,7 @@ describe("CodingProxy Anthropic Messages", () => {
       { system: [{ type: "text", text: "x", cache_control: { type: "forever" } }] },
       "unsupported_anthropic_feature",
     ],
-    ["unreviewed effort", { output_config: { effort: "max" } }, "unsupported_anthropic_feature"],
+    ["unreviewed effort", { output_config: { effort: "ultra" } }, "unsupported_anthropic_feature"],
   ])("rejects %s before credential resolution", async (_name, change, code) => {
     const resolve = vi.fn(async () => "secret");
     const h = await harness({ protocol: "anthropic-messages", credentials: { resolve } });
