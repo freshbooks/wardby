@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { checkBundle } from "./check.js";
@@ -23,13 +23,21 @@ export function parseKnowledgeArgs(args: string[]): { dir: string; root: string;
   };
 }
 
+/**
+ * Every `.md` file under `dir`, keyed by bundle-relative POSIX path. Entry
+ * types come from the directory listing itself (no separate stat, so nothing
+ * can change between the check and the read), and symbolic links are skipped:
+ * a bundle is plain files, and following links could loop or leave the bundle.
+ */
 export function loadBundle(dir: string): Map<string, string> {
   const files = new Map<string, string>();
   const walk = (current: string) => {
-    for (const name of readdirSync(current)) {
-      const full = join(current, name);
-      if (statSync(full).isDirectory()) walk(full);
-      else if (name.endsWith(".md")) files.set(relative(dir, full).split(sep).join("/"), readFileSync(full, "utf8"));
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name.endsWith(".md")) {
+        files.set(relative(dir, full).split(sep).join("/"), readFileSync(full, "utf8"));
+      }
     }
   };
   walk(dir);
