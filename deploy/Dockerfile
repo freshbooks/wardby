@@ -1,4 +1,8 @@
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS build
+# The build stage runs on the builder's own platform ($BUILDPLATFORM): its output (dist/, the
+# generated Prisma client, the help index) is plain JavaScript, so an arm64 machine building the
+# linux/amd64 images compiles natively instead of under emulation. Every stage that ships or runs
+# on the cluster (runtime, migration) stays on the target platform.
+FROM --platform=$BUILDPLATFORM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
@@ -12,10 +16,20 @@ COPY tsconfig.json tsconfig.build.json prisma.config.ts ./
 # client ships compiled inside dist/generated/prisma.
 RUN npm run build
 
-# The migration image keeps the full build tree: the Prisma CLI (a
-# devDependency) and prisma.config.ts, which Prisma 7 needs for the schema,
-# migrations path and DATABASE_URL.
-FROM build AS migration
+# The migration image needs the Prisma CLI (a devDependency) and prisma.config.ts, which Prisma 7
+# needs for the schema, migrations path and DATABASE_URL. It runs on the cluster, so it is built
+# for the target platform rather than from the (builder-platform) build stage.
+FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS migration
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY prisma ./prisma
+COPY prisma.config.ts ./
+# npm ci ran with --ignore-scripts, so Prisma's schema engine (which `migrate deploy` needs) isn't
+# installed yet. The migration Job runs as a non-root user on a read-only root filesystem, where
+# the CLI can't fetch it on first use, so fetch it here, for this image's platform.
+RUN npx prisma generate
 CMD ["npm", "run", "prisma:migrate"]
 
 FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime

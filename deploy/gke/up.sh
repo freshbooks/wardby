@@ -114,17 +114,24 @@ kubectl config use-context "$KUBE_CONTEXT" >/dev/null
 API_HOST="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' | sed -e 's|https://||' -e 's|:.*||')"
 
 echo "==> 3/${TOTAL_STEPS} build and push images (linux/amd64)"
-# --platform is not optional on an arm64 Mac: an arm64 image lands in the
-# registry, the pod fails to start, and the failure surfaces as a scheduling
-# problem rather than an architecture one.
-docker build --platform linux/amd64 --target runtime -t "${REGISTRY}/runtime:latest" -f deploy/Dockerfile . >/dev/null
-docker build --platform linux/amd64 --target migration -t "${REGISTRY}/migration:latest" -f deploy/Dockerfile . >/dev/null
-docker build --platform linux/amd64 -t "${REGISTRY}/coding-worker:latest" -f src/coding-worker/Dockerfile . >/dev/null
-docker build --platform linux/amd64 -t "${REGISTRY}/coding-worker-node-python:latest" -f src/coding-worker/Dockerfile.node-python . >/dev/null
-docker build --platform linux/amd64 -t "${REGISTRY}/claude-coding-worker:latest" -f src/claude-coding-worker/Dockerfile . >/dev/null
-docker build --platform linux/amd64 -t "${REGISTRY}/claude-tool-runner:latest" -f src/claude-tool-runner/Dockerfile . >/dev/null
-docker build --platform linux/amd64 --target node-python -t "${REGISTRY}/claude-tool-runner-node-python:latest" -f src/claude-tool-runner/Dockerfile . >/dev/null
-for img in runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner claude-tool-runner-node-python; do docker push "${REGISTRY}/${img}:latest" >/dev/null; done
+# Every image is built for linux/amd64 (deploy/gke/docker-bake.hcl): an arm64
+# image lands in the registry, the pod fails to start, and the failure surfaces
+# as a scheduling problem rather than an architecture one. bake builds them all
+# concurrently from one context, and the Dockerfiles compile JavaScript on the
+# builder's own platform, so an arm64 Mac only emulates what actually ships.
+REGISTRY="$REGISTRY" docker buildx bake -f deploy/gke/docker-bake.hcl --load >/dev/null
+IMAGES=(runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner claude-tool-runner-node-python)
+PUSH_PIDS=()
+for img in "${IMAGES[@]}"; do
+  docker push "${REGISTRY}/${img}:latest" >/dev/null &
+  PUSH_PIDS+=("$!")
+done
+for i in "${!PUSH_PIDS[@]}"; do
+  if ! wait "${PUSH_PIDS[$i]}"; then
+    echo "up.sh: pushing ${REGISTRY}/${IMAGES[$i]}:latest failed." >&2
+    exit 1
+  fi
+done
 
 # Digests, not tags. The launcher refuses a tag, and a digest is the only
 # reference that still means the same bytes tomorrow.
