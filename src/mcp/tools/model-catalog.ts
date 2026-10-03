@@ -11,12 +11,26 @@
  * started with (CatalogEntry snapshots, not live lookups) — a write here
  * never reprices or reshapes a run in flight.
  *
- * Writes go straight to ModelCatalogEntry via `ctx.db`, then refresh the
- * process's installed CatalogStore (`deps.refresh`) before reading the
- * merged view back from `currentModelCatalog()`, so every response reflects
- * exactly what routing will use next. A process with no store installed
- * (or a caller that passed no `refresh`) still gets a response — it just
- * won't reflect the write until the next poll.
+ * Correctness of a write never depends on the process's installed
+ * CatalogStore, which can be stale (it polls on an interval) or briefly
+ * unreachable:
+ *  - `set_model`'s provider-conflict check reads `ctx.db` directly (plus the
+ *    static shipped catalog, which is never stale), not the in-memory
+ *    catalog — a conflicting row written by another process/replica and
+ *    not yet polled in here must still be caught.
+ *  - Every write's response and audit event are built from the data just
+ *    written (what we know is true), never from a post-write re-read of the
+ *    catalog — so a refresh failure can never turn a successful write into
+ *    an unaudited one, or into an error.
+ *  - `deps.refresh` is still called best-effort after each write (so this
+ *    process's own routing picks up the change promptly); a failure is
+ *    logged and swallowed, never thrown.
+ *  - `set_model` additionally re-checks ownership after a *successful*
+ *    refresh: two processes racing to claim the same model id under
+ *    different providers can both write (the compound key is
+ *    (provider, modelId), not modelId alone) — `buildCatalog` then silently
+ *    picks one winner. If the merge didn't pick us, we report an error
+ *    rather than success, even though our own row did get written.
  */
 import { z } from "zod";
 import { logger } from "../../core/logger.js";
@@ -29,10 +43,13 @@ import {
   THINKING_MODES,
   TOKENIZER_ENCODINGS,
   entryOf,
+  sameEntry,
   type CatalogEntry,
+  type CatalogRow,
   type ResolvedCatalogEntry,
 } from "../../providers/llm/catalog-types.js";
 import { LLM_EFFORT_LEVELS } from "../../providers/llm/types.js";
+import { rowFromRecord } from "../../providers/llm/catalog.js";
 import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
 import { SHIPPED_CATALOG_VERSION } from "../../providers/llm/catalog-shipped.js";
 import type { RoutingLlmProvider } from "../../providers/llm/routing.js";
@@ -98,6 +115,8 @@ function audit(
   action: "set" | "disable" | "reset",
   info: {
     provider: string;
+    /** Every provider whose row was touched (reset_model can, in principle, clear more than one). Omitted when it's just `provider`. */
+    providers?: string[];
     modelId: string;
     sourceUrl?: string;
     before: CatalogEntry | null;
@@ -108,6 +127,7 @@ function audit(
     {
       event: `models.catalog.${action}`,
       provider: info.provider,
+      ...(info.providers && info.providers.length > 1 ? { providers: info.providers } : {}),
       modelId: info.modelId,
       sourceUrl: info.sourceUrl,
       before: info.before,
@@ -116,6 +136,33 @@ function audit(
     },
     "model catalog changed",
   );
+}
+
+/** Best-effort: logs and swallows a refresh failure rather than letting it fail (or un-audit) an already-committed write. Returns whether it actually ran and succeeded. */
+async function refreshBestEffort(
+  refresh: (() => Promise<void>) | undefined,
+  context: Record<string, unknown>,
+): Promise<boolean> {
+  if (!refresh) return false;
+  try {
+    await refresh();
+    return true;
+  } catch (err) {
+    modelsLog.warn(
+      { event: "models.catalog.refresh_failed", ...context, err: err instanceof Error ? err.message : String(err) },
+      "model catalog refresh failed after a write; the write stands, but routing may lag until the next poll",
+    );
+    return false;
+  }
+}
+
+function conflictError(modelId: string, provider: string, enabled: boolean): McpError {
+  return enabled
+    ? new McpError(409, `Model "${modelId}" is already served by provider "${provider}"; reset or disable it first.`)
+    : new McpError(
+        409,
+        `Model "${modelId}" is reserved by a disabled entry for provider "${provider}"; reset_model it first.`,
+      );
 }
 
 const modelIdProperty = {
@@ -247,68 +294,75 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
     },
     handler: async (rawArgs: unknown, ctx) => {
       const input: SetModelInput = parse(SetModelSchema, "set_model arguments", rawArgs);
-      const catalog = currentModelCatalog();
-
-      // One model id belongs to exactly one provider. The merged `active` map
-      // already carries every shipped-and-untouched entry, so checking it
-      // catches both "shipped, never overridden" and "enabled override"
-      // conflicts. A disabled row is removed from `active` on disable, so it
-      // needs its own check — it still reserves the id for its provider
-      // until reset_model clears it (buildCatalog's own conflict skip is a
-      // backstop for this, not the primary guard).
-      const active = catalog.get(input.modelId);
-      if (active && active.provider !== input.provider) {
-        throw new McpError(
-          409,
-          `Model "${input.modelId}" is already served by provider "${active.provider}"; reset or disable it first.`,
-        );
-      }
-      const disabled = catalog.disabledEntries().find((e) => e.modelId === input.modelId);
-      if (disabled && disabled.provider !== input.provider) {
-        throw new McpError(
-          409,
-          `Model "${input.modelId}" is reserved by a disabled entry for provider "${disabled.provider}"; reset_model it first.`,
-        );
-      }
-      const before: CatalogEntry | null = active ? entryOf(active) : disabled ? entryOf(disabled) : null;
-
       const { sourceUrl, ...entry } = input;
+
+      // Ownership is checked against the database directly, not the process's
+      // (possibly stale, poll-interval-old) installed catalog: a row written
+      // by another process/replica must be caught even if this process
+      // hasn't refreshed since. The static shipped catalog is never stale,
+      // so it's safe to read from the in-memory catalog either way.
+      const existingRows = await ctx.db.modelCatalogEntry.findMany({ where: { modelId: input.modelId } });
+      const conflictingRow = existingRows.find((row) => row.provider !== input.provider);
+      if (conflictingRow) {
+        throw conflictError(input.modelId, String(conflictingRow.provider), Boolean(conflictingRow.enabled));
+      }
+      const shippedEntry = currentModelCatalog().shippedEntry(input.modelId);
+      if (shippedEntry && shippedEntry.provider !== input.provider && existingRows.length === 0) {
+        throw conflictError(input.modelId, shippedEntry.provider, true);
+      }
+
+      const ownRow = existingRows.find((row) => row.provider === input.provider);
+      const parsedOwnRow = ownRow ? rowFromRecord(ownRow) : null;
+      const before: CatalogEntry | null = parsedOwnRow
+        ? entryOf(parsedOwnRow)
+        : shippedEntry && shippedEntry.provider === input.provider
+          ? entryOf(shippedEntry)
+          : null;
+
       const data = { ...entry, efforts: [...entry.efforts], enabled: true, sourceUrl, updatedBy: ctx.principal.id };
-      await ctx.db.modelCatalogEntry.upsert({
+      const row = await ctx.db.modelCatalogEntry.upsert({
         where: { provider_modelId: { provider: input.provider, modelId: input.modelId } },
         create: data,
         update: data,
       });
 
-      await deps.refresh?.();
-      const updated = currentModelCatalog();
-      const after = updated.get(input.modelId) ?? updated.disabledEntries().find((e) => e.modelId === input.modelId);
-      audit(ctx, "set", {
-        provider: input.provider,
-        modelId: input.modelId,
-        sourceUrl,
-        before,
-        after: after ? entryOf(after) : null,
-      });
+      // Audited from the data we know was written — independent of whether
+      // the refresh below succeeds, so a transient refresh failure can
+      // never leave a committed write un-audited.
+      const after = entryOf(entry);
+      audit(ctx, "set", { provider: input.provider, modelId: input.modelId, sourceUrl, before, after });
 
       const warnings = RATE_FIELDS.filter((field) => input[field] === 0).map(
         (field) => `${field} is 0: confirm against ${sourceUrl}`,
       );
 
-      const llm = ctx.providers.llm as RoutingLlmProvider;
-      const model = after
-        ? view(after, llm)
-        : view(
-            {
-              ...entry,
-              origin: "override",
-              priceVersion: new Date().toISOString(),
-              sourceUrl,
-              updatedBy: ctx.principal.id,
-            },
-            llm,
+      const refreshed = await refreshBestEffort(deps.refresh, { action: "set", modelId: input.modelId });
+
+      // Two processes racing to claim the same id under different providers
+      // can both write (the unique key is (provider, modelId), not modelId
+      // alone); buildCatalog then silently picks one winner. If a refresh
+      // just told us the merge didn't pick us, our own row is dead on
+      // arrival — report an error rather than success.
+      if (refreshed) {
+        const nowOwner = currentModelCatalog().get(input.modelId)?.provider;
+        if (nowOwner && nowOwner !== input.provider) {
+          throw new McpError(
+            409,
+            `Model "${input.modelId}" was written for provider "${input.provider}", but a concurrent write for provider "${nowOwner}" won; retry set_model.`,
           );
-      return textResult({ model, warnings });
+        }
+      }
+
+      const llm = ctx.providers.llm as RoutingLlmProvider;
+      const resolved: ResolvedCatalogEntry = {
+        ...entry,
+        origin: "override",
+        priceVersion: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : new Date().toISOString(),
+        sourceUrl,
+        updatedBy: ctx.principal.id,
+        ...(shippedEntry ? { shippedDiffers: !sameEntry(shippedEntry, entry) } : {}),
+      };
+      return textResult({ model: view(resolved, llm), warnings });
     },
   });
 
@@ -336,43 +390,37 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
       const before = entryOf(active);
       const sourceUrl = active.sourceUrl ?? `shipped:${SHIPPED_CATALOG_VERSION}`;
       const data = {
-        ...entryOf(active),
-        efforts: [...active.efforts],
+        ...before,
+        efforts: [...before.efforts],
         enabled: false,
         sourceUrl,
         updatedBy: ctx.principal.id,
       };
-      await ctx.db.modelCatalogEntry.upsert({
+      const row = await ctx.db.modelCatalogEntry.upsert({
         where: { provider_modelId: { provider: active.provider, modelId } },
         create: data,
         update: data,
       });
 
-      await deps.refresh?.();
-      const updated = currentModelCatalog();
-      const disabledEntry = updated.disabledEntries().find((e) => e.modelId === modelId);
-      audit(ctx, "disable", {
-        provider: active.provider,
-        modelId,
-        sourceUrl,
-        before,
-        after: disabledEntry ? entryOf(disabledEntry) : null,
-      });
+      // Disabling never changes the core CatalogEntry fields, so "after" is
+      // "before" — audited from the write we just made, not a post-refresh
+      // re-read, same reasoning as set_model.
+      const after = before;
+      audit(ctx, "disable", { provider: active.provider, modelId, sourceUrl, before, after });
+
+      await refreshBestEffort(deps.refresh, { action: "disable", modelId });
 
       const llm = ctx.providers.llm as RoutingLlmProvider;
-      const disabledView = disabledEntry
-        ? view(disabledEntry, llm)
-        : view(
-            {
-              ...entryOf(active),
-              origin: "override",
-              priceVersion: new Date().toISOString(),
-              sourceUrl,
-              updatedBy: ctx.principal.id,
-            },
-            llm,
-          );
-      return textResult({ disabled: disabledView });
+      const shippedEntry = catalog.shippedEntry(modelId);
+      const resolved: ResolvedCatalogEntry = {
+        ...before,
+        origin: "override",
+        priceVersion: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : new Date().toISOString(),
+        sourceUrl,
+        updatedBy: ctx.principal.id,
+        ...(shippedEntry ? { shippedDiffers: !sameEntry(shippedEntry, before) } : {}),
+      };
+      return textResult({ disabled: view(resolved, llm) });
     },
   });
 
@@ -389,34 +437,44 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
     },
     handler: async (rawArgs: unknown, ctx) => {
       const { modelId } = parse(ModelIdArgSchema, "reset_model arguments", rawArgs);
-      const catalog = currentModelCatalog();
-      const active = catalog.get(modelId);
-      const disabled = catalog.disabledEntries().find((e) => e.modelId === modelId);
-      // Only an override (active or disabled) is an actual ModelCatalogEntry row;
-      // an untouched shipped entry has nothing to delete.
-      const existingRow = active?.origin === "override" ? active : disabled;
-      if (!existingRow) {
+
+      // The rows actually deleted come from the database, not the in-memory
+      // catalog: this is what "every provider whose row was deleted" means,
+      // and it's what makes the 404 check correct even against a stale
+      // in-memory catalog.
+      const rawRows = await ctx.db.modelCatalogEntry.findMany({ where: { modelId } });
+      const parsedRows = rawRows.map((row) => rowFromRecord(row)).filter((row): row is CatalogRow => row !== null);
+      if (parsedRows.length === 0) {
         throw new McpError(
           404,
           `No catalog row for "${modelId}" to reset (it is either unmodified shipped, or unknown).`,
         );
       }
-      const before = entryOf(existingRow);
+      const providers = [...new Set(parsedRows.map((row) => row.provider))];
+      const before = entryOf(parsedRows[0]);
       await ctx.db.modelCatalogEntry.deleteMany({ where: { modelId } });
 
-      await deps.refresh?.();
-      const updated = currentModelCatalog();
-      const now = updated.get(modelId);
+      // The shipped entry is static (compiled-in), never stale, so "after"
+      // and the response's "now" can both be built from it directly,
+      // without depending on the refresh below at all.
+      const shippedEntry = currentModelCatalog().shippedEntry(modelId);
+      const after = shippedEntry ? entryOf(shippedEntry) : null;
       audit(ctx, "reset", {
-        provider: existingRow.provider,
+        provider: providers[0],
+        providers,
         modelId,
-        sourceUrl: existingRow.sourceUrl,
+        sourceUrl: parsedRows[0].sourceUrl,
         before,
-        after: now ? entryOf(now) : null,
+        after,
       });
 
+      await refreshBestEffort(deps.refresh, { action: "reset", modelId });
+
       const llm = ctx.providers.llm as RoutingLlmProvider;
-      return textResult({ reset: modelId, now: now ? view(now, llm) : null });
+      const now = shippedEntry
+        ? view({ ...shippedEntry, origin: "shipped", priceVersion: `shipped:${SHIPPED_CATALOG_VERSION}` }, llm)
+        : null;
+      return textResult({ reset: modelId, now });
     },
   });
 }

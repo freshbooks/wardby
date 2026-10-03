@@ -71,7 +71,11 @@ function fakeDb() {
   const keyOf = (where: { provider_modelId: { provider: string; modelId: string } }) =>
     `${where.provider_modelId.provider}::${where.provider_modelId.modelId}`;
   const modelCatalogEntry = {
-    findMany: async () => [...rows.values()],
+    findMany: async (args?: { where?: { modelId?: string } }) => {
+      const all = [...rows.values()];
+      if (args?.where?.modelId !== undefined) return all.filter((row) => row.modelId === args.where!.modelId);
+      return all;
+    },
     upsert: async ({
       where,
       create,
@@ -111,7 +115,7 @@ afterEach(() => {
   uninstallModelCatalogForTests();
 });
 
-async function connect(who: { scopes: string[]; roles: string[] }) {
+async function connect(who: { scopes: string[]; roles: string[] }, overrides: { refresh?: () => Promise<void> } = {}) {
   const { db, rows } = fakeDb();
   const llm = new RoutingLlmProvider([{ provider: "anthropic", adapter: fakeLlm("anthropic") }]);
   const providers = { llm } as unknown as McpRequestContext["providers"];
@@ -131,7 +135,7 @@ async function connect(who: { scopes: string[]; roles: string[] }) {
     clientSupportsTasks: false,
     mcpReq: { requestState: () => undefined },
   });
-  registerModelCatalogTools(mcp, { refresh: () => store.refreshNow() });
+  registerModelCatalogTools(mcp, { refresh: overrides.refresh ?? (() => store.refreshNow()) });
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
@@ -245,6 +249,56 @@ describe("model catalog tools", () => {
     expect(r.isError).toBe(true);
     expect(text(r)).toMatch(/reserved by a disabled entry for provider "anthropic"/);
     expect(text(r)).toMatch(/reset_model it first/);
+    await client.close();
+  });
+
+  it("set_model refuses a conflicting row that exists in the database but hasn't reached the installed catalog yet", async () => {
+    const { client, rows } = await connect(MODEL_MANAGER);
+    // Simulate another process/replica's write landing after this process's
+    // last poll: present in the database, invisible to the installed
+    // (in-memory, poll-interval-stale) catalog, since we never refresh here.
+    rows.set("openai::claude-new", {
+      provider: "openai",
+      modelId: "claude-new",
+      enabled: true,
+      encoding: "o200k_base",
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+      cachedInputPerMTok: 0.1,
+      cacheWritePerMTok: 1.25,
+      efforts: [],
+      thinkingMode: "none",
+      sourceUrl: "https://platform.openai.com/docs/pricing",
+      updatedBy: "p-other",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const r = await client.callTool({ name: "set_model", arguments: NEW });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/already served by provider "openai"/);
+    await client.close();
+  });
+
+  it("set_model still succeeds and audits the change when the post-write catalog refresh fails", async () => {
+    logged.length = 0;
+    const { client, rows } = await connect(MODEL_MANAGER, {
+      refresh: () => Promise.reject(new Error("db unreachable")),
+    });
+    const r = await client.callTool({ name: "set_model", arguments: NEW });
+    expect(r.isError).toBeFalsy();
+    // The write landed even though the refresh that followed it failed.
+    expect(rows.has("anthropic::claude-new")).toBe(true);
+    expect(logged).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          event: "models.catalog.set",
+          modelId: "claude-new",
+          by: "p-admin",
+          before: null,
+          after: expect.objectContaining({ provider: "anthropic", modelId: "claude-new", outputPerMTok: 15 }),
+        }),
+      }),
+    );
     await client.close();
   });
 
