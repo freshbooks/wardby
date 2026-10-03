@@ -647,7 +647,29 @@ pub async fn list_servers(
         let _g = state.config.lock().unwrap_or_else(|e| e.into_inner());
         load_servers(&app)?
     };
-    tokio::task::spawn_blocking(move || summaries(&list, keychain_has))
+    // A live session in memory answers first (and spares the Keychain, which
+    // may prompt after a rebuild); the Keychain decides for the rest.
+    let live: std::collections::HashSet<String> = list
+        .iter()
+        .filter(|c| state.has_session(&c.url))
+        .map(|c| c.url.clone())
+        .collect();
+    tokio::task::spawn_blocking(move || summaries(&list, |u| live.contains(u) || keychain_has(u)))
+        .await
+        .map_err(|_| AppError::Keychain("keychain task failed".to_string()))
+}
+
+#[tauri::command]
+pub async fn add_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    url: String,
+    client_id: Option<String>,
+) -> Result<(), AppError> {
+    edit_servers(&app, &state, |list| {
+        upsert_server(list, &name, &url, client_id.as_deref())
+    })
 }
 
 #[tauri::command]
