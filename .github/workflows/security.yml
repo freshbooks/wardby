@@ -80,6 +80,20 @@ jobs:
 
   package:
     runs-on: ubuntu-latest
+    # Package acceptance creates a throwaway database on this server.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wardby
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: security
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://wardby:test-only@localhost:5432/security
+      # Public deterministic fixture material for tests only; never a deployment key.
+      SECRET_APP_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
