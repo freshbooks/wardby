@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
+import { withBaseCommit } from "../../coding/base-commit.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
@@ -690,7 +691,7 @@ export class ContainerExecutor implements Executor {
         spendEnabled = true;
         sessionId = session.id;
         this.options.capabilities.set(runId, session.capability);
-        const inputArtifact = await this.writeInput(run, deadlineAt);
+        const inputArtifact = await this.writeInput(run, deadlineAt, workspace.baseCommit);
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
         const spec = this.jobSpec(run, inputArtifact);
@@ -1203,7 +1204,7 @@ export class ContainerExecutor implements Executor {
     throw new Error("coding_provider_not_configured:claude-code");
   }
 
-  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date): Promise<string> {
+  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, baseCommit: string): Promise<string> {
     await ensurePrivateDirectory(this.artifactRoot);
     const rootReal = await realpath(this.artifactRoot);
     const directory = resolve(rootReal, run.runId);
@@ -1219,7 +1220,7 @@ export class ContainerExecutor implements Executor {
       repository: run.repository,
       baseRef: run.baseRef,
       headRef: run.headRef,
-      task: run.task,
+      task: withBaseCommit(run.task, baseCommit),
       model: run.model,
       budgetUsd: run.budgetUsd,
       deadlineAt: deadlineAt.toISOString(),
