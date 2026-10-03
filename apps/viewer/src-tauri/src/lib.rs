@@ -23,6 +23,7 @@ pub fn run() {
             commands::disconnect,
             commands::fetch_graph,
             commands::fetch_run,
+            commands::open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

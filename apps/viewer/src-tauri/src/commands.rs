@@ -732,6 +732,43 @@ pub async fn fetch_run(
     fetch(&app, &state, &url, &path).await
 }
 
+/// The only links the webview may ask the system browser to open: absolute
+/// `https://` URLs with a host and no embedded credentials.
+fn check_open_url(raw: &str) -> Result<url::Url, AppError> {
+    let reject = || AppError::Protocol("only https links can be opened".to_string());
+    // The URL parser silently trims whitespace and strips control characters.
+    if raw.trim() != raw || raw.chars().any(char::is_control) {
+        return Err(reject());
+    }
+    // `https:///host` and `https:\\host` parse as `https://host/`; require the
+    // literal authority form so what is checked is what the user sees.
+    let literal = raw
+        .get(..8)
+        .filter(|p| p.eq_ignore_ascii_case("https://"))
+        .map(|_| &raw[8..]);
+    if literal.is_none_or(|rest| rest.starts_with(['/', '\\'])) {
+        return Err(reject());
+    }
+    let parsed = url::Url::parse(raw).map_err(|_| reject())?;
+    let has_host = parsed.host_str().is_some_and(|h| !h.is_empty());
+    if parsed.scheme() != "https"
+        || !has_host
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(reject());
+    }
+    Ok(parsed)
+}
+
+#[tauri::command]
+pub async fn open_url(app: AppHandle, url: String) -> Result<(), AppError> {
+    let parsed = check_open_url(&url)?;
+    app.opener()
+        .open_url(parsed.as_str(), None::<&str>)
+        .map_err(|_| AppError::Network("could not open the system browser".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,6 +782,34 @@ mod tests {
             name: name.into(),
             url: url.into(),
             client_id: id.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn open_url_allows_only_https_with_a_host() {
+        let ok = check_open_url("https://github.com/o/r/pull/7?x=1#f").unwrap();
+        assert_eq!(ok.as_str(), "https://github.com/o/r/pull/7?x=1#f");
+        assert!(check_open_url("HTTPS://Example.com").is_ok());
+        for bad in [
+            "http://example.com/",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:text/html,<script>1</script>",
+            "ftp://example.com/",
+            "wardby://open",
+            "slack://channel",
+            "mailto:a@b.c",
+            "https://user@example.com/",
+            "https://user:pw@example.com/",
+            "https:///nohost",
+            "https:",
+            "https:\\\\example.com",
+            "//example.com/",
+            "example.com",
+            "",
+            " https://example.com ",
+        ] {
+            assert!(check_open_url(bad).is_err(), "should reject {bad:?}");
         }
     }
 

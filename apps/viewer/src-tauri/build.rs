@@ -13,6 +13,7 @@ fn main() {
             "disconnect",
             "fetch_graph",
             "fetch_run",
+            "open_url",
         ]),
     ))
     .expect("failed to run tauri-build");

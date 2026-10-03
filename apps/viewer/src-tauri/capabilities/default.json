@@ -14,6 +14,7 @@
     "allow-connect",
     "allow-disconnect",
     "allow-fetch-graph",
-    "allow-fetch-run"
+    "allow-fetch-run",
+    "allow-open-url"
   ]
 }

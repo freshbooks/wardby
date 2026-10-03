@@ -15,6 +15,7 @@ import {
   isAppError,
   listServers,
   onFrame,
+  openUrl,
   removeServer,
   signIn,
   signOut,
@@ -43,6 +44,7 @@ describe("command wrappers", () => {
     await disconnect("https://w.example");
     await fetchGraph("https://w.example", "24h", 200);
     await fetchRun("https://w.example", "run-1");
+    await openUrl("https://github.com/o/r/pull/7");
     expect(invokeMock.mock.calls).toEqual([
       ["list_servers"],
       ["add_server", { name: "Prod", url: "https://w.example", clientId: "cid" }],
@@ -55,6 +57,7 @@ describe("command wrappers", () => {
       ["disconnect", { url: "https://w.example" }],
       ["fetch_graph", { url: "https://w.example", since: "24h", limit: 200 }],
       ["fetch_run", { url: "https://w.example", id: "run-1" }],
+      ["open_url", { url: "https://github.com/o/r/pull/7" }],
     ]);
   });
 

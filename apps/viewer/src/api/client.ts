@@ -82,6 +82,9 @@ export const fetchGraph = (url: string, since: string, limit: number) =>
 
 export const fetchRun = (url: string, id: string) => invoke<RunDetail>("fetch_run", { url, id });
 
+/** Opens an `https://` link in the system browser; Rust rejects every other scheme. */
+export const openUrl = (url: string) => invoke<void>("open_url", { url });
+
 /** Subscribes to stream frames; resolves to the function that unsubscribes. */
 export function onFrame(cb: (payload: FramePayload) => void): Promise<UnlistenFn> {
   return listen<FramePayload>(FRAME_EVENT, (e) => cb(e.payload));

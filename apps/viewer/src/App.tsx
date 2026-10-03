@@ -6,6 +6,7 @@ import { ServerDialog } from "./chrome/ServerDialog";
 import { SignInGate } from "./chrome/SignInGate";
 import { TopBar } from "./chrome/TopBar";
 import { FlowCanvas } from "./graph/FlowCanvas";
+import { DetailPanel } from "./panel/DetailPanel";
 import { initialFilters, type Filters } from "./state/filters";
 import { useViewer } from "./state/useViewer";
 
@@ -21,10 +22,18 @@ interface DashboardProps {
 
 function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: DashboardProps) {
   const [filters, setFilters] = useState<Filters>(initialFilters);
-  // Tasks 9/10 read this: the canvas highlights it and the detail panel shows it.
+  // The canvas highlights this run and the detail panel shows it.
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const viewer = useViewer(server.url, { since: filters.window, limit: GRAPH_LIMIT });
   const { model } = viewer;
+  const selectedRun = selectedRunId ? model.runs.get(selectedRunId) : undefined;
+
+  const onSelect = useCallback(
+    (id: string | null) => setSelectedRunId((cur) => (id === null || id === cur ? null : id)),
+    [],
+  );
+  // The panel navigates to a run (children/parent) or closes; unlike the canvas it never toggles.
+  const selectPanel = useCallback((id: string | null) => setSelectedRunId(id), []);
 
   const runs = useMemo(() => [...model.runs.values()], [model.runs]);
   const agents = useMemo(() => {
@@ -79,12 +88,12 @@ function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: 
               <p className="muted">Showing the most recent {GRAPH_LIMIT} runs; narrow the window to see fewer.</p>
             )}
             {viewer.loaded && (
-              <FlowCanvas
-                runs={runs}
-                filters={view}
-                selectedId={selectedRunId}
-                onSelect={(id) => setSelectedRunId((cur) => (id === null || id === cur ? null : id))}
-              />
+              <div className="workspace">
+                <FlowCanvas runs={runs} filters={view} selectedId={selectedRunId} onSelect={onSelect} />
+                {selectedRun && (
+                  <DetailPanel serverUrl={server.url} run={selectedRun} runs={model.runs} onSelect={selectPanel} />
+                )}
+              </div>
             )}
           </>
         )}
