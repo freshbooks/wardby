@@ -1158,6 +1158,23 @@ describe("dispatchRun", () => {
       ).rejects.toThrow(/different repository/);
     });
 
+    it("a knowledge read never changes how a refused continuation is reported", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent, [openPrCodingRun("root_run", { repository: "openai/other-repo" })]);
+      const readCodingRepositoryFile = vi.fn(async () => "# index\n");
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {}, readCodingRepositoryFile },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        }),
+      ).rejects.toThrow(/different repository/);
+      // The knowledge read's own branch resolution failed quietly; the transaction path reported the refusal.
+      expect(readCodingRepositoryFile).not.toHaveBeenCalled();
+    });
+
     it("rejects continuing a coding run that never opened a pull request", async () => {
       const agent = codingAgent();
       const state = fakeDb(agent, [

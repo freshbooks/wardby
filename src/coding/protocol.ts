@@ -5,6 +5,8 @@ export const CODING_PROTOCOL_VERSION = 1 as const;
 export const CODING_CODE_PROVIDER = "github";
 export const MAX_CODING_ARTIFACT_BYTES = 64 * 1024;
 export const MAX_CODING_TASK_BYTES = 16 * 1024;
+/** Room reserved at the end of a composed task for lines the executor appends (e.g. the base commit). */
+export const CODING_TASK_TRAILER_RESERVE_BYTES = 256;
 export const MAX_CODING_SUMMARY_BYTES = 8 * 1024;
 export const MAX_CODING_TESTS = 64;
 export const MAX_CODING_TEST_COMMAND_BYTES = 2 * 1024;
@@ -223,24 +225,46 @@ export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe b
 export const CodingTaskOverrideSchema = boundedText(MAX_CODING_TASK_BYTES);
 
 /**
+ * A section rendered to fit whatever room the task leaves (the knowledge note:
+ * src/knowledge/note.ts). Declared structurally so this module, which coding
+ * workers ship as a single file, imports nothing new.
+ */
+export interface FittedSection {
+  /** The section text within `maxBytes`, or undefined when it does not fit. */
+  render(maxBytes: number): string | undefined;
+}
+
+/**
  * A coding worker receives only its task text, so a coding agent's own
  * instructions (its systemPrompt) travel inside that text, ahead of the
  * request, followed by any note wardby generates for the run (the services it
  * started: src/coding/services/note.ts). Blank instructions and no note leave
  * the task unchanged. The combination must still fit MAX_CODING_TASK_BYTES;
  * exceeding it is an error naming both parts rather than a silent truncation.
+ * A knowledge note, when given, goes between the standing instructions and the
+ * request and is fitted into whatever room is left: it is cut, or dropped,
+ * never the cause of an error.
  */
-export function composeCodingTask(instructions: string | null | undefined, task: string, note?: string): string {
+export function composeCodingTask(
+  instructions: string | null | undefined,
+  task: string,
+  note?: string,
+  knowledge?: FittedSection,
+): string {
   const standing = [instructions?.trim(), note?.trim()].filter((part): part is string => Boolean(part)).join("\n\n");
-  if (!standing) return task;
-  const composed = `Standing instructions for this coding agent:\n${standing}\n\nRequest:\n${task}`;
-  if (byteLength(composed) > MAX_CODING_TASK_BYTES) {
+  const base = standing ? `Standing instructions for this coding agent:\n${standing}\n\nRequest:\n${task}` : task;
+  if (byteLength(base) > MAX_CODING_TASK_BYTES) {
     throw new Error(
       `The coding agent's instructions (${byteLength(standing)} bytes) plus this task (${byteLength(task)} bytes) ` +
         `exceed the ${MAX_CODING_TASK_BYTES}-byte coding task limit; shorten one of them.`,
     );
   }
-  return composed;
+  if (!knowledge) return base;
+  const prefix = standing ? `Standing instructions for this coding agent:\n${standing}\n\n` : "";
+  const suffix = `\n\nRequest:\n${task}`;
+  const room = MAX_CODING_TASK_BYTES - byteLength(prefix) - byteLength(suffix) - CODING_TASK_TRAILER_RESERVE_BYTES;
+  const rendered = room > 0 ? knowledge.render(room) : undefined;
+  return rendered ? `${prefix}${rendered}${suffix}` : base;
 }
 
 const runIdSchema = boundedText(MAX_RUN_ID_BYTES, true).refine(

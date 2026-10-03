@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  CODING_TASK_TRAILER_RESERVE_BYTES,
   CODING_PROTOCOL_VERSION,
   CodingAgentOutputSchema,
   CodingRunResultSchema,
   composeCodingTask,
+  type FittedSection,
   isReservedServiceEnvName,
   normalizeCodingTag,
   CodingTaskInputSchema,
@@ -460,7 +462,61 @@ describe("redactTokenShapedValues", () => {
   });
 });
 
+const knowledgeStub = (text: string): FittedSection => ({
+  render: (max) => (Buffer.byteLength(text) <= max ? text : undefined),
+});
+
 describe("composeCodingTask", () => {
+  it("places the knowledge note after the standing instructions and before the request", () => {
+    const composed = composeCodingTask(
+      "Run pytest.",
+      "Add a joke.",
+      undefined,
+      knowledgeStub("Architecture knowledge: x"),
+    );
+    expect(composed.indexOf("Run pytest.")).toBeLessThan(composed.indexOf("Architecture knowledge"));
+    expect(composed.indexOf("Architecture knowledge")).toBeLessThan(composed.indexOf("Request:\nAdd a joke."));
+  });
+
+  it("adds the note even without standing instructions", () => {
+    const composed = composeCodingTask(null, "Add a joke.", undefined, knowledgeStub("Architecture knowledge: x"));
+    expect(composed.startsWith("Architecture knowledge")).toBe(true);
+    expect(composed.endsWith("Request:\nAdd a joke.")).toBe(true);
+  });
+
+  it("drops the note instead of throwing when the task leaves no room", () => {
+    const task = "t".repeat(MAX_CODING_TASK_BYTES - 200);
+    const composed = composeCodingTask("i", task, undefined, knowledgeStub("A".repeat(5000)));
+    expect(composed).not.toContain("AAAA");
+    expect(Buffer.byteLength(composed)).toBeLessThanOrEqual(MAX_CODING_TASK_BYTES);
+  });
+
+  it("passes the remaining room to render", () => {
+    let seen = -1;
+    composeCodingTask("Run pytest.", "Add a joke.", undefined, {
+      render: (max) => {
+        seen = max;
+        return undefined;
+      },
+    });
+    const prefix = "Standing instructions for this coding agent:\nRun pytest.\n\n";
+    const suffix = "\n\nRequest:\nAdd a joke.";
+    expect(seen).toBe(
+      MAX_CODING_TASK_BYTES - Buffer.byteLength(prefix) - Buffer.byteLength(suffix) - CODING_TASK_TRAILER_RESERVE_BYTES,
+    );
+  });
+
+  it("leaves the trailer reserve free even with big instructions and a big note", () => {
+    const instructions = "i".repeat(6000);
+    const composed = composeCodingTask(instructions, "Add a joke.", undefined, {
+      render: (max) => "N".repeat(max),
+    });
+    expect(composed).toContain("NNNN");
+    expect(MAX_CODING_TASK_BYTES - Buffer.byteLength(composed)).toBeGreaterThanOrEqual(
+      CODING_TASK_TRAILER_RESERVE_BYTES,
+    );
+  });
+
   it("puts a generated note after the agent's own instructions, ahead of the request", () => {
     expect(composeCodingTask("Run pytest.", "Add a joke.", "Services for this run: ...")).toBe(
       "Standing instructions for this coding agent:\nRun pytest.\n\nServices for this run: ...\n\nRequest:\nAdd a joke.",

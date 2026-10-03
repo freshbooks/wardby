@@ -13,6 +13,9 @@
   runs are billed.
 - [Coding-agent setup](coding-agent-setup.md) configures the local trusted proxy
   and isolated Codex or Claude Code workers.
+- [Architecture knowledge bundles](knowledge.md) covers `docs/knowledge/`: the
+  concept format, how coding runs and reviewers use it, `wardby knowledge check`,
+  and the scheduled architecture agent.
 - [Coding-worker isolation](coding-worker-isolation.md) documents the threat
   model and enforced worker boundary.
 - [Bring-your-own worker images](coding-worker-byo-images.md) explains how to

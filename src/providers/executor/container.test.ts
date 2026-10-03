@@ -455,6 +455,15 @@ describe("ContainerExecutor", () => {
       return { created, input: input! };
     }
 
+    it("tells the worker its base commit in the task", async () => {
+      const { input } = await launched({});
+      expect(
+        (input.task as string).endsWith(
+          `\n\nBase commit: ${"a".repeat(40)} (the commit this workspace was checked out at; the workspace has no git metadata).`,
+        ),
+      ).toBe(true);
+    });
+
     it("hands the launcher the run's services and the worker only their names, versions and variables", async () => {
       const { created, input } = await launched({ services: [POSTGRES] });
       expect(created.jobs.specs[0]?.services).toEqual([POSTGRES]);

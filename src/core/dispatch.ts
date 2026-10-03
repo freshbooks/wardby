@@ -27,6 +27,8 @@ import {
 } from "../coding/services/wording.js";
 import { attributeRun, type AttributionIntent } from "./attribution.js";
 import { effectiveBudgetForRun, MIN_RESERVATION_USD, type BudgetConstraint } from "./budget-groups.js";
+import { DEFAULT_KNOWLEDGE_BUNDLE_PATH } from "../knowledge/concept.js";
+import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
@@ -380,6 +382,41 @@ const UNREADABLE_DECLARATION: Readonly<Record<string, string>> = {
 };
 
 /**
+ * The knowledge note's input (docs/knowledge.md): the repository's bundle
+ * index at the run's base, read before the transaction like the services
+ * declaration. Any failure means no note, never a failed dispatch.
+ */
+async function readKnowledgeIndex(
+  options: DispatchRunOptions,
+  profile: { repository: string; baseRef: string },
+  resolvedBranch: { baseRef: string } | undefined,
+): Promise<KnowledgeNoteInput | undefined> {
+  const executor = options.executor;
+  if (!executor.readCodingRepositoryFile) return undefined;
+  try {
+    // Resolved here, inside the try: a branch problem is the transaction's to report, not the note's.
+    const branch = resolvedBranch ?? (await resolveCodingBranch(options.db, options, profile));
+    const indexText = await executor.readCodingRepositoryFile({
+      repository: profile.repository,
+      baseRef: normalizeGitRef(branch.baseRef),
+      path: `${DEFAULT_KNOWLEDGE_BUNDLE_PATH}/index.md`,
+      maxBytes: KNOWLEDGE_INDEX_READ_MAX_BYTES,
+    });
+    return indexText ? { bundlePath: DEFAULT_KNOWLEDGE_BUNDLE_PATH, indexText } : undefined;
+  } catch (err) {
+    if (err instanceof Error && err.message in UNREADABLE_DECLARATION) {
+      dispatchLog.info(
+        { repository: profile.repository, reason: err.message },
+        "knowledge index unreadable; dispatching without it",
+      );
+      return undefined;
+    }
+    dispatchLog.warn({ err, repository: profile.repository }, "knowledge index read failed; dispatching without it");
+    return undefined;
+  }
+}
+
+/**
  * Coding-run services (docs/coding-services.md): resolves the run's branch and
  * reads the repository's declaration from its base, then parses it. A network
  * call, so it runs before the Serializable transaction, which reuses the
@@ -486,6 +523,11 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     preview.codingProfile &&
     parseAllowedServiceNames(preview.codingProfile.services).length > 0
       ? await readServiceDeclaration(options, preview.codingProfile)
+      : undefined;
+  // The knowledge note's input: the repository's bundle index at the run's base (a network call).
+  const knowledgeIndex =
+    preview?.kind === "coding" && preview.codingProfile && options.executor.readCodingRepositoryFile
+      ? await readKnowledgeIndex(options, preview.codingProfile, declarationRead?.branch)
       : undefined;
   const persistOnce = () =>
     options.db.$transaction(
@@ -605,7 +647,12 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           if (!request) throw new Error(`Coding agent "${agent.id}" requires a task.`);
           // The worker sees only the task text, so the agent's own instructions, and the
           // services note, ride in it.
-          const task = composeCodingTask(agent.systemPrompt, request, servicesInstructionNote(services));
+          const task = composeCodingTask(
+            agent.systemPrompt,
+            request,
+            servicesInstructionNote(services),
+            knowledgeIndex ? knowledgeSection(knowledgeIndex) : undefined,
+          );
           const budgetUsd = codingBudget.budgetUsd;
 
           // Resolved once: before the transaction when the declaration was read from it.

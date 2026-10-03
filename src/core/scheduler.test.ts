@@ -342,4 +342,66 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
       "Standing instructions for this coding agent:\nsys\n\nRequest:\nUpdate dependencies",
     );
   });
+
+  async function makeCodingAgent() {
+    const agent = await makeScheduledAgent();
+    await db.agent.update({
+      where: { id: agent.id },
+      data: {
+        kind: "coding",
+        model: "gpt-5.6-luna",
+        codingProfile: {
+          create: {
+            repository: "openai/wardby",
+            defaultTask: "Update dependencies",
+            allowedEgress: [],
+            protectedPaths: [".github/workflows/**"],
+          },
+        },
+      },
+    });
+    return agent;
+  }
+
+  it("adds the repository's knowledge index to a coding run's task", async () => {
+    const agent = await makeCodingAgent();
+    const readCodingRepositoryFile = vi.fn(async (input: { path: string }) =>
+      input.path === "docs/knowledge/index.md" ? "# Pitfalls\n\n* [A](a.md) - a\n" : null,
+    );
+
+    const runId = await claimDueRun(
+      db,
+      { ...executor, readCodingRepositoryFile },
+      agent.id,
+      new Date("2026-09-05T12:16:00.000Z"),
+    );
+
+    const run = await db.run.findUnique({ where: { id: runId! }, include: { codingRun: true } });
+    expect(readCodingRepositoryFile).toHaveBeenCalledWith(
+      expect.objectContaining({ repository: "openai/wardby", path: "docs/knowledge/index.md" }),
+    );
+    expect(run?.codingRun?.task).toMatch(
+      /^Standing instructions for this coding agent:\nsys\n\nArchitecture knowledge[\s\S]*\* \[A\]\(a\.md\) - a[\s\S]*\n\nRequest:\nUpdate dependencies$/,
+    );
+  });
+
+  it("still dispatches a coding run, without the note, when the index read fails", async () => {
+    const agent = await makeCodingAgent();
+    const readCodingRepositoryFile = vi.fn(async () => {
+      throw new Error("github_unavailable");
+    });
+
+    const runId = await claimDueRun(
+      db,
+      { ...executor, readCodingRepositoryFile },
+      agent.id,
+      new Date("2026-09-05T12:16:00.000Z"),
+    );
+
+    const run = await db.run.findUnique({ where: { id: runId! }, include: { codingRun: true } });
+    expect(readCodingRepositoryFile).toHaveBeenCalled();
+    expect(run?.codingRun?.task).toBe(
+      "Standing instructions for this coding agent:\nsys\n\nRequest:\nUpdate dependencies",
+    );
+  });
 });

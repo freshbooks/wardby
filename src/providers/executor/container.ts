@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
+import { withBaseCommit } from "../../coding/base-commit.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
@@ -690,7 +691,7 @@ export class ContainerExecutor implements Executor {
         spendEnabled = true;
         sessionId = session.id;
         this.options.capabilities.set(runId, session.capability);
-        const inputArtifact = await this.writeInput(run, deadlineAt);
+        const inputArtifact = await this.writeInput(run, deadlineAt, workspace.baseCommit);
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
         const spec = this.jobSpec(run, inputArtifact);
@@ -1141,6 +1142,22 @@ export class ContainerExecutor implements Executor {
     });
   }
 
+  /** One repository file at the run's base ref (Executor.readCodingRepositoryFile). */
+  async readCodingRepositoryFile(input: {
+    repository: string;
+    baseRef: string;
+    path: string;
+    maxBytes: number;
+  }): Promise<string | null> {
+    if (!this.options.vcs.readRepositoryFile) return null;
+    return this.options.vcs.readRepositoryFile({
+      repository: input.repository,
+      ref: input.baseRef,
+      path: input.path,
+      maxBytes: input.maxBytes,
+    });
+  }
+
   /** The job launcher decides (Kubernetes and Docker start services for both providers). */
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.options.jobs.supportsServicesFor?.(provider) === true;
@@ -1187,7 +1204,7 @@ export class ContainerExecutor implements Executor {
     throw new Error("coding_provider_not_configured:claude-code");
   }
 
-  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date): Promise<string> {
+  private async writeInput(run: ContainerRunSnapshot, deadlineAt: Date, baseCommit: string): Promise<string> {
     await ensurePrivateDirectory(this.artifactRoot);
     const rootReal = await realpath(this.artifactRoot);
     const directory = resolve(rootReal, run.runId);
@@ -1197,13 +1214,20 @@ export class ContainerExecutor implements Executor {
     const destination = join(directory, "input.json");
     const temporary = join(directory, `.input-${randomUUID()}.tmp`);
     const services = parseStoredServices(run.services);
+    const task = withBaseCommit(run.task, baseCommit);
+    if (task === run.task && /^[0-9a-f]{40}$/.test(baseCommit)) {
+      containerLog.warn(
+        { event: "coding.base_commit_omitted", runId: run.runId },
+        "the coding task left no room for the base commit line",
+      );
+    }
     const input = CodingTaskInputSchema.parse({
       schemaVersion: CODING_PROTOCOL_VERSION,
       runId: run.runId,
       repository: run.repository,
       baseRef: run.baseRef,
       headRef: run.headRef,
-      task: run.task,
+      task,
       model: run.model,
       budgetUsd: run.budgetUsd,
       deadlineAt: deadlineAt.toISOString(),

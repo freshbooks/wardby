@@ -62,6 +62,18 @@ export interface Executor {
    */
   readCodingServiceDeclaration?(input: { repository: string; baseRef: string }): Promise<string | null>;
   /**
+   * The raw text of one repository file at `baseRef`, or null when absent.
+   * Throws (github_file_too_large, github_file_not_a_file, github_file_not_utf8)
+   * when the file is oversized or not UTF-8 text. Called by dispatch before its transaction (network call).
+   * Used for the knowledge note (src/knowledge/note.ts).
+   */
+  readCodingRepositoryFile?(input: {
+    repository: string;
+    baseRef: string;
+    path: string;
+    maxBytes: number;
+  }): Promise<string | null>;
+  /**
    * Whether this executor can start coding-run services for a run of `provider`: its job launcher
    * says so (Kubernetes and Docker, for Codex and Claude Code).
    */

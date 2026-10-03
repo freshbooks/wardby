@@ -131,6 +131,9 @@ terminal cleanup; investigate any retained resource as a cleanup failure.
 
 See [release verification](release-verification.md) for the complete gate.
 
+If the repository has `docs/knowledge/index.md`, every coding run's prompt
+includes it. See [Architecture knowledge bundles](knowledge.md).
+
 ## Budgets
 
 A coding run's budget is reserved when it is dispatched: the agent's own
