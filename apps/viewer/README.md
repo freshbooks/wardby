@@ -76,6 +76,12 @@ enter its client id when adding the server. The client must:
   match everything except the port);
 - be allowed to request the `admin:view` scope for the Wardby resource.
 
+## Appearance
+
+The viewer follows the system's light or dark appearance by default. To choose
+one for the viewer only, use **View ▸ Appearance ▸ System, Light or Dark** in the
+menu bar (⇧⌘L for Light, ⇧⌘D for Dark). The choice is remembered.
+
 ## Where tokens live
 
 Tokens never reach the UI. The refresh token is stored in the macOS Keychain
