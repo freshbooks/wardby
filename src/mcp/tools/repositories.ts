@@ -21,7 +21,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
 const PROVIDERS = ["github"] as const;
-const TRIGGERS = ["pull_request", "mention"] as const;
+const TRIGGERS = ["pull_request", "mention", "push"] as const;
 const CHECK_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._/()-]{0,99}$/;
 
 type LinkArgs = {
@@ -77,6 +77,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
     scope: "agents:write",
     description:
       "Links a native agent you own to a repository on a code-review host, with its access, event triggers, and checkName. " +
+      "Triggers: pull_request (review each PR push), mention (answer @mentions), push (start on merges to the default branch). " +
       "Your linked GitHub account (link_host_account) must have write access to the repository for a write link, or read for a " +
       "read link; a wardby admin may instead approve it with adminOverride. checkName is only allowed (and required) with the " +
       "pull_request trigger, and is unique per repository. Re-linking an already-linked repository replaces its access, " +
