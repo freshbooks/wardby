@@ -686,3 +686,125 @@ describe("routeHostEvent linked-PR attribution", () => {
     expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toBeUndefined();
   });
 });
+
+describe("routeHostEvent push (merge watcher)", () => {
+  const AFTER = "b".repeat(40);
+  const BEFORE = "a".repeat(40);
+  const push = (changedPaths: string[], changedPathsComplete = true): HostEvent => ({
+    kind: "push",
+    provider: "github",
+    repository: REPO,
+    branch: "main",
+    before: BEFORE,
+    after: AFTER,
+    changedPaths,
+    changedPathsComplete,
+  });
+  const concept = (path: string) =>
+    `---\ntype: invariant\nwardby:\n  schema: 1\n  citations:\n    - { repo: github:o/r, path: ${path}, sha: ${"c".repeat(40)}, spanHash: sha256:${"d".repeat(64)} }\n---\nBody.\n`;
+  function bundleHost(files: Record<string, string> | null) {
+    const h = host();
+    vi.mocked(h.listFiles).mockImplementation(async () => {
+      if (files === null) throw new Error("boom");
+      const names = Object.keys(files).map((f) => `docs/knowledge/${f}`);
+      return { ref: AFTER, count: names.length, truncated: false, files: names };
+    });
+    vi.mocked(h.readFile).mockImplementation(async (_r, path) => {
+      const content = files?.[path.replace("docs/knowledge/", "")] ?? "";
+      return { kind: "file", path, ref: AFTER, totalLines: 1, startLine: 1, endLine: 1, truncated: false, content };
+    });
+    return h;
+  }
+  const link = (agentId: string, triggers = ["push"]) => ({ agentId, triggers, checkName: null });
+  const taskOf = (i = 0) => String(vi.mocked(dispatchRun).mock.calls[i][0].taskOverride);
+
+  it("dispatches the linked agent with the concept a changed cited file affects", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost({ "seed.md": concept("src/a.ts") }));
+    const result = await routeHostEvent(push(["src/a.ts"]), d);
+    expect(result.runIds).toEqual(["run-w1"]);
+    expect(vi.mocked(dispatchRun)).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(dispatchRun).mock.calls[0][0];
+    expect(call).toMatchObject({ agentId: "w1", trigger: "host_event", lockAgent: true });
+    const { task, untrustedContext } = splitTaskOverride(taskOf());
+    expect(task).toContain(`Merge to main in ${REPO}: ${"a".repeat(12)}..${"b".repeat(12)}.`);
+    expect(task).not.toContain("src/a.ts");
+    expect(untrustedContext).toContain("- src/a.ts");
+    expect(untrustedContext).toContain("- docs/knowledge/seed.md");
+  });
+
+  it("still dispatches when only unrelated files changed, saying no concept is affected", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost({ "seed.md": concept("src/a.ts") }));
+    await routeHostEvent(push(["README.md"]), d);
+    expect(vi.mocked(dispatchRun)).toHaveBeenCalledTimes(1);
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("No knowledge concept is affected");
+  });
+
+  it("skips a push while the watcher has a pending or running run", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost({}));
+    await routeHostEvent(push(["README.md"]), d);
+    const before = vi.mocked(dispatchRun).mock.calls[0][0].beforePersist!;
+    const findFirst = vi.fn((): Promise<{ id: string } | null> => Promise.resolve({ id: "r1" }));
+    const tx = { run: { findFirst } } as never;
+    expect(await before(tx, { id: "w1" } as never)).toBe(false);
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { agentId: "w1", status: { in: ["pending", "running"] } },
+      select: { id: true },
+    });
+    findFirst.mockResolvedValueOnce(null);
+    expect(await before(tx, { id: "w1" } as never)).toBe(true);
+  });
+
+  it("ignores links without the push trigger", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("m1", ["mention"]), link("p1", ["pull_request"])], bundleHost({}));
+    const result = await routeHostEvent(push(["README.md"]), d);
+    expect(result.runIds).toEqual([]);
+    expect(vi.mocked(dispatchRun)).not.toHaveBeenCalled();
+  });
+
+  it("dispatches for a repository without a bundle", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost({}));
+    await routeHostEvent(push(["README.md"]), d);
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("No knowledge concept is affected");
+  });
+
+  it("lists the bundle once for several push links", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = bundleHost({ "seed.md": concept("src/a.ts") });
+    const d = deps([link("w1"), link("w2")], h);
+    const result = await routeHostEvent(push(["src/a.ts"]), d);
+    expect(result.runIds).toEqual(["run-w1", "run-w2"]);
+    expect(h.listFiles).toHaveBeenCalledTimes(1);
+    expect(h.listFiles).toHaveBeenCalledWith(REPO, AFTER, "docs/knowledge/");
+  });
+
+  it("still dispatches when the bundle cannot be read", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost(null));
+    const result = await routeHostEvent(push(["src/a.ts"]), d);
+    expect(result.runIds).toEqual(["run-w1"]);
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("No knowledge concept is affected");
+  });
+
+  it("says the file list is incomplete when changedPathsComplete is false", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost({ "seed.md": concept("src/a.ts") }));
+    await routeHostEvent(push([], false), d);
+    const { untrustedContext } = splitTaskOverride(taskOf());
+    expect(untrustedContext).toContain("incomplete");
+    expect(untrustedContext).toContain("- docs/knowledge/seed.md");
+  });
+
+  it("does nothing, and reads no bundle, when no authorized push link remains", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = bundleHost({});
+    const d = deps([link("w1")], h, gate({ use: () => ({ ok: false, reason: "no_access" }) as never }));
+    const result = await routeHostEvent(push(["x"]), d);
+    expect(result.runIds).toEqual([]);
+    expect(h.listFiles).not.toHaveBeenCalled();
+  });
+});
