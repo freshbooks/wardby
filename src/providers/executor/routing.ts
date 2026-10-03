@@ -68,6 +68,16 @@ export class RoutingExecutor implements Executor {
     return this.coding.readCodingServiceDeclaration(input);
   }
 
+  async readCodingRepositoryFile(input: {
+    repository: string;
+    baseRef: string;
+    path: string;
+    maxBytes: number;
+  }): Promise<string | null> {
+    if (!this.coding.readCodingRepositoryFile) return null;
+    return this.coding.readCodingRepositoryFile(input);
+  }
+
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.coding.supportsCodingServices?.(provider) === true;
   }

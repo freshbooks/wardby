@@ -1141,6 +1141,22 @@ export class ContainerExecutor implements Executor {
     });
   }
 
+  /** One repository file at the run's base ref (Executor.readCodingRepositoryFile). */
+  async readCodingRepositoryFile(input: {
+    repository: string;
+    baseRef: string;
+    path: string;
+    maxBytes: number;
+  }): Promise<string | null> {
+    if (!this.options.vcs.readRepositoryFile) return null;
+    return this.options.vcs.readRepositoryFile({
+      repository: input.repository,
+      ref: input.baseRef,
+      path: input.path,
+      maxBytes: input.maxBytes,
+    });
+  }
+
   /** The job launcher decides (Kubernetes and Docker start services for both providers). */
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.options.jobs.supportsServicesFor?.(provider) === true;
