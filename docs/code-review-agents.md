@@ -281,8 +281,10 @@ with:
   below) — generate it with `openssl rand -hex 32` or similar; the ingress
   endpoint answers 404 until this is set.
 - **Subscribe to events**: Pull request, Issue comment, Pull request review
-  comment, Check run, and Issues (needed for mentions in a newly opened or
-  edited issue; without it only comment mentions are seen).
+  comment, Check run, Issues (needed for mentions in a newly opened or
+  edited issue; without it only comment mentions are seen), and Push (needed
+  for the `push` trigger, which starts merge-watcher agents; it is its own
+  checkbox, separate from the others, and must be ticked explicitly).
 - **Repository permissions**:
 
   | Permission    | Access         |
@@ -393,6 +395,23 @@ review command:
   "triggers": ["mention"]
 }
 ```
+
+**A merge watcher**, which starts on every merge to the repository's default
+branch (see [Drift runs on merge](knowledge.md#drift-runs-on-merge)):
+
+```json
+{
+  "agentId": "<agent-id>",
+  "repository": "owner/name",
+  "access": "write",
+  "triggers": ["push"]
+}
+```
+
+The `push` trigger is for native agents only and takes no `checkName`. Unlike
+`mention`, several agents may hold it on one repository, but one watcher per
+repository is the recommended shape. Only pushes to the default branch start a
+run; tags, other branches, and branch deletions are ignored.
 
 Only one agent per repository may hold the `mention` trigger, and only one
 link per repository may use a given `checkName` (whatever its triggers; the
