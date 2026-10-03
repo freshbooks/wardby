@@ -1,4 +1,5 @@
 import type { GraphRun, Outcome } from "../api/types";
+import { tailTruncate } from "./sizes";
 
 export function triggerLabel(trigger: GraphRun["trigger"]): string {
   switch (trigger.kind) {
@@ -38,4 +39,15 @@ const CODING_BADGES: Record<string, { text: string; name: string }> = {
 export function codingBadge(provider: string): { text: string; name: string; known: boolean } {
   const known = CODING_BADGES[provider];
   return known ? { ...known, known: true } : { text: provider.slice(0, 2).toUpperCase(), name: provider, known: false };
+}
+
+/** "owner/repo#12" → "repo#12", cut from the front to `max` so the number stays visible. */
+export function compactTarget(repository: string, number: number | null, max: number): string {
+  const name = repository.slice(repository.lastIndexOf("/") + 1);
+  return tailTruncate(number === null ? name : `${name}#${number}`, max);
+}
+
+/** A trigger node's short title: a pull request or mention keeps its number; others use the label as is. */
+export function triggerTitle(trigger: GraphRun["trigger"], label: string, max: number): string {
+  return trigger.kind === "code_host" ? `⎇ ${compactTarget(trigger.repository, trigger.number, max - 2)}` : label;
 }

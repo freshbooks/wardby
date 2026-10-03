@@ -166,7 +166,8 @@ describe("DetailPanel", () => {
 
   it("offers no Open button for a non-https link", async () => {
     const d = makeDetail();
-    (d.outcomes[0] as { url: string }).url = "javascript:alert(1)";
+    // Off GitHub, so there is no link to fall back to either.
+    Object.assign(d.outcomes[0]!, { url: "javascript:alert(1)", provider: "gitlab" });
     api.fetchRun.mockResolvedValue(d);
     setup();
     await screen.findByText("DATABASE_URL");

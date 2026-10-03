@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchRun, isAppError, openUrl, type AppError } from "../api/client";
-import type { GraphRun, Outcome, RunDetail } from "../api/types";
+import type { GraphRun, RunDetail } from "../api/types";
 import { useClock } from "../graph/clock";
 import { triggerLabel } from "../graph/build";
 import { formatElapsed, serviceChip, statusGlyph } from "../graph/nodes/RunNode";
 import { outcomeLabel } from "../graph/nodes/OutcomeNode";
+import { outcomeLink } from "../graph/links";
 import { ErrorLine } from "../chrome/ErrorLine";
 import { exactUsd, formatUsd } from "../format/money";
 
@@ -52,10 +53,6 @@ export function shortImage(image: string): string {
     return `${image.slice(0, at)}@sha256:${digest.slice(0, DIGEST_CHARS)}${digest.length > DIGEST_CHARS ? "…" : ""}`;
   }
   return image.length > IMAGE_MAX ? `${image.slice(0, IMAGE_MAX)}…` : image;
-}
-
-function outcomeUrl(o: Outcome): string | null {
-  return o.kind === "pull_request" && o.url.startsWith("https://") ? o.url : null;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -211,7 +208,7 @@ export function DetailPanel({ serverUrl, run, runs, onSelect }: DetailPanelProps
           <ul className="panel-list">
             {detail.outcomes.map((o, i) => {
               const { label } = outcomeLabel(o);
-              const url = outcomeUrl(o);
+              const url = outcomeLink(o);
               return (
                 <li key={i}>
                   <span>{label}</span>

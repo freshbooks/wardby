@@ -141,7 +141,40 @@ describe("TriggerNode / OutcomeNode", () => {
       state: "open",
     };
     wrap(<OutcomeNode {...props({ kind: "outcome", outcome })} />);
-    expect(screen.getByText("⎇ your-org/app#212")).toBeInTheDocument();
-    expect(screen.getByText("open")).toBeInTheDocument();
+    expect(screen.getByText("⎇ app#212")).toHaveAttribute("title", "⎇ your-org/app#212");
+    expect(screen.getByText("pull request · open")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open ⎇ your-org/app#212" })).toHaveAttribute(
+      "title",
+      "Open https://example.test/pr/212",
+    );
+  });
+
+  it("keeps a long repository's number visible and links a review trigger to its pull request", () => {
+    const trigger = {
+      kind: "code_host" as const,
+      provider: "github",
+      repository: "your-org/a-very-long-repository-name",
+      number: 104,
+      event: "review" as const,
+    };
+    wrap(
+      <TriggerNode
+        {...props({ kind: "trigger", trigger, label: "⎇ your-org/a-very-long-repository-name#104 review" })}
+      />,
+    );
+    const title = screen.getByText(/#104$/);
+    expect(title.textContent).toBe("⎇ …repository-name#104");
+    expect(screen.getByRole("button", { name: /^Open / })).toHaveAttribute(
+      "title",
+      "Open https://github.com/your-org/a-very-long-repository-name/issues/104",
+    );
+  });
+
+  it("gives a check outcome its kind on the second line and no link off GitHub", () => {
+    const outcome: Outcome = { kind: "check", provider: "gitlab", repository: "g/r", number: 3, completed: true };
+    wrap(<OutcomeNode {...props({ kind: "outcome", outcome })} />);
+    expect(screen.getByText("✓ r#3")).toBeInTheDocument();
+    expect(screen.getByText("check · completed")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).toBeNull();
   });
 });
