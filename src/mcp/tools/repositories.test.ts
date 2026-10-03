@@ -248,7 +248,7 @@ describe("repository tools", () => {
 
     const badTriggerResult = await client.callTool({
       name: "link_repository",
-      arguments: { agentId: "a1", repository: "openai/example", access: "write", triggers: ["push"] },
+      arguments: { agentId: "a1", repository: "openai/example", access: "write", triggers: ["tag"] },
     });
     expect(badTriggerResult.isError).toBeTruthy();
     await client.close();
@@ -271,6 +271,43 @@ describe("repository tools", () => {
     });
     expect(missingCheckName.isError).toBeTruthy();
     expect(errorText(missingCheckName as never)).toContain("checkName is required");
+    await client.close();
+  });
+
+  it("accepts the push trigger for a native agent with write access", async () => {
+    const { mcp } = setup([{ id: "a1", name: "watcher", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const link = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a1", repository: "openai/example", access: "write", triggers: ["push"] },
+    });
+    expect(link.isError).toBeFalsy();
+    const parsed = parseText(link as never) as { link: Record<string, unknown> };
+    expect(parsed.link).toMatchObject({ triggers: ["push"], checkName: null });
+    await client.close();
+  });
+
+  it("requires write access for the push trigger and keeps it native-only", async () => {
+    const { mcp } = setup(
+      [
+        { id: "a1", name: "watcher", ownerId: "p1", kind: "native" },
+        { id: "c1", name: "coder", ownerId: "p1", kind: "coding" },
+      ],
+      "p1",
+    );
+    const client = await connectClient(mcp);
+    const readPush = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a1", repository: "openai/example", access: "read", triggers: ["push"] },
+    });
+    expect(readPush.isError).toBeTruthy();
+    expect(errorText(readPush as never)).toContain("Event triggers need write access.");
+    const codingPush = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "c1", repository: "openai/example", access: "write", triggers: ["push"] },
+    });
+    expect(codingPush.isError).toBeTruthy();
+    expect(errorText(codingPush as never)).toContain("native agents only");
     await client.close();
   });
 

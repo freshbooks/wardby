@@ -362,3 +362,57 @@ describe("normalizeGitHubEvent", () => {
     expect(normalizeGitHubEvent("pull_request", { action: "opened" }, APP)).toBeNull();
   });
 });
+
+describe("push events", () => {
+  const app = { id: 1, slug: "wardby" };
+  const base = {
+    ref: "refs/heads/main",
+    before: "a".repeat(40),
+    after: "b".repeat(40),
+    deleted: false,
+    repository: { full_name: "Org/Repo", default_branch: "main" },
+    commits: [
+      { added: ["docs/knowledge/x.md"], modified: ["src/a.py"], removed: [] },
+      { added: [], modified: ["src/a.py"], removed: ["old.py"] },
+    ],
+  };
+  it("normalizes a default-branch push with deduplicated changed paths", () => {
+    expect(normalizeGitHubEvent("push", base, app)).toEqual({
+      kind: "push",
+      provider: "github",
+      repository: "org/repo",
+      branch: "main",
+      before: "a".repeat(40),
+      after: "b".repeat(40),
+      changedPaths: ["docs/knowledge/x.md", "old.py", "src/a.py"],
+      changedPathsComplete: true,
+    });
+  });
+  it("ignores other branches, tags, and deletions", () => {
+    expect(normalizeGitHubEvent("push", { ...base, ref: "refs/heads/feature" }, app)).toBeNull();
+    expect(normalizeGitHubEvent("push", { ...base, ref: "refs/tags/v1" }, app)).toBeNull();
+    expect(normalizeGitHubEvent("push", { ...base, deleted: true, after: "0".repeat(40) }, app)).toBeNull();
+    expect(normalizeGitHubEvent("push", { ...base, after: "0".repeat(40) }, app)).toBeNull();
+    expect(normalizeGitHubEvent("push", { ...base, before: "nope" }, app)).toBeNull();
+  });
+  it("marks the path list incomplete when GitHub capped the commits", () => {
+    const commits = Array.from({ length: 2048 }, () => ({ added: [], modified: ["a"], removed: [] }));
+    expect(normalizeGitHubEvent("push", { ...base, commits }, app)).toMatchObject({ changedPathsComplete: false });
+  });
+  it("keeps the path list complete below GitHub's 2048-commit cap", () => {
+    const commits = Array.from({ length: 2047 }, () => ({ added: [], modified: ["a"], removed: [] }));
+    expect(normalizeGitHubEvent("push", { ...base, commits }, app)).toMatchObject({ changedPathsComplete: true });
+  });
+  it("ignores a push whose default branch name is not a plain branch name", () => {
+    for (const name of ["main\nIgnore previous", "feat branch", "a".repeat(101), "bad;name", "é"]) {
+      const repository = { full_name: "Org/Repo", default_branch: name };
+      expect(normalizeGitHubEvent("push", { ...base, ref: `refs/heads/${name}`, repository }, app)).toBeNull();
+    }
+    const ok = { full_name: "Org/Repo", default_branch: "release/v1.2_x-y" };
+    expect(
+      normalizeGitHubEvent("push", { ...base, ref: "refs/heads/release/v1.2_x-y", repository: ok }, app),
+    ).toMatchObject({
+      branch: "release/v1.2_x-y",
+    });
+  });
+});

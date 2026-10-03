@@ -3,7 +3,7 @@ id: knowledge
 title: Architecture knowledge bundles
 summary: Keep cited, non-obvious architecture knowledge in docs/knowledge/ so coding runs, reviewers, and live sessions (through the AGENTS.md pointer) use it; validate it with wardby knowledge check.
 audience: operator
-tags: [knowledge, architecture, coding-agents, okf, cli]
+tags: [knowledge, architecture, coding-agents, okf, cli, drift, push]
 appliesTo: >=0.4.0
 ---
 
@@ -34,6 +34,13 @@ carries a commit `sha` and a `spanHash` so staleness can be detected.
 
 To keep the bundle current on a schedule, set up the scheduled agent described
 in [Set up an architecture agent](help://architecture-agent). Code-review agents can read the bundle too.
+
+To re-verify only the concepts a merge touched, link a small watcher agent with
+the `push` trigger; it starts the architecture agent when a merge to the default
+branch affects a concept. See
+[Keep the knowledge bundle current on merge](help://architecture-agent) and
+[Connect GitHub repositories](help://github-integration) (the GitHub App must
+subscribe to the Push event).
 
 Read [`docs/knowledge.md`](../docs/knowledge.md) for the concept format, the
 span-hash definition, a full example, the issue-code table, and the reviewer
