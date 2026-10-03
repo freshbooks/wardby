@@ -432,7 +432,14 @@ async fn sign_in_flow(
     let state = oauth::new_state();
     let url = oauth::authorize_url(&auth, &client_id, &callback.redirect_uri, &pkce, &state);
     (hooks.open)(url.as_str())?;
-    let code = loopback::wait_for_code(listener, &state, Some(&auth.issuer), timeout).await?;
+    let code = loopback::wait_for_code(
+        listener,
+        &state,
+        Some(&auth.issuer),
+        auth.iss_required,
+        timeout,
+    )
+    .await?;
 
     let tokens = oauth::exchange_code(
         &http,

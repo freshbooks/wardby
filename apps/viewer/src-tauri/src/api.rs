@@ -358,6 +358,7 @@ pub(crate) mod test_support {
             registration_endpoint: None,
             resource: format!("{base}/mcp"),
             issuer: format!("{base}/mcp"),
+            iss_required: false,
         }
     }
 

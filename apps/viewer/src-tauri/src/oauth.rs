@@ -89,6 +89,9 @@ pub struct AuthServer {
     /// The advertised issuer, already checked against the metadata's `issuer`.
     /// Also the expected value of the RFC 9207 `iss` callback parameter.
     pub issuer: String,
+    /// RFC 9207: the server said it sends `iss` on authorization responses, so
+    /// the callback must carry it (a mix-up defence that is useless if optional).
+    pub iss_required: bool,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +106,8 @@ struct AsMetadata {
     authorization_endpoint: String,
     token_endpoint: String,
     registration_endpoint: Option<String>,
+    #[serde(default)]
+    authorization_response_iss_parameter_supported: bool,
 }
 
 fn is_loopback_host(url: &Url) -> bool {
@@ -114,11 +119,13 @@ fn is_loopback_host(url: &Url) -> bool {
     }
 }
 
-/// Credentials only travel over https, except to a loopback host (local dev).
-fn require_secure(url: &Url, what: &str) -> Result<(), AppError> {
+/// Credentials only travel over https. Cleartext is for local development
+/// only: a loopback host, and only when the server the user entered is itself
+/// loopback (`local`), so a remote server cannot steer sign-in to cleartext.
+fn require_secure(url: &Url, what: &str, local: bool) -> Result<(), AppError> {
     let ok = match url.scheme() {
         "https" => true,
-        "http" => is_loopback_host(url),
+        "http" => local && is_loopback_host(url),
         _ => false,
     };
     if ok && url.host_str().is_some() {
@@ -139,9 +146,9 @@ fn well_known(base: &Url, suffix: &str) -> Result<Url, AppError> {
     Ok(u)
 }
 
-fn parse_endpoint(raw: &str, what: &str) -> Result<Url, AppError> {
+fn parse_endpoint(raw: &str, what: &str, local: bool) -> Result<Url, AppError> {
     let u = Url::parse(raw).map_err(|_| AppError::Protocol(format!("invalid {what}")))?;
-    require_secure(&u, what)?;
+    require_secure(&u, what, local)?;
     Ok(u)
 }
 
@@ -254,7 +261,8 @@ fn check_resource(server: &Url, resource: &str, exact: bool) -> Result<(), AppEr
 pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthServer, AppError> {
     let server = Url::parse(server_url.trim())
         .map_err(|_| AppError::Protocol("invalid server URL".to_string()))?;
-    require_secure(&server, "server URL")?;
+    let local = is_loopback_host(&server);
+    require_secure(&server, "server URL", local)?;
 
     let (prm, path_inserted) = fetch_prm(http, &server).await?;
     check_resource(&server, &prm.resource, path_inserted)?;
@@ -262,7 +270,7 @@ pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthSe
         .authorization_servers
         .first()
         .ok_or_else(|| AppError::Protocol("no authorization server advertised".to_string()))?;
-    let issuer = parse_endpoint(advertised, "authorization server")?;
+    let issuer = parse_endpoint(advertised, "authorization server", local)?;
 
     let meta = fetch_as_metadata(http, &issuer).await?;
     // RFC 8414 section 3.3: the metadata must name the issuer we asked about.
@@ -275,15 +283,17 @@ pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthSe
         authorization_endpoint: parse_endpoint(
             &meta.authorization_endpoint,
             "authorization endpoint",
+            local,
         )?,
-        token_endpoint: parse_endpoint(&meta.token_endpoint, "token endpoint")?,
+        token_endpoint: parse_endpoint(&meta.token_endpoint, "token endpoint", local)?,
         registration_endpoint: meta
             .registration_endpoint
             .as_deref()
-            .map(|r| parse_endpoint(r, "registration endpoint"))
+            .map(|r| parse_endpoint(r, "registration endpoint", local))
             .transpose()?,
         resource: prm.resource,
         issuer: advertised.clone(),
+        iss_required: meta.authorization_response_iss_parameter_supported,
     })
 }
 
@@ -531,6 +541,7 @@ mod tests {
             registration_endpoint: Some(Url::parse(&format!("{base}/register")).unwrap()),
             resource: format!("{base}/mcp"),
             issuer: format!("{base}/mcp"),
+            iss_required: false,
         }
     }
 
@@ -1077,6 +1088,42 @@ mod tests {
             .await;
         let a = discover(&http_client().unwrap(), &base).await.unwrap();
         assert_eq!(a.issuer, issuer);
+    }
+
+    #[test]
+    fn cleartext_is_only_for_a_loopback_host_of_a_loopback_server() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        assert!(require_secure(&u("https://wardby.example/x"), "x", false).is_ok());
+        assert!(require_secure(&u("http://127.0.0.1:9/x"), "x", true).is_ok());
+        assert!(require_secure(&u("http://localhost/x"), "x", true).is_ok());
+        // A remote server must not steer sign-in to a cleartext endpoint, even a local one.
+        assert!(require_secure(&u("http://127.0.0.1:9/x"), "x", false).is_err());
+        assert!(require_secure(&u("http://idp.example/x"), "x", true).is_err());
+    }
+
+    #[tokio::test]
+    async fn iss_parameter_support_is_read_from_metadata() {
+        let s = MockServer::start().await;
+        let base = s.uri();
+        mount_prm(&s, &base).await;
+        let mut meta = as_meta(&base, &base);
+        meta["authorization_response_iss_parameter_supported"] = serde_json::json!(true);
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(meta))
+            .mount(&s)
+            .await;
+        let http = http_client().unwrap();
+        assert!(discover(&http, &base).await.unwrap().iss_required);
+
+        s.reset().await;
+        mount_prm(&s, &base).await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta(&base, &base)))
+            .mount(&s)
+            .await;
+        assert!(!discover(&http, &base).await.unwrap().iss_required);
     }
 
     #[tokio::test]

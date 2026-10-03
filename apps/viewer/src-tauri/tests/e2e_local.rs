@@ -110,8 +110,16 @@ async fn sign_in_graph_and_events_against_a_local_server() {
     let state = oauth::new_state();
     let authorize = oauth::authorize_url(&auth, &client_id, &callback.redirect_uri, &pkce, &state);
     let issuer = auth.issuer.clone();
+    let require_iss = auth.iss_required;
     let waiter = tokio::spawn(async move {
-        loopback::wait_for_code(listener, &state, Some(&issuer), Duration::from_secs(30)).await
+        loopback::wait_for_code(
+            listener,
+            &state,
+            Some(&issuer),
+            require_iss,
+            Duration::from_secs(30),
+        )
+        .await
     });
 
     // Play the browser: authorize -> login form -> consent form -> callback.

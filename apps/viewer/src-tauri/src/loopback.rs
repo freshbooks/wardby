@@ -54,18 +54,20 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Requests that are not a callback for this attempt (other paths, missing or
 /// wrong `state`, duplicate parameters) get an error page and are ignored; only
 /// a callback whose `state` matches ends the wait. `expected_iss` is the RFC
-/// 9207 issuer, checked when the server sends one. Each connection is served in
+/// 9207 issuer, checked when the server sends one; with `require_iss` (the
+/// server advertised support) a callback without it is refused. Each connection is served in
 /// its own task so a stalled client cannot block the real callback. Consumes
 /// the listener, so the port closes on every exit path.
 pub async fn wait_for_code(
     listener: TcpListener,
     expected_state: &str,
     expected_iss: Option<&str>,
+    require_iss: bool,
     timeout: Duration,
 ) -> Result<String, AppError> {
     tokio::time::timeout(
         timeout,
-        accept_loop(&listener, expected_state, expected_iss),
+        accept_loop(&listener, expected_state, expected_iss, require_iss),
     )
     .await
     .map_err(|_| AppError::Timeout)?
@@ -75,6 +77,7 @@ async fn accept_loop(
     listener: &TcpListener,
     expected_state: &str,
     expected_iss: Option<&str>,
+    require_iss: bool,
 ) -> Result<String, AppError> {
     let (tx, mut rx) = mpsc::channel::<Result<String, AppError>>(1);
     // Dropping the set on return aborts any connection still in flight.
@@ -90,7 +93,13 @@ async fn accept_loop(
                 if !peer.ip().is_loopback() || tasks.len() >= MAX_CONNECTIONS {
                     continue;
                 }
-                tasks.spawn(handle_connection(stream, state.clone(), iss.clone(), tx.clone()));
+                tasks.spawn(handle_connection(
+                    stream,
+                    state.clone(),
+                    iss.clone(),
+                    require_iss,
+                    tx.clone(),
+                ));
             }
         }
     }
@@ -100,6 +109,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     expected_state: std::sync::Arc<str>,
     expected_iss: Option<std::sync::Arc<str>>,
+    require_iss: bool,
     done: mpsc::Sender<Result<String, AppError>>,
 ) {
     let Some(target) = read_target(&mut stream).await else {
@@ -114,7 +124,7 @@ async fn handle_connection(
         respond(&mut stream, "404 Not Found", PAGE_NOT_FOUND).await;
         return;
     }
-    match interpret(&url, &expected_state, expected_iss.as_deref()) {
+    match interpret(&url, &expected_state, expected_iss.as_deref(), require_iss) {
         Verdict::Ignore => respond(&mut stream, "400 Bad Request", PAGE_ERROR).await,
         Verdict::Finish(outcome) => {
             let (status, page) = match &outcome {
@@ -134,7 +144,12 @@ enum Verdict {
     Finish(Result<String, AppError>),
 }
 
-fn interpret(url: &Url, expected_state: &str, expected_iss: Option<&str>) -> Verdict {
+fn interpret(
+    url: &Url,
+    expected_state: &str,
+    expected_iss: Option<&str>,
+    require_iss: bool,
+) -> Verdict {
     let mut code = None;
     let mut state = None;
     let mut error = None;
@@ -156,6 +171,11 @@ fn interpret(url: &Url, expected_state: &str, expected_iss: Option<&str>) -> Ver
         _ => return Verdict::Ignore,
     }
     // From here the request belongs to this attempt, so the outcome is final.
+    if require_iss && iss.is_none() {
+        return Verdict::Finish(Err(AppError::Protocol(
+            "callback missing issuer".to_string(),
+        )));
+    }
     if let (Some(got), Some(want)) = (iss.as_deref(), expected_iss)
         && got.trim_end_matches('/') != want.trim_end_matches('/')
     {
@@ -259,11 +279,20 @@ mod tests {
         iss: Option<&'static str>,
         timeout: Duration,
     ) -> (std::net::SocketAddr, Waiter) {
+        start_iss_req(state, iss, false, timeout).await
+    }
+
+    async fn start_iss_req(
+        state: &'static str,
+        iss: Option<&'static str>,
+        require_iss: bool,
+        timeout: Duration,
+    ) -> (std::net::SocketAddr, Waiter) {
         let (_, listener) = bind().await.unwrap();
         let addr = listener.local_addr().unwrap();
         (
             addr,
-            tokio::spawn(wait_for_code(listener, state, iss, timeout)),
+            tokio::spawn(wait_for_code(listener, state, iss, require_iss, timeout)),
         )
     }
 
@@ -379,6 +408,30 @@ mod tests {
         let (addr, h) = start_iss("s", Some("https://as.example/mcp"), LONG).await;
         get(addr, "/callback?code=c2&state=s").await;
         assert_eq!(h.await.unwrap().unwrap(), "c2");
+    }
+
+    #[tokio::test]
+    async fn a_required_iss_must_be_present_and_match() {
+        let want = Some("https://as.example/mcp");
+        let (addr, h) = start_iss_req("s", want, true, LONG).await;
+        get(addr, "/callback?code=c&state=s").await;
+        assert!(
+            matches!(h.await.unwrap(), Err(AppError::Protocol(m)) if m == "callback missing issuer")
+        );
+        let (addr, h) = start_iss_req("s", want, true, LONG).await;
+        get(
+            addr,
+            "/callback?code=c&state=s&iss=https%3A%2F%2Fevil.example",
+        )
+        .await;
+        assert!(matches!(h.await.unwrap(), Err(AppError::Protocol(_))));
+        let (addr, h) = start_iss_req("s", want, true, LONG).await;
+        get(
+            addr,
+            "/callback?code=c&state=s&iss=https%3A%2F%2Fas.example%2Fmcp",
+        )
+        .await;
+        assert_eq!(h.await.unwrap().unwrap(), "c");
     }
 
     #[tokio::test]
