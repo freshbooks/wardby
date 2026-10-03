@@ -8,6 +8,8 @@ import { buildMcpServer } from "../server.js";
 import { registerAgentTools } from "./agents.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
+import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../../providers/llm/catalog-store.js";
+import { SHIPPED_CATALOG } from "../../providers/llm/catalog-shipped.js";
 
 /** The control-plane log, captured: the debug-trace audit line is asserted on. */
 const logged = vi.hoisted(() => [] as { level: string; payload: Record<string, unknown>; message: string }[]);
@@ -658,6 +660,125 @@ describe("agent CRUD tools", () => {
       toolchainVersion: "3.12",
     });
     await client.close();
+  });
+
+  describe("model availability (model catalog)", () => {
+    /** Installs a catalog in which an admin has since disabled these shipped models. */
+    async function withDisabled(modelIds: string[], body: () => Promise<void>) {
+      const rows = modelIds.map((modelId) => ({
+        ...SHIPPED_CATALOG.find((e) => e.modelId === modelId)!,
+        enabled: false,
+        sourceUrl: "https://example.com/pricing",
+        updatedBy: "admin",
+        updatedAt: new Date(),
+      }));
+      const store = new CatalogStore(
+        { modelCatalogEntry: { findMany: async () => rows } },
+        {
+          intervalMs: 60_000,
+        },
+      );
+      await store.refreshNow();
+      installModelCatalog(store);
+      try {
+        await body();
+      } finally {
+        uninstallModelCatalogForTests();
+        store.close();
+      }
+    }
+
+    it("create_agent rejects a model the catalog does not have", async () => {
+      const db = fakeDb();
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+      registerAgentTools(mcp);
+      const client = await connectClient(mcp);
+      const result = await client.callTool({
+        name: "create_agent",
+        arguments: { name: "x", systemPrompt: "x", model: "gpt-9", budgetUsd: 1 },
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toMatch(/model_unavailable: .*reason: not_in_catalog/);
+      await client.close();
+    });
+
+    it("update_agent rejects changing to a disabled model", async () => {
+      await withDisabled(["gpt-4.1-nano"], async () => {
+        const db = fakeDb([
+          {
+            id: "a1",
+            name: "agent",
+            systemPrompt: "x",
+            model: "gpt-4o",
+            budgetUsd: 1,
+            maxTurns: 10,
+            schedule: null,
+            timezone: "UTC",
+            ownerId: "p1",
+            tools: [],
+          },
+        ]);
+        const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+        mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+        registerAgentTools(mcp);
+        const client = await connectClient(mcp);
+        const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", model: "gpt-4.1-nano" } });
+        expect(result.isError).toBe(true);
+        expect((result.content as { text: string }[])[0].text).toMatch(/model_unavailable: .*reason: disabled/);
+        await client.close();
+      });
+    });
+
+    it.each([
+      { kind: "native" as const, model: "claude-sonnet-5", effort: "high", codingProfile: null },
+      {
+        kind: "coding" as const,
+        model: "gpt-5.6-luna",
+        effort: null,
+        codingProfile: {
+          provider: "codex" as const,
+          repository: "openai/example",
+          baseRef: "main",
+          defaultTask: null,
+          timeoutSec: 1800,
+          protectedPaths: ["CODEOWNERS"],
+        },
+      },
+    ])(
+      "update_agent changing only the system prompt of a $kind agent whose model was since disabled succeeds",
+      async ({ kind, model, effort, codingProfile }) => {
+        await withDisabled([model], async () => {
+          const db = fakeDb([
+            {
+              id: "a1",
+              name: "agent",
+              systemPrompt: "x",
+              model,
+              budgetUsd: 1,
+              maxTurns: 10,
+              schedule: null,
+              timezone: "UTC",
+              ownerId: "p1",
+              tools: [],
+              kind,
+              codingProfile,
+              effort,
+            },
+          ]);
+          const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+          mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+          registerAgentTools(mcp);
+          const client = await connectClient(mcp);
+          const result = await client.callTool({
+            name: "update_agent",
+            arguments: { id: "a1", systemPrompt: "still here" },
+          });
+          expect(result.isError).toBeFalsy();
+          await client.close();
+        });
+      },
+    );
   });
 
   it("update_agent rejects changing a coding provider without a compatible model", async () => {
@@ -1484,7 +1605,7 @@ describe("agent CRUD tools", () => {
 
     const result = await client.callTool({
       name: "create_agent",
-      arguments: { name: "grouped", systemPrompt: "s", model: "m", budgetUsd: 1, budgetGroupId: "g1" },
+      arguments: { name: "grouped", systemPrompt: "s", model: "gpt-4o", budgetUsd: 1, budgetGroupId: "g1" },
     });
     expect(result.isError).toBeFalsy();
     const body = JSON.parse((result.content as { text: string }[])[0].text) as { budgetGroupId: string };

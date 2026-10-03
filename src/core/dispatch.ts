@@ -9,6 +9,7 @@ import {
   composeCodingTask,
 } from "../coding/protocol.js";
 import { assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
+import { entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
 import { parseAllowedServiceNames, workerServices, type ResolvedCodingService } from "../coding/services/catalog.js";
 import {
   MAX_SERVICE_DECLARATION_BYTES,
@@ -27,6 +28,7 @@ import {
 import { attributeRun, type AttributionIntent } from "./attribution.js";
 import { effectiveBudgetForRun, MIN_RESERVATION_USD, type BudgetConstraint } from "./budget-groups.js";
 import { logger } from "./logger.js";
+import { resolveCodingEntry } from "./run-pricing.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
 
 const dispatchLog = logger.child({ module: "dispatch" });
@@ -512,11 +514,14 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         // reservation. A native run computes its effective budget in
         // executeRun's load step instead.
         let codingBudget: { budgetUsd: number; refusal?: string } | undefined;
+        let codingEntry: ResolvedCatalogEntry | undefined;
         let services: ResolvedCodingService[] = [];
         let servicesRefusal: string | undefined;
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
           assertCodingProviderModel(agent.codingProfile.provider, agent.model);
+          // Recorded on the run row below: the run is billed at this entry for its whole life.
+          codingEntry = resolveCodingEntry(agent.codingProfile.provider, agent.model);
           if (declarationRead) {
             if (
               declarationRead.repository !== agent.codingProfile.repository ||
@@ -555,6 +560,14 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             // Refused before it starts, the same terminal status (and zero
             // spend) as a native run whose budget is gone at turn 1.
             ...(refusal ? { status: "refused" as const, error: refusal, finishedAt: now } : {}),
+            ...(codingEntry
+              ? {
+                  pricingVersion: codingEntry.priceVersion,
+                  // entryOf returns plain JSON data (fresh array, no Dates); the interface's readonly
+                  // efforts array is all that keeps it from matching Prisma's Json input type.
+                  pricingSnapshot: entryOf(codingEntry) as unknown as Prisma.InputJsonValue,
+                }
+              : {}),
           },
         });
 

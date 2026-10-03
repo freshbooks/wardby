@@ -9,6 +9,8 @@ import { Prisma, type CodingAgentProfile } from "#prisma";
 import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
+import { assertAgentModelAvailable } from "../../core/run-pricing.js";
+import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
 import { validateCronExpression } from "../../core/cron.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
@@ -294,6 +296,21 @@ function validateEffort(kind: "native" | "coding", model: string, effort: string
   }
 }
 
+/**
+ * A model being set (create, or update with `model`) must be runnable here:
+ * in the catalog, enabled, and its provider configured. An existing agent's
+ * unchanged model is not re-checked: if an admin later disabled it, the agent
+ * fails at its next run, not at an unrelated edit.
+ */
+function requireModelAvailable(ctx: McpRequestContext, model: string): void {
+  try {
+    assertAgentModelAvailable(model, ctx.providers.llm);
+  } catch (err) {
+    if (err instanceof ModelUnavailableError) throw new McpError(400, err.message);
+    throw err;
+  }
+}
+
 function storedProfile(profile: CodingAgentProfile): CodingProfile {
   return CodingProfileSchema.parse({
     provider: profile.provider,
@@ -376,6 +393,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       )
         requirePackageApproval(ctx);
       validateSchedule(args.schedule, args.timezone ?? "UTC");
+      requireModelAvailable(ctx, args.model);
       validateEffort(args.kind, args.model, args.effort);
       if (args.codingProfile) await requireCatalogServiceNames(ctx.db, args.codingProfile.services);
       if (args.budgetGroupId) {
@@ -576,11 +594,16 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           if (nextKind === "native" && args.codingProfile) {
             throw new McpError(400, "A coding profile is only valid for coding agents.");
           }
-          validateEffort(
-            nextKind,
-            args.model ?? existing.model,
-            args.effort !== undefined ? args.effort : existing.effort,
-          );
+          if (args.model !== undefined) requireModelAvailable(ctx, args.model);
+          // Only re-checked when the model, effort or kind changes: an agent whose
+          // model was since disabled can still take unrelated edits.
+          if (args.model !== undefined || args.effort !== undefined || nextKind !== existing.kind) {
+            validateEffort(
+              nextKind,
+              args.model ?? existing.model,
+              args.effort !== undefined ? args.effort : existing.effort,
+            );
+          }
 
           let nextProfile: CodingProfile | null = null;
           if (nextKind === "coding") {
@@ -595,7 +618,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             nextProfile = profileResult.data;
             if (args.codingProfile?.services !== undefined) await requireCatalogServiceNames(tx, nextProfile.services);
             const nextModel = args.model ?? existing.model;
-            if (!codingProviderSupportsModel(nextProfile.provider, nextModel)) {
+            const pairingChanges =
+              args.model !== undefined ||
+              existing.kind !== "coding" ||
+              existing.codingProfile?.provider !== nextProfile.provider;
+            if (pairingChanges && !codingProviderSupportsModel(nextProfile.provider, nextModel)) {
               throw new McpError(
                 400,
                 `Model "${nextModel}" is not supported by coding provider "${nextProfile.provider}".`,

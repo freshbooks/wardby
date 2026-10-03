@@ -482,8 +482,8 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
   describe("friendly errors: mapPrismaError at dispatch, pinned against the real adapter's error metadata", () => {
     it("a duplicate create_agent is a 409 naming the model and field", async () => {
       const name = id("dup-agent");
-      await callTool("create_agent", { name, systemPrompt: "t", model: "t", budgetUsd: 1 });
-      const err = await mcpError(callTool("create_agent", { name, systemPrompt: "t", model: "t", budgetUsd: 1 }));
+      await callTool("create_agent", { name, systemPrompt: "t", model: "gpt-4o", budgetUsd: 1 });
+      const err = await mcpError(callTool("create_agent", { name, systemPrompt: "t", model: "gpt-4o", budgetUsd: 1 }));
       expect(err.httpStatus).toBe(409);
       expect(err.message).toBe("An agent with that name already exists.");
     });

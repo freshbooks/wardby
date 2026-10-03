@@ -224,6 +224,32 @@ describe("dispatchRun", () => {
     expect(state.codingRuns[0]).not.toHaveProperty("allowedEgress");
   });
 
+  it("records the coding run's catalog entry on the run row at dispatch", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+      },
+    };
+    const state = fakeDb(agent);
+    await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id });
+    expect(state.runs[0].pricingVersion).toBe("shipped:2026-10-03");
+    expect(state.runs[0].pricingSnapshot.modelId).toBe(agent.model);
+  });
+
+  it("leaves a native run's catalog entry for the runner to record", async () => {
+    const state = fakeDb(nativeAgent());
+    await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: "agent_1" });
+    expect(state.runs[0]).not.toHaveProperty("pricingVersion");
+  });
+
   describe("budget groups (E-01)", () => {
     const groupedCodingAgent = () => ({
       ...nativeAgent(),

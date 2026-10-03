@@ -1,17 +1,25 @@
-import { anthropicSupportedModels } from "../providers/llm/pricing-anthropic.js";
-import { supportedModels as openaiSupportedModels } from "../providers/llm/pricing.js";
+import { currentModelCatalog } from "../providers/llm/catalog-store.js";
+import type { ModelCatalog } from "../providers/llm/catalog.js";
+import type { ModelProvider } from "../providers/llm/catalog-types.js";
 
 export const CODING_PROVIDERS = ["codex", "claude-code"] as const;
 
 export type CodingProvider = (typeof CODING_PROVIDERS)[number];
 
-const MODELS_BY_PROVIDER: Record<CodingProvider, ReadonlySet<string>> = {
-  codex: new Set(openaiSupportedModels()),
-  "claude-code": new Set(anthropicSupportedModels()),
-};
+/** Which coding provider runs a model provider's models; Bedrock models are never coding models. */
+export function codingProviderForModelProvider(provider: ModelProvider): CodingProvider | undefined {
+  if (provider === "openai") return "codex";
+  if (provider === "anthropic") return "claude-code";
+  return undefined;
+}
 
-export function codingProviderSupportsModel(provider: CodingProvider, model: string): boolean {
-  return MODELS_BY_PROVIDER[provider].has(model);
+export function codingProviderSupportsModel(
+  provider: CodingProvider,
+  model: string,
+  catalog: ModelCatalog = currentModelCatalog(),
+): boolean {
+  const entry = catalog.get(model);
+  return entry !== undefined && codingProviderForModelProvider(entry.provider) === provider;
 }
 
 export function assertCodingProviderModel(provider: string, model: string): asserts provider is CodingProvider {

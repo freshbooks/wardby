@@ -52,6 +52,7 @@ import { buildIssueTrackers } from "./providers/issue-tracker/index.js";
 import { buildReviewHosts } from "./providers/review-host/index.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { validateCronExpression } from "./core/cron.js";
+import { assertAgentModelAvailable } from "./core/run-pricing.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
 import { NativeEngine } from "./core/engine-native.js";
@@ -175,6 +176,12 @@ async function agentCreate(args: string[]): Promise<void> {
     } catch (err) {
       fail(`invalid --schedule/--timezone: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  try {
+    assertAgentModelAvailable(values.model);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
   }
 
   if (values.effort !== undefined) {

@@ -9,7 +9,15 @@
 import type { Prisma } from "#prisma";
 import type { LlmProvider } from "../providers/llm/types.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
-import { entryOf, parseStoredEntry, type CatalogEntry } from "../providers/llm/catalog-types.js";
+import {
+  entryOf,
+  parseStoredEntry,
+  type CatalogEntry,
+  type ResolvedCatalogEntry,
+} from "../providers/llm/catalog-types.js";
+import { currentModelCatalog } from "../providers/llm/catalog-store.js";
+import type { ModelCatalog } from "../providers/llm/catalog.js";
+import { codingProviderForModelProvider, type CodingProvider } from "../coding/provider.js";
 
 export interface PinnedPricing {
   entry: CatalogEntry;
@@ -58,4 +66,23 @@ export async function pinNativeRunPricing(
     select: { pricingVersion: true, pricingSnapshot: true },
   });
   return (row && stored(row)) ?? { entry, priceVersion: resolved.priceVersion };
+}
+
+/** A coding run's entry at dispatch: in the catalog, enabled, and of this coding provider's model provider. */
+export function resolveCodingEntry(
+  provider: CodingProvider,
+  model: string,
+  catalog: ModelCatalog = currentModelCatalog(),
+): ResolvedCatalogEntry {
+  const entry = catalog.require(model);
+  if (codingProviderForModelProvider(entry.provider) !== provider) {
+    throw new Error(`Model "${model}" is not supported by coding provider "${provider}".`);
+  }
+  return entry;
+}
+
+/** Config-time check for create_agent/update_agent: the model must be runnable here. */
+export function assertAgentModelAvailable(model: string, llm?: LlmProvider): void {
+  if (llm instanceof RoutingLlmProvider) llm.entryFor(model);
+  else currentModelCatalog().require(model);
 }

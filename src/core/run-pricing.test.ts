@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { pinNativeRunPricing } from "./run-pricing.js";
+import { pinNativeRunPricing, resolveCodingEntry, assertAgentModelAvailable } from "./run-pricing.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import { buildCatalog } from "../providers/llm/catalog.js";
 import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
@@ -99,5 +99,29 @@ describe("pinNativeRunPricing", () => {
     expect(
       await pinNativeRunPricing(d, { id: "r1", pricingVersion: null, pricingSnapshot: null }, "m", adapter),
     ).toBeUndefined();
+  });
+});
+
+describe("resolveCodingEntry", () => {
+  const catalog = buildCatalog(SHIPPED_CATALOG, [], "2026-10-03");
+  it("returns the entry for a matching provider", () => {
+    expect(resolveCodingEntry("claude-code", "claude-haiku-4-5", catalog).thinkingMode).toBe("manual");
+  });
+  it("refuses a model of the other provider", () => {
+    expect(() => resolveCodingEntry("codex", "claude-haiku-4-5", catalog)).toThrow(
+      /not supported by coding provider "codex"/,
+    );
+  });
+  it("refuses an unknown model with model_unavailable", () => {
+    expect(() => resolveCodingEntry("codex", "gpt-9", catalog)).toThrow(/reason: not_in_catalog/);
+  });
+});
+
+describe("assertAgentModelAvailable", () => {
+  it("names provider_not_configured when the router lacks the provider", () => {
+    expect(() => assertAgentModelAvailable("gpt-4o", router())).toThrow(/reason: provider_not_configured/);
+  });
+  it("accepts a routable model", () => {
+    expect(() => assertAgentModelAvailable("claude-sonnet-5", router())).not.toThrow();
   });
 });
