@@ -30,5 +30,10 @@ and refetch the graph on every `resync` event and after any reconnect. `hello`
 and `status` events report whether live events are flowing. Proxies and load balancers in front of Wardby
 must allow long-lived responses and not buffer `text/event-stream`.
 
+A desktop viewer for macOS is included in the source tree (`apps/viewer`). Add
+your server's canonical URI, sign in with an `admin` user in the browser, and it
+shows the live graph. Its README covers setup, and what an external identity
+provider client needs when the server runs in delegating mode.
+
 For parameters, status codes, frame formats and schemas, follow
 [`docs/viewer-api.md`](../docs/viewer-api.md).

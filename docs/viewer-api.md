@@ -102,6 +102,14 @@ Live events come from Postgres `NOTIFY`. Each server replica holds one
 database connection for them, opened only while at least one client is
 subscribed.
 
+## Desktop viewer
+
+A desktop app for macOS in the source tree, `apps/viewer`, is a ready-made
+client of this API: it signs in with the same flow described under Access,
+draws the graph, and updates it from the event stream. See
+[`apps/viewer/README.md`](../apps/viewer/README.md) for prerequisites, running
+it, adding a server, and what an external identity provider client needs.
+
 ## Response schemas
 
 JSON Schemas for every response and event are in `src/viewer/schemas/` of the
