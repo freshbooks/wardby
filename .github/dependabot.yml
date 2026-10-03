@@ -2,8 +2,21 @@
 # Dependabot updates the SHA and its version comment together, which keeps the
 # pins current without giving up what pinning buys.
 #
-# npm dependencies are deliberately not listed: they go through
-# scripts/security-audit.mjs and are upgraded by hand.
+# npm dependencies are otherwise deliberately not listed: they go through
+# scripts/security-audit.mjs and are upgraded by hand. The two exceptions are
+# the coding agents' own SDKs, because a model provider can start refusing an
+# old agent version for a new model, and an upgrade PR is the earliest warning.
+# Each entry allows only the agent SDK, waits three days after a release (the
+# same age rule the package registry applies), and stays exactly pinned.
+#
+# - Claude Code (src/claude-coding-worker): CI builds the worker images, runs the
+#   compatibility test (the SDK's exact request shape per model) and the Docker
+#   acceptance run, so a green PR is ready to merge and deploy.
+# - Codex (src/coding-worker): the PR is a checklist, not a finished upgrade. It
+#   fails until the Codex request fixture is re-recorded for the new version
+#   (src/coding-worker/codex-compatibility.test.ts names it), and the worker
+#   images only pick it up after a new driver-vN image is published and its
+#   digest pinned in src/coding-worker/Dockerfile and Dockerfile.node-python.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -13,3 +26,31 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /src/claude-coding-worker
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    versioning-strategy: increase
+    allow:
+      - dependency-name: "@anthropic-ai/claude-agent-sdk"
+      - dependency-name: "@anthropic-ai/sdk"
+    groups:
+      claude-code:
+        patterns: ["@anthropic-ai/*"]
+    commit-message:
+      prefix: "chore(claude-coding-worker)"
+
+  - package-ecosystem: npm
+    directory: /src/coding-worker
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    versioning-strategy: increase
+    allow:
+      - dependency-name: "@openai/codex-sdk"
+    commit-message:
+      prefix: "chore(coding-worker)"

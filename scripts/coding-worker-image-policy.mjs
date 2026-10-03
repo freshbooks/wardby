@@ -21,7 +21,14 @@ if (!fromLines.length || fromLines.some((line) => !/@sha256:[0-9a-f]{64}(?:\s|$)
 }
 const sdkVersion = workerPackage.dependencies?.["@openai/codex-sdk"];
 const lockedSdk = workerLock.packages?.["node_modules/@openai/codex-sdk"];
-if (sdkVersion !== "0.153.4" || lockedSdk?.version !== sdkVersion || !lockedSdk?.integrity) {
+// An exact version (no range), matched by the lockfile with integrity. Which version is reviewed is
+// pinned elsewhere: codex-compatibility.test.ts requires a request fixture recorded from it.
+if (
+  typeof sdkVersion !== "string" ||
+  !/^\d+\.\d+\.\d+$/.test(sdkVersion) ||
+  lockedSdk?.version !== sdkVersion ||
+  !lockedSdk?.integrity
+) {
   failures.push("Codex SDK must be exactly pinned with lockfile integrity");
 }
 // The driver image is an intermediate layer other Dockerfiles build on top
