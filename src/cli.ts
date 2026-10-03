@@ -39,6 +39,7 @@ import {
   modelSupportedEfforts,
   resolveLlmRegistrations,
 } from "./providers/llm/index.js";
+import { startModelCatalog, type CatalogStore } from "./providers/llm/catalog-store.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
@@ -178,6 +179,16 @@ async function agentCreate(args: string[]): Promise<void> {
     }
   }
 
+  // Started before validating the model so an admin override recorded in
+  // ModelCatalogEntry (a disabled model, a narrowed effort list) is
+  // respected here too, not just at run time.
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
   try {
     assertAgentModelAvailable(values.model);
   } catch (err) {
@@ -193,6 +204,7 @@ async function agentCreate(args: string[]): Promise<void> {
       );
     }
   }
+  modelCatalog.close();
 
   // Owned by --owner or the local operator; never owner-less (resource-
   // sharing grants spec §3.8). --public shares it with everyone at execute.
@@ -582,6 +594,13 @@ async function run(name: string | undefined): Promise<void> {
     fail("Coding agents are MCP-first: use trigger_agent so task input and ownership are recorded safely.");
   }
 
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
   const llm = buildLlmProvider();
   const engine = buildEngine();
   const secrets = buildSecrets();
@@ -608,6 +627,7 @@ async function run(name: string | undefined): Promise<void> {
     fail(err instanceof Error ? err.message : String(err));
   } finally {
     removeSignalHandlers?.();
+    modelCatalog.close();
   }
   process.stdout.write("\n");
 
@@ -748,6 +768,13 @@ async function scheduler(args: string[]): Promise<void> {
   // CODING_QUEUE_TIMEOUT_SEC fails fast.
   const concurrency = loadCodingConcurrencyConfig();
 
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
   const config = loadProviderConfig();
   const llm = buildLlmProvider();
   const engine = buildEngine();
@@ -786,7 +813,10 @@ async function scheduler(args: string[]): Promise<void> {
       reconciler.stop();
       void Promise.resolve(executor.close?.())
         .catch((err: unknown) => cliLog.warn({ err }, "executor close failed during scheduler shutdown"))
-        .finally(resolve);
+        .finally(() => {
+          modelCatalog.close();
+          resolve();
+        });
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);

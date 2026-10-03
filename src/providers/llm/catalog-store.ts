@@ -142,6 +142,23 @@ export class CatalogStore {
   }
 }
 
+/**
+ * Starts a store against `db`, installs it as what `currentModelCatalog()`
+ * returns process-wide, and returns it. Throws (via `CatalogStore.start()`)
+ * if the database is unreachable — every process that calls this fails
+ * fast at startup rather than silently running on the shipped catalog
+ * alone, which would quietly re-enable models an admin turned off.
+ */
+export async function startModelCatalog(
+  db: CatalogDb,
+  options: { intervalMs?: number; log?: CatalogLog } = {},
+): Promise<CatalogStore> {
+  const store = new CatalogStore(db, options);
+  await store.start();
+  installModelCatalog(store);
+  return store;
+}
+
 let installed: CatalogStore | undefined;
 
 export function installModelCatalog(store: CatalogStore): void {

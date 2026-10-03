@@ -4,6 +4,7 @@ import {
   currentModelCatalog,
   installModelCatalog,
   refreshIntervalMs,
+  startModelCatalog,
   uninstallModelCatalogForTests,
 } from "./catalog-store.js";
 
@@ -177,6 +178,15 @@ describe("CatalogStore", () => {
     await vi.advanceTimersByTimeAsync(0); // let the now-rejected poll settle
     expect(store.current()).toBe(before);
     expect(log.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("startModelCatalog", () => {
+  it("loads, installs, and fails without a database", async () => {
+    const store = await startModelCatalog(db([ROW]), { log: quiet });
+    expect(currentModelCatalog().get("claude-new")).toBeDefined();
+    store.close();
+    await expect(startModelCatalog(db(new Error("down")), { log: quiet })).rejects.toThrow(/model catalog/);
   });
 });
 

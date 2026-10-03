@@ -26,6 +26,7 @@ import { prisma } from "../core/db.js";
 import { waitForInFlightRuns } from "../core/in-flight-runs.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { resolveLlmRegistrations, RoutingLlmProvider } from "../providers/llm/index.js";
+import { startModelCatalog } from "../providers/llm/catalog-store.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
 import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
@@ -241,6 +242,12 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const mcpConfig = loadMcpConfig();
   // Parsed up front so a malformed value fails at startup, not at shutdown.
   const drainSeconds = loadShutdownDrainSeconds();
+  // Loads the model catalog before anything else: running on the shipped
+  // catalog alone (the fallback currentModelCatalog() uses before a store
+  // is installed) would quietly re-enable models an admin turned off.
+  // `modelCatalog` is handed to registerAllTools by a later task so
+  // refresh_model_catalog can call `modelCatalog.refreshNow()`.
+  const modelCatalog = await startModelCatalog(prisma);
   const providers = options.providers ?? buildMcpProviders().providers;
   await providers.executor.launch?.();
   if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
@@ -267,6 +274,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       close: async () => {
         await closeQuietly(stdio.close(), "stdio transport close");
         await closeQuietly(providers.executor.close?.(), "executor close");
+        modelCatalog.close();
       },
     };
   }
@@ -412,6 +420,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       // closes under them; a run abandoned here is lost, never resumed.
       await waitForInFlightRuns(drainSeconds * 1000);
       await closeQuietly(providers.executor.close?.(), "executor close");
+      modelCatalog.close();
     },
   };
 }
