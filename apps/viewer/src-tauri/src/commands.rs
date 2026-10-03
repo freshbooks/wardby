@@ -15,7 +15,9 @@ use tauri_plugin_store::StoreExt;
 
 use crate::api::{KeychainStore, RefreshStore, Session};
 use crate::error::AppError;
-use crate::events::{EventsHandle, StreamFrame, spawn_events};
+use crate::events::{
+    EventsConfig, EventsHandle, SessionBuilder, StreamFrame, is_retryable, spawn_events_lazy,
+};
 use crate::loopback;
 use crate::oauth;
 use crate::servers::{self, ServerConfig, normalize_server_url};
@@ -36,6 +38,21 @@ fn epoch_of(map: &std::sync::Mutex<HashMap<String, u64>>, url: &str) -> u64 {
 
 type Slot = Arc<tokio::sync::Mutex<Option<Arc<Session>>>>;
 
+/// The event stream and the bookkeeping that keeps a slow `connect` from
+/// replacing a newer one. Always locked briefly, never across an await.
+#[derive(Default)]
+struct Events {
+    /// The current stream and the server it belongs to.
+    stream: Option<(String, EventsHandle)>,
+    /// Generation counter: every connect request takes the next number.
+    next_gen: u64,
+    /// The newest connect request that has not installed its stream yet.
+    /// Cleared by installing, and by anything that stops that server's stream
+    /// (`disconnect`, sign-out, removal, a dead grant), so a request that was
+    /// overtaken or cancelled while it was busy never installs anything.
+    pending: Option<(String, u64)>,
+}
+
 #[derive(Default)]
 pub struct AppState {
     /// One slot per server (normalized URL). The slot's mutex is that server's
@@ -48,8 +65,8 @@ pub struct AppState {
     /// lock. Per-server, so a slow server never blocks another. Slots are never
     /// removed.
     slots: std::sync::Mutex<HashMap<String, Slot>>,
-    /// The current event stream and the server it belongs to.
-    events: std::sync::Mutex<Option<(String, EventsHandle)>>,
+    /// The current event stream (see `Events`).
+    events: std::sync::Mutex<Events>,
     /// Serialises read-modify-write of the saved server list.
     config: std::sync::Mutex<()>,
     /// Per-server cancel counter, bumped by every `cancel_sign_in`. A sign-in
@@ -80,20 +97,139 @@ impl Drop for SignInGuard<'_> {
 }
 
 impl AppState {
-    fn events_slot(&self) -> std::sync::MutexGuard<'_, Option<(String, EventsHandle)>> {
+    fn events_slot(&self) -> std::sync::MutexGuard<'_, Events> {
         self.events.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Replaces (and so aborts) the current stream.
-    fn set_stream(&self, server_url: String, handle: EventsHandle) {
-        *self.events_slot() = Some((server_url, handle));
+    /// Registers a connect request, superseding any older pending one. Taken
+    /// BEFORE the request awaits anything.
+    fn begin_connect(&self, server_url: &str) -> u64 {
+        let mut ev = self.events_slot();
+        ev.next_gen += 1;
+        let gen_ = ev.next_gen;
+        ev.pending = Some((server_url.to_string(), gen_));
+        gen_
     }
 
-    fn stop_stream_for(&self, server_url: &str) {
-        let mut slot = self.events_slot();
-        if slot.as_ref().is_some_and(|(u, _)| u == server_url) {
-            *slot = None;
+    fn connect_is_current(&self, server_url: &str, gen_: u64) -> bool {
+        self.events_slot()
+            .pending
+            .as_ref()
+            .is_some_and(|(u, g)| u == server_url && *g == gen_)
+    }
+
+    /// Installs the stream only if its request is still the latest one;
+    /// otherwise the handle is dropped, which stops it. Replacing the current
+    /// stream aborts it silently: the UI owns the `live` flag and clears it
+    /// whenever it tears a server's view down (see `useViewer`).
+    fn install_stream(&self, server_url: &str, gen_: u64, handle: EventsHandle) -> bool {
+        let mut ev = self.events_slot();
+        if !ev
+            .pending
+            .as_ref()
+            .is_some_and(|(u, g)| u == server_url && *g == gen_)
+        {
+            return false;
         }
+        ev.pending = None;
+        ev.stream = Some((server_url.to_string(), handle));
+        true
+    }
+
+    fn cancel_pending(&self, server_url: &str, gen_: u64) {
+        let mut ev = self.events_slot();
+        if ev
+            .pending
+            .as_ref()
+            .is_some_and(|(u, g)| u == server_url && *g == gen_)
+        {
+            ev.pending = None;
+        }
+    }
+
+    /// Stops a server's stream and cancels its pending connect, if any.
+    fn stop_stream_for(&self, server_url: &str) {
+        let mut ev = self.events_slot();
+        if ev.stream.as_ref().is_some_and(|(u, _)| u == server_url) {
+            ev.stream = None;
+        }
+        if ev.pending.as_ref().is_some_and(|(u, _)| u == server_url) {
+            ev.pending = None;
+        }
+    }
+
+    /// Whether the server has a live session in memory (without waiting on its
+    /// auth lock: a busy lock just means "ask the Keychain instead").
+    fn has_session(&self, server_url: &str) -> bool {
+        let slot = self
+            .slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(server_url)
+            .cloned();
+        slot.is_some_and(|s| s.try_lock().is_ok_and(|g| g.is_some()))
+    }
+
+    /// Opens the server's event stream. The session is built first; if that
+    /// fails for a reason that can pass (network, server trouble) the stream
+    /// task is installed anyway and builds the session itself, backing off and
+    /// emitting `Reconnecting` until it works. Failures that need the user
+    /// (not signed in, Keychain) are returned. A request that was overtaken or
+    /// cancelled while building installs nothing and reports success.
+    async fn connect_stream<B, Fut>(
+        &self,
+        server_url: &str,
+        build: B,
+        emit: impl Fn(StreamFrame) + Send + Sync + 'static,
+        on_dead: impl Fn(Arc<Session>) + Send + Sync + 'static,
+        cfg: EventsConfig,
+    ) -> Result<(), AppError>
+    where
+        B: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Arc<Session>, AppError>> + Send + 'static,
+    {
+        let gen_ = self.begin_connect(server_url);
+        let build = Arc::new(build);
+        let first = match build().await {
+            Ok(s) => Some(s),
+            Err(e) if is_retryable(&e) => None,
+            Err(e) => {
+                self.cancel_pending(server_url, gen_);
+                return Err(e);
+            }
+        };
+        if !self.connect_is_current(server_url, gen_) {
+            return Ok(());
+        }
+        // The session the stream runs on, for a dead-grant cleanup.
+        let current: Arc<std::sync::Mutex<Option<Arc<Session>>>> =
+            Arc::new(std::sync::Mutex::new(first.clone()));
+        let builder: SessionBuilder = {
+            let (build, current) = (build.clone(), current.clone());
+            Box::new(move || {
+                let (build, current) = (build.clone(), current.clone());
+                Box::pin(async move {
+                    let s = build().await?;
+                    *current.lock().unwrap_or_else(|e| e.into_inner()) = Some(s.clone());
+                    Ok(s)
+                })
+            })
+        };
+        let emit = move |frame: StreamFrame| {
+            let dead = matches!(
+                &frame,
+                StreamFrame::Ended {
+                    error: AppError::NotSignedIn
+                }
+            );
+            emit(frame);
+            if dead && let Some(s) = current.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                on_dead(s);
+            }
+        };
+        let handle = spawn_events_lazy(first, builder, emit, cfg);
+        self.install_stream(server_url, gen_, handle);
+        Ok(())
     }
 
     fn slot(&self, server_url: &str) -> Slot {
@@ -512,21 +648,6 @@ pub async fn list_servers(
         load_servers(&app)?
     };
     tokio::task::spawn_blocking(move || summaries(&list, keychain_has))
-        .await
-        .map_err(|_| AppError::Keychain("keychain task failed".to_string()))
-}
-
-#[tauri::command]
-pub async fn add_server(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    name: String,
-    url: String,
-    client_id: Option<String>,
-) -> Result<(), AppError> {
-    edit_servers(&app, &state, |list| {
-        upsert_server(list, &name, &url, client_id.as_deref())
-    })
 }
 
 #[tauri::command]
@@ -645,29 +766,37 @@ pub async fn connect(
     url: String,
 ) -> Result<(), AppError> {
     let url = normalize_server_url(&url)?;
-    let session = session_of(&app, &state, &url).await?;
-    let server = url.clone();
-    let emitter = app.clone();
-    let sess = session.clone();
-    let handle = spawn_events(session, move |frame| {
-        let dead = matches!(
-            &frame,
-            StreamFrame::Ended {
-                error: AppError::NotSignedIn
+    find_server(&load_servers(&app)?, &url)?;
+    let build = {
+        let (app, url) = (app.clone(), url.clone());
+        move || {
+            let (app, url) = (app.clone(), url.clone());
+            async move {
+                let state = app.state::<AppState>();
+                session_of(&app, &state, &url).await
             }
-        );
-        let _ = emitter.emit(FRAME_EVENT, frame_payload(&server, frame));
-        if dead {
-            let (app, sess) = (emitter.clone(), sess.clone());
+        }
+    };
+    let emit = {
+        let (app, server) = (app.clone(), url.clone());
+        move |frame: StreamFrame| {
+            let _ = app.emit(FRAME_EVENT, frame_payload(&server, frame));
+        }
+    };
+    let on_dead = {
+        let app = app.clone();
+        move |sess: Arc<Session>| {
+            let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 app.state::<AppState>()
                     .drop_dead(&sess, servers::keychain_delete)
                     .await;
             });
         }
-    });
-    state.set_stream(url, handle);
-    Ok(())
+    };
+    state
+        .connect_stream(&url, build, emit, on_dead, EventsConfig::default())
+        .await
 }
 
 #[tauri::command]
@@ -783,6 +912,256 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::events::spawn_events;
+
+    /// Installs a stream the way a connect request would.
+    fn put(st: &AppState, url: &str, handle: EventsHandle) {
+        let g = st.begin_connect(url);
+        assert!(st.install_stream(url, g, handle));
+    }
+
+    // ---- connect_stream
+
+    use crate::api::test_support::tokens;
+    use tokio::sync::Notify;
+
+    type Log = Arc<std::sync::Mutex<Vec<String>>>;
+
+    fn log() -> (Log, impl Fn(StreamFrame) + Send + Sync + 'static) {
+        let log: Log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let l = log.clone();
+        (log, move |f| l.lock().unwrap().push(format!("{f:?}")))
+    }
+
+    fn fast() -> EventsConfig {
+        EventsConfig {
+            default_retry: Duration::from_millis(20),
+            min_retry: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(80),
+            idle_timeout: Duration::from_millis(500),
+            stable_after: Duration::from_secs(10),
+            max_event_bytes: 1024 * 1024,
+        }
+    }
+
+    async fn events_server() -> MockServer {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/api/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "retry: 20\n\nevent: hello\ndata: {\"connected\":true}\n\n",
+                "text/event-stream",
+            ))
+            .mount(&s)
+            .await;
+        s
+    }
+
+    fn live_session(base: &str) -> Arc<Session> {
+        Arc::new(
+            Session::new(
+                base,
+                auth_for(base),
+                "cid",
+                MemStore::with("RT0"),
+                Some(tokens("AT0")),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn no_dead(_: Arc<Session>) {}
+
+    /// A build step that parks until released, then yields `session`.
+    #[allow(clippy::type_complexity)]
+    fn gated(
+        session: Arc<Session>,
+    ) -> (
+        impl Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<Arc<Session>, AppError>> + Send>>
+        + Send
+        + Sync
+        + 'static,
+        Arc<Notify>,
+        Arc<Notify>,
+    ) {
+        let (started, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        let (st, rel) = (started.clone(), release.clone());
+        let build = move || {
+            let (st, rel, session) = (st.clone(), rel.clone(), session.clone());
+            Box::pin(async move {
+                st.notify_one();
+                rel.notified().await;
+                Ok(session)
+            }) as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+        (build, started, release)
+    }
+
+    fn ready(
+        session: Arc<Session>,
+    ) -> impl Fn() -> std::future::Ready<Result<Arc<Session>, AppError>> + Send + Sync + 'static
+    {
+        move || std::future::ready(Ok(session.clone()))
+    }
+
+    async fn settle() {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    async fn a_slow_connect_cannot_replace_another_servers_stream() {
+        let (sa, sb) = (events_server().await, events_server().await);
+        let st = Arc::new(AppState::default());
+        let (a_log, a_emit) = log();
+        let (b_log, b_emit) = log();
+        let (build_a, a_started, a_release) = gated(live_session(&sa.uri()));
+        let a = {
+            let (st, url) = (st.clone(), sa.uri());
+            tokio::spawn(async move {
+                st.connect_stream(&url, build_a, a_emit, no_dead, fast())
+                    .await
+            })
+        };
+        a_started.notified().await;
+        // The user switched servers while A was still building.
+        st.connect_stream(
+            &sb.uri(),
+            ready(live_session(&sb.uri())),
+            b_emit,
+            no_dead,
+            fast(),
+        )
+        .await
+        .unwrap();
+        a_release.notify_one();
+        a.await.unwrap().unwrap();
+        settle().await;
+        assert_eq!(st.events_slot().stream.as_ref().unwrap().0, sb.uri());
+        assert!(a_log.lock().unwrap().is_empty(), "A's stream never started");
+        assert!(
+            !b_log.lock().unwrap().is_empty(),
+            "B's stream is the live one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_connect_cannot_replace_a_newer_one_for_the_same_server() {
+        let s = events_server().await;
+        let st = Arc::new(AppState::default());
+        let (old_log, old_emit) = log();
+        let (new_log, new_emit) = log();
+        let (build, started, release) = gated(live_session(&s.uri()));
+        let old = {
+            let (st, url) = (st.clone(), s.uri());
+            tokio::spawn(async move {
+                st.connect_stream(&url, build, old_emit, no_dead, fast())
+                    .await
+            })
+        };
+        started.notified().await;
+        st.connect_stream(
+            &s.uri(),
+            ready(live_session(&s.uri())),
+            new_emit,
+            no_dead,
+            fast(),
+        )
+        .await
+        .unwrap();
+        release.notify_one();
+        old.await.unwrap().unwrap();
+        settle().await;
+        assert!(old_log.lock().unwrap().is_empty());
+        assert!(!new_log.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn disconnect_while_connecting_installs_nothing() {
+        let s = events_server().await;
+        let st = Arc::new(AppState::default());
+        let (frames, emit) = log();
+        let (build, started, release) = gated(live_session(&s.uri()));
+        let c = {
+            let (st, url) = (st.clone(), s.uri());
+            tokio::spawn(async move { st.connect_stream(&url, build, emit, no_dead, fast()).await })
+        };
+        started.notified().await;
+        st.stop_stream_for(&s.uri());
+        release.notify_one();
+        c.await.unwrap().unwrap();
+        settle().await;
+        assert!(st.events_slot().stream.is_none());
+        assert!(frames.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_to_build_the_session_keeps_retrying() {
+        let s = events_server().await;
+        let sess = live_session(&s.uri());
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = attempts.clone();
+        let build = move || {
+            let n = a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let sess = sess.clone();
+            async move {
+                if n < 2 {
+                    Err(AppError::Network("down".to_string()))
+                } else {
+                    Ok(sess)
+                }
+            }
+        };
+        let st = AppState::default();
+        let (frames, emit) = log();
+        st.connect_stream(&s.uri(), build, emit, no_dead, fast())
+            .await
+            .expect("a transient failure does not fail connect");
+        assert!(st.events_slot().stream.is_some());
+        for _ in 0..100 {
+            if frames.lock().unwrap().iter().any(|f| f.contains("Hello")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let got = frames.lock().unwrap().clone();
+        assert!(got[0].contains("Reconnecting"), "{got:?}");
+        assert!(got.iter().any(|f| f.contains("Hello")), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failure_that_needs_the_user_is_returned_and_installs_nothing() {
+        let st = AppState::default();
+        let (frames, emit) = log();
+        let err = st
+            .connect_stream(
+                "https://w.example",
+                || std::future::ready(Err(AppError::NotSignedIn)),
+                emit,
+                no_dead,
+                fast(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::NotSignedIn));
+        assert!(st.events_slot().stream.is_none());
+        assert!(st.events_slot().pending.is_none());
+        assert!(frames.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn has_session_reflects_the_live_slot() {
+        let s = MockServer::start().await;
+        mount_server(&s, true).await;
+        let st = AppState::default();
+        assert!(!st.has_session(&s.uri()));
+        st.session_for(&s.uri(), Some("cid"), MemStore::with("rt"))
+            .await
+            .unwrap();
+        assert!(st.has_session(&s.uri()));
+        sign_out_with(&st, &s.uri(), |_| Ok(())).await.unwrap();
+        assert!(!st.has_session(&s.uri()));
+    }
 
     fn cfg(name: &str, url: &str, id: Option<&str>) -> ServerConfig {
         ServerConfig {
@@ -1136,13 +1515,13 @@ mod tests {
         st.session_for(&other.uri(), Some("cid"), MemStore::with("rt"))
             .await
             .unwrap();
-        st.set_stream(s.uri(), spawn_events(a, |_| {}));
+        put(&st, &s.uri(), spawn_events(a, |_| {}));
 
         let deleted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let d = deleted.clone();
         // Signing out of a different server leaves the stream alone.
         sign_out_with(&st, &other.uri(), |_| Ok(())).await.unwrap();
-        assert!(st.events_slot().is_some());
+        assert!(st.events_slot().stream.is_some());
         sign_out_with(&st, &s.uri(), move |u| {
             d.lock().unwrap().push(u.to_string());
             Ok(())
@@ -1150,7 +1529,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(*deleted.lock().unwrap(), vec![s.uri()]);
-        assert!(st.events_slot().is_none());
+        assert!(st.events_slot().stream.is_none());
         assert!(st.slot(&s.uri()).lock().await.is_none());
     }
 
@@ -1163,11 +1542,11 @@ mod tests {
             .session_for(&s.uri(), Some("cid"), MemStore::with("rt"))
             .await
             .unwrap();
-        st.set_stream("one".into(), spawn_events(a.clone(), |_| {}));
-        st.set_stream("two".into(), spawn_events(a, |_| {}));
-        assert_eq!(st.events_slot().as_ref().unwrap().0, "two");
+        put(&st, "one", spawn_events(a.clone(), |_| {}));
+        put(&st, "two", spawn_events(a, |_| {}));
+        assert_eq!(st.events_slot().stream.as_ref().unwrap().0, "two");
         st.stop_stream_for("two");
-        assert!(st.events_slot().is_none());
+        assert!(st.events_slot().stream.is_none());
     }
 
     #[tokio::test]
@@ -1179,11 +1558,14 @@ mod tests {
             .session_for(&s.uri(), Some("cid"), MemStore::with("rt"))
             .await
             .unwrap();
-        st.set_stream("https://new.example".into(), spawn_events(a, |_| {}));
+        put(&st, "https://new.example", spawn_events(a, |_| {}));
         st.stop_stream_for("https://old.example");
-        assert_eq!(st.events_slot().as_ref().unwrap().0, "https://new.example");
+        assert_eq!(
+            st.events_slot().stream.as_ref().unwrap().0,
+            "https://new.example"
+        );
         st.stop_stream_for("https://new.example");
-        assert!(st.events_slot().is_none());
+        assert!(st.events_slot().stream.is_none());
     }
 
     #[tokio::test]

@@ -110,8 +110,31 @@ pub fn spawn_events_with(
     emit: impl Fn(StreamFrame) + Send + Sync + 'static,
     cfg: EventsConfig,
 ) -> EventsHandle {
+    let never: SessionBuilder =
+        Box::new(|| Box::pin(async { Err(AppError::Protocol("no session".to_string())) }));
+    spawn_events_lazy(Some(session), never, emit, cfg)
+}
+
+/// Builds the session the stream runs on; called again after each failure
+/// until it succeeds.
+pub type SessionBuilder = Box<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Arc<Session>, AppError>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// Like `spawn_events_with`, but the session may not exist yet: while `build`
+/// fails with a retryable error the task emits `Reconnecting` and tries again
+/// with the usual backoff, so a transient failure at startup heals by itself.
+pub fn spawn_events_lazy(
+    session: Option<Arc<Session>>,
+    build: SessionBuilder,
+    emit: impl Fn(StreamFrame) + Send + Sync + 'static,
+    cfg: EventsConfig,
+) -> EventsHandle {
     EventsHandle {
-        inner: tokio::spawn(run(session, emit, cfg)),
+        inner: tokio::spawn(run(session, build, emit, cfg)),
     }
 }
 
@@ -127,6 +150,16 @@ fn backoff(base: Duration, failures: u32, cfg: &EventsConfig) -> Duration {
 /// Why a connection attempt cannot be retried.
 fn is_fatal(e: &AppError) -> bool {
     matches!(e, AppError::NotSignedIn | AppError::Forbidden)
+}
+
+/// Errors worth another attempt: the network or server is unwell. Anything
+/// else (not signed in, forbidden, Keychain or storage trouble) will not heal
+/// by waiting, so it is reported instead.
+pub fn is_retryable(e: &AppError) -> bool {
+    matches!(
+        e,
+        AppError::Network(_) | AppError::Http { .. } | AppError::NotWardby | AppError::Protocol(_)
+    )
 }
 
 async fn connect(session: &Session, cfg: &EventsConfig) -> Result<reqwest::Response, AppError> {
@@ -274,15 +307,36 @@ fn frame_for(name: &str, data: &str) -> Option<StreamFrame> {
     }
 }
 
+async fn ensure_session(
+    session: &mut Option<Arc<Session>>,
+    build: &SessionBuilder,
+) -> Result<Arc<Session>, AppError> {
+    if let Some(s) = session {
+        return Ok(s.clone());
+    }
+    let built = build().await?;
+    *session = Some(built.clone());
+    Ok(built)
+}
+
 async fn run(
-    session: Arc<Session>,
+    mut session: Option<Arc<Session>>,
+    build: SessionBuilder,
     emit: impl Fn(StreamFrame) + Send + Sync + 'static,
     cfg: EventsConfig,
 ) {
     let mut failures: u32 = 0;
     let retry_ms = Arc::new(AtomicU64::new(0));
     loop {
-        match connect(&session, &cfg).await {
+        let attempt = match ensure_session(&mut session, &build).await {
+            Ok(s) => connect(&s, &cfg).await,
+            Err(e) if !is_retryable(&e) => {
+                emit(StreamFrame::Ended { error: e });
+                return;
+            }
+            Err(e) => Err(e),
+        };
+        match attempt {
             Err(e) if is_fatal(&e) => {
                 emit(StreamFrame::Ended { error: e });
                 return;
@@ -470,6 +524,71 @@ mod tests {
             .await;
         let (frames, emit) = collector();
         let h = spawn_events_with(session(&s.uri()), emit, fast());
+        tokio::time::timeout(Duration::from_secs(5), h.wait())
+            .await
+            .unwrap();
+        assert_eq!(*frames.lock().unwrap(), ["ended:not_signed_in"]);
+    }
+
+    fn builder(
+        fail_first: usize,
+        err: fn() -> AppError,
+        s: Arc<Session>,
+    ) -> (SessionBuilder, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let b: SessionBuilder = Box::new(move || {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            let s = s.clone();
+            Box::pin(async move { if n < fail_first { Err(err()) } else { Ok(s) } })
+        });
+        (b, calls)
+    }
+
+    #[tokio::test]
+    async fn a_session_that_cannot_be_built_yet_is_retried_with_backoff() {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/api/events"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body_with_retry(20), "text/event-stream"),
+            )
+            .mount(&s)
+            .await;
+        let (build, calls) = builder(2, || AppError::Network("down".into()), session(&s.uri()));
+        let (frames, emit) = collector();
+        let h = spawn_events_lazy(None, build, emit, fast());
+        let got = wait_for(&frames, 3).await;
+        h.abort();
+        assert_eq!(
+            got[..3],
+            ["reconnecting:1:20", "reconnecting:2:40", "hello:true"],
+            "{got:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_built_session_is_reused_across_reconnects() {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&s)
+            .await;
+        let (build, calls) = builder(0, || AppError::NotSignedIn, session(&s.uri()));
+        let (frames, emit) = collector();
+        let h = spawn_events_lazy(None, build, emit, fast());
+        wait_for(&frames, 3).await;
+        h.abort();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_can_never_be_built_ends_the_task() {
+        let s = MockServer::start().await;
+        let (build, _) = builder(usize::MAX, || AppError::NotSignedIn, session(&s.uri()));
+        let (frames, emit) = collector();
+        let h = spawn_events_lazy(None, build, emit, fast());
         tokio::time::timeout(Duration::from_secs(5), h.wait())
             .await
             .unwrap();
