@@ -5,7 +5,8 @@ import { ErrorLine } from "./chrome/ErrorLine";
 import { ServerDialog } from "./chrome/ServerDialog";
 import { SignInGate } from "./chrome/SignInGate";
 import { TopBar } from "./chrome/TopBar";
-import { initialFilters, matchesFilters, type Filters } from "./state/filters";
+import { FlowCanvas } from "./graph/FlowCanvas";
+import { initialFilters, type Filters } from "./state/filters";
 import { useViewer } from "./state/useViewer";
 
 const GRAPH_LIMIT = 500;
@@ -36,7 +37,6 @@ function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: 
     const ids = new Set(agents.map((a) => a.id));
     return { ...filters, agents: new Set([...filters.agents].filter((id) => ids.has(id))) };
   }, [filters, agents]);
-  const visible = useMemo(() => runs.filter((r) => matchesFilters(r, view)), [runs, view]);
 
   return (
     <div className="app">
@@ -78,20 +78,12 @@ function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: 
             {viewer.loaded && model.truncated && (
               <p className="muted">Showing the most recent {GRAPH_LIMIT} runs; narrow the window to see fewer.</p>
             )}
-            {/* Placeholder for the flow canvas (Task 9) and detail panel (Task 10). */}
-            <ul className="run-list" aria-label="Runs">
-              {visible.map((r) => (
-                <li key={r.id}>
-                  <button
-                    type="button"
-                    aria-pressed={selectedRunId === r.id}
-                    onClick={() => setSelectedRunId(selectedRunId === r.id ? null : r.id)}
-                  >
-                    {r.agentName} · {r.id.slice(-6)} · {r.status}
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <FlowCanvas
+              runs={runs}
+              filters={view}
+              selectedId={selectedRunId}
+              onSelect={(id) => setSelectedRunId((cur) => (id === null || id === cur ? null : id))}
+            />
           </>
         )}
       </main>

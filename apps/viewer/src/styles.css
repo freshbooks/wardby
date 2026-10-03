@@ -282,3 +282,169 @@ button:disabled {
   justify-content: flex-end;
   gap: 0.5rem;
 }
+
+/* Flow canvas */
+.main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.flow-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.flow-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.flow-canvas .react-flow {
+  --xy-background-color: var(--bg);
+  --xy-edge-stroke: var(--muted);
+  --xy-controls-button-background-color: var(--surface);
+  --xy-controls-button-color: var(--text);
+}
+
+.flow-handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.flow-node {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.9rem;
+  display: grid;
+  gap: 0.2rem;
+  transition: opacity 0.6s;
+}
+
+.flow-node.trigger {
+  width: 180px;
+}
+
+.flow-node.outcome {
+  width: 200px;
+}
+
+.flow-node.run {
+  width: 240px;
+}
+
+.node-head {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+
+.node-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-id,
+.node-sub {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.node-id {
+  margin-left: auto;
+}
+
+.flow-node.running .glyph {
+  color: var(--accent);
+}
+
+.flow-node.succeeded .glyph {
+  color: var(--ok);
+}
+
+.flow-node.failed {
+  border-color: var(--bad);
+}
+
+.flow-node.failed .glyph {
+  color: var(--bad);
+}
+
+.flow-node.faded {
+  opacity: 0.7;
+}
+
+.flow-node.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.budget {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.budget > div {
+  height: 100%;
+  background: var(--accent);
+}
+
+.chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.chip {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.chip.ready {
+  color: var(--ok);
+}
+
+.chip.probing {
+  color: var(--warn);
+}
+
+.chip.failed {
+  color: var(--bad);
+}
+
+@keyframes node-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+}
+
+.flow-node.pulse {
+  animation: node-pulse 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-node.pulse {
+    animation: none;
+  }
+  .flow-node {
+    transition: none;
+  }
+}
