@@ -116,11 +116,19 @@ Only pushes to the default branch start a run; tags, other branches, and
 deletions are ignored. The watcher's task gives the commit range. The changed
 files and the concepts they affect arrive in the run's untrusted context (a
 concept is affected when a changed file is its own file, one of its citation
-paths, or matches an `affects` glob). If GitHub truncated the commit list (more
-than 20 commits), the context says the list is incomplete and every concept may
-be affected. If the bundle cannot be read, the context says no concept is
-affected and the run still starts. Commit messages and author names are never
-included.
+paths, or matches an `affects` glob). The list is incomplete when GitHub sends at most 20 commits for the
+push (a larger push is truncated) or it exceeds 1000 paths; the context then
+says so and that every concept may be affected. The context shows at most 200
+changed files (then `… and N more changed files`), but concept selection uses
+the full list. If the bundle cannot be read, the context says no concept is
+affected and the run still starts; at most 200 concept files are read, and
+files over 2000 lines or unreadable are skipped. Commit messages and author
+names are never included.
+
+The watcher's owner must still have write access to the repository (or a
+recorded administrator approval) when the merge arrives. Otherwise the merge is
+skipped and only a server log line records it, so check access first if nothing
+happened.
 
 Only one run per watcher at a time: a merge that arrives while the watcher has a
 pending or running run starts nothing, and the next merge or the weekly run

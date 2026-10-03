@@ -90,7 +90,7 @@ export function mergeTaskText(event: PushEvent, scope: DriftScope | null): strin
           ? [`… and ${event.changedPaths.length - MAX_LISTED_CHANGES} more changed files`]
           : []),
       ].join("\n")}`
-    : "The changed-file list is incomplete (more than 20 commits); treat every knowledge concept as possibly affected.";
+    : "The changed-file list is incomplete (GitHub sends at most 20 commits per push and the list is capped at 1000 paths); treat every knowledge concept as possibly affected.";
   const concepts = scope
     ? `Knowledge concepts whose citations, affects globs, or files changed (${scope.reason}):\n` +
       scope.concepts.map((p) => `- ${DEFAULT_KNOWLEDGE_BUNDLE_PATH}/${p}`).join("\n")
