@@ -44,9 +44,9 @@ const MAX_UPSTREAM_JSON_BYTES = 16 * 1024 * 1024;
 const MAX_UPSTREAM_ERROR_BYTES = 64 * 1024;
 const REQUEST_KEY_PATTERN = /^[\x21-\x7e]{1,200}$/;
 /**
- * Betas Claude Code sends only for some models, accepted but never required: per-turn-control is
- * sent for Claude Opus 5.5 (it lets a later turn change effort; every body field is still checked
- * against the reviewed shape below, so the header alone unlocks nothing).
+ * Betas Claude Code sends only for some models. per-turn-control is sent for Claude Opus 5.5; it is
+ * required only by an effort-only system message (per-turn effort), and every body field is still
+ * checked against the reviewed shape, so the header alone unlocks nothing.
  */
 export const OPTIONAL_ANTHROPIC_BETAS = ["per-turn-control-2026-07-01"] as const;
 const APPROVED_ANTHROPIC_BETAS = new Set<string>([...CLAUDE_CODE_ANTHROPIC_BETAS, ...OPTIONAL_ANTHROPIC_BETAS]);
@@ -693,7 +693,10 @@ function parseAnthropicBeta(value: string | undefined): { header?: string; value
 /** Anthropic's minimum manual thinking budget. */
 const MIN_THINKING_BUDGET_TOKENS = 1024;
 
-function requireAnthropicBeta(values: Set<string>, beta: (typeof CLAUDE_CODE_ANTHROPIC_BETAS)[number]): void {
+function requireAnthropicBeta(
+  values: Set<string>,
+  beta: (typeof CLAUDE_CODE_ANTHROPIC_BETAS)[number] | (typeof OPTIONAL_ANTHROPIC_BETAS)[number],
+): void {
   if (!values.has(beta)) throw new CodingProxyError(400, "anthropic_beta_required");
 }
 
@@ -704,10 +707,30 @@ interface AnthropicModelShape {
   efforts: readonly string[];
 }
 
+/**
+ * An `output_config` (top-level, or on an effort-only system message): only an effort level, and
+ * only one the run's catalog entry lists. Budget is still reserved from max_tokens per request, so
+ * effort only changes how much of it the model uses. Effort doesn't exist on a manual-thinking
+ * model; the SDK never sends it there.
+ */
+function validateEffortConfig(
+  value: unknown,
+  { thinkingMode, efforts }: AnthropicModelShape,
+  betas: Set<string>,
+): void {
+  if (thinkingMode === "manual") throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  requireAnthropicBeta(betas, "effort-2025-11-24");
+  const output = record(value);
+  onlyKeys(output, ["effort"]);
+  if (typeof output.effort !== "string" || !efforts.includes(output.effort)) {
+    throw new CodingProxyError(400, "unsupported_anthropic_feature");
+  }
+}
+
 function parseAnthropicRequest(
   rawBody: string,
   betaHeader: string | undefined,
-  { thinkingMode, efforts }: AnthropicModelShape,
+  shape: AnthropicModelShape,
 ): ParsedRequest {
   const beta = parseAnthropicBeta(betaHeader);
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
@@ -746,12 +769,22 @@ function parseAnthropicRequest(
   if (body.system !== undefined) validateTextBlocks(body.system);
   for (const value of body.messages) {
     const message = record(value);
-    onlyKeys(message, ["role", "content"]);
+    onlyKeys(message, message.role === "system" ? ["role", "content", "output_config"] : ["role", "content"]);
     if (message.role !== "user" && message.role !== "assistant" && message.role !== "system") {
       throw new CodingProxyError(400, "unsupported_anthropic_feature");
     }
     if (message.role === "system") {
       requireAnthropicBeta(beta.values, "mid-conversation-system-2026-04-07");
+      if (message.output_config !== undefined) {
+        // An effort-only system message (Claude Opus 5.5's per-turn effort): no content at all, and
+        // the same effort rule as the top-level output_config.
+        requireAnthropicBeta(beta.values, "per-turn-control-2026-07-01");
+        if (!Array.isArray(message.content) || message.content.length !== 0) {
+          throw new CodingProxyError(400, "unsupported_anthropic_feature");
+        }
+        validateEffortConfig(message.output_config, shape, beta.values);
+        continue;
+      }
       if (typeof message.content === "string") {
         if (Buffer.byteLength(message.content) > MAX_TOOL_TEXT_BYTES) {
           throw new CodingProxyError(400, "unsupported_anthropic_feature");
@@ -777,7 +810,7 @@ function parseAnthropicRequest(
     onlyKeys(metadata, ["user_id"]);
     if (typeof metadata.user_id !== "string") throw new CodingProxyError(400, "invalid_anthropic_request");
   }
-  const manualThinking = thinkingMode === "manual";
+  const manualThinking = shape.thinkingMode === "manual";
   if (body.thinking !== undefined) {
     requireAnthropicBeta(beta.values, "interleaved-thinking-2025-05-14");
     requireAnthropicBeta(beta.values, "thinking-token-count-2026-05-13");
@@ -811,18 +844,7 @@ function parseAnthropicRequest(
       throw new CodingProxyError(400, "unsupported_anthropic_feature");
     }
   }
-  if (body.output_config !== undefined) {
-    // Effort doesn't exist on a manual-thinking model; the SDK never sends it there.
-    if (manualThinking) throw new CodingProxyError(400, "unsupported_anthropic_feature");
-    requireAnthropicBeta(beta.values, "effort-2025-11-24");
-    const output = record(body.output_config);
-    onlyKeys(output, ["effort"]);
-    // Any level the run's catalog entry lists (Claude Opus 5.5 defaults to medium). Budget is still
-    // reserved from max_tokens per request, so effort only changes how much of it the model uses.
-    if (typeof output.effort !== "string" || !efforts.includes(output.effort)) {
-      throw new CodingProxyError(400, "unsupported_anthropic_feature");
-    }
-  }
+  if (body.output_config !== undefined) validateEffortConfig(body.output_config, shape, beta.values);
   const normalized: Record<string, unknown> = { ...body };
   delete normalized.metadata;
   const encoded = JSON.stringify(normalized);

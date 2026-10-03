@@ -1,0 +1,64 @@
+{
+  "model": "claude-opus-5-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Return the exact text compatibility-ok and do nothing else.",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
+    },
+    {
+      "role": "system",
+      "content": [],
+      "output_config": {
+        "effort": "medium"
+      }
+    }
+  ],
+  "system": [
+    {
+      "type": "text",
+      "text": "x-anthropic-billing-header: cc_version=2.1.286.a87; cc_entrypoint=sdk-ts;"
+    },
+    {
+      "type": "text",
+      "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    },
+    {
+      "type": "text",
+      "text": "You are a deterministic compatibility probe.",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "tools": [],
+  "metadata": {
+    "user_id": "{\"device_id\":\"56ca3dbe28dc27e69991cd10d3d2b7b8e3943521a16dfe311752283dddec7493\",\"account_uuid\":\"\",\"session_id\":\"be49a8ed-af0c-46b3-8ade-875b2a66f2b9\"}"
+  },
+  "max_tokens": 4096,
+  "thinking": {
+    "type": "adaptive"
+  },
+  "context_management": {
+    "edits": [
+      {
+        "type": "clear_thinking_20251015",
+        "keep": "all"
+      }
+    ]
+  },
+  "output_config": {
+    "effort": "medium"
+  },
+  "stream": true
+}
