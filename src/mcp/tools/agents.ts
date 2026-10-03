@@ -11,6 +11,7 @@ import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } fro
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { assertAgentModelAvailable } from "../../core/run-pricing.js";
 import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
+import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
 import { validateCronExpression } from "../../core/cron.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
@@ -131,9 +132,12 @@ const CreateAgentSchema = z
         message: "is only valid for coding agents",
       });
     }
+    // A model the catalog doesn't offer is left to the handler, which reports
+    // model_unavailable with its reason instead of a provider mismatch.
     if (
       value.kind === "coding" &&
       value.codingProfile &&
+      currentModelCatalog().get(value.model) !== undefined &&
       !codingProviderSupportsModel(value.codingProfile.provider, value.model)
     ) {
       ctx.addIssue({
@@ -298,13 +302,16 @@ function validateEffort(kind: "native" | "coding", model: string, effort: string
 
 /**
  * A model being set (create, or update with `model`) must be runnable here:
- * in the catalog, enabled, and its provider configured. An existing agent's
+ * in the catalog and enabled; for a native agent, its provider must also be
+ * configured on the native router. A coding agent is checked against the
+ * catalog only: its runs go through the coding proxy, whose credentials
+ * (CODING_*_CREDENTIAL_REF) are not the native router's. An existing agent's
  * unchanged model is not re-checked: if an admin later disabled it, the agent
  * fails at its next run, not at an unrelated edit.
  */
-function requireModelAvailable(ctx: McpRequestContext, model: string): void {
+function requireModelAvailable(ctx: McpRequestContext, model: string, kind: "native" | "coding"): void {
   try {
-    assertAgentModelAvailable(model, ctx.providers.llm);
+    assertAgentModelAvailable(model, kind === "native" ? ctx.providers.llm : undefined);
   } catch (err) {
     if (err instanceof ModelUnavailableError) throw new McpError(400, err.message);
     throw err;
@@ -393,7 +400,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       )
         requirePackageApproval(ctx);
       validateSchedule(args.schedule, args.timezone ?? "UTC");
-      requireModelAvailable(ctx, args.model);
+      requireModelAvailable(ctx, args.model, args.kind);
       validateEffort(args.kind, args.model, args.effort);
       if (args.codingProfile) await requireCatalogServiceNames(ctx.db, args.codingProfile.services);
       if (args.budgetGroupId) {
@@ -594,7 +601,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           if (nextKind === "native" && args.codingProfile) {
             throw new McpError(400, "A coding profile is only valid for coding agents.");
           }
-          if (args.model !== undefined) requireModelAvailable(ctx, args.model);
+          if (args.model !== undefined) requireModelAvailable(ctx, args.model, nextKind);
           // Only re-checked when the model, effort or kind changes: an agent whose
           // model was since disabled can still take unrelated edits.
           if (args.model !== undefined || args.effort !== undefined || nextKind !== existing.kind) {

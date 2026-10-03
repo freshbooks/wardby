@@ -8,7 +8,7 @@ import {
   publicCodingRunResult,
   composeCodingTask,
 } from "../coding/protocol.js";
-import { assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
+import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
 import { entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
 import { parseAllowedServiceNames, workerServices, type ResolvedCodingService } from "../coding/services/catalog.js";
 import {
@@ -519,7 +519,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         let servicesRefusal: string | undefined;
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
-          assertCodingProviderModel(agent.codingProfile.provider, agent.model);
+          assertCodingProvider(agent.codingProfile.provider);
+          // Throws model_unavailable (not in the catalog, or disabled) or a provider mismatch.
           // Recorded on the run row below: the run is billed at this entry for its whole life.
           codingEntry = resolveCodingEntry(agent.codingProfile.provider, agent.model);
           if (declarationRead) {

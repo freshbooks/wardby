@@ -10,6 +10,8 @@ import {
 } from "../coding/services/wording.js";
 import type { AttributionIntent } from "./attribution.js";
 import { dispatchRun, isSerializationConflict, type DispatchDb } from "./dispatch.js";
+import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../providers/llm/catalog-store.js";
+import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
 import type { SelfDefectSink } from "./self-defects.js";
 
 interface FakeBudget {
@@ -242,6 +244,43 @@ describe("dispatchRun", () => {
     await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id });
     expect(state.runs[0].pricingVersion).toBe("shipped:2026-10-03");
     expect(state.runs[0].pricingSnapshot.modelId).toBe(agent.model);
+  });
+
+  it("refuses a coding dispatch for a disabled model with model_unavailable, writing no run", async () => {
+    const rows = [
+      {
+        ...SHIPPED_CATALOG.find((e) => e.modelId === "gpt-5.6-luna")!,
+        enabled: false,
+        sourceUrl: "https://example.com/pricing",
+        updatedBy: "admin",
+        updatedAt: new Date(),
+      },
+    ];
+    const store = new CatalogStore({ modelCatalogEntry: { findMany: async () => rows } }, { intervalMs: 60_000 });
+    await store.refreshNow();
+    installModelCatalog(store);
+    try {
+      const agent = {
+        ...nativeAgent(),
+        kind: "coding",
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/wardby",
+          baseRef: "main",
+          defaultTask: "Fix the failing tests",
+          timeoutSec: 900,
+          protectedPaths: [],
+        },
+      };
+      const state = fakeDb(agent);
+      await expect(
+        dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id }),
+      ).rejects.toThrow(/model_unavailable: .*reason: disabled/);
+      expect(state.runs).toHaveLength(0);
+    } finally {
+      uninstallModelCatalogForTests();
+      store.close();
+    }
   });
 
   it("leaves a native run's catalog entry for the runner to record", async () => {

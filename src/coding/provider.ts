@@ -22,11 +22,15 @@ export function codingProviderSupportsModel(
   return entry !== undefined && codingProviderForModelProvider(entry.provider) === provider;
 }
 
-export function assertCodingProviderModel(provider: string, model: string): asserts provider is CodingProvider {
+export function assertCodingProvider(provider: string): asserts provider is CodingProvider {
   if (!CODING_PROVIDERS.includes(provider as CodingProvider)) {
     throw new Error(`Unsupported coding provider "${provider}".`);
   }
-  if (!codingProviderSupportsModel(provider as CodingProvider, model)) {
+}
+
+export function assertCodingProviderModel(provider: string, model: string): asserts provider is CodingProvider {
+  assertCodingProvider(provider);
+  if (!codingProviderSupportsModel(provider, model)) {
     throw new Error(`Model "${model}" is not supported by coding provider "${provider}".`);
   }
 }

@@ -10,6 +10,7 @@ import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../../providers/llm/catalog-store.js";
 import { SHIPPED_CATALOG } from "../../providers/llm/catalog-shipped.js";
+import { RoutingLlmProvider, type CatalogLlmAdapter } from "../../providers/llm/routing.js";
 
 /** The control-plane log, captured: the debug-trace audit line is asserted on. */
 const logged = vi.hoisted(() => [] as { level: string; payload: Record<string, unknown>; message: string }[]);
@@ -726,6 +727,118 @@ describe("agent CRUD tools", () => {
         const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", model: "gpt-4.1-nano" } });
         expect(result.isError).toBe(true);
         expect((result.content as { text: string }[])[0].text).toMatch(/model_unavailable: .*reason: disabled/);
+        await client.close();
+      });
+    });
+
+    const codingCreate = (model: string) => ({
+      name: "coder",
+      systemPrompt: "Make the requested change.",
+      model,
+      budgetUsd: 0.25,
+      kind: "coding",
+      codingProfile: { provider: "claude-code", repository: "OpenAI/Example.git" },
+    });
+
+    it("create_agent for a coding agent with an unknown model reports model_unavailable", async () => {
+      const db = fakeDb();
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+      registerAgentTools(mcp);
+      const client = await connectClient(mcp);
+      const result = await client.callTool({ name: "create_agent", arguments: codingCreate("gpt-9") });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toMatch(/model_unavailable: .*reason: not_in_catalog/);
+      await client.close();
+    });
+
+    it("create_agent for a coding agent with a disabled model reports model_unavailable", async () => {
+      await withDisabled(["claude-sonnet-5"], async () => {
+        const db = fakeDb();
+        const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+        mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
+        registerAgentTools(mcp);
+        const client = await connectClient(mcp);
+        const result = await client.callTool({ name: "create_agent", arguments: codingCreate("claude-sonnet-5") });
+        expect(result.isError).toBe(true);
+        expect((result.content as { text: string }[])[0].text).toMatch(/model_unavailable: .*reason: disabled/);
+        await client.close();
+      });
+    });
+
+    describe("with a native router that has no Anthropic credentials", () => {
+      const adapter: CatalogLlmAdapter = {
+        async *stream() {},
+        countTokens: async () => 1,
+        priceUsd: () => 0,
+        withEntry: () => adapter,
+      };
+      const providers = {
+        ...fakeProviders,
+        llm: new RoutingLlmProvider([{ provider: "openai", adapter }]),
+      } as unknown as import("../context.js").McpProviders;
+
+      it("still accepts a Claude Code agent: coding runs use the coding proxy's credentials", async () => {
+        const db = fakeDb();
+        const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+        mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], [], providers));
+        registerAgentTools(mcp);
+        const client = await connectClient(mcp);
+        const result = await client.callTool({ name: "create_agent", arguments: codingCreate("claude-sonnet-5") });
+        expect(result.isError).toBeFalsy();
+        await client.close();
+      });
+
+      it("refuses the same model for a native agent with provider_not_configured", async () => {
+        const db = fakeDb();
+        const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+        mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], [], providers));
+        registerAgentTools(mcp);
+        const client = await connectClient(mcp);
+        const result = await client.callTool({
+          name: "create_agent",
+          arguments: { name: "n", systemPrompt: "x", model: "claude-sonnet-5", budgetUsd: 1 },
+        });
+        expect(result.isError).toBe(true);
+        expect((result.content as { text: string }[])[0].text).toMatch(
+          /model_unavailable: .*reason: provider_not_configured/,
+        );
+        await client.close();
+      });
+
+      it("update_agent moving a coding agent to a Claude model checks the catalog only", async () => {
+        const db = fakeDb([
+          {
+            id: "a1",
+            name: "agent",
+            systemPrompt: "x",
+            model: "claude-haiku-4-5",
+            budgetUsd: 1,
+            maxTurns: 10,
+            schedule: null,
+            timezone: "UTC",
+            ownerId: "p1",
+            tools: [],
+            kind: "coding",
+            codingProfile: {
+              provider: "claude-code",
+              repository: "openai/example",
+              baseRef: "main",
+              defaultTask: null,
+              timeoutSec: 1800,
+              protectedPaths: ["CODEOWNERS"],
+            },
+          },
+        ]);
+        const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+        mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], [], providers));
+        registerAgentTools(mcp);
+        const client = await connectClient(mcp);
+        const result = await client.callTool({
+          name: "update_agent",
+          arguments: { id: "a1", model: "claude-sonnet-5" },
+        });
+        expect(result.isError).toBeFalsy();
         await client.close();
       });
     });
