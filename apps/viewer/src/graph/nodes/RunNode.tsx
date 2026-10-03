@@ -5,6 +5,7 @@ import type { GraphRun, ServiceStatus } from "../../api/types";
 import { statusGroup } from "../../state/filters";
 import type { FlowNodeData } from "../build";
 import { sameNodeProps } from "../sameData";
+import { RUN_TITLE_MAX_CHARS, RUN_WIDTH, runHeight, tailTruncate } from "../sizes";
 
 const FADE_AFTER_MS = 60_000;
 
@@ -66,13 +67,15 @@ function RunNodeImpl({ data }: NodeProps) {
     .join(" ");
 
   return (
-    <div className={cls}>
+    <div className={cls} style={{ width: RUN_WIDTH, height: runHeight(run.services.length) }}>
       <Handle type="target" position={Position.Left} className="flow-handle" isConnectable={false} />
       <div className="node-head">
         <span className="glyph" role="img" aria-label={run.status}>
           {statusGlyph(run.status)}
         </span>
-        <span className="node-title">{run.agentName}</span>
+        <span className="node-title" title={run.agentName} aria-label={run.agentName}>
+          {tailTruncate(run.agentName, RUN_TITLE_MAX_CHARS)}
+        </span>
         <span className="node-id">{run.id.slice(-6)}</span>
       </div>
       <div className="node-sub">
@@ -92,7 +95,7 @@ function RunNodeImpl({ data }: NodeProps) {
       {run.services.length > 0 && (
         <ul className="chips" aria-label="Services">
           {run.services.map((s) => (
-            <li key={s.name} className={`chip ${s.state}`}>
+            <li key={s.name} className={`chip ${s.state}`} title={`${s.name} ${serviceChip(s)}`}>
               {s.name} {serviceChip(s)}
             </li>
           ))}

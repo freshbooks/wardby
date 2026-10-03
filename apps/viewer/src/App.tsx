@@ -7,7 +7,7 @@ import { ErrorLine } from "./chrome/ErrorLine";
 import { ServerDialog } from "./chrome/ServerDialog";
 import { ServerMenu } from "./chrome/ServerMenu";
 import { SignInGate } from "./chrome/SignInGate";
-import { TopBar } from "./chrome/TopBar";
+import { TopBar, windowSpend } from "./chrome/TopBar";
 import { FlowCanvas } from "./graph/FlowCanvas";
 import { DetailPanel } from "./panel/DetailPanel";
 import { initialFilters, type Filters } from "./state/filters";
@@ -75,6 +75,7 @@ function Dashboard({
         onFiltersChange={setFilters}
         agents={agents}
         spend={model.spend}
+        windowSpendUsd={windowSpend(runs)}
       />
       <main className="main">
         {viewer.needsSignIn ? (

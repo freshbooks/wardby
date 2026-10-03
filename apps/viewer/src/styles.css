@@ -160,10 +160,21 @@ button:disabled {
 
 .agent-filter summary,
 .server-menu summary {
+  list-style: none;
   cursor: pointer;
   padding: 0.3rem 0.6rem;
   border: 1px solid var(--border);
   border-radius: 6px;
+}
+
+.agent-filter summary::-webkit-details-marker,
+.server-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-filter summary::after {
+  content: " ▾";
+  color: var(--muted);
 }
 
 .agent-filter .popover,
@@ -344,16 +355,11 @@ button:disabled {
   transition: opacity 0.6s;
 }
 
-.flow-node.trigger {
-  width: 180px;
-}
-
-.flow-node.outcome {
-  width: 200px;
-}
-
-.flow-node.run {
-  width: 240px;
+/* Width/height come from graph/sizes.ts (inline) so they match the layout. */
+.flow-node {
+  box-sizing: border-box;
+  overflow: hidden;
+  align-content: start;
 }
 
 .node-head {
@@ -362,7 +368,28 @@ button:disabled {
   align-items: baseline;
 }
 
+.node-head > * {
+  min-width: 0;
+}
+
+.node-head .node-title {
+  flex: 1 1 auto;
+}
+
+.node-head .glyph,
+.node-head .node-id {
+  flex: none;
+}
+
+.node-sub,
+.chip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .node-title {
+  min-width: 0;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -510,6 +537,8 @@ button:disabled {
 }
 
 .panel-head h2 {
+  min-width: 0;
+  overflow-wrap: anywhere;
   margin: 0;
   font-size: 1.05rem;
 }

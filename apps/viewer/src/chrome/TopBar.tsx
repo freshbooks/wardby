@@ -23,12 +23,21 @@ interface Props {
   onFiltersChange: (f: Filters) => void;
   agents: { id: string; name: string }[];
   spend: ViewerModel["spend"];
+  /** Sum of costUsd over the runs in the current snapshot (the selected window). */
+  windowSpendUsd: number;
 }
 
 function toggled<T>(set: ReadonlySet<T>, value: T): Set<T> {
   const next = new Set(set);
   if (!next.delete(value)) next.add(value);
   return next;
+}
+
+/** Total cost of the runs currently in the window. */
+export function windowSpend(runs: Iterable<{ costUsd: number }>): number {
+  let total = 0;
+  for (const r of runs) total += r.costUsd;
+  return total;
 }
 
 /** Today's spend against the smallest daily group cap, when any group has one. */
@@ -127,6 +136,9 @@ export function TopBar(props: Props) {
         />
         {spend && (
           <div className="spend" aria-label="Today's spend">
+            <span>
+              {filters.window} ${props.windowSpendUsd.toFixed(2)} ·{" "}
+            </span>
             <span>
               Today ${spend.spent.toFixed(2)}
               {spend.cap !== null && ` / $${spend.cap.toFixed(2)}`}

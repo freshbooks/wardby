@@ -3,6 +3,7 @@ import { memo } from "react";
 import type { Outcome } from "../../api/types";
 import type { FlowNodeData } from "../build";
 import { sameNodeProps } from "../sameData";
+import { OUTCOME_SIZE } from "../sizes";
 
 export function outcomeLabel(o: Outcome): { label: string; detail: string | null } {
   switch (o.kind) {
@@ -24,9 +25,11 @@ function OutcomeNodeImpl({ data }: NodeProps) {
   const d = data as unknown as Extract<FlowNodeData, { kind: "outcome" }>;
   const { label, detail } = outcomeLabel(d.outcome);
   return (
-    <div className="flow-node outcome">
+    <div className="flow-node outcome" style={{ width: OUTCOME_SIZE.width, height: OUTCOME_SIZE.height }}>
       <Handle type="target" position={Position.Left} className="flow-handle" isConnectable={false} />
-      <span className="node-title">{label}</span>
+      <span className="node-title" title={label}>
+        {label}
+      </span>
       {detail && <span className="node-sub">{detail}</span>}
     </div>
   );
