@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient } from "#prisma";
 import { logger } from "../../core/logger.js";
+import { parseStoredEntry } from "../llm/catalog-types.js";
 import type {
   CreateProxySessionInput,
   PricingSnapshot,
@@ -46,6 +47,9 @@ interface SessionRow {
   registryTokenHash: string | null;
   budgetExhaustedAt?: Date | null;
   upstreamFailure?: string | null;
+  /** Selected by findSessionByCapabilityHash only. */
+  pricingVersion?: string | null;
+  catalogEntry?: unknown;
 }
 
 interface RequestRow {
@@ -87,7 +91,14 @@ function sessionFromRow(row: SessionRow): ProxySession {
     registryTokenHash: row.registryTokenHash,
     budgetExhaustedAt: row.budgetExhaustedAt ?? null,
     upstreamFailure: row.upstreamFailure ?? null,
+    terms: sessionTerms(row),
   };
+}
+
+/** The session's stored model terms; null when absent (a session from before the catalog) or malformed. */
+function sessionTerms(row: SessionRow): ProxySession["terms"] {
+  const entry = parseStoredEntry(row.catalogEntry);
+  return row.pricingVersion && entry ? { version: row.pricingVersion, entry } : null;
 }
 
 function requestFromRow(row: RequestRow): ProxyRequest {
@@ -142,17 +153,19 @@ export class PrismaProxyLedger implements ProxyLedger {
     await this.db.$executeRaw`
       INSERT INTO "CodingProxySession"
         ("id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt",
-         "budgetUsd", "status", "registryTokenHash", "createdAt", "updatedAt")
+         "budgetUsd", "status", "registryTokenHash", "pricingVersion", "catalogEntry", "createdAt", "updatedAt")
       VALUES
         (${input.id}, ${input.runId}, ${input.capabilityHash}, ${input.credentialRef}, ${input.protocol}, ${models}::jsonb,
-         ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash},
+         ${input.terms?.version ?? null}, ${input.terms ? JSON.stringify(input.terms.entry) : null}::jsonb,
+         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `;
   }
 
   async findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "budgetExhaustedAt", "upstreamFailure"
+             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry"
       FROM "CodingProxySession" WHERE "capabilityHash" = ${capabilityHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : null;

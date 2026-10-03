@@ -15,6 +15,9 @@ function cloneSession(session: ProxySession): ProxySession {
     deadlineAt: new Date(session.deadlineAt),
     budgetExhaustedAt: session.budgetExhaustedAt ? new Date(session.budgetExhaustedAt) : null,
     upstreamFailure: session.upstreamFailure ?? null,
+    terms: session.terms
+      ? { version: session.terms.version, entry: { ...session.terms.entry, efforts: [...session.terms.entry.efforts] } }
+      : null,
   };
 }
 
@@ -38,7 +41,12 @@ export class MemoryProxyLedger implements ProxyLedger {
       throw new Error("proxy_session_exists");
     }
     if (this.sessionByCapability.has(input.capabilityHash)) throw new Error("proxy_capability_collision");
-    const session: ProxySession = { ...input, allowedModels: [...input.allowedModels], status: "active" };
+    const session: ProxySession = {
+      ...input,
+      allowedModels: [...input.allowedModels],
+      status: "active",
+      terms: input.terms ?? null,
+    };
     this.sessions.set(session.id, session);
     this.sessionByCapability.set(session.capabilityHash, session.id);
   }

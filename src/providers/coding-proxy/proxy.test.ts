@@ -14,8 +14,10 @@ import {
 } from "./proxy.js";
 import { MAX_TIMEOUT_MS as TOOL_RUNNER_MAX_TIMEOUT_MS } from "../../claude-tool-runner/command.mjs";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
-import type { ModelPricing } from "../llm/pricing.js";
-import type { ProxyAuditEvent, ProxyProtocol } from "./types.js";
+import type { ModelPricing } from "../llm/pricing-core.js";
+import { shippedCatalog } from "../llm/catalog.js";
+import { entryOf } from "../llm/catalog-types.js";
+import type { ProxyAuditEvent, ProxyModelTerms, ProxyProtocol } from "./types.js";
 
 const NOW = new Date("2026-09-07T12:00:00.000Z");
 const PRICE: ModelPricing = {
@@ -91,6 +93,7 @@ async function harness(
     credentials?: { resolve(reference: string): Promise<string> };
     protocol?: ProxyProtocol;
     allowedModels?: string[];
+    terms?: ProxyModelTerms;
   } = {},
 ): Promise<Harness> {
   const ledger = overrides.ledger ?? new MemoryProxyLedger();
@@ -98,13 +101,16 @@ async function harness(
   const fetchImpl: typeof globalThis.fetch =
     overrides.fetch ?? (async () => Response.json({ id: "resp", usage: USAGE }, { status: 200 }));
   const fetch = vi.fn(fetchImpl);
+  // An explicit `price` (even undefined, meaning "the shipped-catalog fallback") wins;
+  // otherwise the test price stands in for the fallback only on a session without terms.
+  const pricing = "price" in overrides ? overrides.price : overrides.terms ? undefined : () => PRICE;
   const proxy = new CodingProxy({
     ledger,
     credentials: overrides.credentials ?? { resolve: async () => "UPSTREAM_SECRET" },
     fetch,
     now: overrides.now ?? (() => NOW),
-    pricing: overrides.price ?? (() => PRICE),
-    pricingVersion: "test-v1",
+    pricing,
+    pricingVersion: pricing ? "test-v1" : undefined,
     audit: (event) => events.push(event),
   });
   const session = await proxy.createSession({
@@ -116,6 +122,7 @@ async function harness(
     ],
     deadlineAt: overrides.deadlineAt ?? new Date(NOW.getTime() + 60_000),
     budgetUsd: overrides.budgetUsd ?? 1,
+    terms: overrides.terms,
   });
   return { proxy, ledger, session, fetch, events };
 }
@@ -473,6 +480,143 @@ describe("CodingProxy", () => {
     await execute(h, "identity");
     const init = h.fetch.mock.calls[0][1] as RequestInit;
     expect(new Headers(init.headers).get("accept-encoding")).toBe("identity");
+  });
+});
+
+describe("model terms from the session", () => {
+  const sonnet = shippedCatalog().require("claude-sonnet-5");
+  const haiku = shippedCatalog().require("claude-haiku-4-5");
+  const anthropicResponse = async () => {
+    const response = JSON.parse(await fixture("anthropic-message-response.json"));
+    return async () => Response.json(response);
+  };
+  const anthropicBody = async (model: string, name = "anthropic-sdk-request.json") => {
+    const body = JSON.parse(await fixture(name));
+    body.stream = false;
+    body.model = model;
+    return JSON.stringify(body);
+  };
+
+  it("prices from the session's stored entry and tags requests with its version", async () => {
+    const h = await harness({
+      protocol: "anthropic-messages",
+      allowedModels: ["claude-sonnet-5"],
+      fetch: await anthropicResponse(),
+      terms: { version: "2026-10-04T00:00:00.000Z", entry: { ...entryOf(sonnet), outputPerMTok: 99 } },
+      price: () => {
+        throw new Error("the fallback must not be consulted when the session has terms");
+      },
+    });
+    await execute(h, "terms-priced", new TestSink(), await anthropicBody("claude-sonnet-5"));
+    const request = await h.ledger.getRequest(reservedRequestId(h.events));
+    expect(request?.pricing).toEqual({
+      version: "2026-10-04T00:00:00.000Z",
+      encoding: sonnet.encoding,
+      inputPerMTok: sonnet.inputPerMTok,
+      outputPerMTok: 99,
+      cachedInputPerMTok: sonnet.cachedInputPerMTok,
+      cacheWritePerMTok: sonnet.cacheWritePerMTok,
+    });
+  });
+
+  it("takes manual thinking from the stored entry, not a hardcoded model list", async () => {
+    // An added model with manual thinking: before the catalog only claude-haiku-4-5 could send budget_tokens.
+    const added = { ...entryOf(haiku), modelId: "claude-added-manual" };
+    const h = await harness({
+      protocol: "anthropic-messages",
+      allowedModels: ["claude-added-manual"],
+      fetch: await anthropicResponse(),
+      terms: { version: "v", entry: added },
+    });
+    await execute(
+      h,
+      "terms-manual",
+      new TestSink(),
+      await anthropicBody("claude-added-manual", "anthropic-sdk-request-haiku-4-5.json"),
+    );
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+    const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(forwarded.thinking).toEqual({ type: "enabled", budget_tokens: 4095 });
+  });
+
+  it("refuses adaptive thinking for a manual-thinking entry", async () => {
+    const h = await harness({
+      protocol: "anthropic-messages",
+      allowedModels: ["claude-haiku-4-5"],
+      terms: { version: "v", entry: entryOf(haiku) },
+    });
+    await expect(
+      execute(h, "terms-adaptive", new TestSink(), await anthropicBody("claude-haiku-4-5")),
+    ).rejects.toMatchObject({ status: 400, code: "unsupported_anthropic_feature" });
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses manual thinking for an adaptive entry, even on a model id the shipped catalog calls manual", async () => {
+    const h = await harness({
+      protocol: "anthropic-messages",
+      allowedModels: ["claude-haiku-4-5"],
+      terms: { version: "v", entry: { ...entryOf(haiku), thinkingMode: "adaptive" } },
+    });
+    await expect(
+      execute(
+        h,
+        "terms-adaptive-only",
+        new TestSink(),
+        await anthropicBody("claude-haiku-4-5", "anthropic-sdk-request-haiku-4-5.json"),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "unsupported_anthropic_feature" });
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses a session whose terms are for a different model", async () => {
+    await expect(
+      harness({
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-sonnet-5"],
+        terms: { version: "v", entry: entryOf(haiku) },
+      }),
+    ).rejects.toThrow(/invalid_proxy_model_terms/);
+  });
+
+  it("refuses terms whose provider does not serve the session's protocol", async () => {
+    await expect(
+      harness({
+        protocol: "openai-responses",
+        allowedModels: ["claude-sonnet-5"],
+        terms: { version: "v", entry: entryOf(sonnet) },
+      }),
+    ).rejects.toThrow(/invalid_proxy_model_terms/);
+  });
+
+  it("refuses terms on a session that allows more than one model", async () => {
+    await expect(
+      harness({
+        protocol: "anthropic-messages",
+        allowedModels: ["claude-sonnet-5", "claude-haiku-4-5"],
+        terms: { version: "v", entry: entryOf(sonnet) },
+      }),
+    ).rejects.toThrow(/invalid_proxy_model_terms/);
+  });
+
+  it("falls back to the shipped catalog for a session with no terms (created before the catalog)", async () => {
+    const h = await harness({
+      protocol: "anthropic-messages",
+      allowedModels: ["claude-sonnet-5"],
+      fetch: await anthropicResponse(),
+      price: undefined,
+    });
+    await execute(h, "no-terms", new TestSink(), await anthropicBody("claude-sonnet-5"));
+    const request = await h.ledger.getRequest(reservedRequestId(h.events));
+    expect(request?.pricing).toMatchObject({ version: "shipped:2026-10-03", outputPerMTok: sonnet.outputPerMTok });
+  });
+
+  it("refuses a no-terms session for a model the shipped catalog lacks or files under the other protocol", async () => {
+    await expect(
+      harness({ protocol: "anthropic-messages", allowedModels: ["claude-not-shipped"], price: undefined }),
+    ).rejects.toThrow();
+    await expect(
+      harness({ protocol: "openai-responses", allowedModels: ["claude-sonnet-5"], price: undefined }),
+    ).rejects.toThrow(/unknown_model/);
   });
 });
 

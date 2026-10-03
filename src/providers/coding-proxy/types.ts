@@ -1,4 +1,5 @@
-import type { ModelPricing } from "../llm/pricing.js";
+import type { CatalogEntry } from "../llm/catalog-types.js";
+import type { ModelPricing } from "../llm/pricing-core.js";
 
 export type ProxySessionStatus = "active" | "cancelled";
 export type ProxyRequestStatus = "reserved" | "completed" | "released" | "uncertain";
@@ -6,6 +7,12 @@ export type ProxyProtocol = "openai-responses" | "anthropic-messages";
 
 export interface PricingSnapshot extends ModelPricing {
   version: string;
+}
+
+/** The model terms a coding run was dispatched under: its catalog entry and that entry's price version. */
+export interface ProxyModelTerms {
+  version: string;
+  entry: CatalogEntry;
 }
 
 export interface ProxyUsage {
@@ -31,6 +38,8 @@ export interface ProxySession {
   budgetExhaustedAt?: Date | null;
   /** The code of the first upstream failure the proxy relayed for this session. */
   upstreamFailure?: string | null;
+  /** The run's catalog entry, copied at session creation; null on sessions from before the catalog. */
+  terms?: ProxyModelTerms | null;
 }
 
 export interface ProxyRequest {
@@ -57,6 +66,7 @@ export interface CreateProxySessionInput {
   deadlineAt: Date;
   budgetUsd: number;
   registryTokenHash: string;
+  terms?: ProxyModelTerms;
 }
 
 export interface ReserveProxyRequestInput {

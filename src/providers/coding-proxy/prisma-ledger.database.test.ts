@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { createPrismaClient } from "../../core/db.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
+import { shippedCatalog } from "../llm/catalog.js";
+import { entryOf } from "../llm/catalog-types.js";
 
 const db = createPrismaClient();
 const suffix = randomUUID();
@@ -54,6 +56,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       protocol: "openai-responses",
       budgetExhaustedAt: null,
       upstreamFailure: null,
+      // Created without terms, as a session from before the catalog.
+      terms: null,
     });
     expect(await ledger.budgetExhausted(sessionId)).toBe(false);
     expect(await ledger.upstreamFailure(sessionId)).toBeNull();
@@ -99,6 +103,57 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     expect(Number(run.costUsd)).toBe(0.00005);
     // One completed proxied call (completed twice, idempotently) is one turn.
     expect(run.turns).toBe(1);
+  });
+
+  describe("model terms", () => {
+    const tAgent = `terms-agent-${suffix}`;
+    const tRun = `terms-run-${suffix}`;
+    const tSession = `terms-session-${suffix}`;
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${tSession}`;
+      await db.codingRun.deleteMany({ where: { runId: tRun } });
+      await db.run.deleteMany({ where: { id: tRun } });
+      await db.agent.deleteMany({ where: { id: tAgent } });
+    });
+
+    it("round-trips a session's catalog entry and its version", async () => {
+      const entry = { ...entryOf(shippedCatalog().require("gpt-5.6-luna")), outputPerMTok: 99 };
+      await db.agent.create({
+        data: { id: tAgent, name: tAgent, systemPrompt: "x", model: entry.modelId, budgetUsd: 1 },
+      });
+      await db.run.create({ data: { id: tRun, agentId: tAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: tRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${tRun}`,
+          provider: "codex",
+          model: entry.modelId,
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      const ledger = new PrismaProxyLedger(db);
+      await ledger.createSession({
+        id: tSession,
+        runId: tRun,
+        capabilityHash: `terms-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: [entry.modelId],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        registryTokenHash: `terms-registry-hash-${suffix}`,
+        terms: { version: "2026-10-04T00:00:00.000Z", entry },
+      });
+      const session = await new PrismaProxyLedger(db).findSessionByCapabilityHash(`terms-hash-${suffix}`);
+      expect(session?.terms).toEqual({ version: "2026-10-04T00:00:00.000Z", entry });
+    });
   });
 
   describe("per-model usage (RunModelUsage)", () => {

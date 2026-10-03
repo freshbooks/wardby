@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { computeCost, type ModelPricing } from "../llm/pricing.js";
+import { computeCost, type ModelPricing } from "../llm/pricing-core.js";
 import type { PricingSnapshot, ProxyUsage } from "./types.js";
 
 const MAX_SAFE_TOKENS = 2_000_000_000;
@@ -189,6 +189,15 @@ export class AnthropicSseUsageTracker {
   }
 }
 
+/** The rates a request is billed at, tagged with their version. Picks only the price fields: a catalog entry's routing/shape fields stay out of the ledger. */
 export function pricingSnapshot(version: string, pricing: ModelPricing): PricingSnapshot {
-  return { version, ...pricing };
+  const snapshot: PricingSnapshot = {
+    version,
+    encoding: pricing.encoding,
+    inputPerMTok: pricing.inputPerMTok,
+    outputPerMTok: pricing.outputPerMTok,
+  };
+  if (pricing.cachedInputPerMTok !== undefined) snapshot.cachedInputPerMTok = pricing.cachedInputPerMTok;
+  if (pricing.cacheWritePerMTok !== undefined) snapshot.cacheWritePerMTok = pricing.cacheWritePerMTok;
+  return snapshot;
 }
