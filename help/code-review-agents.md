@@ -22,6 +22,12 @@ agent, which acknowledges the request and posts its final outcome. Do not give
 a mention agent instructions that could echo secrets or internal details: its
 reply is visible wherever the mention was posted.
 
+A mention on a pull request that a wardby coding run opened continues that
+run's branch. If this deployment has no record of the run that opened it (for
+example, another wardby deployment sharing the same GitHub App opened it), the
+App replies that it cannot continue the pull request instead of starting a
+run. Ask the deployment that opened it, or change the branch by hand.
+
 Wardby skips pull requests whose head is in a fork. It also ignores mentions
 from bots and people without write access. Repository links require the
 agent owner's linked GitHub access, or an explicitly recorded administrator

@@ -17,8 +17,12 @@ vi.mock("./dispatch.js", () => ({
     await opts.afterPersist?.(txStub, run);
     return { run };
   }),
+  checkContinuation: vi.fn(async () => ({
+    ok: true,
+    root: { runId: "run_1", baseRef: "main", headRef: "wardby/run-run_1", pullRequestNumber: 7 },
+  })),
 }));
-import { dispatchRun } from "./dispatch.js";
+import { checkContinuation, dispatchRun } from "./dispatch.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const REPO = "chfields/knock-knock-jokes";
@@ -303,6 +307,48 @@ describe("routeHostEvent mention task text", () => {
         "<!-- wardby:run_1 -->\n\nAdds jokes.",
       ].join("\n"),
     });
+  });
+
+  it("refuses, with a comment, a follow-up on a PR whose run this deployment has no record of", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    vi.mocked(checkContinuation).mockResolvedValueOnce({ ok: false, reason: "unknown_run" });
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    const result = await routeHostEvent({ ...base, priorRunId: "run_elsewhere" }, d);
+    for (const f of result.followUps) await f();
+    expect(result.runIds).toEqual([]);
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(checkContinuation).toHaveBeenLastCalledWith(d.db, "run_elsewhere", REPO);
+    expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, {
+      number: 7,
+      body: expect.stringContaining("Its description names wardby run `run_elsewhere`"),
+    });
+  });
+
+  it("refuses a follow-up whose marker names a known run that opened a different PR", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    vi.mocked(checkContinuation).mockResolvedValueOnce({
+      ok: true,
+      root: { runId: "run_9", baseRef: "main", headRef: "wardby/run-run_9", pullRequestNumber: 9 },
+    });
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    const result = await routeHostEvent({ ...base, priorRunId: "run_9" }, d);
+    for (const f of result.followUps) await f();
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(d.hosts.github.comment).toHaveBeenCalledTimes(1);
+  });
+
+  it("replies to a refused follow-up in its review thread", async () => {
+    vi.mocked(checkContinuation).mockResolvedValueOnce({ ok: false, reason: "unknown_run" });
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    const result = await routeHostEvent(
+      { ...base, comment: { kind: "inline", id: "88" }, replyToReviewCommentId: "88", priorRunId: "run_x" },
+      d,
+    );
+    for (const f of result.followUps) await f();
+    expect(d.hosts.github.comment).toHaveBeenCalledWith(
+      REPO,
+      expect.objectContaining({ replyToReviewCommentId: "88" }),
+    );
   });
 
   it("N-1: an outsider's issue text reaches the agent only as wrapped untrusted context", async () => {

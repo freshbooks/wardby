@@ -10,7 +10,7 @@ import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { CodeReviewHost, HostEvent, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { linkedPullRequestAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./attribution.js";
-import { dispatchRun } from "./dispatch.js";
+import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
@@ -123,6 +123,26 @@ export function mentionTaskText(event: MentionEvent): string {
     );
   }
   return composeTaskOverride(sections.join("\n\n"), context.length > 0 ? context.join("\n\n") : undefined);
+}
+
+/**
+ * Whether the run the PR's marker names is one this deployment can continue on
+ * this PR: known here, in this repository, and the one that opened this PR.
+ * The marker is trusted only on a PR the App authored, but every deployment
+ * sharing the App authors such PRs, and the id is only a hint until checked.
+ */
+async function priorRunContinues(deps: RouteHostEventDeps, event: MentionEvent): Promise<boolean> {
+  if (!event.priorRunId) return false;
+  const check = await checkContinuation(deps.db, event.priorRunId, event.repository);
+  return check.ok && check.root.pullRequestNumber === event.number;
+}
+
+export function unknownPriorRunBody(priorRunId: string): string {
+  return (
+    `❌ I can't continue this pull request. Its description names wardby run \`${priorRunId}\`, but this wardby ` +
+    "deployment has no record of that run opening this pull request (another wardby deployment may have opened it). " +
+    "Ask the deployment that opened it, or make the change on this branch by hand."
+  );
 }
 
 interface ReviewTarget {
@@ -343,6 +363,27 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
           runIds: await startReviews(deps, host, event.repository, event.number, head.headSha, reviewTargets(allowed)),
           followUps: [react],
         };
+      }
+      if (event.priorRunId && !(await priorRunContinues(deps, event))) {
+        // The PR's marker names a run this deployment cannot continue (most
+        // often one another deployment sharing the App opened). A run would
+        // only fail, or open a second PR, so say why instead of starting one.
+        log.info(
+          { repository: event.repository, number: event.number, priorRunId: event.priorRunId },
+          "mention refused: the PR's wardby run cannot be continued here",
+        );
+        const reply = async () => {
+          await host
+            .comment(event.repository, {
+              number: event.number,
+              body: unknownPriorRunBody(event.priorRunId ?? ""),
+              ...(event.replyToReviewCommentId ? { replyToReviewCommentId: event.replyToReviewCommentId } : {}),
+            })
+            .catch((err: unknown) => {
+              log.warn({ err, repository: event.repository, number: event.number }, "could not post the refusal");
+            });
+        };
+        return { runIds: [], followUps: [react, reply] };
       }
       const dispatched = await dispatchRun({
         db: deps.db,
