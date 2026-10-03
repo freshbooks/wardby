@@ -289,21 +289,28 @@ run's **untrusted context** block, because file paths are commit content.
 
 - A concept is affected when a changed file is the concept's own file, is one of
   its citation paths, or matches one of its `affects` globs.
-- The changed-file list is incomplete when GitHub sends at most 20 commits for
-  the push (a larger push is truncated) or the list exceeds 1000 paths. The
+- The changed-file list is incomplete when a push has 2048 or more commits
+  (GitHub includes at most 2048 per push) or more than 1000 changed paths. The
   context then says so and that every concept may be affected.
 - The context lists at most 200 changed files, followed by `… and N more
 changed files`. Concept selection still uses the full list.
-- If the knowledge bundle cannot be read, the context says no concept is
-  affected, and the run still starts. Reading is capped: up to 200 concept
-  files, and files over 2000 lines or unreadable are skipped with a warning. A
-  truncated listing continues with the files listed.
+- The knowledge bundle is read within a 4 second deadline (listing plus reads,
+  eight files at a time), because GitHub expects a webhook response within
+  about 10 seconds. Reading is capped at 200 concept files; files over 2000
+  lines or unreadable are skipped with a warning. If the bundle cannot be read,
+  is only partly read (deadline, truncated listing, file cap, skipped files),
+  the context says the bundle could not be fully read and that every concept
+  may be affected, and the run still starts. It says no concept is affected
+  only when the whole bundle was read and none matched.
+- If every linked watcher already has a run in flight, the bundle is not read
+  at all.
 - Commit messages and author names are never included.
 
 ### One run at a time
 
 A merge that arrives while the linked agent already has a pending or running run
-starts nothing; the next merge or the weekly architecture run catches up.
+starts nothing. The skipped merge's changed files are re-checked only by the
+next weekly architecture run (the next merge carries only its own changes).
 Because a native agent waits for the coding sub-agents it starts, this also
 prevents overlapping drift runs.
 

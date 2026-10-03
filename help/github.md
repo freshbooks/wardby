@@ -35,11 +35,11 @@ Link a native agent to a repository with `link_repository`. Each trigger needs
 its GitHub App event ticked in the App's event settings; every event is a
 separate checkbox.
 
-| Trigger        | Starts a run when                                 | App event to subscribe |
-| -------------- | ------------------------------------------------- | ---------------------- |
-| `pull_request` | A pull request is opened or pushed to             | Pull request           |
-| `mention`      | Someone with write access `@`-mentions the App    | Issue comment, Issues  |
-| `push`         | A commit lands on the repository's default branch | Push                   |
+| Trigger        | Starts a run when                                                   | App event to subscribe                                                                 |
+| -------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `pull_request` | A pull request is opened or pushed to; a re-run of the review check | Pull request, Check run (re-runs of the review check)                                  |
+| `mention`      | Someone with write access `@`-mentions the App                      | Issue comment, Issues, Pull request review comment (mentions in inline review threads) |
+| `push`         | A commit lands on the repository's default branch                   | Push                                                                                   |
 
 The `push` trigger starts a merge-watcher agent; only default-branch pushes
 count (tags, other branches, and deletions are ignored). See

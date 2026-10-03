@@ -9,7 +9,9 @@ import type { HostEvent } from "./types.js";
 const PR_ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const SAFE_SHA = /^[0-9a-f]{40}$/;
-const PUSH_MAX_COMMITS = 20;
+// GitHub's push payload includes at most 2048 commits.
+const PUSH_MAX_COMMITS = 2048;
+const SAFE_BRANCH = /^[A-Za-z0-9._/-]{1,100}$/;
 const PUSH_MAX_PATHS = 1000;
 /** Mirrors the runId shape validated in providers/vcs (github.ts, git.ts). */
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -93,7 +95,7 @@ export function normalizeGitHubEvent(
   if (eventName === "push") {
     const defaultBranch = obj(p.repository)?.default_branch;
     const { before, after } = p;
-    if (typeof defaultBranch !== "string" || !defaultBranch) return null;
+    if (typeof defaultBranch !== "string" || !SAFE_BRANCH.test(defaultBranch)) return null;
     if (p.ref !== `refs/heads/${defaultBranch}` || p.deleted === true) return null;
     if (typeof before !== "string" || typeof after !== "string") return null;
     if (!SAFE_SHA.test(before) || !SAFE_SHA.test(after) || /^0+$/.test(after)) return null;
@@ -113,7 +115,7 @@ export function normalizeGitHubEvent(
       before,
       after,
       changedPaths: [...paths].sort().slice(0, PUSH_MAX_PATHS),
-      // GitHub includes at most 20 commits, so a full list may be truncated.
+      // GitHub includes at most 2048 commits, so a full list may be truncated.
       changedPathsComplete: commits.length < PUSH_MAX_COMMITS && paths.size <= PUSH_MAX_PATHS,
     };
   }

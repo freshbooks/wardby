@@ -66,9 +66,11 @@ function deps(
   reviewed: { runId: string } | null = null,
 ) {
   const reviewLookup = vi.fn(async () => reviewed);
+  const runFindMany = vi.fn(async (): Promise<Array<{ agentId: string }>> => []);
   const linkedIssue = vi.fn(async (): Promise<{ issueProvider: string; issueKey: string } | null> => null);
   return {
     reviewLookup,
+    runFindMany,
     linkedIssue,
     hosts: { github: h },
     executor: {} as never,
@@ -101,7 +103,10 @@ function deps(
         updateMany: vi.fn(async () => ({ count: 1 })),
       },
       runHostCheck: { findFirst: reviewLookup },
-      run: { findUnique: vi.fn(async () => ({ id: "run", status: "running", finalText: null })) },
+      run: {
+        findUnique: vi.fn(async () => ({ id: "run", status: "running", finalText: null })),
+        findMany: runFindMany,
+      },
       issuePullRequest: { findFirst: linkedIssue },
       workItem: { findUnique: vi.fn(async () => null) },
     } as never,
@@ -793,7 +798,9 @@ describe("routeHostEvent push (merge watcher)", () => {
     const d = deps([link("w1")], bundleHost(null));
     const result = await routeHostEvent(push(["src/a.ts"]), d);
     expect(result.runIds).toEqual(["run-w1"]);
-    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("No knowledge concept is affected");
+    const { untrustedContext } = splitTaskOverride(taskOf());
+    expect(untrustedContext).toContain("The knowledge bundle could not be fully read");
+    expect(untrustedContext).not.toContain("No knowledge concept is affected");
   });
 
   it("says the file list is incomplete when changedPathsComplete is false", async () => {
@@ -801,8 +808,103 @@ describe("routeHostEvent push (merge watcher)", () => {
     const d = deps([link("w1")], bundleHost({ "seed.md": concept("src/a.ts") }));
     await routeHostEvent(push([], false), d);
     const { untrustedContext } = splitTaskOverride(taskOf());
-    expect(untrustedContext).toContain("incomplete");
+    expect(untrustedContext).toContain(
+      "The changed-file list is incomplete (GitHub includes at most 2048 commits per push and the list is capped at 1000 paths); treat every knowledge concept as possibly affected.",
+    );
     expect(untrustedContext).toContain("- docs/knowledge/seed.md");
+  });
+
+  it("says only that no concept exists when the list is incomplete and the bundle is empty", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const d = deps([link("w1")], bundleHost({}));
+    await routeHostEvent(push([], false), d);
+    const { untrustedContext } = splitTaskOverride(taskOf());
+    expect(untrustedContext).toContain("No knowledge concept exists in this repository.");
+    expect(untrustedContext).not.toContain("treat every knowledge concept");
+  });
+
+  it("skips loading the bundle when every authorized watcher already has a run in flight", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = bundleHost({ "seed.md": concept("src/a.ts") });
+    const d = deps([link("w1"), link("w2")], h);
+    d.runFindMany.mockResolvedValue([{ agentId: "w1" }, { agentId: "w2" }]);
+    const result = await routeHostEvent(push(["src/a.ts"]), d);
+    expect(result.runIds).toEqual([]);
+    expect(h.listFiles).not.toHaveBeenCalled();
+    expect(vi.mocked(dispatchRun)).not.toHaveBeenCalled();
+  });
+
+  it("still loads the bundle when only some watchers are busy", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = bundleHost({});
+    const d = deps([link("w1"), link("w2")], h);
+    d.runFindMany.mockResolvedValue([{ agentId: "w1" }]);
+    await routeHostEvent(push(["README.md"]), d);
+    expect(h.listFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads bundle files with at most 8 reads in flight", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const files = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`c${i}.md`, concept(`src/f${i}.ts`)]));
+    const h = bundleHost(files);
+    const read = vi.mocked(h.readFile).getMockImplementation()!;
+    let inFlight = 0;
+    let max = 0;
+    vi.mocked(h.readFile).mockImplementation(async (r, path, ref, w) => {
+      inFlight += 1;
+      max = Math.max(max, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      inFlight -= 1;
+      return read(r, path, ref, w);
+    });
+    await routeHostEvent(push(["src/f29.ts"]), deps([link("w1")], h));
+    expect(max).toBe(8);
+    expect(h.readFile).toHaveBeenCalledTimes(30);
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("- docs/knowledge/c29.md");
+  });
+
+  it("stops at the 4 s deadline and treats the bundle as incomplete", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    vi.useFakeTimers();
+    try {
+      const h = bundleHost({ "a.md": concept("src/a.ts"), "b.md": concept("src/b.ts") });
+      const read = vi.mocked(h.readFile).getMockImplementation()!;
+      vi.mocked(h.readFile).mockImplementation((r, path, ref, w) =>
+        path.endsWith("b.md") ? new Promise(() => undefined) : read(r, path, ref, w),
+      );
+      const routed = routeHostEvent(push(["README.md"]), deps([link("w1")], h));
+      await vi.advanceTimersByTimeAsync(4000);
+      const result = await routed;
+      expect(result.runIds).toEqual(["run-w1"]);
+      const { untrustedContext } = splitTaskOverride(taskOf());
+      expect(untrustedContext).toContain("The knowledge bundle could not be fully read");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a bundle listing that never returns as incomplete at the deadline", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    vi.useFakeTimers();
+    try {
+      const h = bundleHost({});
+      vi.mocked(h.listFiles).mockImplementation(() => new Promise(() => undefined));
+      const routed = routeHostEvent(push(["README.md"]), deps([link("w1")], h));
+      await vi.advanceTimersByTimeAsync(4000);
+      await routed;
+      expect(splitTaskOverride(taskOf()).untrustedContext).toContain("could not be fully read");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a bundle over the 200-file cap as incomplete", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const files = Object.fromEntries(Array.from({ length: 201 }, (_, i) => [`c${i}.md`, concept(`src/f${i}.ts`)]));
+    const h = bundleHost(files);
+    await routeHostEvent(push(["README.md"]), deps([link("w1")], h));
+    expect(h.readFile).toHaveBeenCalledTimes(200);
+    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("could not be fully read");
   });
 
   it("does nothing, and reads no bundle, when no authorized push link remains", async () => {
@@ -833,7 +935,9 @@ describe("routeHostEvent push (merge watcher)", () => {
     });
     const d = deps([link("w1")], h);
     await routeHostEvent(push(["src/a.ts"]), d);
-    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("- docs/knowledge/seed.md");
+    const { untrustedContext } = splitTaskOverride(taskOf());
+    expect(untrustedContext).toContain("- docs/knowledge/seed.md");
+    expect(untrustedContext).toContain("could not be fully read");
   });
 
   it("continues with what was listed when the listing is truncated", async () => {
@@ -843,7 +947,9 @@ describe("routeHostEvent push (merge watcher)", () => {
     vi.mocked(h.listFiles).mockImplementation(async (...a) => ({ ...(await list(...a)), truncated: true }));
     const d = deps([link("w1")], h);
     await routeHostEvent(push(["src/a.ts"]), d);
-    expect(splitTaskOverride(taskOf()).untrustedContext).toContain("- docs/knowledge/seed.md");
+    const { untrustedContext } = splitTaskOverride(taskOf());
+    expect(untrustedContext).toContain("- docs/knowledge/seed.md");
+    expect(untrustedContext).toContain("could not be fully read");
   });
 
   it("caps the changed-file list in the context, scoping on the full list", async () => {
