@@ -26,6 +26,15 @@
             "coding"
           ]
         },
+        "model": {
+          "type": "string"
+        },
+        "codingProvider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "status": {
           "type": "string",
           "enum": [
@@ -331,6 +340,25 @@
             ]
           }
         },
+        "declaredServices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "version"
+            ],
+            "additionalProperties": false
+          }
+        },
         "services": {
           "type": "array",
           "items": {
@@ -391,9 +419,6 @@
             ],
             "additionalProperties": false
           }
-        },
-        "model": {
-          "type": "string"
         },
         "error": {
           "type": [
@@ -496,6 +521,8 @@
         "agentId",
         "agentName",
         "agentKind",
+        "model",
+        "codingProvider",
         "status",
         "trigger",
         "turns",
@@ -507,8 +534,8 @@
         "finishedAt",
         "heartbeatAt",
         "outcomes",
+        "declaredServices",
         "services",
-        "model",
         "error",
         "finalText",
         "childRunIds",

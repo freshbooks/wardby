@@ -58,6 +58,16 @@ or running, plus all of their ancestors, so a sub-agent tree is never cut off
 from its root. When more runs match than `limit`, the response sets
 `truncated`.
 
+Each run carries its agent, status, trigger, turn and token counts, cost and
+budget, outcomes, and coding-run services. `model` is the model the run used
+(a coding run's own model, otherwise the agent's). `codingProvider` names the
+coding worker, such as `codex` or `claude-code`, and is `null` for runs that
+aren't coding runs.
+`declaredServices` lists the services (name and version) a coding run was
+started with; `services` holds their recorded readiness. A finished run can
+declare a service that has no readiness record, for example a run from before
+the server recorded service status.
+
 ### `GET /admin/api/runs/<id>`
 
 One run in full: the graph fields plus the run's final text and error. For
@@ -101,6 +111,14 @@ data is waiting; it reconnects and resyncs like any other reconnect.
 Live events come from Postgres `NOTIFY`. Each server replica holds one
 database connection for them, opened only while at least one client is
 subscribed.
+
+## Desktop viewer
+
+A desktop app for macOS in the source tree, `apps/viewer`, is a ready-made
+client of this API: it signs in with the same flow described under Access,
+draws the graph, and updates it from the event stream. See
+[`apps/viewer/README.md`](https://github.com/wardby/wardby/tree/main/apps/viewer) for prerequisites, running
+it, adding a server, and what an external identity provider client needs.
 
 ## Response schemas
 

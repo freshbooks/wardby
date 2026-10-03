@@ -3,7 +3,7 @@ id: admin-viewer
 title: Watch live runs with the admin viewer API
 summary: Read-only, deployment-wide live view of runs, sub-agent trees, triggers, outcomes and coding-run services for admins (admin:view).
 audience: operator
-tags: [viewer, admin, runs, live, sse, monitoring]
+tags: [viewer, admin, runs, live, sse, monitoring, desktop, app]
 appliesTo: ">=0.4.0"
 ---
 
@@ -29,6 +29,11 @@ The stream has no replay: open the event stream first, then load the graph,
 and refetch the graph on every `resync` event and after any reconnect. `hello`
 and `status` events report whether live events are flowing. Proxies and load balancers in front of Wardby
 must allow long-lived responses and not buffer `text/event-stream`.
+
+A desktop viewer for macOS is included in the source tree (`apps/viewer`). Add
+your server's canonical URI, sign in with an `admin` user in the browser, and it
+shows the live graph. Its README covers setup, and what an external identity
+provider client needs when the server runs in delegating mode.
 
 For parameters, status codes, frame formats and schemas, follow
 [`docs/viewer-api.md`](../docs/viewer-api.md).

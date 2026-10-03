@@ -1,0 +1,40 @@
+[package]
+name = "wardby-viewer"
+version = "0.1.0"
+description = "Desktop viewer for wardby"
+authors = ["wardby contributors"]
+license = "Apache-2.0"
+repository = "https://github.com/wardby/wardby"
+edition = "2024"
+rust-version = "1.90"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "wardby_viewer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.1", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2.12.1", features = [] }
+tauri-plugin-opener = "2.7.0"
+tauri-plugin-store = "2.5.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+url = "2.5.8"
+sha2 = "0.11.0"
+base64 = "0.23.1"
+rand = "0.10.3"
+thiserror = "2.0.21"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "form", "stream"] }
+keyring = "4.2.0"
+eventsource-stream = "0.2.3"
+futures-util = "0.3.34"
+bytes = "1.12.1"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+wiremock = "0.6.5"

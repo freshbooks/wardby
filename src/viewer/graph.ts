@@ -29,7 +29,7 @@ export function parseSince(value: string | null, now: Date): Date {
 
 const runInclude = {
   agent: true,
-  codingRun: { select: { result: true } },
+  codingRun: { select: { result: true, provider: true, model: true, services: true } },
   hostCheck: true,
   hostStatus: true,
   issueStatus: true,
@@ -37,6 +37,15 @@ const runInclude = {
 } satisfies Prisma.RunInclude;
 
 type RunRow = Prisma.RunGetPayload<{ include: typeof runInclude }>;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Name and version of each service in a coding run's resolved services snapshot. */
+function declaredServices(snapshot: unknown): GraphRun["declaredServices"] {
+  if (!Array.isArray(snapshot)) return [];
+  return snapshot.filter(isRecord).map((s) => ({ name: String(s.name), version: String(s.version) }));
+}
 type PullRequestRow = Prisma.IssuePullRequestGetPayload<object>;
 
 const iso = (date: Date | null): string | null => (date ? date.toISOString() : null);
@@ -132,6 +141,8 @@ export function toGraphRun(row: RunRow, pullRequests: readonly PullRequestRow[])
     agentId: row.agentId,
     agentName: row.agent.name,
     agentKind: row.agent.kind,
+    model: row.codingRun?.model ?? row.agent.model,
+    codingProvider: row.codingRun?.provider ?? null,
     status: row.status,
     trigger: triggerFor(row),
     turns: row.turns,
@@ -143,6 +154,7 @@ export function toGraphRun(row: RunRow, pullRequests: readonly PullRequestRow[])
     finishedAt: iso(row.finishedAt),
     heartbeatAt: iso(row.heartbeatAt),
     outcomes: outcomesFor(row, pullRequests),
+    declaredServices: declaredServices(row.codingRun?.services),
     services: row.serviceStatuses.map((s) => ({
       name: s.name,
       state: s.state,
