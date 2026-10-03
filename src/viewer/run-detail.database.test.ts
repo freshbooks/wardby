@@ -85,6 +85,7 @@ describe.skipIf(!process.env.DATABASE_URL)("loadRunDetail (PostgreSQL)", () => {
     expect(detail).not.toBeNull();
     expect(RunDetailSchema.parse(detail)).toEqual(detail);
     expect(detail!.model).toBe("coding-model");
+    expect(detail!.codingProvider).toBe("codex");
     expect(detail!.coding).toMatchObject({
       provider: "codex",
       repository: "your-org/app",
@@ -105,7 +106,13 @@ describe.skipIf(!process.env.DATABASE_URL)("loadRunDetail (PostgreSQL)", () => {
   it("returns a native run's detail with ordered child ids and null coding", async () => {
     const detail = await loadRunDetail(db, ids.R1);
     expect(RunDetailSchema.parse(detail)).toEqual(detail);
-    expect(detail).toMatchObject({ model: "agent-model", error: "boom", finalText: "final words", coding: null });
+    expect(detail).toMatchObject({
+      model: "agent-model",
+      codingProvider: null,
+      error: "boom",
+      finalText: "final words",
+      coding: null,
+    });
     expect(detail!.childRunIds).toEqual([ids.R2, ids.R3]);
   });
 
@@ -113,6 +120,7 @@ describe.skipIf(!process.env.DATABASE_URL)("loadRunDetail (PostgreSQL)", () => {
     const detail = await loadRunDetail(db, ids.R4);
     expect(detail!.coding).toBeNull();
     expect(detail!.model).toBe("agent-model");
+    expect(detail!.codingProvider).toBeNull();
   });
 
   it("returns null for an unknown run", async () => {

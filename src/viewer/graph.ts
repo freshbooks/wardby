@@ -29,7 +29,7 @@ export function parseSince(value: string | null, now: Date): Date {
 
 const runInclude = {
   agent: true,
-  codingRun: { select: { result: true } },
+  codingRun: { select: { result: true, provider: true, model: true } },
   hostCheck: true,
   hostStatus: true,
   issueStatus: true,
@@ -132,6 +132,8 @@ export function toGraphRun(row: RunRow, pullRequests: readonly PullRequestRow[])
     agentId: row.agentId,
     agentName: row.agent.name,
     agentKind: row.agent.kind,
+    model: row.codingRun?.model ?? row.agent.model,
+    codingProvider: row.codingRun?.provider ?? null,
     status: row.status,
     trigger: triggerFor(row),
     turns: row.turns,

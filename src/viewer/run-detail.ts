@@ -28,14 +28,12 @@ export async function loadRunDetail(db: PrismaClient, runId: string): Promise<Ru
       select: {
         error: true,
         finalText: true,
-        agent: { select: { model: true } },
         codingRun: {
           select: {
             provider: true,
             repository: true,
             baseRef: true,
             headRef: true,
-            model: true,
             queuedAt: true,
             failureCategory: true,
             services: true,
@@ -52,7 +50,6 @@ export async function loadRunDetail(db: PrismaClient, runId: string): Promise<Ru
   const coding = row.codingRun;
   return {
     ...graphRun,
-    model: coding?.model ?? row.agent.model,
     error: row.error,
     finalText: row.finalText,
     childRunIds: children.map((c) => c.id),

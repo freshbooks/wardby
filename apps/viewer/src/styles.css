@@ -395,6 +395,44 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* The model gives way first; turn, cost and elapsed time stay whole. */
+.flow-node.run .node-sub {
+  display: flex;
+}
+
+.node-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.node-stats {
+  flex: none;
+  white-space: pre;
+}
+
+.coding-badge {
+  flex: none;
+  align-self: center;
+  padding: 0 0.3em;
+  border-radius: 4px;
+  font-size: 0.7em;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.03em;
+  /* Fixed colours, dark enough for white text in both themes. */
+  color: #fff;
+  background: #5b6472;
+}
+
+.coding-badge.codex {
+  background: #0b7a5f;
+}
+
+.coding-badge.claude-code {
+  background: #b4532f;
+}
+
 .node-title {
   min-width: 0;
   font-weight: 600;

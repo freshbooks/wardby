@@ -13,6 +13,8 @@ function makeRun(overrides: Partial<GraphRun> = {}): GraphRun {
     agentId: "a1",
     agentName: "builder",
     agentKind: "coding",
+    model: "gpt-5.5-codex",
+    codingProvider: "codex",
     status: "running",
     trigger: { kind: "manual" },
     turns: 6,
@@ -69,6 +71,27 @@ describe("RunNode", () => {
     expect(screen.getByText(/minio/)).toHaveTextContent("○ pending");
     expect(screen.getByText(/kafka/)).toHaveTextContent("✗ failed (oom)");
     expect(screen.getByText(/2m 1\ds/)).toBeInTheDocument();
+  });
+
+  it("tags a coding run with its worker and shows its model", () => {
+    wrap(<RunNode {...props({ kind: "run", run: makeRun(), selected: false })} />);
+    const badge = screen.getByRole("img", { name: "Codex" });
+    expect(badge).toHaveTextContent("CX");
+    expect(screen.getByText("gpt-5.5-codex")).toHaveAttribute("title", "gpt-5.5-codex");
+  });
+
+  it("tags Claude Code runs and shortens Claude model ids", () => {
+    const run = makeRun({ codingProvider: "claude-code", model: "claude-sonnet-4-6" });
+    wrap(<RunNode {...props({ kind: "run", run, selected: false })} />);
+    expect(screen.getByRole("img", { name: "Claude Code" })).toHaveTextContent("CC");
+    expect(screen.getByText("sonnet-4-6")).toHaveAttribute("title", "claude-sonnet-4-6");
+  });
+
+  it("shows a native run's model without a badge", () => {
+    const run = makeRun({ agentKind: "native", codingProvider: null, model: "claude-haiku-4-5-20251001" });
+    wrap(<RunNode {...props({ kind: "run", run, selected: false })} />);
+    expect(screen.getByText("haiku-4-5")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Codex|Claude Code/ })).toBeNull();
   });
 
   it("marks failed-family runs and selection", () => {

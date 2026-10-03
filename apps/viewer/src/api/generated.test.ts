@@ -19,6 +19,8 @@ describe("generated API types", () => {
       agentId: "a1",
       agentName: "agent",
       agentKind: "native",
+      model: "m",
+      codingProvider: null,
       status: "running",
       trigger: { kind: "manual" },
       turns: 1,
@@ -42,7 +44,6 @@ describe("generated API types", () => {
     } satisfies GraphSnapshot;
     const detail = {
       ...run,
-      model: "m",
       error: null,
       finalText: null,
       childRunIds: [],

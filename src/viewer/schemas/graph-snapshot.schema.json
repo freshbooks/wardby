@@ -43,6 +43,15 @@
                   "coding"
                 ]
               },
+              "model": {
+                "type": "string"
+              },
+              "codingProvider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "status": {
                 "type": "string",
                 "enum": [
@@ -416,6 +425,8 @@
               "agentId",
               "agentName",
               "agentKind",
+              "model",
+              "codingProvider",
               "status",
               "trigger",
               "turns",

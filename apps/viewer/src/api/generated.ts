@@ -11,6 +11,8 @@ export interface GraphSnapshot {
     agentId: string;
     agentName: string;
     agentKind: "native" | "coding";
+    model: string;
+    codingProvider: string | null;
     status: "pending" | "running" | "succeeded" | "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled";
     trigger:
       | {
@@ -104,6 +106,8 @@ export interface RunDetail {
   agentId: string;
   agentName: string;
   agentKind: "native" | "coding";
+  model: string;
+  codingProvider: string | null;
   status: "pending" | "running" | "succeeded" | "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled";
   trigger:
     | {
@@ -179,7 +183,6 @@ export interface RunDetail {
     failedAt: string | null;
     createdAt: string;
   }[];
-  model: string;
   error: string | null;
   finalText: string | null;
   childRunIds: string[];

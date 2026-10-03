@@ -26,6 +26,15 @@
             "coding"
           ]
         },
+        "model": {
+          "type": "string"
+        },
+        "codingProvider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "status": {
           "type": "string",
           "enum": [
@@ -392,9 +401,6 @@
             "additionalProperties": false
           }
         },
-        "model": {
-          "type": "string"
-        },
         "error": {
           "type": [
             "string",
@@ -496,6 +502,8 @@
         "agentId",
         "agentName",
         "agentKind",
+        "model",
+        "codingProvider",
         "status",
         "trigger",
         "turns",
@@ -508,7 +516,6 @@
         "heartbeatAt",
         "outcomes",
         "services",
-        "model",
         "error",
         "finalText",
         "childRunIds",

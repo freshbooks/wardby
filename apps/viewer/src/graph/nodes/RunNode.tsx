@@ -7,8 +7,11 @@ import type { FlowNodeData } from "../build";
 import { sameNodeProps } from "../sameData";
 import { RUN_TITLE_MAX_CHARS, RUN_WIDTH, runHeight, tailTruncate } from "../sizes";
 import { exactUsd, formatUsd } from "../../format/money";
+import { codingBadge, shortModel } from "../labels";
 
 const FADE_AFTER_MS = 60_000;
+/** Title characters the coding badge takes up. */
+const BADGE_CHARS = 3;
 
 export function statusGlyph(status: GraphRun["status"]): string {
   switch (statusGroup(status)) {
@@ -62,6 +65,7 @@ function RunNodeImpl({ data }: NodeProps) {
   const now = useClock(running);
   const faded = useFaded(run);
   const group = statusGroup(run.status);
+  const badge = run.codingProvider ? codingBadge(run.codingProvider) : null;
   const pct = run.budgetUsd > 0 ? Math.min(100, (run.costUsd / run.budgetUsd) * 100) : 0;
   const cls = ["flow-node", "run", group, selected ? "selected" : "", faded ? "faded" : "", running ? "pulse" : ""]
     .filter(Boolean)
@@ -74,14 +78,31 @@ function RunNodeImpl({ data }: NodeProps) {
         <span className="glyph" role="img" aria-label={run.status}>
           {statusGlyph(run.status)}
         </span>
+        {badge && (
+          <span
+            className={`coding-badge${badge.known ? ` ${run.codingProvider}` : ""}`}
+            role="img"
+            aria-label={badge.name}
+            title={badge.name}
+          >
+            {badge.text}
+          </span>
+        )}
         <span className="node-title" title={run.agentName} aria-label={run.agentName}>
-          {tailTruncate(run.agentName, RUN_TITLE_MAX_CHARS)}
+          {tailTruncate(run.agentName, RUN_TITLE_MAX_CHARS - (badge ? BADGE_CHARS : 0))}
         </span>
         <span className="node-id">{run.id.slice(-6)}</span>
       </div>
-      <div className="node-sub" title={exactUsd(run.costUsd)}>
-        turn {run.turns} · {formatUsd(run.costUsd)}
-        {running && <span> · {formatElapsed(now - Date.parse(run.startedAt))}</span>}
+      <div className="node-sub">
+        {run.model && (
+          <span className="node-model" title={run.model}>
+            {shortModel(run.model)}
+          </span>
+        )}
+        <span className="node-stats" title={exactUsd(run.costUsd)}>
+          {run.model && " · "}turn {run.turns} · {formatUsd(run.costUsd)}
+          {running && <span> · {formatElapsed(now - Date.parse(run.startedAt))}</span>}
+        </span>
       </div>
       <div
         className="budget"

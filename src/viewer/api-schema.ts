@@ -76,6 +76,10 @@ export const GraphRunSchema = z.object({
   agentId: z.string(),
   agentName: z.string(),
   agentKind: z.enum(["native", "coding"]),
+  /** The coding run's model, else the agent's. */
+  model: z.string(),
+  /** The coding worker (e.g. `codex`, `claude-code`); null for native runs. */
+  codingProvider: z.string().nullable(),
   status: RunStatusSchema,
   trigger: RunTriggerSchema,
   turns: z.number().int(),
@@ -107,7 +111,6 @@ export const GraphSnapshotSchema = z.object({
 });
 
 export const RunDetailSchema = GraphRunSchema.extend({
-  model: z.string(),
   error: z.string().nullable(),
   finalText: z.string().nullable(),
   childRunIds: z.array(z.string()),

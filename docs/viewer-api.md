@@ -58,6 +58,12 @@ or running, plus all of their ancestors, so a sub-agent tree is never cut off
 from its root. When more runs match than `limit`, the response sets
 `truncated`.
 
+Each run carries its agent, status, trigger, turn and token counts, cost and
+budget, outcomes, and coding-run services. `model` is the model the run used
+(a coding run's own model, otherwise the agent's). `codingProvider` names the
+coding worker, such as `codex` or `claude-code`, and is `null` for runs that
+aren't coding runs.
+
 ### `GET /admin/api/runs/<id>`
 
 One run in full: the graph fields plus the run's final text and error. For
