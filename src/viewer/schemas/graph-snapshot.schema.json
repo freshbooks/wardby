@@ -260,6 +260,12 @@
                             "string",
                             "null"
                           ]
+                        },
+                        "at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
                         }
                       },
                       "required": [
@@ -268,7 +274,8 @@
                         "repository",
                         "number",
                         "url",
-                        "state"
+                        "state",
+                        "at"
                       ],
                       "additionalProperties": false
                     },
@@ -287,13 +294,20 @@
                         },
                         "number": {
                           "type": "integer"
+                        },
+                        "at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
                         }
                       },
                       "required": [
                         "kind",
                         "provider",
                         "repository",
-                        "number"
+                        "number",
+                        "at"
                       ],
                       "additionalProperties": false
                     },
@@ -309,12 +323,19 @@
                         },
                         "issueKey": {
                           "type": "string"
+                        },
+                        "at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
                         }
                       },
                       "required": [
                         "kind",
                         "provider",
-                        "issueKey"
+                        "issueKey",
+                        "at"
                       ],
                       "additionalProperties": false
                     },
@@ -343,6 +364,12 @@
                         },
                         "completed": {
                           "type": "boolean"
+                        },
+                        "at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
                         }
                       },
                       "required": [
@@ -350,7 +377,8 @@
                         "provider",
                         "repository",
                         "number",
-                        "completed"
+                        "completed",
+                        "at"
                       ],
                       "additionalProperties": false
                     }

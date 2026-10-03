@@ -68,6 +68,10 @@ started with; `services` holds their recorded readiness. A finished run can
 declare a service that has no readiness record, for example a run from before
 the server recorded service status.
 
+Each outcome carries `at`, when it happened: when a pull request was opened,
+when a comment was last updated, or when a check completed (`null` while a
+check is still pending).
+
 ### `GET /admin/api/runs/<id>`
 
 One run in full: the graph fields plus the run's final text and error. For

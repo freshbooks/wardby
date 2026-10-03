@@ -7,7 +7,9 @@ import { loadGraph, parseSince } from "./graph.js";
 const db = createPrismaClient();
 const suffix = randomUUID();
 // Far-future clock: the DB is shared, so nothing else can outrank these runs in the newest-first cap.
-const now = new Date("2030-01-01T12:00:00.000Z");
+// It must be one no other test file uses (run-detail's runs at 2030 used to win the cap when the
+// files ran in parallel).
+const now = new Date("2040-01-01T12:00:00.000Z");
 const ago = (ms: number) => new Date(now.getTime() - ms);
 const MIN = 60_000;
 const id = (name: string) => `graph-${name}-${suffix}`;
@@ -144,11 +146,15 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
         number: 7,
         url: "https://github.com/your-org/app/pull/7",
         state: null,
+        // Opened from the coding run's result: the run's finish time.
+        at: by(ids.R2).finishedAt,
       },
     ]);
     expect(by(ids.R2).services).toMatchObject([{ name: "postgres", state: "ready" }]);
     expect(by(ids.R4).trigger).toEqual({ kind: "issue", provider: "jira", issueKey: "WMD-42" });
-    expect(by(ids.R4).outcomes).toEqual([{ kind: "issue_comment", provider: "jira", issueKey: "WMD-42" }]);
+    expect(by(ids.R4).outcomes).toEqual([
+      { kind: "issue_comment", provider: "jira", issueKey: "WMD-42", at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/) },
+    ]);
   });
 
   it("caps the window but never its ancestors", async () => {
@@ -164,11 +170,11 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
   it("parses since values", () => {
     expect(parseSince("15m", now)).toEqual(ago(15 * MIN));
     expect(parseSince("7d", now)).toEqual(new Date(now.getTime() - 7 * 86_400_000));
-    expect(parseSince("2030-01-01T11:00:00Z", now)).toEqual(ago(60 * MIN));
+    expect(parseSince("2040-01-01T11:00:00Z", now)).toEqual(ago(60 * MIN));
     expect(parseSince(null, now)).toEqual(ago(60 * MIN));
     expect(() => parseSince("5y", now)).toThrow();
     expect(() => parseSince("constructor", now)).toThrow();
     expect(() => parseSince("toString", now)).toThrow();
-    expect(() => parseSince("2030-13-99T99:99:99Z", now)).toThrow();
+    expect(() => parseSince("2040-13-99T99:99:99Z", now)).toThrow();
   });
 });
