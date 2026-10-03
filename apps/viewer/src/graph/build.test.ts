@@ -157,3 +157,18 @@ describe("buildGraph", () => {
     expect(a.nodes.map((n) => n.id)).toEqual(["t:m", "r:m", "t:z", "r:z", "r:k", "r:n"]);
   });
 });
+
+describe("buildGraph timeRange", () => {
+  it("keeps runs started in range and their ancestors", () => {
+    const rs = [
+      makeRun("root", { startedAt: "2026-01-01T10:00:00.000Z" }),
+      makeRun("child", { parentRunId: "root", startedAt: "2026-01-01T12:00:00.000Z" }),
+      makeRun("other", { startedAt: "2026-01-01T15:00:00.000Z" }),
+    ];
+    const timeRange = { from: Date.parse("2026-01-01T11:00:00.000Z"), to: Date.parse("2026-01-01T13:00:00.000Z") };
+    const ids = buildGraph(rs, { ...all, timeRange }, null)
+      .nodes.filter((n) => n.type === "run")
+      .map((n) => n.id);
+    expect(ids.sort()).toEqual(["r:child", "r:root"]);
+  });
+});

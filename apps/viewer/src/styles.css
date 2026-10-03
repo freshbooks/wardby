@@ -637,3 +637,151 @@ button:disabled {
   outline: 2px solid var(--accent);
   outline-offset: -3px;
 }
+
+/* Timeline bar */
+.timeline {
+  position: relative;
+  flex: none;
+  height: 72px;
+  margin: -0.75rem -0.75rem 0.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+.timeline-svg {
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+  font-size: 10px;
+}
+
+.timeline-baseline,
+.timeline-tick line {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.timeline-tick text,
+.timeline-now text {
+  fill: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.timeline-now line {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.timeline-now circle {
+  fill: var(--accent);
+}
+
+.timeline-now.pulse circle {
+  animation: timeline-pulse 1.6s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes timeline-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.8);
+    opacity: 0.5;
+  }
+}
+
+.timeline-band {
+  fill: color-mix(in srgb, var(--accent) 22%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
+.timeline-bucket .bar {
+  shape-rendering: crispEdges;
+}
+
+.timeline-marker {
+  cursor: pointer;
+  outline: none;
+}
+
+.timeline-marker .hit {
+  fill: transparent;
+}
+
+.timeline-marker .x {
+  fill: var(--bad);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.timeline-marker:hover .dot,
+.timeline-marker.selected .dot {
+  stroke: var(--text);
+  stroke-width: 1.5;
+}
+
+.timeline-marker:hover .x,
+.timeline-marker.selected .x {
+  font-size: 11px;
+}
+
+.timeline-marker:focus-visible .hit {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.timeline:focus-visible {
+  outline-offset: -2px;
+}
+
+.timeline-tooltip {
+  position: absolute;
+  top: 2px;
+  transform: translateX(-50%);
+  max-width: 90%;
+  padding: 0.15rem 0.5rem;
+  background: var(--text);
+  color: var(--bg);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.timeline-chip {
+  position: absolute;
+  top: 4px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0 0.25rem 0 0.6rem;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  z-index: 1;
+}
+
+.timeline-chip button {
+  padding: 0 0.35rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  line-height: 1.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .timeline-now.pulse circle {
+    animation: none;
+  }
+}

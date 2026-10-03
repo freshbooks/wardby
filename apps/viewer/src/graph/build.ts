@@ -6,6 +6,8 @@ export interface Filters {
   statuses: ReadonlySet<RunStatus> | null;
   agentIds: ReadonlySet<string> | null;
   search: string;
+  /** Epoch-ms range on run start; ancestors of matching runs are kept like for other filters. */
+  timeRange?: { from: number; to: number } | null;
 }
 
 export type FlowNodeData =
@@ -55,6 +57,10 @@ export function buildGraph(runs: readonly GraphRun[], filters: Filters, selected
   const matches = (r: GraphRun): boolean => {
     if (filters.statuses && !filters.statuses.has(r.status)) return false;
     if (filters.agentIds && !filters.agentIds.has(r.agentId)) return false;
+    if (filters.timeRange) {
+      const t = Date.parse(r.startedAt);
+      if (!(t >= filters.timeRange.from && t <= filters.timeRange.to)) return false;
+    }
     if (needle === "") return true;
     const hay = [r.agentName, r.id, triggerLabel(r.trigger), ...r.outcomes.flatMap(outcomeTerms)];
     return hay.some((s) => s.toLowerCase().includes(needle));

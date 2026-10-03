@@ -10,7 +10,8 @@ import { SignInGate } from "./chrome/SignInGate";
 import { TopBar, windowSpend } from "./chrome/TopBar";
 import { FlowCanvas } from "./graph/FlowCanvas";
 import { DetailPanel } from "./panel/DetailPanel";
-import { initialFilters, type Filters } from "./state/filters";
+import { Timeline } from "./timeline/Timeline";
+import { changeFilters, initialFilters, visibleRuns, type Filters } from "./state/filters";
 import { useViewer } from "./state/useViewer";
 
 const GRAPH_LIMIT = 500;
@@ -60,6 +61,9 @@ function Dashboard({
     return { ...filters, agents: new Set([...filters.agents].filter((id) => ids.has(id))) };
   }, [filters, agents]);
 
+  const shown = useMemo(() => visibleRuns(runs, view), [runs, view]);
+  const setRange = useCallback((timeRange: Filters["timeRange"]) => setFilters((f) => ({ ...f, timeRange })), []);
+
   return (
     <div className="app">
       <TopBar
@@ -72,7 +76,7 @@ function Dashboard({
         live={model.live}
         reconnecting={viewer.reconnecting}
         filters={view}
-        onFiltersChange={setFilters}
+        onFiltersChange={(next) => setFilters((prev) => changeFilters(prev, next))}
         agents={agents}
         spend={model.spend}
         windowSpendUsd={windowSpend(runs)}
@@ -100,6 +104,16 @@ function Dashboard({
               </>
             )}
             {!viewer.loaded && !viewer.error && <p className="muted">Loading…</p>}
+            {viewer.loaded && (
+              <Timeline
+                runs={runs}
+                window={filters.window}
+                timeRange={filters.timeRange}
+                onRangeChange={setRange}
+                onSelect={onSelect}
+                selectedId={selectedRunId}
+              />
+            )}
             {viewer.loaded && model.truncated && (
               <p className="muted">Showing the most recent {GRAPH_LIMIT} runs; narrow the window to see fewer.</p>
             )}
@@ -114,7 +128,7 @@ function Dashboard({
           </>
         )}
       </main>
-      <BottomBar runs={runs} ticker={model.ticker} window={filters.window} />
+      <BottomBar runs={shown} ticker={model.ticker} window={filters.window} />
     </div>
   );
 }
