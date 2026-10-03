@@ -68,6 +68,11 @@ never frees it, since the disabled row still reserves the id.
 model accepts. Getting it wrong doesn't fail at `set_model` — it fails later,
 when a run calls the model, with `unsupported_anthropic_feature`.
 
+A newly released Claude model may also need a newer Claude Code than your
+Claude Code worker image has: coding runs on it then fail as
+`provider_rejected` (no cost) while native runs work. Upgrade wardby and
+rebuild the worker images before using the model in Claude Code agents.
+
 Catalog changes take effect on the writing process immediately, and on every
 other wardby process within `WARDBY_MODEL_CATALOG_REFRESH_SECONDS` (default
 45). A run already in progress keeps the catalog entry it started with, so

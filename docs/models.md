@@ -138,6 +138,13 @@ run actually calls the model, with `unsupported_anthropic_feature`. Check the
 model's own documentation for which mode and effort levels it supports before
 adding it.
 
+A newly released Claude model can also require a newer Claude Code than the
+one built into your Claude Code worker image. The provider then refuses the
+coding run's requests, and the run fails with the `provider_rejected` category
+at no cost; native runs on the same model are unaffected. Upgrade wardby (each
+release pins a tested Claude Code version), rebuild your worker images, and
+redeploy before pointing Claude Code agents at the new model.
+
 ## Disabling and resetting
 
 `disable_model` removes a model from routing without deleting its pricing
