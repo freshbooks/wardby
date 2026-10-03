@@ -364,7 +364,9 @@ for the repository's own dependency-override policy.
 - MCP-first agent, tool, schedule, budget-group, secret, datastore, webhook,
   run, and sub-agent management.
 - Scheduled and event-triggered native agents with OpenAI, direct Anthropic,
-  and Bedrock-Claude model routing.
+  and Bedrock-Claude model routing, priced and routed from an admin-editable
+  model catalog (`list_models`, `get_model`, `set_model`, `disable_model`,
+  `reset_model`).
 - Per-run budgets, shared budget groups, usage accounting, and cancellation.
 - QuickJS tool isolation with host allowlists and secret bindings.
 - Containerized Codex and Claude Code executors with trusted GitHub draft-PR

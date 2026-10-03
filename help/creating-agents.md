@@ -44,6 +44,15 @@ the trusted coding proxy, and a narrowly installed GitHub App. The agent owner
 must have the required repository access, or an administrator must explicitly
 approve the repository.
 
+## Choosing a model
+
+Both agent types take a `model` field naming an entry in wardby's model
+catalog. Run `list_models` to see which ids this deployment can actually
+route to right now (`routable: true`) and what each costs; `get_model` shows
+one entry in full. `create_agent` and `update_agent` refuse a `model` that
+isn't in the catalog, is disabled, or whose provider has no credentials
+configured here. See [Models and pricing](models.md).
+
 ## Decision checklist
 
 Choose a native agent when all of these are true:

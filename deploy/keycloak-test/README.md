@@ -72,15 +72,17 @@ scopes so they are always present; a real deployment may prefer optional
 scopes and explicit requests.
 
 **A privileged scope isn't enough on its own.** Wardby honours `agents:admin`,
-`packages:approve`, `services:manage` and `admin:view` only when the access token's role
-claim, mapped through `AUTH_ROLE_MAP`, gives the caller a Wardby role that
-grants them:
+`packages:approve`, `services:manage`, `admin:view` and `models:admin` only
+when the access token's role claim, mapped through `AUTH_ROLE_MAP`, gives the
+caller a Wardby role that grants them:
 
 - `wardby-user` has no Wardby role, so `make_owner` is refused with a role
   error even though the token carries `agents:admin`.
 - `wardby-approver` can approve packages but not call `make_owner`.
 - `wardby-admin` can do both, and can also read every owner's runs through the
-  admin viewer API (`admin:view`).
+  admin viewer API (`admin:view`) and change the model catalog (`models:admin`,
+  see [`docs/models.md`](../../docs/models.md)) — this harness does not set up
+  a separate `model-manager` role/user, since `wardby-admin` already covers it.
 
 **Dynamic client registration is usually disabled.** Keycloak returns `403` for
 anonymous DCR out of the box, and enterprise IdPs typically keep it that way on

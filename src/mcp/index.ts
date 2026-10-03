@@ -250,8 +250,10 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   // Loads the model catalog before anything else: running on the shipped
   // catalog alone (the fallback currentModelCatalog() uses before a store
   // is installed) would quietly re-enable models an admin turned off.
-  // `modelCatalog` is handed to registerAllTools by a later task so
-  // refresh_model_catalog can call `modelCatalog.refreshNow()`.
+  // `modelCatalog` is handed to registerAllTools as `refreshModelCatalog`,
+  // which the model catalog tools (set_model, disable_model, reset_model)
+  // call via `modelCatalog.refreshNow()` after each write — there is no
+  // separate refresh tool.
   const modelCatalog = await startModelCatalog(prisma);
   const providers = options.providers ?? buildMcpProviders().providers;
   await providers.executor.launch?.();
