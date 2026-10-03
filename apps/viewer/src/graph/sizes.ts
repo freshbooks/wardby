@@ -19,8 +19,8 @@ export const trayHeight = (serviceCount: number): number =>
 
 export const runHeight = (serviceCount: number): number => RUN_BASE_HEIGHT + trayHeight(serviceCount);
 
-/** Approx. title characters that fit a trigger or outcome node beside its "↗" button. */
-export const LINK_NODE_TITLE_MAX_CHARS = 22;
+/** Approx. title characters that fit a trigger or outcome node beside its "↗" button (icons count double). */
+export const LINK_NODE_TITLE_MAX_CHARS = 18;
 
 /** Approx. characters of a run node's agent name that fit its fixed width. */
 export const RUN_TITLE_MAX_CHARS = 18;

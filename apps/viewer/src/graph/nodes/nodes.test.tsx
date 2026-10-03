@@ -5,6 +5,7 @@ import type { GraphRun, Outcome } from "../../api/types";
 import { OutcomeNode } from "./OutcomeNode";
 import { RunNode } from "./RunNode";
 import { TriggerNode } from "./TriggerNode";
+import { LINK_NODE_TITLE_MAX_CHARS } from "../sizes";
 
 function makeRun(overrides: Partial<GraphRun> = {}): GraphRun {
   return {
@@ -163,7 +164,8 @@ describe("TriggerNode / OutcomeNode", () => {
       />,
     );
     const title = screen.getByText(/#104$/);
-    expect(title.textContent).toBe("⎇ …repository-name#104");
+    expect(title.textContent).toMatch(/^⎇ ….*-name#104$/);
+    expect(title.textContent!.length).toBeLessThanOrEqual(LINK_NODE_TITLE_MAX_CHARS);
     expect(screen.getByRole("button", { name: /^Open / })).toHaveAttribute(
       "title",
       "Open https://github.com/your-org/a-very-long-repository-name/issues/104",

@@ -365,6 +365,8 @@ button:disabled {
 /* Width/height come from graph/sizes.ts (inline) so they match the layout. */
 .flow-node {
   box-sizing: border-box;
+  /* Rows never grow past the box: long titles shrink, a "↗" button stays visible. */
+  grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
   align-content: center;
 }
