@@ -43,7 +43,7 @@
   ],
   "tools": [],
   "metadata": {
-    "user_id": "{\"device_id\":\"56ca3dbe28dc27e69991cd10d3d2b7b8e3943521a16dfe311752283dddec7493\",\"account_uuid\":\"\",\"session_id\":\"be49a8ed-af0c-46b3-8ade-875b2a66f2b9\"}"
+    "user_id": "{\"device_id\":\"fixture-device\",\"account_uuid\":\"\",\"session_id\":\"fixture-session\"}"
   },
   "max_tokens": 4096,
   "thinking": {

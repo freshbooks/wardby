@@ -728,6 +728,36 @@ describe("model terms from the session", () => {
         });
         expect(h.fetch).not.toHaveBeenCalled();
       });
+
+      it("refuses it without the mid-conversation-system beta", async () => {
+        const h = await opusHarness();
+        const beta = [...CLAUDE_CODE_ANTHROPIC_BETAS, "per-turn-control-2026-07-01"]
+          .filter((b) => b !== "mid-conversation-system-2026-04-07")
+          .join(",");
+        await expect(run(h, "per-turn-no-midconv", await capturedWith(() => {}), beta)).rejects.toMatchObject({
+          status: 400,
+          code: "anthropic_beta_required",
+        });
+        expect(h.fetch).not.toHaveBeenCalled();
+      });
+
+      it("refuses it for a manual-thinking model", async () => {
+        const h = await harness({
+          protocol: "anthropic-messages",
+          allowedModels: ["claude-opus-5-5"],
+          terms: { version: "v", entry: { ...opus, efforts: [...opus.efforts], thinkingMode: "manual" } },
+          fetch: await anthropicResponse(),
+        });
+        const body = await capturedWith((b) => {
+          delete (b as Record<string, unknown>).output_config;
+          delete (b as Record<string, unknown>).thinking;
+        });
+        await expect(run(h, "per-turn-manual", body, CAPTURED_BETA)).rejects.toMatchObject({
+          status: 400,
+          code: "unsupported_anthropic_feature",
+        });
+        expect(h.fetch).not.toHaveBeenCalled();
+      });
     });
 
     it("still refuses a beta header outside the reviewed set", async () => {
