@@ -1,5 +1,6 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { memo, useEffect, useState } from "react";
+import { useClock } from "../clock";
 import type { GraphRun, ServiceStatus } from "../../api/types";
 import { statusGroup } from "../../state/filters";
 import type { FlowNodeData } from "../build";
@@ -41,34 +42,22 @@ export function serviceChip(s: ServiceStatus): string {
   }
 }
 
-/** Re-renders every second while `active`; timers are cleared on unmount or when inactive. */
-function useNow(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [active]);
-  return now;
-}
-
 /** True once a succeeded run has been finished for 60 s (one timer, no polling). */
 function useFaded(run: GraphRun): boolean {
   const fadeAt = run.status === "succeeded" && run.finishedAt ? Date.parse(run.finishedAt) + FADE_AFTER_MS : null;
-  const [now, setNow] = useState(() => Date.now());
+  const [fired, setFired] = useState(() => fadeAt !== null && Date.now() >= fadeAt);
   useEffect(() => {
     if (fadeAt === null) return;
-    const wait = fadeAt - Date.now();
-    const id = setTimeout(() => setNow(Date.now()), Math.max(0, wait));
+    const id = setTimeout(() => setFired(true), Math.max(0, fadeAt - Date.now()));
     return () => clearTimeout(id);
   }, [fadeAt]);
-  return fadeAt !== null && now >= fadeAt;
+  return fired && fadeAt !== null;
 }
 
 function RunNodeImpl({ data }: NodeProps) {
   const { run, selected } = data as unknown as Extract<FlowNodeData, { kind: "run" }>;
   const running = run.status === "running";
-  const now = useNow(running);
+  const now = useClock(running);
   const faded = useFaded(run);
   const group = statusGroup(run.status);
   const pct = run.budgetUsd > 0 ? Math.min(100, (run.costUsd / run.budgetUsd) * 100) : 0;
@@ -80,7 +69,7 @@ function RunNodeImpl({ data }: NodeProps) {
     <div className={cls}>
       <Handle type="target" position={Position.Left} className="flow-handle" isConnectable={false} />
       <div className="node-head">
-        <span className="glyph" aria-label={run.status}>
+        <span className="glyph" role="img" aria-label={run.status}>
           {statusGlyph(run.status)}
         </span>
         <span className="node-title">{run.agentName}</span>
@@ -95,8 +84,8 @@ function RunNodeImpl({ data }: NodeProps) {
         role="progressbar"
         aria-label="Budget used"
         aria-valuemin={0}
-        aria-valuemax={run.budgetUsd}
-        aria-valuenow={run.costUsd}
+        aria-valuemax={run.budgetUsd > 0 ? run.budgetUsd : undefined}
+        aria-valuenow={run.budgetUsd > 0 ? Math.min(run.costUsd, run.budgetUsd) : undefined}
       >
         <div style={{ width: `${pct}%` }} />
       </div>

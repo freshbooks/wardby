@@ -1,11 +1,19 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { GraphRun } from "../api/types";
 import { initialFilters } from "../state/filters";
 import { FlowCanvas } from "./FlowCanvas";
 
+const layoutSpy = vi.hoisted(() => ({
+  impl: async (g: { nodes: { id: string }[] }): Promise<Map<string, { x: number; y: number }>> =>
+    new Map(g.nodes.map((n, i) => [n.id, { x: i * 300, y: 0 }])),
+  calls: 0,
+}));
 vi.mock("./layout", () => ({
-  layoutGraph: async (g: { nodes: { id: string }[] }) => new Map(g.nodes.map((n, i) => [n.id, { x: i * 300, y: 0 }])),
+  layoutGraph: (g: { nodes: { id: string }[] }) => {
+    layoutSpy.calls++;
+    return layoutSpy.impl(g);
+  },
 }));
 
 function makeRun(id: string, overrides: Partial<GraphRun> = {}): GraphRun {
@@ -55,5 +63,43 @@ describe("FlowCanvas", () => {
     onSelect.mockClear();
     fireEvent.click(screen.getAllByText("manual")[0]!);
     expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("names nodes and selects a focused run node with Enter", async () => {
+    const onSelect = vi.fn();
+    render(<FlowCanvas runs={runs} filters={initialFilters} selectedId={null} onSelect={onSelect} />);
+    const node = await screen.findByLabelText("agent-one, succeeded, run one");
+    fireEvent.keyDown(node, { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith("one");
+  });
+
+  it("does not re-layout on data-only changes", async () => {
+    layoutSpy.calls = 0;
+    const props = { filters: initialFilters, selectedId: null, onSelect: () => {} };
+    const { rerender } = render(<FlowCanvas runs={runs} {...props} />);
+    await screen.findByText("agent-one");
+    const before = layoutSpy.calls;
+    rerender(
+      <FlowCanvas runs={[makeRun("one", { costUsd: 0.9, outcomes: runs[0]!.outcomes }), runs[1]!]} {...props} />,
+    );
+    await screen.findByText("agent-one");
+    expect(layoutSpy.calls).toBe(before);
+  });
+
+  it("drops a slower, earlier layout result", async () => {
+    const resolvers: ((m: Map<string, { x: number; y: number }>) => void)[] = [];
+    layoutSpy.impl = () => new Promise((res) => resolvers.push(res));
+    const props = { filters: initialFilters, selectedId: null, onSelect: () => {} };
+    const { rerender, container } = render(<FlowCanvas runs={[runs[1]!]} {...props} />);
+    await waitFor(() => expect(resolvers).toHaveLength(1));
+    rerender(<FlowCanvas runs={runs} {...props} />);
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+    // Newer layout (5 nodes) resolves first, then the stale one (2 nodes).
+    const ids = ["t:two", "r:two", "t:one", "r:one", "o:one:0"];
+    await act(async () => resolvers[1]!(new Map(ids.map((id, i) => [id, { x: i * 300, y: 0 }]))));
+    await waitFor(() => expect(container.querySelectorAll(".react-flow__node")).toHaveLength(5));
+    await act(async () => resolvers[0]!(new Map([["t:two", { x: 0, y: 0 }]])));
+    expect(container.querySelectorAll(".react-flow__node")).toHaveLength(5);
+    layoutSpy.impl = async (g) => new Map(g.nodes.map((n, i) => [n.id, { x: i * 300, y: 0 }]));
   });
 });

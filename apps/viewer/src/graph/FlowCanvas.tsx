@@ -1,10 +1,10 @@
-import { Background, ReactFlow, type Edge, type Node } from "@xyflow/react";
+import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
 import type { GraphRun, RunStatus } from "../api/types";
 import { statusGroup, type Filters as UiFilters } from "../state/filters";
 import { buildGraph, type Filters as BuildFilters, type FlowGraph } from "./build";
-import { OutcomeNode } from "./nodes/OutcomeNode";
+import { outcomeLabel, OutcomeNode } from "./nodes/OutcomeNode";
 import { RunNode } from "./nodes/RunNode";
 import { TriggerNode } from "./nodes/TriggerNode";
 
@@ -30,6 +30,17 @@ function toBuildFilters(f: UiFilters): BuildFilters {
     agentIds: f.agents.size > 0 ? f.agents : null,
     search: f.search,
   };
+}
+
+function nodeLabel(d: FlowGraph["nodes"][number]["data"]): string {
+  switch (d.kind) {
+    case "run":
+      return `${d.run.agentName}, ${d.run.status}, run ${d.run.id.slice(-6)}`;
+    case "trigger":
+      return d.label;
+    case "outcome":
+      return outcomeLabel(d.outcome).label;
+  }
 }
 
 /** Fallback when the layout engine fails to load: a plain grid so the view still works. */
@@ -76,7 +87,15 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
     const out: Node[] = [];
     for (const n of graph.nodes) {
       const position = positions.get(n.id);
-      if (position) out.push({ id: n.id, type: n.type, position, data: n.data as unknown as Record<string, unknown> });
+      if (position) {
+        out.push({
+          id: n.id,
+          type: n.type,
+          position,
+          ariaLabel: nodeLabel(n.data),
+          data: n.data as unknown as Record<string, unknown>,
+        });
+      }
     }
     return out;
   }, [graph, positions]);
@@ -89,7 +108,19 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
   if (positions === null && graph.nodes.length > 0) return <p className="muted">Laying out…</p>;
 
   return (
-    <div className="flow-canvas" aria-label="Run graph">
+    // Enter/Space on a focused run node selects it (React Flow only handles click).
+    <div
+      className="flow-canvas"
+      aria-label="Run graph"
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        const id = (e.target as HTMLElement).closest?.(".react-flow__node")?.getAttribute("data-id");
+        if (id?.startsWith("r:")) {
+          e.preventDefault();
+          onSelect(id.slice(2));
+        }
+      }}
+    >
       {nodes.length === 0 && <p className="muted flow-empty">No runs in this window.</p>}
       {/* Remount once when the first nodes arrive so fitView frames them. */}
       <ReactFlow
@@ -108,6 +139,7 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
         onPaneClick={() => onSelect(null)}
       >
         <Background />
+        <Controls showInteractive={false} />
       </ReactFlow>
     </div>
   );

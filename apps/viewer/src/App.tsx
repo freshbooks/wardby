@@ -78,12 +78,14 @@ function Dashboard({ server, servers, onSelectServer, onAddServer, onChecked }: 
             {viewer.loaded && model.truncated && (
               <p className="muted">Showing the most recent {GRAPH_LIMIT} runs; narrow the window to see fewer.</p>
             )}
-            <FlowCanvas
-              runs={runs}
-              filters={view}
-              selectedId={selectedRunId}
-              onSelect={(id) => setSelectedRunId((cur) => (id === null || id === cur ? null : id))}
-            />
+            {viewer.loaded && (
+              <FlowCanvas
+                runs={runs}
+                filters={view}
+                selectedId={selectedRunId}
+                onSelect={(id) => setSelectedRunId((cur) => (id === null || id === cur ? null : id))}
+              />
+            )}
           </>
         )}
       </main>
