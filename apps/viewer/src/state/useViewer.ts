@@ -1,6 +1,7 @@
 // Stream-first data flow: subscribe to frames and open the event stream BEFORE the
 // first graph fetch, so nothing that happens between the two is lost; refetch the
-// graph on every `resync` and (debounced) when an event references an unknown run.
+// graph on every `resync` and (debounced) when an event references an unknown run
+// or reports a run finishing (today's spend is only in the graph).
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { connect, disconnect, fetchGraph, isAppError, onFrame, type AppError, type FramePayload } from "../api/client";
 import { initialModel, isViewerEvent, reduce, type ViewerModel } from "./reducer";
@@ -172,7 +173,9 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
           // Dropped, not thrown on: a newer server may send shapes this build predates.
           if (!isViewerEvent(frame.data)) break;
           const unknown = frame.data.kind === "outcome" || !knownRuns.current.has(frame.data.runId);
-          if (unknown) {
+          // Today's spend comes only from the graph, so a finished run's final cost needs a refetch.
+          const finished = frame.data.kind === "run" && frame.data.finishedAt !== null;
+          if (unknown || finished) {
             needSeq += 1;
             schedule(Math.max(0, REFETCH_DEBOUNCE_MS - (Date.now() - lastFetchAt)), false);
           }

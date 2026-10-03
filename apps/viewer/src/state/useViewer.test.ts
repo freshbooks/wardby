@@ -117,6 +117,29 @@ describe("useViewer", () => {
     expect(fetches()).toBe(2);
   });
 
+  it("refetches when a known run finishes, so today's spend includes it", async () => {
+    const known = { ...snapshot(), runs: [{ id: "r1" } as GraphSnapshot["runs"][number]] };
+    vi.mocked(client.fetchGraph).mockImplementation(async () => {
+      calls.push("fetchGraph");
+      return known;
+    });
+    renderHook(() => useViewer(URL_, { since: "1h", limit: 500 }));
+    await settle();
+    expect(fetches()).toBe(1);
+    // Still running: applied in place, no refetch.
+    await send({ type: "event", kind: "run", data: runEvent("r1") });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(fetches()).toBe(1);
+    const done = { ...runEvent("r1"), status: "succeeded", finishedAt: "2026-10-02T00:01:00.000Z" } as ViewerEvent;
+    await send({ type: "event", kind: "run", data: done });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(fetches()).toBe(2);
+  });
+
   it("exposes needsSignIn and forbidden from an ended frame", async () => {
     const { result } = renderHook(() => useViewer(URL_, { since: "1h", limit: 500 }));
     await settle();
