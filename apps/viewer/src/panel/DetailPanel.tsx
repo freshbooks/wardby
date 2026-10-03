@@ -244,7 +244,7 @@ export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null }: De
               return (
                 <li key={i} className={focusClass(focused(i))} ref={focused(i) ? setFocusEl : undefined}>
                   <span>{label}</span>
-                  {o.at && <span className="muted">{formatEventTime(Date.parse(o.at))}</span>}
+                  {o.at && <span className="muted"> · {formatEventTime(Date.parse(o.at))}</span>}
                   {url && (
                     <button
                       type="button"

@@ -166,6 +166,8 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        // Follows the window theme (View ▸ Appearance or the system setting).
+        colorMode="system"
         defaultViewport={HOME_VIEWPORT}
         minZoom={0.2}
         nodesDraggable={false}
