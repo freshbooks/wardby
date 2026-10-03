@@ -46,8 +46,9 @@ const runs: GraphRun[] = [
         number: 3,
         url: "https://example.test/pr/3",
         state: "open",
+        at: null,
       },
-      { kind: "issue_comment", provider: "jira", issueKey: "WAR-7" },
+      { kind: "issue_comment", provider: "jira", issueKey: "WAR-7", at: null },
     ],
   }),
   makeRun("c", {
@@ -135,7 +136,7 @@ describe("buildGraph", () => {
       [
         makeRun("p", {
           status: "pending",
-          outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "K-1" }],
+          outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "K-1", at: null }],
         }),
         makeRun("q", { parentRunId: "p", status: "running" }),
         makeRun("s", { parentRunId: "p", status: "succeeded", startedAt: "2026-01-01T00:00:01.000Z" }),

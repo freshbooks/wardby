@@ -7,6 +7,7 @@ import { compactTarget } from "../labels";
 import { outcomeLink } from "../links";
 import { LINK_NODE_TITLE_MAX_CHARS, OUTCOME_SIZE, tailTruncate } from "../sizes";
 import { NodeLink } from "./NodeLink";
+import { formatEventTime } from "../../format/time";
 
 export function outcomeLabel(o: Outcome): { label: string; detail: string | null } {
   switch (o.kind) {
@@ -59,7 +60,17 @@ function OutcomeNodeImpl({ data }: NodeProps) {
         </span>
         {url && <NodeLink url={url} label={label} />}
       </div>
-      <span className="node-sub">{detail}</span>
+      <span className="node-sub">
+        {detail}
+        {d.outcome.at && (
+          <>
+            {" · "}
+            <time dateTime={d.outcome.at} title={new Date(d.outcome.at).toLocaleString()}>
+              {formatEventTime(Date.parse(d.outcome.at))}
+            </time>
+          </>
+        )}
+      </span>
     </div>
   );
 }

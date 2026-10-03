@@ -6,6 +6,7 @@ import { triggerLink } from "../links";
 import { sameNodeProps } from "../sameData";
 import { LINK_NODE_TITLE_MAX_CHARS, TRIGGER_SIZE } from "../sizes";
 import { NodeLink } from "./NodeLink";
+import { formatEventTime } from "../../format/time";
 
 function TriggerNodeImpl({ data }: NodeProps) {
   const d = data as unknown as Extract<FlowNodeData, { kind: "trigger" }>;
@@ -18,6 +19,9 @@ function TriggerNodeImpl({ data }: NodeProps) {
         </span>
         {url && <NodeLink url={url} label={d.label} />}
       </div>
+      <time className="node-sub" dateTime={d.at} title={new Date(d.at).toLocaleString()}>
+        {formatEventTime(Date.parse(d.at))}
+      </time>
       <Handle type="source" position={Position.Right} className="flow-handle" isConnectable={false} />
     </div>
   );

@@ -5,7 +5,9 @@ import { useClock } from "../graph/clock";
 import { triggerLabel } from "../graph/build";
 import { formatElapsed, serviceChip, statusGlyph } from "../graph/nodes/RunNode";
 import { outcomeLabel } from "../graph/nodes/OutcomeNode";
-import { outcomeLink } from "../graph/links";
+import { outcomeLink, triggerLink } from "../graph/links";
+import type { RunFocus } from "../graph/selection";
+import { formatEventTime } from "../format/time";
 import { ErrorLine } from "../chrome/ErrorLine";
 import { exactUsd, formatUsd } from "../format/money";
 
@@ -22,6 +24,8 @@ export interface DetailPanelProps {
   runs: ReadonlyMap<string, GraphRun>;
   /** Select a run, or `null` to close the panel. */
   onSelect: (id: string | null) => void;
+  /** The trigger or outcome clicked in the graph, highlighted and scrolled into view. */
+  focus?: RunFocus | null;
 }
 
 interface Loaded {
@@ -86,13 +90,22 @@ function RunLink({
   );
 }
 
-export function DetailPanel({ serverUrl, run, runs, onSelect }: DetailPanelProps) {
+const focusClass = (on: boolean) => (on ? "focus-item focused" : "focus-item");
+
+export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null }: DetailPanelProps) {
   const [loaded, setLoaded] = useState<Loaded>({ id: run.id, detail: null, error: null });
   const seq = useRef(0);
   const panelRef = useRef<HTMLElement>(null);
   const [copied, setCopied] = useState(false);
   const running = run.status === "running";
   const now = useClock(true);
+  const trigger = triggerLink(run.trigger);
+  const focused = (i: number) => focus?.kind === "outcome" && focus.index === i;
+  // Bring the clicked trigger or outcome into view once it has rendered (outcomes wait for the detail).
+  const focusRef = useRef<HTMLElement | null>(null);
+  const setFocusEl = (el: HTMLElement | null) => {
+    focusRef.current = el;
+  };
 
   const discardPending = useCallback(() => {
     seq.current++;
@@ -154,6 +167,9 @@ export function DetailPanel({ serverUrl, run, runs, onSelect }: DetailPanelProps
 
   const current = loaded.id === run.id ? loaded : { id: run.id, detail: null, error: null };
   const detail = current.detail;
+  useEffect(() => {
+    focusRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [focus, detail]);
   const pct = run.budgetUsd > 0 ? Math.min(100, (run.costUsd / run.budgetUsd) * 100) : 0;
   const end = run.finishedAt ? Date.parse(run.finishedAt) : now;
   const elapsed = formatElapsed(end - Date.parse(run.startedAt));
@@ -179,10 +195,26 @@ export function DetailPanel({ serverUrl, run, runs, onSelect }: DetailPanelProps
       </header>
       <p className="muted">
         {run.status} · {elapsed}
-        {running ? " elapsed" : ""} · {triggerLabel(run.trigger)}
+        {running ? " elapsed" : ""}
       </p>
       {current.error && <ErrorLine error={current.error} />}
       {!detail && !current.error && <p className="muted">Loading…</p>}
+
+      <Section title="TRIGGER">
+        <p className={focusClass(focus?.kind === "trigger")} ref={focus?.kind === "trigger" ? setFocusEl : undefined}>
+          <span>{triggerLabel(run.trigger)}</span>
+          <span className="muted"> · {formatEventTime(Date.parse(run.startedAt))}</span>
+          {trigger && (
+            <button
+              type="button"
+              aria-label={`Open ${triggerLabel(run.trigger)}`}
+              onClick={() => void openUrl(trigger).catch(() => undefined)}
+            >
+              Open
+            </button>
+          )}
+        </p>
+      </Section>
 
       <Section title="COST">
         <p title={`${exactUsd(run.costUsd)} of ${exactUsd(run.budgetUsd)}`}>
@@ -210,8 +242,9 @@ export function DetailPanel({ serverUrl, run, runs, onSelect }: DetailPanelProps
               const { label } = outcomeLabel(o);
               const url = outcomeLink(o);
               return (
-                <li key={i}>
+                <li key={i} className={focusClass(focused(i))} ref={focused(i) ? setFocusEl : undefined}>
                   <span>{label}</span>
+                  {o.at && <span className="muted">{formatEventTime(Date.parse(o.at))}</span>}
                   {url && (
                     <button
                       type="button"

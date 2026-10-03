@@ -140,6 +140,7 @@ describe("TriggerNode / OutcomeNode", () => {
       number: 212,
       url: "https://example.test/pr/212",
       state: "open",
+      at: null,
     };
     wrap(<OutcomeNode {...props({ kind: "outcome", outcome })} />);
     expect(screen.getByText("⎇ app#212")).toHaveAttribute("title", "⎇ your-org/app#212");
@@ -172,8 +173,25 @@ describe("TriggerNode / OutcomeNode", () => {
     );
   });
 
+  it("shows when a trigger fired and when an outcome happened", () => {
+    const at = new Date(Date.now() - 60_000).toISOString();
+    const hhmm = (iso: string) => new Date(iso).toTimeString().slice(0, 5);
+    wrap(<TriggerNode {...props({ kind: "trigger", trigger: { kind: "manual" }, label: "manual", at })} />);
+    expect(screen.getByText(hhmm(at))).toHaveAttribute("datetime", at);
+    const outcome: Outcome = { kind: "check", provider: "github", repository: "o/r", number: 1, completed: true, at };
+    wrap(<OutcomeNode {...props({ kind: "outcome", outcome })} />);
+    expect(screen.getByText(/check · completed ·/)).toHaveTextContent(`check · completed · ${hhmm(at)}`);
+  });
+
   it("gives a check outcome its kind on the second line and no link off GitHub", () => {
-    const outcome: Outcome = { kind: "check", provider: "gitlab", repository: "g/r", number: 3, completed: true };
+    const outcome: Outcome = {
+      kind: "check",
+      provider: "gitlab",
+      repository: "g/r",
+      number: 3,
+      completed: true,
+      at: null,
+    };
     wrap(<OutcomeNode {...props({ kind: "outcome", outcome })} />);
     expect(screen.getByText("✓ r#3")).toBeInTheDocument();
     expect(screen.getByText("check · completed")).toBeInTheDocument();

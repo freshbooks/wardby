@@ -50,7 +50,7 @@ function makeRun(id: string, overrides: Partial<GraphRun> = {}): GraphRun {
 
 describe("FlowCanvas", () => {
   const runs = [
-    makeRun("one", { outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "WAR-1" }] }),
+    makeRun("one", { outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "WAR-1", at: null }] }),
     makeRun("two", { startedAt: "2026-01-02T00:00:00.000Z" }),
   ];
 
@@ -64,14 +64,18 @@ describe("FlowCanvas", () => {
     expect(screen.getByText("agent-two")).toBeInTheDocument();
   });
 
-  it("selects a run on click but ignores trigger nodes", async () => {
+  it("selects a run on click, and a trigger's run with the trigger highlighted", async () => {
     const onSelect = vi.fn();
     render(<FlowCanvas runs={runs} filters={initialFilters} selectedId={null} onSelect={onSelect} />);
     fireEvent.click(await screen.findByText("agent-one"));
     expect(onSelect).toHaveBeenCalledWith("one");
     onSelect.mockClear();
+    // Newest tree first: the first trigger started run "two".
     fireEvent.click(screen.getAllByText("manual")[0]!);
-    expect(onSelect).not.toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledWith("two", { kind: "trigger" });
+    onSelect.mockClear();
+    fireEvent.click(screen.getByText("💬 WAR-1"));
+    expect(onSelect).toHaveBeenCalledWith("one", { kind: "outcome", index: 0 });
   });
 
   it("names nodes and selects a focused run node with Enter", async () => {

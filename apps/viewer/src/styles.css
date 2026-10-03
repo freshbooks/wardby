@@ -413,6 +413,19 @@ button:disabled {
   white-space: pre;
 }
 
+/* The trigger or outcome clicked in the graph, shown in its run's panel. */
+.focus-item {
+  border-radius: 4px;
+  padding: 0.1rem 0.3rem;
+  margin-inline: -0.3rem;
+  transition: background 0.3s;
+}
+
+.focus-item.focused {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  outline: 1px solid var(--accent);
+}
+
 .node-link {
   flex: none;
   margin-left: auto;

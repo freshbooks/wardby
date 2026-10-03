@@ -26,7 +26,7 @@ function run(id: string, parentRunId: string | null, startedAt: string): GraphRu
     startedAt,
     finishedAt: null,
     heartbeatAt: null,
-    outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "K-1" }],
+    outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "K-1", at: null }],
     services: [],
   } as GraphRun;
 }

@@ -2,7 +2,7 @@ import type { FlowNodeData } from "./build";
 import { trayServices } from "./services";
 
 /** Single source of truth for node boxes: the ELK layout reserves exactly these sizes. */
-export const TRIGGER_SIZE = { width: 200, height: 44 } as const;
+export const TRIGGER_SIZE = { width: 200, height: 56 } as const;
 export const OUTCOME_SIZE = { width: 200, height: 56 } as const;
 export const RUN_WIDTH = 240;
 export const RUN_BASE_HEIGHT = 70;
