@@ -867,10 +867,27 @@ async function serve(args: string[]): Promise<void> {
 
 async function importCommand(rest: string[]): Promise<void> {
   const opts = parseImportArgs(rest);
-  const { report, result } = await runImport({ ...opts, db: prisma, env: process.env });
-  console.log(report);
-  if (result) {
-    for (const w of result.webhookSecrets) console.log(`webhook secret (${w.agentName}): ${w.secret}`);
+
+  // runImport builds an LLM provider and classifies each agent's model as
+  // routable/unroutable from currentModelCatalog() — without a store
+  // started here first, that falls back to the shipped catalog, so an
+  // admin-disabled model would be (wrongly) imported as routable and a
+  // DB-only custom model would be (wrongly) imported as disabled.
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
+  try {
+    const { report, result } = await runImport({ ...opts, db: prisma, env: process.env });
+    console.log(report);
+    if (result) {
+      for (const w of result.webhookSecrets) console.log(`webhook secret (${w.agentName}): ${w.secret}`);
+    }
+  } finally {
+    modelCatalog.close();
   }
 }
 
