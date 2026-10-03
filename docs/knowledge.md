@@ -115,13 +115,15 @@ own instructions, such as `AGENTS.md`, win on conflict), includes the index, and
 asks the agent to read the concepts covering files it will touch and to update a
 concept's prose if its change alters the behavior the concept describes.
 
-- The note holds up to 8 KiB of the index, cut at a line boundary and ended with
-  a `[index truncated — list docs/knowledge/ for the rest]` marker.
+- The note is capped at 8 KiB. When the index does not fit it is cut at a line
+  boundary and a `[index truncated — list docs/knowledge/ for the rest]` marker
+  is added. The note always ends with an `[end of architecture knowledge]` line.
 - It is dropped when the task leaves no room for it.
 - It never fails or changes a dispatch: an unreadable or oversized index, or any
   problem reading the branch, simply means no note.
 
-Every coding run's task also ends with a line of the form:
+When the run's commit is known (it always is for a normal clone) and the
+request leaves room, the task also ends with a line of the form:
 
 ```text
 Base commit: <sha> (the commit this workspace was checked out at; the workspace has no git metadata).

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CODING_TASK_TRAILER_RESERVE_BYTES,
   CODING_PROTOCOL_VERSION,
   CodingAgentOutputSchema,
   CodingRunResultSchema,
@@ -500,7 +501,20 @@ describe("composeCodingTask", () => {
     });
     const prefix = "Standing instructions for this coding agent:\nRun pytest.\n\n";
     const suffix = "\n\nRequest:\nAdd a joke.";
-    expect(seen).toBe(MAX_CODING_TASK_BYTES - Buffer.byteLength(prefix) - Buffer.byteLength(suffix));
+    expect(seen).toBe(
+      MAX_CODING_TASK_BYTES - Buffer.byteLength(prefix) - Buffer.byteLength(suffix) - CODING_TASK_TRAILER_RESERVE_BYTES,
+    );
+  });
+
+  it("leaves the trailer reserve free even with big instructions and a big note", () => {
+    const instructions = "i".repeat(6000);
+    const composed = composeCodingTask(instructions, "Add a joke.", undefined, {
+      render: (max) => "N".repeat(max),
+    });
+    expect(composed).toContain("NNNN");
+    expect(MAX_CODING_TASK_BYTES - Buffer.byteLength(composed)).toBeGreaterThanOrEqual(
+      CODING_TASK_TRAILER_RESERVE_BYTES,
+    );
   });
 
   it("puts a generated note after the agent's own instructions, ahead of the request", () => {

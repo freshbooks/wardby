@@ -8,6 +8,7 @@ export interface KnowledgeNoteInput {
   indexText: string;
 }
 
+const END_MARKER = "[end of architecture knowledge]";
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
 function header(bundlePath: string): string {
@@ -27,16 +28,16 @@ function header(bundlePath: string): string {
 export function renderKnowledgeNote(input: KnowledgeNoteInput, maxBytes: number): string | undefined {
   const top = header(input.bundlePath);
   const body = (splitFrontMatter(input.indexText)?.body ?? input.indexText).trim();
-  const full = `${top}\n${body}`;
+  const full = `${top}\n${body}\n${END_MARKER}`;
   if (bytes(full) <= maxBytes) return full;
   const marker = `[index truncated — list ${input.bundlePath}/ for the rest]`;
-  if (bytes(`${top}\n${marker}`) > maxBytes) return undefined;
+  if (bytes(`${top}\n${marker}\n${END_MARKER}`) > maxBytes) return undefined;
   const kept: string[] = [];
   for (const line of body.split("\n")) {
-    if (bytes(`${top}\n${[...kept, line, marker].join("\n")}`) > maxBytes) break;
+    if (bytes(`${top}\n${[...kept, line, marker, END_MARKER].join("\n")}`) > maxBytes) break;
     kept.push(line);
   }
-  return `${top}\n${[...kept, marker].join("\n")}`;
+  return `${top}\n${[...kept, marker, END_MARKER].join("\n")}`;
 }
 
 /** The knowledge note as a composeCodingTask section, capped at KNOWLEDGE_NOTE_MAX_BYTES. */

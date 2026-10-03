@@ -1,7 +1,7 @@
 ---
 id: knowledge
 title: Architecture knowledge bundles
-summary: Keep cited, non-obvious architecture knowledge in docs/knowledge/ so coding runs, reviewers, and live sessions use it; validate it with wardby knowledge check.
+summary: Keep cited, non-obvious architecture knowledge in docs/knowledge/ so coding runs, reviewers, and live sessions (through the AGENTS.md pointer) use it; validate it with wardby knowledge check.
 audience: operator
 tags: [knowledge, architecture, coding-agents, okf, cli]
 appliesTo: >=0.4.0
@@ -21,7 +21,8 @@ carries a commit `sha` and a `spanHash` so staleness can be detected.
 - When `docs/knowledge/index.md` exists on a coding run's base branch, the run's
   task includes the index automatically (up to 8 KiB). It never fails a
   dispatch; an unreadable index just means no note.
-- Every coding run's task ends with a `Base commit: <sha>` line. The workspace
+- When the run's commit is known (it always is for a normal clone) and the
+  request leaves room, the task ends with a `Base commit: <sha>` line. The workspace
   has no git metadata, so use that value for citation `sha` fields.
 - Validate the bundle with `wardby knowledge check` (add `--strict` to fail on
   warnings, `--json` for machine output, `--root` to point at the repository).

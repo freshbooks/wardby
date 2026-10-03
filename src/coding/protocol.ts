@@ -5,6 +5,8 @@ export const CODING_PROTOCOL_VERSION = 1 as const;
 export const CODING_CODE_PROVIDER = "github";
 export const MAX_CODING_ARTIFACT_BYTES = 64 * 1024;
 export const MAX_CODING_TASK_BYTES = 16 * 1024;
+/** Room reserved at the end of a composed task for lines the executor appends (e.g. the base commit). */
+export const CODING_TASK_TRAILER_RESERVE_BYTES = 256;
 export const MAX_CODING_SUMMARY_BYTES = 8 * 1024;
 export const MAX_CODING_TESTS = 64;
 export const MAX_CODING_TEST_COMMAND_BYTES = 2 * 1024;
@@ -260,7 +262,7 @@ export function composeCodingTask(
   if (!knowledge) return base;
   const prefix = standing ? `Standing instructions for this coding agent:\n${standing}\n\n` : "";
   const suffix = `\n\nRequest:\n${task}`;
-  const room = MAX_CODING_TASK_BYTES - byteLength(prefix) - byteLength(suffix);
+  const room = MAX_CODING_TASK_BYTES - byteLength(prefix) - byteLength(suffix) - CODING_TASK_TRAILER_RESERVE_BYTES;
   const rendered = room > 0 ? knowledge.render(room) : undefined;
   return rendered ? `${prefix}${rendered}${suffix}` : base;
 }

@@ -63,4 +63,37 @@ describe("checkBundle", () => {
     ]);
     expect(codes(checkBundle({ files }, reader({ "src/a.py": source })))).toEqual(["concept_not_indexed"]);
   });
+  it("treats anchored index links as links", () => {
+    const hash = spanHash(source, [2, 3])!;
+    const files = new Map([
+      ["index.md", "# Pitfalls\n\n* [A](a.md#why) - a\n"],
+      ["a.md", concept(hash)],
+    ]);
+    expect(checkBundle({ files }, reader({ "src/a.py": source }))).toEqual([]);
+  });
+  it("does not treat reindex.md as an index", () => {
+    const hash = spanHash(source, [2, 3])!;
+    const files = new Map([
+      ["index.md", index],
+      ["a.md", concept(hash)],
+      ["reindex.md", concept(hash)],
+    ]);
+    expect(codes(checkBundle({ files }, reader({ "src/a.py": source })))).toEqual(["concept_not_indexed"]);
+    const linkingFromConcept = new Map([
+      ["index.md", index],
+      ["a.md", concept(hash)],
+      ["reindex.md", concept(hash) + "\n[B](b.md)\n"],
+    ]);
+    expect(codes(checkBundle({ files: linkingFromConcept }, reader({ "src/a.py": source })))).toEqual([
+      "concept_not_indexed",
+    ]);
+  });
+  it("ignores index links with a URL scheme", () => {
+    const hash = spanHash(source, [2, 3])!;
+    const files = new Map([
+      ["index.md", index + "* [Spec](https://example.com/spec.md) - external\n"],
+      ["a.md", concept(hash)],
+    ]);
+    expect(checkBundle({ files }, reader({ "src/a.py": source }))).toEqual([]);
+  });
 });

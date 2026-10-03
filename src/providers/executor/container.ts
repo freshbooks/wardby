@@ -1214,13 +1214,20 @@ export class ContainerExecutor implements Executor {
     const destination = join(directory, "input.json");
     const temporary = join(directory, `.input-${randomUUID()}.tmp`);
     const services = parseStoredServices(run.services);
+    const task = withBaseCommit(run.task, baseCommit);
+    if (task === run.task && /^[0-9a-f]{40}$/.test(baseCommit)) {
+      containerLog.warn(
+        { event: "coding.base_commit_omitted", runId: run.runId },
+        "the coding task left no room for the base commit line",
+      );
+    }
     const input = CodingTaskInputSchema.parse({
       schemaVersion: CODING_PROTOCOL_VERSION,
       runId: run.runId,
       repository: run.repository,
       baseRef: run.baseRef,
       headRef: run.headRef,
-      task: withBaseCommit(run.task, baseCommit),
+      task,
       model: run.model,
       budgetUsd: run.budgetUsd,
       deadlineAt: deadlineAt.toISOString(),

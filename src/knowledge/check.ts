@@ -22,7 +22,9 @@ export interface BundleFiles {
 }
 export type RepoFileReader = (repoRelativePath: string) => string | null;
 
-const LINK = /\]\(([^)#\s]+\.md)\)/g;
+const LINK = /\]\(([^)#\s]+\.md)(?:#[^)\s]*)?\)/g;
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+const baseName = (path: string) => path.split("/").pop() ?? path;
 
 function dirOf(path: string): string {
   const cut = path.lastIndexOf("/");
@@ -48,8 +50,9 @@ export function checkBundle(bundle: BundleFiles, readRepoFile: RepoFileReader): 
   const linked = new Set<string>();
   for (const [path, text] of bundle.files) {
     if (redactTokenShapedValues(text) !== text) add("error", "concept_secret", path, "contains a secret-shaped value");
-    if (!path.endsWith("index.md")) continue;
+    if (baseName(path) !== "index.md") continue;
     for (const match of text.matchAll(LINK)) {
+      if (URL_SCHEME.test(match[1])) continue;
       const target = normalize(match[1].startsWith("/") ? match[1].slice(1) : dirOf(path) + match[1]);
       linked.add(target);
       if (!bundle.files.has(target)) add("error", "index_link_broken", path, `links to missing ${target}`);
