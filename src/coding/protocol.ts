@@ -223,6 +223,16 @@ export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe b
 export const CodingTaskOverrideSchema = boundedText(MAX_CODING_TASK_BYTES);
 
 /**
+ * A section rendered to fit whatever room the task leaves (the knowledge note:
+ * src/knowledge/note.ts). Declared structurally so this module, which coding
+ * workers ship as a single file, imports nothing new.
+ */
+export interface FittedSection {
+  /** The section text within `maxBytes`, or undefined when it does not fit. */
+  render(maxBytes: number): string | undefined;
+}
+
+/**
  * A coding worker receives only its task text, so a coding agent's own
  * instructions (its systemPrompt) travel inside that text, ahead of the
  * request, followed by any note wardby generates for the run (the services it
@@ -233,16 +243,6 @@ export const CodingTaskOverrideSchema = boundedText(MAX_CODING_TASK_BYTES);
  * request and is fitted into whatever room is left: it is cut, or dropped,
  * never the cause of an error.
  */
-/**
- * A section rendered to fit whatever room the task leaves (the knowledge note:
- * src/knowledge/note.ts). Declared structurally so this module, which coding
- * workers ship as a single file, imports nothing new.
- */
-export interface FittedSection {
-  /** The section text within `maxBytes`, or undefined when it does not fit. */
-  render(maxBytes: number): string | undefined;
-}
-
 export function composeCodingTask(
   instructions: string | null | undefined,
   task: string,

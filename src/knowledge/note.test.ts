@@ -22,6 +22,11 @@ describe("renderKnowledgeNote", () => {
     expect(cut).not.toContain("fourth");
     expect(cut).toContain("* [A](a.md) - first");
     expect(cut).toContain("[index truncated");
+    const lines = cut.split("\n");
+    expect(lines.at(-1)).toBe("[index truncated — list docs/knowledge/ for the rest]");
+    // The last kept line is a whole index line, not a fragment.
+    const thirdLine = `* [C](c.md) - ${"third concept ".repeat(10)}`;
+    expect(lines.at(-2)).toBe(thirdLine);
     expect(Buffer.byteLength(cut)).toBeLessThanOrEqual(Buffer.byteLength(full) - 5);
   });
   it("returns undefined when even the header does not fit", () => {
