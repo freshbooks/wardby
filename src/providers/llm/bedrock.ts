@@ -3,7 +3,7 @@
  * is imported only here; all protocol/pricing-dispatch logic lives in the
  * shared ClaudeLlmProvider base class (claude-provider.ts) — AnthropicBedrock
  * exposes the identical .messages.stream() surface as @anthropic-ai/sdk, so
- * this file's only job is constructing the right client and pricing module.
+ * this file's only job is constructing the right client.
  *
  * Named BedrockClaudeLlmProvider, not BedrockLlmProvider: Bedrock hosts
  * multiple model vendors, and this adapter only ever speaks the
@@ -12,13 +12,7 @@
  */
 import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import { ClaudeLlmProvider } from "./claude-provider.js";
-import {
-  bedrockClaudePriceUsd,
-  bedrockClaudeSupportedEfforts,
-  getBedrockClaudePricing,
-} from "./pricing-bedrock-claude.js";
-
-export { bedrockClaudeSupportedModels } from "./pricing-bedrock-claude.js";
+import type { CatalogLookup } from "./catalog-lookup.js";
 
 export function bedrockCredentialsPresent(env: NodeJS.ProcessEnv = process.env): boolean {
   // A region is the one thing Bedrock always needs; AWS resolves actual
@@ -28,14 +22,14 @@ export function bedrockCredentialsPresent(env: NodeJS.ProcessEnv = process.env):
 }
 
 export class BedrockClaudeLlmProvider extends ClaudeLlmProvider {
-  constructor(region: string = process.env.BEDROCK_REGION ?? process.env.AWS_REGION ?? "", client?: AnthropicBedrock) {
+  constructor(
+    region: string = process.env.BEDROCK_REGION ?? process.env.AWS_REGION ?? "",
+    client?: AnthropicBedrock,
+    lookup?: CatalogLookup,
+  ) {
     if (!client && !region) {
       throw new Error("BEDROCK_REGION (or AWS_REGION) is required by the Bedrock Claude LlmProvider adapter.");
     }
-    super(client ?? new AnthropicBedrock({ awsRegion: region }), {
-      getPricing: getBedrockClaudePricing,
-      priceUsd: bedrockClaudePriceUsd,
-      supportedEfforts: bedrockClaudeSupportedEfforts,
-    });
+    super(client ?? new AnthropicBedrock({ awsRegion: region }), lookup);
   }
 }

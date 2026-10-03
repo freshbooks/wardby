@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type OpenAI from "openai";
 import { OpenAiLlmProvider, estimateTokens } from "./openai.js";
+import { shippedCatalog } from "./catalog.js";
 import type { LlmMessage, LlmStreamEvent, LlmToolDef } from "./types.js";
 
 function fakeOpenAiClient(chunks: unknown[]): OpenAI {
@@ -157,5 +158,27 @@ describe("estimateTokens with tools", () => {
 
   it("is a no-op for an empty tool array (matches the omitted-tools estimate)", () => {
     expect(estimateTokens("gpt-4o-mini", messages, [])).toBe(estimateTokens("gpt-4o-mini", messages));
+  });
+});
+
+describe("OpenAiLlmProvider.withEntry", () => {
+  it("withEntry keeps the injected client and prices from the pinned entry", async () => {
+    const chunks = [
+      { choices: [{ delta: { content: "hi" }, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 1_000_000, completion_tokens: 0 } },
+    ];
+    const pinned = new OpenAiLlmProvider("fake-key", fakeOpenAiClient(chunks)).withEntry({
+      ...shippedCatalog().require("gpt-4o-mini"),
+      inputPerMTok: 7,
+    });
+
+    const events: LlmStreamEvent[] = [];
+    for await (const event of pinned.stream({ model: "gpt-4o-mini", messages: [] })) {
+      events.push(event);
+    }
+
+    const done = events.find((e) => e.type === "done");
+    expect(done?.type === "done" && done.usage.costUsd).toBeCloseTo(7, 9);
+    expect(() => pinned.priceUsd("gpt-4o", { inputTokens: 1, outputTokens: 0 })).toThrow(/reason: not_in_catalog/);
   });
 });

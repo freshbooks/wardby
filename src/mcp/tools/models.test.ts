@@ -3,14 +3,15 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerModelTools } from "./models.js";
-import { RoutingLlmProvider } from "../../providers/llm/index.js";
+import { RoutingLlmProvider, SHIPPED_CATALOG, buildCatalog } from "../../providers/llm/index.js";
 import type { LlmProvider } from "../../providers/llm/types.js";
+import type { CatalogLlmAdapter } from "../../providers/llm/routing.js";
 import type { McpRequestContext } from "../context.js";
 
 const CANONICAL_URI = "https://host/mcp";
 
-function fakeLlm(name: string): LlmProvider {
-  return {
+function fakeLlm(name: string): CatalogLlmAdapter {
+  const self: CatalogLlmAdapter = {
     async *stream() {
       yield { type: "done", stopReason: "stop", usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 } };
     },
@@ -20,7 +21,9 @@ function fakeLlm(name: string): LlmProvider {
     priceUsd() {
       return 0;
     },
+    withEntry: () => self,
   };
+  return self;
 }
 
 function fakeCtx(llm: LlmProvider): McpRequestContext {
@@ -45,11 +48,14 @@ async function connectClient(mcp: ReturnType<typeof buildMcpServer>) {
 }
 
 describe("list_models", () => {
-  it("returns every model registered across LLM providers", async () => {
-    const llm = new RoutingLlmProvider([
-      { provider: fakeLlm("a"), models: ["gpt-4o", "gpt-4o-mini"] },
-      { provider: fakeLlm("b"), models: ["claude-opus-5"] },
-    ]);
+  it("returns every catalog model whose provider is configured", async () => {
+    const llm = new RoutingLlmProvider(
+      [
+        { provider: "openai", adapter: fakeLlm("a") },
+        { provider: "anthropic", adapter: fakeLlm("b") },
+      ],
+      () => buildCatalog(SHIPPED_CATALOG, [], "2026-10-03"),
+    );
     const mcp = buildMcpServer({
       providers: { llm } as unknown as McpRequestContext["providers"],
       db: {} as never,
@@ -62,7 +68,8 @@ describe("list_models", () => {
     const result = await client.callTool({ name: "list_models", arguments: {} });
     expect(result.isError).toBeFalsy();
     const { models } = JSON.parse((result.content as { text: string }[])[0].text);
-    expect(models.sort()).toEqual(["claude-opus-5", "gpt-4o", "gpt-4o-mini"]);
+    const expected = SHIPPED_CATALOG.filter((e) => e.provider !== "bedrock-claude").map((e) => e.modelId);
+    expect(models.sort()).toEqual(expected.sort());
 
     await client.close();
   });

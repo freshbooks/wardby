@@ -7,9 +7,8 @@ describe("classifyModel", () => {
     expect(classifyModel("gpt-4o", routable)).toBe("routable");
   });
   it("unroutable when the model id is not in the routable set (e.g. an un-rostered Bedrock inference-profile id)", () => {
-    // The Bedrock-Claude adapter is registered, but its pricing roster is
-    // seeded — a profile id not yet in bedrockClaudeSupportedModels() is not
-    // routable. A rostered id (e.g. "anthropic.claude-sonnet-5-v1:0") would be.
+    // The Bedrock-Claude adapter is registered, but a profile id that is not
+    // in the model catalog is not routable; a catalog id would be.
     expect(classifyModel("us.anthropic.claude-opus-4-6-v1", routable)).toBe("unroutable");
   });
 });

@@ -3,9 +3,6 @@ import { resolveLlmRegistrations } from "./registration.js";
 import { OpenAiLlmProvider } from "./openai.js";
 import { AnthropicLlmProvider } from "./anthropic.js";
 import { BedrockClaudeLlmProvider } from "./bedrock.js";
-import { supportedModels as openaiSupportedModels } from "./pricing.js";
-import { anthropicSupportedModels } from "./anthropic.js";
-import { bedrockClaudeSupportedModels } from "./bedrock.js";
 
 const NO_CREDS = {} as NodeJS.ProcessEnv;
 const OPENAI_ONLY = { OPENAI_API_KEY: "sk-test-openai" } as NodeJS.ProcessEnv;
@@ -27,8 +24,8 @@ describe("resolveLlmRegistrations", () => {
     expect(result.kind).toBe("registrations");
     if (result.kind !== "registrations") throw new Error("unreachable");
     expect(result.registrations).toHaveLength(1);
-    expect(result.registrations[0].provider).toBeInstanceOf(OpenAiLlmProvider);
-    expect(result.registrations[0].models).toEqual(openaiSupportedModels());
+    expect(result.registrations[0].provider).toBe("openai");
+    expect(result.registrations[0].adapter).toBeInstanceOf(OpenAiLlmProvider);
   });
 
   it("registers only the Anthropic adapter when only its credential is present", () => {
@@ -36,8 +33,8 @@ describe("resolveLlmRegistrations", () => {
     expect(result.kind).toBe("registrations");
     if (result.kind !== "registrations") throw new Error("unreachable");
     expect(result.registrations).toHaveLength(1);
-    expect(result.registrations[0].provider).toBeInstanceOf(AnthropicLlmProvider);
-    expect(result.registrations[0].models).toEqual(anthropicSupportedModels());
+    expect(result.registrations[0].provider).toBe("anthropic");
+    expect(result.registrations[0].adapter).toBeInstanceOf(AnthropicLlmProvider);
   });
 
   it("registers only the Bedrock-Claude adapter when only AWS_REGION is present", () => {
@@ -45,8 +42,8 @@ describe("resolveLlmRegistrations", () => {
     expect(result.kind).toBe("registrations");
     if (result.kind !== "registrations") throw new Error("unreachable");
     expect(result.registrations).toHaveLength(1);
-    expect(result.registrations[0].provider).toBeInstanceOf(BedrockClaudeLlmProvider);
-    expect(result.registrations[0].models).toEqual(bedrockClaudeSupportedModels());
+    expect(result.registrations[0].provider).toBe("bedrock-claude");
+    expect(result.registrations[0].adapter).toBeInstanceOf(BedrockClaudeLlmProvider);
   });
 
   it("registers all three adapters additively when all three credentials are present — Bedrock is never exclusive", () => {
@@ -54,7 +51,8 @@ describe("resolveLlmRegistrations", () => {
     expect(result.kind).toBe("registrations");
     if (result.kind !== "registrations") throw new Error("unreachable");
     expect(result.registrations).toHaveLength(3);
-    expect(result.registrations.map((r) => r.provider)).toEqual([
+    expect(result.registrations.map((r) => r.provider)).toEqual(["openai", "anthropic", "bedrock-claude"]);
+    expect(result.registrations.map((r) => r.adapter)).toEqual([
       expect.any(OpenAiLlmProvider),
       expect.any(AnthropicLlmProvider),
       expect.any(BedrockClaudeLlmProvider),
