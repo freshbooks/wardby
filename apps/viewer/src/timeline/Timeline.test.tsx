@@ -1,7 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GraphRun } from "../api/types";
-import { Timeline, hhmm, tickAnchor } from "./Timeline";
+import { hhmm } from "../format/time";
+import { Timeline, tickAnchor } from "./Timeline";
 
 const NOW = Date.UTC(2026, 0, 1, 13, 0, 0);
 const MIN = 60_000;
@@ -96,6 +97,34 @@ describe("Timeline", () => {
     const { from, to } = onRangeChange.mock.calls[0]![0] as { from: number; to: number };
     expect(from).toBeCloseTo(NOW - 60 * MIN, -3);
     expect(to).toBeCloseTo(NOW - 30 * MIN, -3);
+  });
+
+  it("brushes right-to-left the same as left-to-right", () => {
+    const { svg, onRangeChange } = setup();
+    drag(svg, 10 + 373, 10);
+    const { from, to } = onRangeChange.mock.calls[0]![0] as { from: number; to: number };
+    expect(from).toBeCloseTo(NOW - 60 * MIN, -3);
+    expect(to).toBeCloseTo(NOW - 30 * MIN, -3);
+  });
+
+  it("clamps a drag past the plot edges to the window", () => {
+    const { svg, onRangeChange } = setup();
+    fireEvent.pointerDown(svg, { clientX: -50, clientY: 20, pointerId: 1 });
+    fireEvent.pointerMove(svg, { clientX: 2000, clientY: 20, pointerId: 1 });
+    const band = svg.querySelector(".timeline-band")!;
+    expect(Number(band.getAttribute("x"))).toBe(10);
+    expect(Number(band.getAttribute("x")) + Number(band.getAttribute("width"))).toBe(756);
+    fireEvent.pointerUp(svg, { clientX: 2000, clientY: 20, pointerId: 1 });
+    const { from, to } = onRangeChange.mock.calls[0]![0] as { from: number; to: number };
+    expect(from).toBe(NOW - 60 * MIN);
+    expect(to).toBe(NOW);
+  });
+
+  it("treats a drag narrower than one bucket as a click", () => {
+    const { svg, onRangeChange } = setup({ timeRange: { from: NOW - 30 * MIN, to: NOW } });
+    drag(svg, 300, 304);
+    expect(onRangeChange).toHaveBeenCalledTimes(1);
+    expect(onRangeChange).toHaveBeenCalledWith(null);
   });
 
   it("clears on a click on empty space", () => {

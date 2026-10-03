@@ -1,4 +1,5 @@
 import type { GraphRun, RunStatus } from "../api/types";
+import { outcomeTerms, triggerLabel } from "../graph/labels";
 
 export const WINDOWS = ["15m", "1h", "6h", "24h", "7d"] as const;
 export type WindowSize = (typeof WINDOWS)[number];
@@ -58,6 +59,10 @@ export function statusGroup(status: RunStatus): StatusGroup {
   }
 }
 
+/**
+ * The one run-matching rule shared by the graph, counts, cost and timeline: status group, agents,
+ * search (agent name, run id, trigger label, outcome terms) and brushed range (unless ignored).
+ */
 export function matchesFilters(run: GraphRun, filters: Filters, opts: { ignoreTimeRange?: boolean } = {}): boolean {
   if (!filters.statuses.has(statusGroup(run.status))) return false;
   if (filters.timeRange && !opts.ignoreTimeRange) {
@@ -66,27 +71,13 @@ export function matchesFilters(run: GraphRun, filters: Filters, opts: { ignoreTi
   }
   if (filters.agents.size > 0 && !filters.agents.has(run.agentId)) return false;
   const q = filters.search.trim().toLowerCase();
-  if (q && !run.id.toLowerCase().includes(q) && !run.agentName.toLowerCase().includes(q)) return false;
-  return true;
+  if (q === "") return true;
+  const hay = [run.agentName, run.id, triggerLabel(run.trigger), ...run.outcomes.flatMap(outcomeTerms)];
+  return hay.some((s) => s.toLowerCase().includes(q));
 }
 
 export function countByGroup(runs: Iterable<GraphRun>): Record<StatusGroup, number> {
   const counts: Record<StatusGroup, number> = { running: 0, failed: 0, succeeded: 0, pending: 0 };
   for (const run of runs) counts[statusGroup(run.status)] += 1;
   return counts;
-}
-
-/** Runs matching the filters plus their ancestors, so run trees stay connected. */
-export function visibleRuns(runs: readonly GraphRun[], filters: Filters): GraphRun[] {
-  const byId = new Map(runs.map((r) => [r.id, r]));
-  const keep = new Set<string>();
-  for (const r of runs) {
-    if (!matchesFilters(r, filters)) continue;
-    let cur: GraphRun | undefined = r;
-    while (cur && !keep.has(cur.id)) {
-      keep.add(cur.id);
-      cur = cur.parentRunId === null ? undefined : byId.get(cur.parentRunId);
-    }
-  }
-  return runs.filter((r) => keep.has(r.id));
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GraphRun } from "../api/types";
+import { initialFilters } from "../state/filters";
 import { buildGraph } from "./build";
 import { layoutGraph } from "./layout";
 import { OUTCOME_SIZE, RUN_WIDTH, TRIGGER_SIZE, runHeight } from "./sizes";
@@ -32,7 +33,7 @@ const graph = buildGraph(
     run("c", "p", "2026-01-01T00:01:00.000Z"),
     run("q", null, "2026-01-02T00:00:00.000Z"),
   ],
-  { statuses: null, agentIds: null, search: "" },
+  initialFilters,
   null,
 );
 

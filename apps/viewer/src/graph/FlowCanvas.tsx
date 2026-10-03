@@ -1,37 +1,16 @@
 import { Background, ControlButton, Controls, ReactFlow, useReactFlow, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
-import type { GraphRun, RunStatus } from "../api/types";
-import { statusGroup, type Filters as UiFilters } from "../state/filters";
-import { buildGraph, type Filters as BuildFilters, type FlowGraph } from "./build";
+import type { GraphRun } from "../api/types";
+import type { Filters as UiFilters } from "../state/filters";
+import { buildGraph, type FlowGraph } from "./build";
 import { outcomeLabel, OutcomeNode } from "./nodes/OutcomeNode";
 import { RunNode } from "./nodes/RunNode";
 import { TriggerNode } from "./nodes/TriggerNode";
 
 const nodeTypes = { trigger: TriggerNode, run: RunNode, outcome: OutcomeNode };
 
-const ALL_STATUSES: RunStatus[] = [
-  "pending",
-  "running",
-  "succeeded",
-  "failed",
-  "refused",
-  "lost",
-  "budget_exhausted",
-  "cancelled",
-];
-
 type Positions = Map<string, { x: number; y: number }>;
-
-function toBuildFilters(f: UiFilters): BuildFilters {
-  const allGroups = [...new Set(ALL_STATUSES.map(statusGroup))].every((g) => f.statuses.has(g));
-  return {
-    statuses: allGroups ? null : new Set(ALL_STATUSES.filter((s) => f.statuses.has(statusGroup(s)))),
-    agentIds: f.agents.size > 0 ? f.agents : null,
-    search: f.search,
-    timeRange: f.timeRange,
-  };
-}
 
 function nodeLabel(d: FlowGraph["nodes"][number]["data"]): string {
   switch (d.kind) {
@@ -101,7 +80,7 @@ interface Props {
 }
 
 export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
-  const graph = useMemo(() => buildGraph(runs, toBuildFilters(filters), selectedId), [runs, filters, selectedId]);
+  const graph = useMemo(() => buildGraph(runs, filters, selectedId), [runs, filters, selectedId]);
 
   // Layout runs only when the set of node/edge ids changes, so live status and
   // cost updates never move nodes. `layoutInput` is the graph as of the last

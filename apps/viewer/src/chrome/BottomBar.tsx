@@ -4,7 +4,7 @@ import type { TickerItem } from "../state/reducer";
 import { exactUsd, formatUsd } from "../format/money";
 import { breakdownText, shownCost } from "../state/cost";
 import { countByGroup, type Filters } from "../state/filters";
-import { windowSpend } from "./TopBar";
+import { formatWindowTotal, TRUNCATED_TITLE, windowSpend } from "../format/spend";
 
 const TICKER_SHOWN = 5;
 
@@ -15,26 +15,31 @@ export function BottomBar({
   filters,
   ticker,
   window,
+  truncated = false,
 }: {
   /** Every run in the snapshot window (not just the visible ones). */
   runs: readonly GraphRun[];
   filters: Filters;
   ticker: TickerItem[];
   window: string;
+  /** The snapshot hit its row limit, so the window total is a lower bound. */
+  truncated?: boolean;
 }) {
   const { matching, shown, byAgent } = useMemo(() => shownCost(runs, filters), [runs, filters]);
   const total = windowSpend(runs);
-  const narrowed = Math.abs(total - shown) > 1e-9;
+  const narrowed = matching.length !== runs.length;
   const counts = countByGroup(matching);
   const breakdown = breakdownText(byAgent);
-  const exact = narrowed ? `${exactUsd(shown)} shown of ${exactUsd(total)}` : exactUsd(total);
-  const title = breakdown ? `${breakdown}\n${exact}` : exact;
+  const totalText = formatWindowTotal(total, truncated);
+  const exactTotal = `${truncated ? "≥" : ""}${exactUsd(total)}`;
+  const exact = narrowed ? `${exactUsd(shown)} shown of ${exactTotal}` : exactTotal;
+  const title = [breakdown, exact, truncated ? TRUNCATED_TITLE : ""].filter(Boolean).join("\n");
   return (
     <footer className="bottombar">
       <span className="counts">
         ◉ {counts.running} running · ✗ {counts.failed} failed · ✓ {counts.succeeded} done ·{" "}
         <span className="cost" title={title} aria-description={breakdown || undefined} tabIndex={0}>
-          {narrowed ? `${formatUsd(shown)} shown of ${formatUsd(total)}` : formatUsd(total)} ({window})
+          {narrowed ? `${formatUsd(shown)} shown of ${totalText}` : totalText} ({window})
         </span>
       </span>
       <ol className="ticker" aria-label="Recent events">

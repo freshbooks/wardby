@@ -7,7 +7,8 @@ import { ErrorLine } from "./chrome/ErrorLine";
 import { ServerDialog } from "./chrome/ServerDialog";
 import { ServerMenu } from "./chrome/ServerMenu";
 import { SignInGate } from "./chrome/SignInGate";
-import { TopBar, windowSpend } from "./chrome/TopBar";
+import { TopBar } from "./chrome/TopBar";
+import { windowSpend } from "./format/spend";
 import { FlowCanvas } from "./graph/FlowCanvas";
 import { DetailPanel } from "./panel/DetailPanel";
 import { Timeline } from "./timeline/Timeline";
@@ -66,6 +67,7 @@ function Dashboard({
     () => runs.filter((r) => matchesFilters(r, view, { ignoreTimeRange: true })),
     [runs, view],
   );
+  const totalSpend = useMemo(() => windowSpend(runs), [runs]);
   const rangeRunCount = useMemo(() => {
     const range = view.timeRange;
     if (!range) return 0;
@@ -91,7 +93,8 @@ function Dashboard({
         onFiltersChange={(next) => setFilters((prev) => changeFilters(prev, next))}
         agents={agents}
         spend={model.spend}
-        windowSpendUsd={windowSpend(runs)}
+        windowSpendUsd={totalSpend}
+        windowSpendTruncated={model.truncated}
         rangeRunCount={rangeRunCount}
         onClearRange={() => setRange(null)}
       />
@@ -142,7 +145,7 @@ function Dashboard({
           </>
         )}
       </main>
-      <BottomBar runs={runs} filters={view} ticker={model.ticker} window={filters.window} />
+      <BottomBar runs={runs} filters={view} ticker={model.ticker} window={filters.window} truncated={model.truncated} />
     </div>
   );
 }

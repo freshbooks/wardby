@@ -1,14 +1,10 @@
 // Pure model -> graph data. No positions here (see layout.ts); shapes are plain
 // objects compatible with React Flow's Node/Edge so this stays testable.
-import type { GraphRun, Outcome, RunStatus } from "../api/types";
+import type { GraphRun, Outcome } from "../api/types";
+import { matchesFilters, type Filters } from "../state/filters";
+import { triggerLabel } from "./labels";
 
-export interface Filters {
-  statuses: ReadonlySet<RunStatus> | null;
-  agentIds: ReadonlySet<string> | null;
-  search: string;
-  /** Epoch-ms range on run start; ancestors of matching runs are kept like for other filters. */
-  timeRange?: { from: number; to: number } | null;
-}
+export { triggerLabel };
 
 export type FlowNodeData =
   | { kind: "trigger"; trigger: GraphRun["trigger"]; label: string }
@@ -20,29 +16,6 @@ export interface FlowGraph {
   edges: { id: string; source: string; target: string; animated: boolean }[];
 }
 
-export function triggerLabel(trigger: GraphRun["trigger"]): string {
-  switch (trigger.kind) {
-    case "scheduled":
-      return `⏰ ${trigger.schedule ?? "scheduled"}`;
-    case "webhook":
-      return "webhook";
-    case "manual":
-      return "manual";
-    case "issue":
-      return `◆ ${trigger.provider} ${trigger.issueKey}`;
-    case "code_host":
-      return `⎇ ${trigger.repository}${trigger.number === null ? "" : `#${trigger.number}`} ${trigger.event}`;
-    case "host_event":
-      return "host event";
-    case "subagent":
-      return "sub-agent";
-  }
-}
-
-function outcomeTerms(o: Outcome): string[] {
-  return "repository" in o ? [o.repository] : [o.issueKey];
-}
-
 const isLive = (r: GraphRun) => r.status === "pending" || r.status === "running";
 
 const byStartedAsc = (a: GraphRun, b: GraphRun) =>
@@ -52,24 +25,11 @@ const byStartedDesc = (a: GraphRun, b: GraphRun) =>
 
 export function buildGraph(runs: readonly GraphRun[], filters: Filters, selectedId: string | null): FlowGraph {
   const byId = new Map(runs.map((r) => [r.id, r]));
-  const needle = filters.search.trim().toLowerCase();
-
-  const matches = (r: GraphRun): boolean => {
-    if (filters.statuses && !filters.statuses.has(r.status)) return false;
-    if (filters.agentIds && !filters.agentIds.has(r.agentId)) return false;
-    if (filters.timeRange) {
-      const t = Date.parse(r.startedAt);
-      if (!(t >= filters.timeRange.from && t <= filters.timeRange.to)) return false;
-    }
-    if (needle === "") return true;
-    const hay = [r.agentName, r.id, triggerLabel(r.trigger), ...r.outcomes.flatMap(outcomeTerms)];
-    return hay.some((s) => s.toLowerCase().includes(needle));
-  };
 
   // Keep every matching run plus all of its ancestors so trees stay connected.
   const keep = new Set<string>();
   for (const r of runs) {
-    if (!matches(r)) continue;
+    if (!matchesFilters(r, filters)) continue;
     let cur: GraphRun | undefined = r;
     while (cur && !keep.has(cur.id)) {
       keep.add(cur.id);

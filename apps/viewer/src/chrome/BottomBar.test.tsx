@@ -31,4 +31,17 @@ describe("BottomBar cost", () => {
     expect(el.getAttribute("aria-description")).toBe("jira-smoke $0.09");
     expect(screen.getByText(/0 failed/)).toBeTruthy();
   });
+
+  it("marks a truncated window total as a lower bound", () => {
+    render(<BottomBar runs={runs} filters={initialFilters} ticker={[]} window="7d" truncated />);
+    const el = screen.getByText("≥$0.11 (7d)");
+    expect(el.getAttribute("title")).toContain("Only the most recent 500 runs are loaded");
+  });
+
+  it("is narrowed by run count, not cost equality", () => {
+    const free = [r("a", "x", 0), r("b", "y", 0, "failed")];
+    const f = { ...initialFilters, statuses: new Set(["succeeded" as const]) };
+    render(<BottomBar runs={free} filters={f} ticker={[]} window="1h" />);
+    expect(screen.getByText("$0 shown of $0 (1h)")).toBeTruthy();
+  });
 });

@@ -1,8 +1,9 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { initialFilters } from "../state/filters";
-import { hhmm } from "../timeline/Timeline";
-import { TopBar, windowSpend } from "./TopBar";
+import { hhmm } from "../format/time";
+import { windowSpend } from "../format/spend";
+import { TopBar } from "./TopBar";
 
 describe("windowSpend", () => {
   it("sums costUsd over the runs", () => {
@@ -73,5 +74,32 @@ describe("TopBar range chip", () => {
     expect(screen.getByText(`${hhmm(from)} → ${hhmm(to)} · 3 runs`)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /clear time range/i }));
     expect(clear).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("TopBar truncated window total", () => {
+  it("marks a lower bound with an explanatory title", () => {
+    render(
+      <TopBar
+        servers={[]}
+        selectedUrl={null}
+        onSelectServer={vi.fn()}
+        onAddServer={vi.fn()}
+        onSignOut={vi.fn()}
+        onRemoveServer={vi.fn()}
+        live
+        reconnecting={false}
+        filters={{ ...initialFilters, window: "7d" }}
+        onFiltersChange={vi.fn()}
+        agents={[]}
+        spend={{ todayUsd: 0, groups: [] }}
+        windowSpendUsd={0.62}
+        windowSpendTruncated
+        rangeRunCount={0}
+        onClearRange={vi.fn()}
+      />,
+    );
+    const el = screen.getByText(/7d ≥\$0\.62/);
+    expect(el.getAttribute("title")).toContain("Only the most recent 500 runs are loaded");
   });
 });

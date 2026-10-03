@@ -4,6 +4,8 @@ import { useClock } from "../graph/clock";
 import { statusGroup, WINDOW_MS, type StatusGroup, type TimeRange, type WindowSize } from "../state/filters";
 import { bucketIndex, bucketRuns } from "./buckets";
 import { formatUsd } from "../format/money";
+import { formatSpanTime, hhmm, WEEKDAYS } from "../format/time";
+import { plural } from "../format/text";
 
 export const TIMELINE_HEIGHT = 72;
 const PAD_L = 10;
@@ -34,19 +36,6 @@ const GROUP_COLOR: Record<StatusGroup, string> = {
 };
 // Stack order bottom to top.
 const STACK: StatusGroup[] = ["succeeded", "failed", "running", "pending"];
-
-const pad = (n: number) => String(n).padStart(2, "0");
-export const hhmm = (t: number) => {
-  const d = new Date(t);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-};
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const withDay = (t: number) => `${WEEKDAYS[new Date(t).getDay()]} ${hhmm(t)}`;
-
-export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
-/** Time label for a window: weekday plus time on the 7d view. */
-export const formatSpanTime = (win: WindowSize, t: number) => (win === "7d" ? withDay(t) : hhmm(t));
 
 const TICK_CHAR_W = 6.5;
 
@@ -82,8 +71,9 @@ interface Props {
 }
 
 export function Timeline({ runs, window: win, timeRange, onRangeChange, onSelect, selectedId = null, now }: Props) {
-  const clock = useClock(true);
-  const end = Math.ceil((now ?? clock) / NOW_STEP_MS) * NOW_STEP_MS;
+  // Coarse clock: the axis end only moves every NOW_STEP_MS, so skip the per-second re-renders.
+  const clock = useClock(true, NOW_STEP_MS);
+  const end = now === undefined ? clock + NOW_STEP_MS : Math.ceil(now / NOW_STEP_MS) * NOW_STEP_MS;
   const start = end - WINDOW_MS[win];
 
   const svgRef = useRef<SVGSVGElement>(null);
@@ -106,6 +96,8 @@ export function Timeline({ runs, window: win, timeRange, onRangeChange, onSelect
   const x1 = Math.max(x0 + 1, width - PAD_R);
   const xOf = (t: number) => x0 + ((t - start) / (end - start)) * (x1 - x0);
   const tOf = (x: number) => start + ((Math.min(x1, Math.max(x0, x)) - x0) / (x1 - x0)) * (end - start);
+
+  const clampX = (x: number) => Math.min(x1, Math.max(x0, x));
 
   const count = bucketCountFor(width);
   const spec = useMemo(() => ({ start, end, count }), [start, end, count]);
@@ -159,7 +151,7 @@ export function Timeline({ runs, window: win, timeRange, onRangeChange, onSelect
     if (d) {
       if (!d.moved && Math.abs(x - d.startX) < DRAG_THRESHOLD) return;
       d.moved = true;
-      setBand({ a: d.startX, b: x });
+      setBand({ a: clampX(d.startX), b: clampX(x) });
       return;
     }
     const i = bucketIndex(tOf(x), spec);
@@ -180,7 +172,9 @@ export function Timeline({ runs, window: win, timeRange, onRangeChange, onSelect
     if (d.moved) {
       const a = tOf(d.startX);
       const b = tOf(localX(e));
-      onRangeChange({ from: Math.min(a, b), to: Math.max(a, b) });
+      // A drag narrower than one bucket is no range: treat it as a click.
+      if (Math.abs(b - a) < (end - start) / count) onRangeChange(null);
+      else onRangeChange({ from: Math.min(a, b), to: Math.max(a, b) });
     } else if (!onMarker(e.target)) {
       onRangeChange(null);
     }

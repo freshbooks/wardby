@@ -1,7 +1,9 @@
 import type { ServerSummary } from "../api/client";
 import type { ViewerModel } from "../state/reducer";
 import { ServerMenu } from "./ServerMenu";
-import { formatSpanTime, plural } from "../timeline/Timeline";
+import { formatSpanTime } from "../format/time";
+import { plural } from "../format/text";
+import { formatWindowTotal, TRUNCATED_TITLE } from "../format/spend";
 import { STATUS_GROUPS, WINDOWS, type Filters, type StatusGroup, type WindowSize } from "../state/filters";
 import { exactUsd, formatUsd } from "../format/money";
 
@@ -27,6 +29,8 @@ interface Props {
   spend: ViewerModel["spend"];
   /** Sum of costUsd over the runs in the current snapshot (the selected window). */
   windowSpendUsd: number;
+  /** The snapshot hit its row limit, so the window total is a lower bound. */
+  windowSpendTruncated?: boolean;
   /** Runs (matching the other filters) that fall inside the brushed range. */
   rangeRunCount: number;
   onClearRange: () => void;
@@ -36,13 +40,6 @@ function toggled<T>(set: ReadonlySet<T>, value: T): Set<T> {
   const next = new Set(set);
   if (!next.delete(value)) next.add(value);
   return next;
-}
-
-/** Total cost of the runs currently in the window. */
-export function windowSpend(runs: Iterable<{ costUsd: number }>): number {
-  let total = 0;
-  for (const r of runs) total += r.costUsd;
-  return total;
 }
 
 /** Today's spend against the smallest daily group cap, when any group has one. */
@@ -152,8 +149,14 @@ export function TopBar(props: Props) {
         )}
         {spend && (
           <div className="spend" aria-label="Today's spend">
-            <span title={exactUsd(props.windowSpendUsd)}>
-              {filters.window} {formatUsd(props.windowSpendUsd)} ·{" "}
+            <span
+              title={
+                props.windowSpendTruncated
+                  ? `${exactUsd(props.windowSpendUsd)}\n${TRUNCATED_TITLE}`
+                  : exactUsd(props.windowSpendUsd)
+              }
+            >
+              {filters.window} {formatWindowTotal(props.windowSpendUsd, props.windowSpendTruncated ?? false)} ·{" "}
             </span>
             <span title={`${exactUsd(spend.spent)}${spend.cap !== null ? ` / ${exactUsd(spend.cap)}` : ""}`}>
               Today {formatUsd(spend.spent)}

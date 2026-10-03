@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { GraphRun, RunStatus } from "../api/types";
-import { buildGraph, type Filters } from "./build";
+import type { GraphRun } from "../api/types";
+import { initialFilters, type StatusGroup } from "../state/filters";
+import { buildGraph } from "./build";
 
 function makeRun(id: string, overrides: Partial<GraphRun> = {}): GraphRun {
   return {
@@ -25,7 +26,7 @@ function makeRun(id: string, overrides: Partial<GraphRun> = {}): GraphRun {
   } as GraphRun;
 }
 
-const all: Filters = { statuses: null, agentIds: null, search: "" };
+const all = initialFilters;
 
 const runs: GraphRun[] = [
   makeRun("a", {
@@ -109,12 +110,12 @@ describe("buildGraph", () => {
   });
 
   it("keeps ancestors of a status-matching child", () => {
-    const g = buildGraph(runs, { ...all, statuses: new Set<RunStatus>(["failed"]) }, null);
+    const g = buildGraph(runs, { ...all, statuses: new Set<StatusGroup>(["failed"]) }, null);
     expect(g.nodes.map((n) => n.id)).toEqual(["t:b", "r:b", "o:b:0", "o:b:1", "r:d"]);
   });
 
   it("filters by agent id", () => {
-    const g = buildGraph(runs, { ...all, agentIds: new Set(["agent-1"]) }, null);
+    const g = buildGraph(runs, { ...all, agents: new Set(["agent-1"]) }, null);
     expect(g.nodes.map((n) => n.id)).toEqual(["t:b", "r:b", "o:b:0", "o:b:1", "r:d", "r:c", "t:a", "r:a"]);
   });
 
