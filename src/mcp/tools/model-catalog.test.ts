@@ -3,7 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import type { McpRequestContext } from "../context.js";
-import { registerModelCatalogTools } from "./model-catalog.js";
+import { registerModelCatalogTools, raceLostError } from "./model-catalog.js";
 import { RoutingLlmProvider } from "../../providers/llm/routing.js";
 import type { CatalogLlmAdapter } from "../../providers/llm/routing.js";
 import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../../providers/llm/catalog-store.js";
@@ -146,6 +146,30 @@ async function connect(who: { scopes: string[]; roles: string[] }, overrides: { 
 
 const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
 
+/** A raw ModelCatalogEntry record, as `rows.set(...)` plants directly into the fake DB
+ *  (bypassing set_model/disable_model entirely) to simulate a row this process's own
+ *  write path would never produce on its own — an orphan from another provider, or one
+ *  malformed enough that rowFromRecord rejects it. */
+function rawRow(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+  return {
+    provider: "openai",
+    modelId: "claude-sonnet-5",
+    enabled: true,
+    encoding: "o200k_base",
+    inputPerMTok: 1,
+    outputPerMTok: 5,
+    cachedInputPerMTok: 0.1,
+    cacheWritePerMTok: 1.25,
+    efforts: [],
+    thinkingMode: "none",
+    sourceUrl: "https://platform.openai.com/docs/pricing",
+    updatedBy: "p-other",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
 describe("model catalog tools", () => {
   it("lists shipped models with origin, price version and routability", async () => {
     const { client } = await connect(READER);
@@ -257,26 +281,51 @@ describe("model catalog tools", () => {
     // Simulate another process/replica's write landing after this process's
     // last poll: present in the database, invisible to the installed
     // (in-memory, poll-interval-stale) catalog, since we never refresh here.
-    rows.set("openai::claude-new", {
-      provider: "openai",
-      modelId: "claude-new",
-      enabled: true,
-      encoding: "o200k_base",
-      inputPerMTok: 1,
-      outputPerMTok: 5,
-      cachedInputPerMTok: 0.1,
-      cacheWritePerMTok: 1.25,
-      efforts: [],
-      thinkingMode: "none",
-      sourceUrl: "https://platform.openai.com/docs/pricing",
-      updatedBy: "p-other",
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
+    rows.set("openai::claude-new", rawRow({ modelId: "claude-new" }));
     const r = await client.callTool({ name: "set_model", arguments: NEW });
     expect(r.isError).toBe(true);
     expect(text(r)).toMatch(/already served by provider "openai"/);
     await client.close();
+  });
+
+  it("set_model refuses an orphaned other-provider row's own provider for a shipped id (the shipped provider always owns it)", async () => {
+    const { client, rows } = await connect(MODEL_MANAGER);
+    // buildCatalog seeds ownership of a shipped id from the shipped provider
+    // BEFORE considering any row, so a row under any other provider is a
+    // permanently dead orphan — this must still refuse that same orphan
+    // provider trying to write/update its own dead row.
+    rows.set("openai::claude-sonnet-5", rawRow());
+    const r = await client.callTool({
+      name: "set_model",
+      arguments: { ...NEW, provider: "openai", modelId: "claude-sonnet-5", thinkingMode: "none", efforts: [] },
+    });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/already served by provider "anthropic"/);
+    // Nothing was written: the orphan row is untouched.
+    expect(rows.get("openai::claude-sonnet-5")).toMatchObject({ outputPerMTok: 5 });
+    await client.close();
+  });
+
+  it("set_model under the shipped provider still succeeds despite an orphaned other-provider row for the same id", async () => {
+    const { client, rows } = await connect(MODEL_MANAGER);
+    rows.set("openai::claude-sonnet-5", rawRow());
+    const r = await client.callTool({
+      name: "set_model",
+      arguments: { ...NEW, modelId: "claude-sonnet-5", outputPerMTok: 11 },
+    });
+    expect(r.isError).toBeFalsy();
+    expect(rows.get("anthropic::claude-sonnet-5")).toMatchObject({ outputPerMTok: 11 });
+    // The orphan is left alone — cleaning it up is reset_model's job, not set_model's.
+    expect(rows.has("openai::claude-sonnet-5")).toBe(true);
+    await client.close();
+  });
+
+  it("the post-write ownership-race error names reset_model and the true owner, not a blind retry", () => {
+    const err = raceLostError("claude-new", "anthropic", "openai");
+    expect(err.message).toMatch(/written for provider "anthropic"/);
+    expect(err.message).toMatch(/provider "openai" owns it/);
+    expect(err.message).toMatch(/reset_model removes every row/);
+    expect(err.message).not.toMatch(/retry set_model/i);
   });
 
   it("set_model still succeeds and audits the change when the post-write catalog refresh fails", async () => {
@@ -348,6 +397,30 @@ describe("model catalog tools", () => {
     expect(got.isError).toBe(true);
     expect((await client.callTool({ name: "reset_model", arguments: { modelId: "claude-haiku-4-5" } })).isError).toBe(
       true,
+    );
+    await client.close();
+  });
+
+  it("reset_model deletes a model id whose only row is malformed, and still succeeds with its provider audited", async () => {
+    logged.length = 0;
+    const { client, rows } = await connect(MODEL_MANAGER);
+    // thinkingMode isn't one of THINKING_MODES, so rowFromRecord rejects this
+    // row — but it's still a real row occupying "broken-model" under openai.
+    rows.set(
+      "openai::broken-model",
+      rawRow({ modelId: "broken-model", thinkingMode: "not-a-real-mode", provider: "openai" }),
+    );
+    const r = await client.callTool({ name: "reset_model", arguments: { modelId: "broken-model" } });
+    expect(r.isError).toBeFalsy();
+    expect(rows.has("openai::broken-model")).toBe(false);
+    expect(logged).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          event: "models.catalog.reset",
+          modelId: "broken-model",
+          provider: "openai",
+        }),
+      }),
     );
     await client.close();
   });

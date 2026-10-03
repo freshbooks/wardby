@@ -165,6 +165,58 @@ function conflictError(modelId: string, provider: string, enabled: boolean): Mcp
       );
 }
 
+/**
+ * Mirrors buildCatalog's own ownership rule (catalog.ts) exactly, from the raw
+ * rows a conflict check reads: for a model id the shipped catalog has, the
+ * shipped provider ALWAYS owns it — buildCatalog seeds ownership from the
+ * shipped provider before any row is even considered, so any row for that id
+ * under a different provider is a dead orphan it permanently skips, no
+ * matter how many such rows accumulate or what their timestamps are. For a
+ * model id the shipped catalog doesn't have, the earliest-updated row's
+ * provider owns it (ties broken by provider name), exactly as buildCatalog's
+ * ascending-updatedAt sort + first-claim logic resolves it. A disabled row
+ * still reserves the id for its provider; the shipped provider with no row
+ * at all is implicitly "enabled" (it's just the untouched shipped entry).
+ * Returns null only for a model id that is neither shipped nor ever written.
+ */
+function catalogOwner(
+  shippedEntry: CatalogEntry | undefined,
+  rows: readonly { provider: string; enabled: boolean; updatedAt: unknown }[],
+): { provider: string; enabled: boolean } | null {
+  if (shippedEntry) {
+    const ownRow = rows.find((row) => row.provider === shippedEntry.provider);
+    return { provider: shippedEntry.provider, enabled: ownRow ? ownRow.enabled : true };
+  }
+  if (rows.length === 0) return null;
+  const updatedAtMs = (row: { updatedAt: unknown }) =>
+    row.updatedAt instanceof Date ? row.updatedAt.getTime() : new Date(String(row.updatedAt)).getTime();
+  const [earliest] = [...rows].sort((a, b) => updatedAtMs(a) - updatedAtMs(b) || a.provider.localeCompare(b.provider));
+  return { provider: earliest.provider, enabled: earliest.enabled };
+}
+
+/**
+ * The post-write ownership-race error: our own row for `inputProvider` was
+ * written, but a refresh right after showed `nowOwner` winning the merge
+ * instead (buildCatalog's first-claim-wins rule — see `catalogOwner`). Named
+ * after the thing that actually fixes it (reset_model, which clears every
+ * row for the id, `nowOwner`'s included) rather than telling the caller to
+ * "retry set_model", which would just hit the pre-write conflict check again
+ * (or, if the race repeats, loop). Exported so its exact wording can be unit
+ * tested directly — forcing the genuine two-process write race that triggers
+ * this through the public tool-call surface isn't practical: it requires a
+ * competing write to land in the narrow window between this handler's own
+ * pre-write ownership check and its own write, which a single-process test
+ * harness has no way to inject mid-call.
+ */
+export function raceLostError(modelId: string, inputProvider: string, nowOwner: string): McpError {
+  return new McpError(
+    409,
+    `Model "${modelId}" was written for provider "${inputProvider}" but is not serving it: provider "${nowOwner}" ` +
+      `owns it in the merged catalog. reset_model removes every row for "${modelId}" (including "${nowOwner}"'s); ` +
+      `set_model can then claim it for "${inputProvider}".`,
+  );
+}
+
 const modelIdProperty = {
   type: "string",
   description: 'Exact string an Agent.model must equal, e.g. "claude-sonnet-5".',
@@ -300,15 +352,17 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
       // (possibly stale, poll-interval-old) installed catalog: a row written
       // by another process/replica must be caught even if this process
       // hasn't refreshed since. The static shipped catalog is never stale,
-      // so it's safe to read from the in-memory catalog either way.
+      // so it's safe to read from the in-memory catalog either way. The
+      // check itself mirrors buildCatalog's merge rule exactly (catalogOwner)
+      // rather than "any different-provider row blocks": for a shipped id,
+      // an orphaned other-provider row (dead in the merge no matter what) must
+      // not falsely block the true (shipped) owner, and must not be let through
+      // just because it happens to share its own provider with input.provider.
       const existingRows = await ctx.db.modelCatalogEntry.findMany({ where: { modelId: input.modelId } });
-      const conflictingRow = existingRows.find((row) => row.provider !== input.provider);
-      if (conflictingRow) {
-        throw conflictError(input.modelId, String(conflictingRow.provider), Boolean(conflictingRow.enabled));
-      }
       const shippedEntry = currentModelCatalog().shippedEntry(input.modelId);
-      if (shippedEntry && shippedEntry.provider !== input.provider && existingRows.length === 0) {
-        throw conflictError(input.modelId, shippedEntry.provider, true);
+      const owner = catalogOwner(shippedEntry, existingRows);
+      if (owner && owner.provider !== input.provider) {
+        throw conflictError(input.modelId, owner.provider, owner.enabled);
       }
 
       const ownRow = existingRows.find((row) => row.provider === input.provider);
@@ -346,10 +400,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
       if (refreshed) {
         const nowOwner = currentModelCatalog().get(input.modelId)?.provider;
         if (nowOwner && nowOwner !== input.provider) {
-          throw new McpError(
-            409,
-            `Model "${input.modelId}" was written for provider "${input.provider}", but a concurrent write for provider "${nowOwner}" won; retry set_model.`,
-          );
+          throw raceLostError(input.modelId, input.provider, nowOwner);
         }
       }
 
@@ -438,20 +489,25 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
     handler: async (rawArgs: unknown, ctx) => {
       const { modelId } = parse(ModelIdArgSchema, "reset_model arguments", rawArgs);
 
-      // The rows actually deleted come from the database, not the in-memory
-      // catalog: this is what "every provider whose row was deleted" means,
-      // and it's what makes the 404 check correct even against a stale
-      // in-memory catalog.
+      // The 404 decision and the audited `providers` list are both based on
+      // the RAW rows, not rows that parse cleanly through rowFromRecord: a
+      // row can be malformed (fails parsing) yet still exist and still
+      // occupy the id. Deciding "nothing to reset" or omitting a provider
+      // from the audit based on parse success would delete a malformed row
+      // silently and leave the id permanently stuck — set_model's
+      // DB-sourced conflict check would keep seeing it (via catalogOwner)
+      // and refusing every provider forever, with no tool able to clear it.
       const rawRows = await ctx.db.modelCatalogEntry.findMany({ where: { modelId } });
-      const parsedRows = rawRows.map((row) => rowFromRecord(row)).filter((row): row is CatalogRow => row !== null);
-      if (parsedRows.length === 0) {
+      if (rawRows.length === 0) {
         throw new McpError(
           404,
           `No catalog row for "${modelId}" to reset (it is either unmodified shipped, or unknown).`,
         );
       }
-      const providers = [...new Set(parsedRows.map((row) => row.provider))];
-      const before = entryOf(parsedRows[0]);
+      const providers = [...new Set(rawRows.map((row) => String(row.provider)))];
+      const parsedRows = rawRows.map((row) => rowFromRecord(row)).filter((row): row is CatalogRow => row !== null);
+      const before = parsedRows.length > 0 ? entryOf(parsedRows[0]) : null;
+      const sourceUrl = parsedRows[0]?.sourceUrl;
       await ctx.db.modelCatalogEntry.deleteMany({ where: { modelId } });
 
       // The shipped entry is static (compiled-in), never stale, so "after"
@@ -459,14 +515,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
       // without depending on the refresh below at all.
       const shippedEntry = currentModelCatalog().shippedEntry(modelId);
       const after = shippedEntry ? entryOf(shippedEntry) : null;
-      audit(ctx, "reset", {
-        provider: providers[0],
-        providers,
-        modelId,
-        sourceUrl: parsedRows[0].sourceUrl,
-        before,
-        after,
-      });
+      audit(ctx, "reset", { provider: providers[0], providers, modelId, sourceUrl, before, after });
 
       await refreshBestEffort(deps.refresh, { action: "reset", modelId });
 
