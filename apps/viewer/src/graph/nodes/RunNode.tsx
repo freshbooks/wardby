@@ -8,6 +8,7 @@ import { sameNodeProps } from "../sameData";
 import { RUN_TITLE_MAX_CHARS, RUN_WIDTH, runHeight, tailTruncate } from "../sizes";
 import { exactUsd, formatUsd } from "../../format/money";
 import { codingBadge, shortModel } from "../labels";
+import { formatTokens } from "../../format/text";
 
 const FADE_AFTER_MS = 60_000;
 /** Title characters the coding badge takes up. */
@@ -45,6 +46,14 @@ export function serviceChip(s: ServiceStatus): string {
     case "failed":
       return s.reason ? `✗ failed (${s.reason})` : "✗ failed";
   }
+}
+
+/**
+ * Turns for a native run; a coding run's turns happen inside its worker and are
+ * never counted, so it shows its token total instead.
+ */
+export function progressText(run: GraphRun): string {
+  return run.agentKind === "coding" ? `${formatTokens(run.tokensIn + run.tokensOut)} tok` : `turn ${run.turns}`;
 }
 
 /** True once a succeeded run has been finished for 60 s (one timer, no polling). */
@@ -100,7 +109,8 @@ function RunNodeImpl({ data }: NodeProps) {
           </span>
         )}
         <span className="node-stats" title={exactUsd(run.costUsd)}>
-          {run.model && " · "}turn {run.turns} · {formatUsd(run.costUsd)}
+          {run.model && " · "}
+          {progressText(run)} · {formatUsd(run.costUsd)}
           {running && <span> · {formatElapsed(now - Date.parse(run.startedAt))}</span>}
         </span>
       </div>

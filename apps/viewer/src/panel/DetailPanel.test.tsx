@@ -91,6 +91,23 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("DetailPanel", () => {
+  it("shows a native run's turn count", async () => {
+    setup(makeRun({ agentKind: "native", services: [] }));
+    expect(await screen.findByText(/Turn 6 · last activity 12s ago/)).toBeInTheDocument();
+  });
+
+  it("says a finished run's service status was not recorded instead of pending", async () => {
+    const done = new Date().toISOString();
+    setup(makeRun({ status: "succeeded", finishedAt: done, services: [] }));
+    expect(await screen.findByText("status not recorded")).toBeInTheDocument();
+    expect(screen.queryByText(/pending/)).toBeNull();
+  });
+
+  it("shows a live run's unreported service as pending", async () => {
+    setup(makeRun({ services: [] }));
+    expect(await screen.findByText("○ pending")).toBeInTheDocument();
+  });
+
   it("renders the sections from the run detail", async () => {
     setup();
     expect(await screen.findByText("DATABASE_URL")).toBeInTheDocument();
@@ -99,8 +116,9 @@ describe("DetailPanel", () => {
     expect(screen.getByText(/123456/)).toBeInTheDocument();
     expect(screen.getByText(/\$0\.42 of \$1\.00/)).toBeInTheDocument();
     expect(screen.getByText(/12,?000 in/)).toBeInTheDocument();
-    expect(screen.getByText(/Turn 6/)).toBeInTheDocument();
-    expect(screen.getByText(/last activity 12s ago/)).toBeInTheDocument();
+    // A coding run's turns happen inside its worker: no turn count.
+    expect(screen.queryByText(/Turn 6/)).toBeNull();
+    expect(screen.getByText(/Last activity 12s ago/)).toBeInTheDocument();
     expect(screen.getByText("o/r#7", { exact: false })).toBeInTheDocument();
     expect(screen.getByText(/postgres 16/)).toBeInTheDocument();
     expect(screen.getByText(/probing/)).toBeInTheDocument();

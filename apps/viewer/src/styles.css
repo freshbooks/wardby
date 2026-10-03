@@ -513,6 +513,10 @@ button:disabled {
   color: var(--bad);
 }
 
+.chip.unrecorded {
+  font-style: italic;
+}
+
 @keyframes node-pulse {
   0%,
   100% {

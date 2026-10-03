@@ -65,7 +65,8 @@ describe("RunNode", () => {
     expect(screen.getByText("builder")).toBeInTheDocument();
     expect(screen.getByText("◉")).toBeInTheDocument();
     expect(screen.getByText(/123456/)).toBeInTheDocument();
-    expect(screen.getByText(/turn 6 · \$0\.41/)).toBeInTheDocument();
+    // A coding run shows its token total, not turns.
+    expect(screen.getByText(/2 tok · \$0\.41/)).toBeInTheDocument();
     expect(screen.getByText(/postgres/)).toHaveTextContent("◐ probing 3");
     expect(screen.getByText(/redis/)).toHaveTextContent("● ready");
     expect(screen.getByText(/minio/)).toHaveTextContent("○ pending");
@@ -91,6 +92,7 @@ describe("RunNode", () => {
     const run = makeRun({ agentKind: "native", codingProvider: null, model: "claude-haiku-4-5-20251001" });
     wrap(<RunNode {...props({ kind: "run", run, selected: false })} />);
     expect(screen.getByText("haiku-4-5")).toBeInTheDocument();
+    expect(screen.getByText(/turn 6 · \$0\.41/)).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: /Codex|Claude Code/ })).toBeNull();
   });
 

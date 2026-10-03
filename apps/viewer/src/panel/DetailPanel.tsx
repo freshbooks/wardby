@@ -164,6 +164,8 @@ export function DetailPanel({ serverUrl, run, runs, onSelect }: DetailPanelProps
   const snapshots = new Map((detail?.coding?.services ?? []).map((s) => [s.name, s]));
   const serviceNames = [...new Set([...run.services.map((s) => s.name), ...snapshots.keys()])];
   const statuses = new Map(run.services.map((s) => [s.name, s]));
+  // A live run's services may not have reported yet; a finished run without a status never recorded one.
+  const live = run.status === "pending" || run.status === "running";
 
   return (
     <aside ref={panelRef} tabIndex={-1} className="detail-panel" aria-label="Run details">
@@ -229,11 +231,17 @@ export function DetailPanel({ serverUrl, run, runs, onSelect }: DetailPanelProps
         </Section>
       )}
 
-      <Section title="TURNS">
-        <p>
-          Turn {run.turns} · last activity {relativeTime(run.heartbeatAt, now)}
-        </p>
-      </Section>
+      {run.agentKind === "coding" ? (
+        <Section title="ACTIVITY">
+          <p>Last activity {relativeTime(run.heartbeatAt, now)}</p>
+        </Section>
+      ) : (
+        <Section title="TURNS">
+          <p>
+            Turn {run.turns} · last activity {relativeTime(run.heartbeatAt, now)}
+          </p>
+        </Section>
+      )}
 
       {serviceNames.length > 0 && (
         <Section title="SERVICES">
@@ -245,9 +253,15 @@ export function DetailPanel({ serverUrl, run, runs, onSelect }: DetailPanelProps
                 <li key={name}>
                   <div>
                     <span>{snap ? `${name} ${snap.version}` : name}</span>{" "}
-                    <span className={`chip ${status?.state ?? "pending"}`}>
-                      {status ? serviceChip(status) : "○ pending"}
-                    </span>
+                    {status ? (
+                      <span className={`chip ${status.state}`}>{serviceChip(status)}</span>
+                    ) : live ? (
+                      <span className="chip pending">○ pending</span>
+                    ) : (
+                      <span className="chip unrecorded" title="This run recorded no service status.">
+                        status not recorded
+                      </span>
+                    )}
                   </div>
                   {snap && (
                     <>
