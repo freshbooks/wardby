@@ -11,7 +11,7 @@ import { TopBar, windowSpend } from "./chrome/TopBar";
 import { FlowCanvas } from "./graph/FlowCanvas";
 import { DetailPanel } from "./panel/DetailPanel";
 import { Timeline } from "./timeline/Timeline";
-import { changeFilters, initialFilters, matchesFilters, visibleRuns, type Filters } from "./state/filters";
+import { changeFilters, initialFilters, matchesFilters, type Filters } from "./state/filters";
 import { useViewer } from "./state/useViewer";
 
 const GRAPH_LIMIT = 500;
@@ -61,7 +61,6 @@ function Dashboard({
     return { ...filters, agents: new Set([...filters.agents].filter((id) => ids.has(id))) };
   }, [filters, agents]);
 
-  const shown = useMemo(() => visibleRuns(runs, view), [runs, view]);
   // The timeline follows every filter except the brushed range itself.
   const timelineRuns = useMemo(
     () => runs.filter((r) => matchesFilters(r, view, { ignoreTimeRange: true })),
@@ -143,7 +142,7 @@ function Dashboard({
           </>
         )}
       </main>
-      <BottomBar runs={shown} ticker={model.ticker} window={filters.window} />
+      <BottomBar runs={runs} filters={view} ticker={model.ticker} window={filters.window} />
     </div>
   );
 }

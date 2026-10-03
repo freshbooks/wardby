@@ -782,3 +782,7 @@ button:disabled {
     animation: none;
   }
 }
+
+.bottombar .cost {
+  cursor: help;
+}

@@ -3,6 +3,7 @@ import type { GraphRun } from "../api/types";
 import { useClock } from "../graph/clock";
 import { statusGroup, WINDOW_MS, type StatusGroup, type TimeRange, type WindowSize } from "../state/filters";
 import { bucketIndex, bucketRuns } from "./buckets";
+import { formatUsd } from "../format/money";
 
 export const TIMELINE_HEIGHT = 72;
 const PAD_L = 10;
@@ -167,7 +168,7 @@ export function Timeline({ runs, window: win, timeRange, onRangeChange, onSelect
     const failed = b.counts.failed;
     setHover({
       x,
-      text: `${fmtSpan(b.from)}–${fmtSpan(b.to)} · ${plural(b.total, "run")}${failed ? ` (${failed} failed)` : ""} · $${b.costUsd.toFixed(2)}`,
+      text: `${fmtSpan(b.from)}–${fmtSpan(b.to)} · ${plural(b.total, "run")}${failed ? ` (${failed} failed)` : ""} · ${formatUsd(b.costUsd)}`,
     });
   };
 

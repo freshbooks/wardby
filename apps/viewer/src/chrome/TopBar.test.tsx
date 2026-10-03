@@ -33,7 +33,7 @@ describe("TopBar spend", () => {
       />,
     );
     expect(screen.getByText(/24h \$0\.21/)).toBeInTheDocument();
-    expect(screen.getByText(/Today \$0\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/Today \$0(?!\.)/)).toBeInTheDocument();
   });
 });
 

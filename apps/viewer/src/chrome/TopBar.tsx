@@ -3,6 +3,7 @@ import type { ViewerModel } from "../state/reducer";
 import { ServerMenu } from "./ServerMenu";
 import { formatSpanTime, plural } from "../timeline/Timeline";
 import { STATUS_GROUPS, WINDOWS, type Filters, type StatusGroup, type WindowSize } from "../state/filters";
+import { exactUsd, formatUsd } from "../format/money";
 
 const GROUP_LABEL: Record<StatusGroup, string> = {
   running: "running",
@@ -151,12 +152,12 @@ export function TopBar(props: Props) {
         )}
         {spend && (
           <div className="spend" aria-label="Today's spend">
-            <span>
-              {filters.window} ${props.windowSpendUsd.toFixed(2)} ·{" "}
+            <span title={exactUsd(props.windowSpendUsd)}>
+              {filters.window} {formatUsd(props.windowSpendUsd)} ·{" "}
             </span>
-            <span>
-              Today ${spend.spent.toFixed(2)}
-              {spend.cap !== null && ` / $${spend.cap.toFixed(2)}`}
+            <span title={`${exactUsd(spend.spent)}${spend.cap !== null ? ` / ${exactUsd(spend.cap)}` : ""}`}>
+              Today {formatUsd(spend.spent)}
+              {spend.cap !== null && ` / ${formatUsd(spend.cap)}`}
             </span>
             {spend.cap !== null && (
               <div

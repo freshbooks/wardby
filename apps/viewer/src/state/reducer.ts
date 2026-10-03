@@ -1,4 +1,5 @@
 import type { GraphRun, GraphSnapshot, ServiceStatus, ViewerEvent } from "../api/types";
+import { formatUsd } from "../format/money";
 
 export interface TickerItem {
   at: number;
@@ -37,7 +38,7 @@ function tickerText(event: ViewerEvent, agentName?: (agentId: string) => string 
   switch (event.kind) {
     case "run": {
       const name = agentName?.(event.agentId);
-      const line = `${short(event.runId)} ${event.status} · turn ${event.turns} · $${event.costUsd.toFixed(2)}`;
+      const line = `${short(event.runId)} ${event.status} · turn ${event.turns} · ${formatUsd(event.costUsd)}`;
       return name ? `${name} ${line}` : line;
     }
     case "service":

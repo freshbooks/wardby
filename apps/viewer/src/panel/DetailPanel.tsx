@@ -6,6 +6,7 @@ import { triggerLabel } from "../graph/build";
 import { formatElapsed, serviceChip, statusGlyph } from "../graph/nodes/RunNode";
 import { outcomeLabel } from "../graph/nodes/OutcomeNode";
 import { ErrorLine } from "../chrome/ErrorLine";
+import { exactUsd, formatUsd } from "../format/money";
 
 /** A live event for the selected run triggers one refetch after this quiet period. */
 export const DETAIL_REFETCH_MS = 1000;
@@ -185,8 +186,8 @@ export function DetailPanel({ serverUrl, run, runs, onSelect }: DetailPanelProps
       {!detail && !current.error && <p className="muted">Loading…</p>}
 
       <Section title="COST">
-        <p>
-          ${run.costUsd.toFixed(2)} of ${run.budgetUsd.toFixed(2)}
+        <p title={`${exactUsd(run.costUsd)} of ${exactUsd(run.budgetUsd)}`}>
+          {formatUsd(run.costUsd)} of {formatUsd(run.budgetUsd)}
         </p>
         <div
           className="budget"

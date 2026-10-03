@@ -6,6 +6,7 @@ import { statusGroup } from "../../state/filters";
 import type { FlowNodeData } from "../build";
 import { sameNodeProps } from "../sameData";
 import { RUN_TITLE_MAX_CHARS, RUN_WIDTH, runHeight, tailTruncate } from "../sizes";
+import { exactUsd, formatUsd } from "../../format/money";
 
 const FADE_AFTER_MS = 60_000;
 
@@ -78,8 +79,8 @@ function RunNodeImpl({ data }: NodeProps) {
         </span>
         <span className="node-id">{run.id.slice(-6)}</span>
       </div>
-      <div className="node-sub">
-        turn {run.turns} · ${run.costUsd.toFixed(2)}
+      <div className="node-sub" title={exactUsd(run.costUsd)}>
+        turn {run.turns} · {formatUsd(run.costUsd)}
         {running && <span> · {formatElapsed(now - Date.parse(run.startedAt))}</span>}
       </div>
       <div
