@@ -7,12 +7,13 @@ describe("quickstart next-step hint", () => {
     expect(text).toContain("Ask your assistant one of:");
     expect(text).toContain("Set up the Wardby architecture keeper for this repository");
     expect(text).toContain("Set up a Wardby builder for this repository");
-    expect(text).toContain("help open agent-recipes");
+    expect(text).toContain("Or read the guide: npx @wardby/cli@latest help open agent-recipes");
   });
 
-  it("prints only the guide line when no MCP client was actually configured", () => {
+  it("prints only the guide line, without a dangling 'Or', when no MCP client was actually configured", () => {
     const text = nextStepLines(false).join("\n");
     expect(text).not.toContain("Ask your assistant");
-    expect(text).toContain("help open agent-recipes");
+    expect(text).not.toContain("Or read");
+    expect(text).toContain("Read the guide: npx @wardby/cli@latest help open agent-recipes");
   });
 });

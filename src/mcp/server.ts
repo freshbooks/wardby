@@ -32,6 +32,7 @@ import {
   type InputRequiredResult,
 } from "@modelcontextprotocol/server";
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { Agent, PrismaClient, Principal } from "#prisma";
 import type { McpRequestContext, McpProviders } from "./context.js";
 import { requireScope } from "./auth/resource-server.js";
@@ -40,6 +41,11 @@ import { TASKS_EXTENSION_ID, clientSupportsTasks } from "./capabilities.js";
 import { readableAgentsWhere } from "./auth/access.js";
 import { grantedIds } from "../core/grants.js";
 import { logger } from "../core/logger.js";
+
+/** The package version, reported in MCP server info (package.json sits two levels up from src/mcp and dist/mcp). */
+const SERVER_VERSION = (
+  JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }
+).version;
 
 export interface ToolSpec<Args = Record<string, unknown>> {
   name: string;
@@ -239,7 +245,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
 
   const factory: McpServerFactory = async () => {
     const mcpServer = new McpServer(
-      { name: "wardby", version: "0.0.0" },
+      { name: "wardby", version: SERVER_VERSION },
       {
         requestState: { verify: (state, ctx) => requestStateCodec.verify(state, ctx) },
         instructions: SERVER_INSTRUCTIONS,
