@@ -4,7 +4,7 @@
 // scripted in-process fake: nothing leaves the machine. Codex's other egress is
 // pointed at a closed local port. Skipped when the platform's Codex binary is
 // not installed (npm installs only the host's optional dependency).
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,9 +16,17 @@ import { CodingProxy } from "../providers/coding-proxy/proxy.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "../providers/coding-proxy/server.js";
 import type { ProxyAuditEvent } from "../providers/coding-proxy/types.js";
 import { CODING_OUTPUT_JSON_SCHEMA, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
+import { recordCodexRequests } from "./codex-recorder.test-support.js";
 import { createCodexSdkClient } from "./sdk.js";
 
 const require = createRequire(import.meta.url);
+const RECORD = process.env.CODEX_RECORD === "1";
+const FIXTURES = fileURLToPath(new URL("../providers/coding-proxy/fixtures/", import.meta.url));
+const CODEX_FIXTURE = /^codex-(.+)-responses-requests\.json$/;
+
+function pinnedCodexVersion(): string {
+  return (require("./package.json") as { dependencies: Record<string, string> }).dependencies["@openai/codex-sdk"];
+}
 
 function codexBinaryInstalled(): boolean {
   try {
@@ -135,19 +143,44 @@ function scriptedTurn(call: number, body: Record<string, unknown>): string {
 
 // Needs no Codex binary, so it runs everywhere: a Codex bump without a
 // re-recorded request fixture fails here even where the rest is skipped.
-describe("pinned Codex version", () => {
+describe.skipIf(RECORD)("pinned Codex version", () => {
   it("tests the Codex version the worker image pins", () => {
-    const worker = require("./package.json") as { dependencies: Record<string, string> };
-    const pinned = worker.dependencies["@openai/codex-sdk"];
+    const pinned = pinnedCodexVersion();
+    const rootManifest = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
+      devDependencies: Record<string, string>;
+    };
+    const declared = rootManifest.devDependencies["@openai/codex-sdk"];
     const sdkManifest = join(dirname(fileURLToPath(import.meta.resolve("@openai/codex-sdk"))), "..", "package.json");
-    expect((JSON.parse(readFileSync(sdkManifest, "utf8")) as { version: string }).version).toBe(pinned);
-    expect((require("@openai/codex/package.json") as { version: string }).version).toBe(pinned);
+    const installedSdk = (JSON.parse(readFileSync(sdkManifest, "utf8")) as { version: string }).version;
+    const installedCli = (require("@openai/codex/package.json") as { version: string }).version;
     // The recorded request fixture is named for the version it was captured from.
-    expect(require.resolve(`../providers/coding-proxy/fixtures/codex-${pinned}-responses-requests.json`)).toBeTruthy();
+    const fixtures = readdirSync(FIXTURES)
+      .map((name) => CODEX_FIXTURE.exec(name)?.[1])
+      .filter((version): version is string => version !== undefined);
+    const matches =
+      declared === pinned && installedSdk === pinned && installedCli === pinned && fixtures.includes(pinned);
+    const root = declared === installedSdk ? declared : `${declared} (installed ${installedSdk})`;
+    expect(
+      matches,
+      `Codex SDK bump detected (${pinned} vs ${root}/${fixtures.join(",") || "no fixture"}). ` +
+        'Run "npm run codex:rerecord" on this branch, review the request-shape diff it prints, and commit the new fixture.',
+    ).toBe(true);
   });
 });
 
-describe.skipIf(!codexBinaryInstalled())("pinned Codex CLI against the coding proxy allowlist", () => {
+// CODEX_RECORD=1 (npm run codex:rerecord) records the pinned Codex CLI's
+// requests into the fixture the proxy tests replay, instead of testing.
+describe.runIf(RECORD)("record the pinned Codex CLI's Responses requests", () => {
+  it("writes the request fixture for the pinned version", async () => {
+    expect(codexBinaryInstalled(), "the host's Codex binary (@openai/codex-<platform>) is not installed").toBe(true);
+    const requests = await recordCodexRequests({ log: (line) => console.log(`[codex-record] ${line}`) });
+    const target = join(FIXTURES, `codex-${pinnedCodexVersion()}-responses-requests.json`);
+    await writeFile(target, `${JSON.stringify(requests, null, 2)}\n`);
+    console.log(`[codex-record] wrote ${requests.length} requests to ${target}`);
+  }, 900_000);
+});
+
+describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the coding proxy allowlist", () => {
   const cleanup: Array<() => Promise<void>> = [];
   afterEach(async () => {
     for (const task of cleanup.splice(0).reverse()) await task();

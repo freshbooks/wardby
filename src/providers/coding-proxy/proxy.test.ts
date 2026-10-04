@@ -1235,8 +1235,14 @@ interface CodexFixture {
   body: Record<string, unknown>;
 }
 
-const codexFixtures = async (): Promise<CodexFixture[]> =>
-  JSON.parse(await fixture("codex-0.153.4-responses-requests.json")) as CodexFixture[];
+// Recorded from the Codex version the worker image pins (npm run codex:rerecord).
+const codexFixtures = async (): Promise<CodexFixture[]> => {
+  const worker = JSON.parse(await readFile(new URL("../../coding-worker/package.json", import.meta.url), "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+  const pinned = worker.dependencies["@openai/codex-sdk"];
+  return JSON.parse(await fixture(`codex-${pinned}-responses-requests.json`)) as CodexFixture[];
+};
 
 const INLINE_PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
