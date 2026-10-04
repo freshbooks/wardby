@@ -41,7 +41,10 @@ the `Jira acting as` startup line to confirm the account.
    `WARDBY_JIRA_WEBHOOK_SECRET`, then restart. The startup log line
    `Jira acting as` shows which account Wardby uses; confirm it is the service
    account. Optionally set `WARDBY_JIRA_API_TOKEN_EXPIRES_AT` to get a warning
-   14 days before expiry.
+   14 days before expiry. On the GKE reference deployment, put all five in
+   `.env.local` (all or none) and run `deploy/gke/up.sh`: it seeds them into
+   Secret Manager and syncs the optional `wardby-jira-env` Secret for the
+   control plane. See [Deploy on GKE](deploy-gke.md).
 6. A Wardby administrator links the agent with `link_issue_project`, for
    example `projectKey: "PROJ"`, `access: "write"`,
    `triggers: ["transitioned", "mention"]`,

@@ -129,7 +129,10 @@ Set these variables (see `.env.example`) and restart:
 | `WARDBY_JIRA_API_TOKEN_EXPIRES_AT` | Optional. Token expiry (`YYYY-MM-DD`); wardby logs a warning 14 days before.                        |
 | `WARDBY_JIRA_EPIC_LINK_FIELD`      | Optional. Field id of the legacy Epic Link field, for cost attribution (see below).                 |
 
-Set the four required variables together or none of them. On startup wardby
+Set the four required variables together or none of them. On the GKE
+reference deployment, put them (and the token's expiry date) in `.env.local`
+before running `up.sh`, which seeds them into Secret Manager; see
+[Prepare secrets](getting-started-gke.md#4-prepare-secrets). On startup wardby
 logs `Jira acting as` with the account id, display name and account type it
 authenticated as. Check that this is the service account you created.
 

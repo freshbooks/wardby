@@ -177,8 +177,14 @@ echo "==> 5/${TOTAL_STEPS} seed Secret Manager"
 # then .env.local, then -- for the two auth keys only -- a new random key. Values
 # go over stdin and are never printed. Stops before writing anything if a value
 # has no source.
+# Optional groups (Jira) are seeded all or none; the ones fully set are listed
+# in SEED_GROUPS_FILE for step 7.
+SEED_GROUPS_FILE="$(mktemp)"
 node deploy/gke/seed-secrets.mjs --project "$PROJECT_ID" --prefix "$SECRET_PREFIX" \
-  --context "$KUBE_CONTEXT" --namespace "$NAMESPACE"
+  --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" --groups-out "$SEED_GROUPS_FILE"
+JIRA_ENABLED=0
+grep -qx jira "$SEED_GROUPS_FILE" && JIRA_ENABLED=1
+rm -f "$SEED_GROUPS_FILE"
 
 echo "==> 6/${TOTAL_STEPS} External Secrets Operator ${ESO_CHART_VERSION}, scoped to ${NAMESPACE}"
 # The namespace first: the scoped chart creates its Role and RoleBinding in it.
@@ -218,7 +224,20 @@ fi
 # Forces a sync and waits for a fresh one, so a secret version that step 5
 # just added (e.g. a newly generated auth key) is in the Secret before step 9
 # rolls the Deployments.
-if ! wait_external_secrets_synced 180s wardby-coding-proxy-env wardby-control-plane-env; then
+SYNCED_SECRETS=(wardby-coding-proxy-env wardby-control-plane-env)
+# Jira is optional: synced when every Jira secret is set, removed when none is
+# (the control plane reads wardby-jira-env with optional: true).
+if ((JIRA_ENABLED)); then
+  echo "    Jira is configured; syncing wardby-jira-env"
+  if ! render_secrets external-secrets-jira.yaml | kubectl apply -f - >/dev/null; then
+    echo "up.sh: applying the Jira ExternalSecret failed; running pods are unaffected." >&2
+    exit 1
+  fi
+  SYNCED_SECRETS+=(wardby-jira-env)
+else
+  kubectl -n "$NAMESPACE" delete externalsecret wardby-jira-env --ignore-not-found >/dev/null
+fi
+if ! wait_external_secrets_synced 180s "${SYNCED_SECRETS[@]}"; then
   echo "up.sh: the Secrets did not sync from Secret Manager; nothing else was applied." >&2
   exit 1
 fi

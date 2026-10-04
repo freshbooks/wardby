@@ -67,6 +67,20 @@ describe("decideSeed", () => {
   });
 });
 
+describe("decideSeed for an optional secret", () => {
+  it("skips a Jira value with no source and never generates one", () => {
+    expect(decideSeed(entry("jira-api-token"), { hasVersion: false, generate: never })).toEqual({ action: "skip" });
+  });
+
+  it("seeds a Jira value from .env.local like any other", () => {
+    expect(decideSeed(entry("jira-api-token"), { hasVersion: false, env: "e", generate: never })).toEqual({
+      action: "add",
+      from: ".env.local",
+      value: "e",
+    });
+  });
+});
+
 describe("generateHexKey", () => {
   it("returns 32 random bytes as 64 lowercase hex characters", () => {
     const a = generateHexKey();
@@ -103,6 +117,14 @@ const fullEnv = {
   GITHUB_APP_CLIENT_ID: "Iv23liExampleClientId",
   GITHUB_APP_CLIENT_SECRET: "example-client-secret-value",
 };
+const jiraEnv = {
+  WARDBY_JIRA_SITE_URL: "https://your-site.atlassian.net",
+  WARDBY_JIRA_API_BASE_URL: "https://api.atlassian.com/ex/jira/00000000-0000-0000-0000-000000000000",
+  WARDBY_JIRA_API_TOKEN: "jira-token-secret-value",
+  WARDBY_JIRA_API_TOKEN_EXPIRES_AT: "2027-01-01",
+  WARDBY_JIRA_WEBHOOK_SECRET: "jira-webhook-secret-value-0000",
+};
+const required = SECRETS.filter((s) => !s.group);
 
 describe("seed", () => {
   it("writes nothing when any secret has no source", async () => {
@@ -119,7 +141,7 @@ describe("seed", () => {
     const values = [...Object.values(fullEnv), "b".repeat(64), "c".repeat(64)];
     for (const call of calls) for (const value of values) expect(call.args.join(" ")).not.toContain(value);
     const added = calls.filter((c) => c.args.includes("add"));
-    expect(added).toHaveLength(SECRETS.length);
+    expect(added).toHaveLength(required.length);
     expect(added.every((c) => c.args.includes("--data-file=-") && typeof c.input === "string")).toBe(true);
   });
 
@@ -128,6 +150,41 @@ describe("seed", () => {
     await seed({ ...base, env: fullEnv, exec, generate: () => "c".repeat(64), log: () => {} });
     const signing = calls.find((c) => c.args.includes("add") && c.args.includes("wardby-auth-signing-key"));
     expect(signing.input).toBe("b".repeat(64));
+  });
+
+  it("leaves Jira empty and reports no groups when none of it is set", async () => {
+    const { exec, calls } = fakeExec({});
+    const result = await seed({ ...base, env: fullEnv, exec, generate: () => "c".repeat(64), log: () => {} });
+    expect(result.enabledGroups).toEqual([]);
+    expect(calls.some((c) => c.args.includes("add") && c.args.some((a) => a.includes("jira")))).toBe(false);
+  });
+
+  it("seeds every Jira value and reports the group when all of it is set", async () => {
+    const { exec, calls } = fakeExec({});
+    const env = { ...fullEnv, ...jiraEnv };
+    const result = await seed({ ...base, env, exec, generate: () => "c".repeat(64), log: () => {} });
+    expect(result.enabledGroups).toEqual(["jira"]);
+    expect(calls.filter((c) => c.args.includes("add"))).toHaveLength(SECRETS.length);
+    for (const call of calls)
+      for (const value of Object.values(jiraEnv)) expect(call.args.join(" ")).not.toContain(value);
+  });
+
+  it("counts a Jira value already in Secret Manager as set", async () => {
+    const { exec } = fakeExec({ versions: { "wardby-jira-api-token": "x" } });
+    const env = { ...fullEnv, ...jiraEnv };
+    delete env.WARDBY_JIRA_API_TOKEN;
+    const result = await seed({ ...base, env, exec, generate: () => "c".repeat(64), log: () => {} });
+    expect(result.enabledGroups).toEqual(["jira"]);
+  });
+
+  it("writes nothing when only part of Jira is set", async () => {
+    const { exec, calls } = fakeExec({});
+    const env = { ...fullEnv, ...jiraEnv };
+    delete env.WARDBY_JIRA_WEBHOOK_SECRET;
+    await expect(seed({ ...base, env, exec, generate: () => "c".repeat(64), log: () => {} })).rejects.toThrow(
+      "WARDBY_JIRA_WEBHOOK_SECRET",
+    );
+    expect(calls.some((c) => c.args.includes("add"))).toBe(false);
   });
 
   it("leaves secrets that already have versions alone", async () => {

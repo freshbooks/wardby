@@ -156,6 +156,26 @@ leave **Request user authorization (OAuth) during installation** unchecked; see
 [code-review-agents.md](code-review-agents.md#registering-the-github-app).
 Seeding stops, with nothing written, if either value is missing.
 
+To connect [Jira Cloud](jira-agents.md), also add its five settings. They are
+optional, but all or none: seeding stops, with nothing written, if only some
+are set.
+
+```dotenv
+WARDBY_JIRA_SITE_URL="https://your-site.atlassian.net"
+WARDBY_JIRA_API_BASE_URL="https://api.atlassian.com/ex/jira/<cloudId>"
+WARDBY_JIRA_API_TOKEN="..."
+WARDBY_JIRA_API_TOKEN_EXPIRES_AT="YYYY-MM-DD"
+WARDBY_JIRA_WEBHOOK_SECRET="..."
+```
+
+Point the Jira webhook at `https://<your hostname>/hosts/jira/events`. When
+all five are in Secret Manager, `up.sh` syncs them into a separate Secret,
+`wardby-jira-env`, that only the control plane reads; when none is, it leaves
+that Secret out. `WARDBY_JIRA_EPIC_LINK_FIELD` is not a secret and is not
+seeded: add it to the control plane's `env` in
+`deploy/kind-coding/manifests/overlays/gke-autopilot/control-plane.yaml` if you
+need it.
+
 Generate `SECRET_APP_KEY` with:
 
 ```sh
@@ -600,6 +620,10 @@ printf '%s' "$NEW_VALUE" | gcloud secrets versions add wardby-openai-api-key --p
 KUBE_CONTEXT="$(kubectl config current-context)" NAMESPACE=wardby-coding bash -c 'source deploy/gke/lib-secrets.sh && wait_external_secrets_synced 120s wardby-coding-proxy-env wardby-control-plane-env' && \
 kubectl -n wardby-coding rollout restart deploy/wardby-coding-proxy deploy/wardby-control-plane
 ```
+
+For a Jira setting, add the version to its `wardby-jira-*` secret, wait on
+`wardby-jira-env` instead, and restart only `deploy/wardby-control-plane`.
+Rotate the token and its `jira-api-token-expires-at` together.
 
 Pods read their environment only at start, hence the restart. The LLM API
 keys and the database URL are read by both Deployments; the other secrets only
