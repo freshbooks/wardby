@@ -358,6 +358,28 @@ pip use inside the same run, and `packageAllowlist` has no entry for other
 ecosystems. If services are allowed, the image must be built on driver v11 or
 later.
 
+### Fanning out to several builders
+
+A router delegates once per run by default: it routes a request to exactly one
+sub-agent and never retries into a second. To have one native agent split a
+request across several repositories, attach one builder per repository and set
+the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
+`update_agent`:
+
+```json
+{ "id": "<lead agent id>", "maxDelegationsPerRun": 6 }
+```
+
+- Each `delegate_to_<name>` call still goes to a different sub-agent; a second
+  call to the same one in the same run is refused with `already_dispatched`.
+- The calls run one after another, in the order the lead makes them, so
+  delegate the repositories that own the data first.
+- The whole run tree shares one budget: give the lead a `budgetUsd` that covers
+  every builder it may start, plus its own planning.
+- Each builder works only in its own repository and can't see the others, so
+  the lead's task to each one must carry everything that crosses a repository
+  boundary (routes, field names and types, error codes), word for word the same.
+
 ### Together with Recipe A
 
 Coding runs automatically receive the repository's knowledge index and base

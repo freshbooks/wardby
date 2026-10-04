@@ -526,6 +526,8 @@ async function executeTrackedRun(
       pricing,
       memoryEnabled: agent.memoryEnabled,
       subAgentEdges,
+      // Only when above the default of one, so a default agent's pinned step result is unchanged.
+      ...(agent.maxDelegationsPerRun > 1 ? { maxDelegationsPerRun: agent.maxDelegationsPerRun } : {}),
       repositoryLinks,
       issueProjectLinks,
       agent: {
@@ -719,14 +721,26 @@ async function executeTrackedRun(
             message: `No sub-agent is bound to name "${boundName}".`,
           });
         }
-        // At most one dispatch per run: a classifier deciding plan-vs-implement
-        // should commit to exactly one child, never both and never a retry
-        // that leaves two children racing on the same task.
+        // At most maxDelegationsPerRun dispatches per run (default one: a
+        // classifier deciding plan-vs-implement commits to exactly one child),
+        // and never the same child twice, so a retry can't leave two children
+        // racing on the same task. A lead that fans out to several builders
+        // raises the limit; its children still run one after another.
+        const limit = loaded.maxDelegationsPerRun ?? 1;
         const priorDispatches = await db.run.findMany({ where: { parentRunId: { in: [runId] } } });
-        if (priorDispatches.length > 0) {
+        if (priorDispatches.some((prior) => prior.agentId === edge.childAgentId)) {
           return JSON.stringify({
             error: "already_dispatched",
-            message: "This run already delegated to a sub-agent; only one delegation is allowed per run.",
+            message: `This run already delegated to "${boundName}"; a run delegates to each sub-agent at most once.`,
+          });
+        }
+        if (priorDispatches.length >= limit) {
+          return JSON.stringify({
+            error: "already_dispatched",
+            message:
+              limit === 1
+                ? "This run already delegated to a sub-agent; only one delegation is allowed per run."
+                : `This run already made ${limit} delegations, the most this agent allows per run.`,
           });
         }
         let parsed: unknown;

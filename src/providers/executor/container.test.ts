@@ -624,6 +624,20 @@ describe("ContainerExecutor", () => {
     expect(created.jobs.specs[0]?.limits.diskMb).toBe(8192);
   });
 
+  it("hands the worker maxTurns only when the run has one, leaving other inputs unchanged", async () => {
+    const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return input!;
+    };
+    expect(await launchedInput({ maxTurns: 120 })).toMatchObject({ runId: "run-1", maxTurns: 120 });
+    expect(await launchedInput({ maxTurns: null })).not.toHaveProperty("maxTurns");
+  });
+
   it("hands the worker debugTrace only for a traced run, leaving other inputs unchanged", async () => {
     const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
       const created = await harness(overrides);

@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
-import { MAX_CODING_TASK_BYTES, normalizeGitHubRepository, normalizeGitRef } from "./protocol.js";
+import {
+  MAX_CODING_TASK_BYTES,
+  MAX_CODING_TURNS,
+  normalizeGitHubRepository,
+  normalizeGitRef,
+} from "./protocol.js";
 import { MAX_COLLECT_EXCLUDE_PATHS, validateCollectExcludePath } from "./collect-exclude.js";
 import { CODING_PROVIDERS } from "./provider.js";
 import { WARDBY_PROTECTED_PATHS, isWellFormedProtectedPath, protectsSomePath } from "./protected-paths.js";
@@ -90,6 +95,8 @@ const workerImageRefSchema = z
   .refine(isImmutableDockerImage, "must be an immutable repository digest")
   .nullable();
 const workspaceDiskMbSchema = z.number().int().min(64).max(32_768).nullable();
+/** Claude Code runs only: the most agent turns a run may take; null = the worker default (DEFAULT_CLAUDE_MAX_TURNS). */
+const maxTurnsSchema = z.number().int().min(1).max(MAX_CODING_TURNS).nullable();
 
 const packageAllowlistSchema = z
   .record(z.string(), z.array(z.string().min(1).max(256)).max(256))
@@ -125,6 +132,7 @@ const codingProfileFields = {
   toolchainVersion: toolchainVersionSchema,
   workerImageRef: workerImageRefSchema,
   workspaceDiskMb: workspaceDiskMbSchema,
+  maxTurns: maxTurnsSchema,
   protectedPaths: z
     .array(protectedPathSchema)
     .min(1)
@@ -155,6 +163,7 @@ export const CodingProfileSchema = z
     toolchainVersion: codingProfileFields.toolchainVersion.default(null),
     workerImageRef: codingProfileFields.workerImageRef.default(null),
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.default(null),
+    maxTurns: codingProfileFields.maxTurns.default(null),
     packageAllowlist: codingProfileFields.packageAllowlist.default({}),
     packagePolicy: codingProfileFields.packagePolicy.default({}),
     services: codingProfileFields.services.default([]),
@@ -175,6 +184,7 @@ export const CodingProfilePatchSchema = z
     toolchainVersion: codingProfileFields.toolchainVersion.optional(),
     workerImageRef: codingProfileFields.workerImageRef.optional(),
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.optional(),
+    maxTurns: codingProfileFields.maxTurns.optional(),
     packageAllowlist: codingProfileFields.packageAllowlist.optional(),
     packagePolicy: codingProfileFields.packagePolicy.optional(),
     services: codingProfileFields.services.optional(),

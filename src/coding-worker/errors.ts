@@ -11,6 +11,8 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   "coding_artifact_nesting_limit",
   "coding_artifact_duplicate_key",
   "coding_turn_failed",
+  // Claude Code reached the run's turn limit (CodingAgentProfile.maxTurns) before finishing.
+  "coding_turn_limit",
   "coding_stream_failed",
   "coding_stream_proxy_denied",
   "coding_stream_rate_limited",

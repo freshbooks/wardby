@@ -389,6 +389,78 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  it("codingProfile.maxTurns round-trips through create_agent, get_agent, and update_agent(null)", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const created = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "claude-coder",
+        systemPrompt: "Make the requested change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 0.25,
+        kind: "coding",
+        codingProfile: { repository: "openai/example", maxTurns: 120 },
+      },
+    });
+    expect(created.isError).toBeFalsy();
+    const createdAgent = JSON.parse((created.content as { text: string }[])[0].text);
+    expect(createdAgent.codingProfile.maxTurns).toBe(120);
+
+    const fetched = await client.callTool({ name: "get_agent", arguments: { id: createdAgent.id } });
+    expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.maxTurns).toBe(120);
+
+    const updated = await client.callTool({
+      name: "update_agent",
+      arguments: { id: createdAgent.id, codingProfile: { maxTurns: null } },
+    });
+    expect(updated.isError).toBeFalsy();
+    expect(JSON.parse((updated.content as { text: string }[])[0].text).codingProfile.maxTurns).toBeNull();
+    await client.close();
+  });
+
+  it("maxDelegationsPerRun defaults to 1, round-trips, and stays within 1..20", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const base = { systemPrompt: "Plan, then delegate.", model: "gpt-5.6-luna", budgetUsd: 5 };
+
+    const plain = await client.callTool({ name: "create_agent", arguments: { name: "router", ...base } });
+    expect(plain.isError).toBeFalsy();
+    const plainAgent = JSON.parse((plain.content as { text: string }[])[0].text);
+    expect(plainAgent.maxDelegationsPerRun ?? 1).toBe(1);
+
+    const lead = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "lead", ...base, maxDelegationsPerRun: 6 },
+    });
+    expect(lead.isError).toBeFalsy();
+    const leadAgent = JSON.parse((lead.content as { text: string }[])[0].text);
+    expect(leadAgent.maxDelegationsPerRun).toBe(6);
+
+    const raised = await client.callTool({
+      name: "update_agent",
+      arguments: { id: plainAgent.id, maxDelegationsPerRun: 3 },
+    });
+    expect(raised.isError).toBeFalsy();
+    expect(JSON.parse((raised.content as { text: string }[])[0].text).maxDelegationsPerRun).toBe(3);
+
+    for (const bad of [0, 21, 2.5]) {
+      const refused = await client.callTool({
+        name: "update_agent",
+        arguments: { id: plainAgent.id, maxDelegationsPerRun: bad },
+      });
+      expect(refused.isError, String(bad)).toBe(true);
+    }
+    await client.close();
+  });
+
   it("collectExclude round-trips through create_agent and update_agent with agents:write", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
@@ -2080,6 +2152,7 @@ describe("agent tools under grants", () => {
       { timeoutSec: 7200 },
       { toolchain: "node-python" },
       { workspaceDiskMb: 4096 },
+      { maxTurns: 50 },
     ]) {
       const refusedField = await writer.client.callTool({
         name: "update_agent",

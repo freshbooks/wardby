@@ -3,6 +3,7 @@ import {
   parseCodingAgentOutputJson,
   type CodingAgentOutput,
   type CodingTaskInput,
+  DEFAULT_CLAUDE_MAX_TURNS,
 } from "../coding/protocol.js";
 import { safeWorkerErrorCode } from "../coding-worker/errors.js";
 import type { WorkerProgressEvent } from "../coding-worker/types.js";
@@ -55,6 +56,8 @@ export interface ClaudeSdkMessage {
 
 /** The MCP server (sdk.ts) whose one tool runs commands through the tool runner's socket. */
 const TOOL_SERVER = "wardby_tools";
+/** How the Claude Agent SDK words a turn-limit stop when it throws rather than returning error_max_turns. */
+const MAX_TURNS_MESSAGE = /maximum number of turns|max[_ ]turns/i;
 /** Statuses that can still become "connected"; anything else means the run has no command tool. */
 const TOOL_SERVER_USABLE = new Set(["connected", "pending"]);
 
@@ -73,6 +76,8 @@ export interface ClaudeQueryOptions {
   prompt: string;
   model: string;
   budgetUsd: number;
+  /** The run's turn limit (CodingTaskInput.maxTurns), or DEFAULT_CLAUDE_MAX_TURNS. */
+  maxTurns: number;
   signal: AbortSignal;
   environment: Record<string, string>;
   relayEnvironment: Record<string, string>;
@@ -138,6 +143,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     prompt: boundedPrompt(options.input.task, options.input.runId),
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
+    maxTurns: options.input.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,
     signal: options.signal,
     // Package-registry settings reach the tool runner from the launcher (claude-tool-setup.ts); the
     // agent never runs commands, so it gets none.
@@ -148,6 +154,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   });
   let finalJson: string | undefined;
   let failed = false;
+  let turnLimit = false;
+  let streamFailed = false;
   let toolUnreachable = false;
   try {
     for await (const message of stream) {
@@ -168,12 +176,18 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
       } else if (message.type === "result") {
         if (message.subtype === "success" && typeof message.result === "string") finalJson = message.result;
         else if (message.subtype === "error_max_budget_usd") return budgetExhausted(options.input);
+        else if (message.subtype === "error_max_turns") turnLimit = true;
         else failed = true;
       }
     }
-  } catch {
-    throw new Error("coding_stream_failed");
+  } catch (err) {
+    // The SDK can also end the stream by throwing at the turn limit. Only that
+    // is read from the error; its text (which can carry provider content) is never kept.
+    if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;
+    else streamFailed = true;
   }
+  if (streamFailed) throw new Error("coding_stream_failed");
+  if (turnLimit) throw new Error("coding_turn_limit");
   if (toolUnreachable) throw new Error("worker_tool_runner_unreachable");
   if (failed) throw new Error("coding_turn_failed");
   if (!finalJson) throw new Error("coding_output_missing");

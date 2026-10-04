@@ -23,6 +23,15 @@ Review the deployment guide for your target before assigning a coding profile.
 
 For the specific isolation refusal, read [Coding-worker isolation unavailable](../errors/docker-isolation-unsupported.md).
 
+## Runs that stop at the turn limit
+
+A Claude Code run whose failure category is `turn_limit` reached its agent's
+turn limit (worker error `coding_turn_limit`): 200 model calls by default. The
+work was too large for the limit, or the agent was looping. Read the run's
+summary and debug trace (`codingProfile.debugTraceMinutes`) to tell which;
+raise `codingProfile.maxTurns` (up to 1000) with `update_agent` for the first,
+or narrow the task for the second. Codex runs have no turn limit.
+
 ## Service refusals and failures
 
 A repository can declare services such as PostgreSQL in `.wardby/services.yaml`
