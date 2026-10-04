@@ -101,9 +101,8 @@ yourself.`
    the user whether to reuse it or replace it.
 2. Call `create_agent` for the builder: `name: "builder"`, `kind: "coding"`, a
    `model` the chosen provider supports, `budgetUsd` such as `5`, a
-   `systemPrompt` from the builder template in
-   [`docs/agent-recipes.md`](../docs/agent-recipes.md), and a `codingProfile`
-   with `provider`, `repository`, `baseRef`, and `timeoutSec` (for example
+   `systemPrompt` the prompt from `get_help_article` with `id: "builder-agent"`
+   (section "Builder prompt"), and a `codingProfile` with `provider`, `repository`, `baseRef`, and `timeoutSec` (for example
    `1800`), plus the stack settings:
    - Node/TypeScript: `toolchain: "node"`, with `packageAllowlist` such as
      `{ "npm": ["react@^19", "vitest"] }`.
@@ -118,8 +117,9 @@ yourself.`
 
 3. Create or reuse the router. To create it, call `create_agent` with
    `name: "router"`, `kind: "native"`, a small fast `model`, a `budgetUsd` of the
-   builder's budget plus a little, and the router prompt from
-   [`docs/agent-recipes.md`](../docs/agent-recipes.md).
+   builder's budget plus a little, and the
+   router prompt from `get_help_article` with `id: "builder-agent"` (section
+   "Router prompt").
 4. Call `attach_subagent` with `parentAgentId` the router, `childAgentId` the
    builder, and `boundName: "builder"`.
 5. Call `link_repository` with `agentId` the router, `repository`,
@@ -135,7 +135,8 @@ manual step for the user: merge the first knowledge pull request, tick any App
 events still missing, or try the first `@` mention. Remind them that Wardby never
 merges pull requests for them.
 
-Related: [Set up an architecture agent](help://architecture-agent),
+Related: [Builder and router prompts](help://builder-agent),
+[Set up an architecture agent](help://architecture-agent),
 [Architecture knowledge bundles](help://knowledge),
 [Choose a native or coding agent](help://creating-agents),
 [Connect GitHub repositories](help://github-integration),
