@@ -122,6 +122,28 @@ describe("handleReviewHostTool", () => {
     expect(c.markRunCheckCompleted).toHaveBeenCalledOnce();
   });
 
+  it("records the verdict and review text when it completes the run's own check", async () => {
+    const c = ctx({
+      runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA, prNumber: 7 },
+    });
+    await handleReviewHostTool(
+      "repo_publish_review",
+      JSON.stringify({
+        repository: WRITE.repository,
+        prNumber: 7,
+        headSha: SHA,
+        verdict: "CHANGES_REQUESTED",
+        summary: "needs work",
+        body: "## Findings\n- [MAJOR] x",
+      }),
+      c,
+    );
+    expect(c.markRunCheckCompleted).toHaveBeenCalledWith({
+      verdict: "CHANGES_REQUESTED",
+      body: "needs work\n\n## Findings\n- [MAJOR] x",
+    });
+  });
+
   it("passes resolveThreadIds through, and rejects malformed ids", async () => {
     const c = ctx();
     const args = {

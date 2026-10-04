@@ -648,8 +648,14 @@ async function executeTrackedRun(
                   prNumber: check.prNumber,
                 }
               : null,
-          markRunCheckCompleted: async () => {
-            await db.runHostCheck.update({ where: { runId }, data: { completedAt: new Date() } });
+          markRunCheckCompleted: async (review) => {
+            await db.runHostCheck.update({
+              where: { runId },
+              data: {
+                completedAt: new Date(),
+                ...(review ? { verdict: review.verdict, reviewBody: review.body } : {}),
+              },
+            });
           },
           // Live, not from the pinned load: the link's current stamp and
           // access, and the agent's CURRENT owner (a make_owner, unlink, or
