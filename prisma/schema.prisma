@@ -1065,11 +1065,14 @@ model AgentRepository {
   repository String
   /// "read" or "write".
   access     String
-  /// Subset of "pull_request", "mention", "push".
+  /// Subset of "pull_request", "mention", "review_fix".
   triggers   String[] @default([])
   /// Only with the "pull_request" trigger (required there); names the agent's
   /// check. Unique per repository across all links (NULLs are distinct).
   checkName  String?
+  /// Only with the "review_fix" trigger: how many automatic fix rounds a
+  /// pull request gets before wardby stops. Null = the default (2).
+  reviewFixMaxRounds Int?
   createdAt  DateTime @default(now())
 
   /// How this link was authorized: "host_permission" (the agent owner's
@@ -1100,6 +1103,13 @@ model RunHostCheck {
   /// existed: such a run publishes without a check.
   prNumber    Int?
   completedAt DateTime?
+  /// The verdict the run published on its own check ("APPROVE",
+  /// "CHANGES_REQUESTED", "COMMENT"); null until then, or when the check was
+  /// closed without one (superseded, or by the finalizer).
+  verdict     String?
+  /// The published review's summary and body (capped), kept for an automatic
+  /// fix round started when the run finishes.
+  reviewBody  String?
 }
 
 /// De-duplicates host webhook redeliveries; pruned after 7 days.
