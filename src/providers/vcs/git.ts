@@ -19,7 +19,12 @@ import {
   normalizeGitHubRepository,
   normalizeGitRef,
 } from "../../coding/protocol.js";
-import { isSafeGitHubInstallationToken, type GitHubRepositoryAccess, type RepositoryFileInput } from "./github.js";
+import {
+  isLockfilePath,
+  isSafeGitHubInstallationToken,
+  type GitHubRepositoryAccess,
+  type RepositoryFileInput,
+} from "./github.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -524,6 +529,7 @@ export class GitVcsProvider implements VcsProvider {
       tag: details?.tag,
       packages: details?.packages,
       packageRefusals: details?.packageRefusals,
+      changedLockfiles: changed.filter(isLockfilePath),
       ...(details?.issue ? { issue: details.issue } : {}),
     });
     return {

@@ -113,6 +113,20 @@ describe("outcomeBody", () => {
     expect(body).toContain("`r1`");
   });
 
+  it("flags a pull request whose run had failing checks instead of a plain ✅", () => {
+    const body = outcomeBody(run("succeeded"), REPO, [
+      {
+        outcome: "pull_request_opened",
+        repository: REPO,
+        pullRequestNumber: 3,
+        codeProvider: "github",
+        failedChecks: 2,
+      },
+    ]);
+    expect(body).toMatch(/^⚠️ Opened #3, but 2 checks failed in the run/);
+    expect(body).not.toContain("✅");
+  });
+
   it("shows the agent's reply, quoted and without live @-mentions, when no pull request came out", () => {
     const body = outcomeBody(run("succeeded", "Which file?\n@chfields please say"), REPO, []);
     expect(body).toMatch(/^✅ Finished without opening a pull request\./);
@@ -529,5 +543,35 @@ describe("collectRunOutcome", () => {
     ]);
     expect(out.failedChildren.map((c) => c.id)).toEqual(["c2"]);
     expect(out.budgetSentence).toBeUndefined();
+  });
+
+  it("counts a pull request's failed checks from the coding result", async () => {
+    const database = {
+      run: {
+        findMany: vi.fn(async () => [
+          {
+            id: "c1",
+            status: "succeeded",
+            error: null,
+            codingRun: {
+              result: {
+                outcome: "pull_request_opened",
+                repository: "o/r",
+                pullRequestNumber: 4,
+                tests: [
+                  { command: "npm run typecheck", outcome: "failed" },
+                  { command: "npm run build", outcome: "failed" },
+                  { command: "npm run e2e", outcome: "skipped" },
+                ],
+              },
+              failureCategory: null,
+              services: [],
+            },
+          },
+        ]),
+      },
+    } as never;
+    const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
+    expect(out.pullRequests[0].failedChecks).toBe(2);
   });
 });

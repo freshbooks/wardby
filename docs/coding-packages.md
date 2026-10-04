@@ -401,6 +401,22 @@ and 100 refusals, followed by "…and N more — see get_run for the full list";
 `get_run` always has the complete list. If the report can't be loaded or
 rendered, the section is left out and the pull request is still opened.
 
+When the registry refused anything during the run, the pull request also
+opens with a **Dependency install incomplete** warning, above the agent's
+summary. It names the refused packages grouped by refusal code, says what
+each code means, and notes that failed checks under **Tests** may come from
+the sandbox rather than the change. If the run changed a lock file
+(`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`,
+`poetry.lock`, `uv.lock` or `Pipfile.lock`), the warning names it: the lock
+file may be missing entries, so a clean install in CI can fail until it is
+regenerated outside the sandbox. Wardby writes this from the registry's
+records and the run's diff, not from the agent's summary.
+
+A package that is only reachable through a refused one is refused too, as
+`wardby_package_not_allowed`. When a dependency deep in a toolchain has a
+high-severity advisory and no fixed version, every run that installs that
+tree is refused at the same place; approving more packages won't help.
+
 ## Error codes
 
 npm and pip print the proxy's error body verbatim, so these are what you'll

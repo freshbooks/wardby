@@ -51,6 +51,8 @@ export interface PullRequestInput {
   /** Deduplicated by the caller isn't required — pullRequestBody dedupes itself (ecosystem+name+version / +reason). */
   packages?: readonly PackageReport[];
   packageRefusals?: readonly PackageRefusal[];
+  /** Lock files the run changed (repository paths); with refusals, the PR body warns they may be incomplete. */
+  changedLockfiles?: readonly string[];
   /**
    * A continuation re-finds the PR its root run opened, and a person may
    * have marked that PR ready for review since. The push has already updated
@@ -260,12 +262,84 @@ function packagesSection(input: PullRequestInput): string | undefined {
   ].join("\n");
 }
 
+/** Lock file names whose change, alongside a refusal, means CI's clean install may fail. */
+const LOCKFILE_NAMES = new Set([
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "poetry.lock",
+  "uv.lock",
+  "Pipfile.lock",
+]);
+
+export function isLockfilePath(path: string): boolean {
+  return LOCKFILE_NAMES.has(path.slice(path.lastIndexOf("/") + 1));
+}
+
+/** What each refusal code means to someone reading the PR, without the registry's internals. */
+const REFUSAL_MEANING: Record<string, string> = {
+  wardby_package_not_allowed: "not on the allowlist, or only reachable through a refused package",
+  wardby_version_filtered: "withheld: newer than the release-age limit, or a high-severity advisory",
+  wardby_graph_incomplete: "its dependencies could not be confirmed (usually transient)",
+  wardby_lockfile_integrity_mismatch: "the lock file's integrity does not match the registry's",
+  wardby_upstream_error: "the upstream registry failed (transient)",
+  wardby_audit_unavailable: "the advisory check was unavailable (transient)",
+};
+
+/** At most this many refused packages are named in the warning; the full list stays in the details. */
+const MAX_WARNING_NAMES = 8;
+
+/**
+ * A visible warning when the registry refused packages: the run's own
+ * installs were then incomplete, so failed checks in Tests may be the
+ * sandbox, not the change, and a changed lock file may not install in CI.
+ * Built only from registry records and the run's own diff, never from the
+ * agent's summary, so it cannot be softened or left out by the model.
+ */
+function refusalWarning(input: PullRequestInput): string | undefined {
+  const refusals = (input.packageRefusals ?? []).filter(
+    (r) => isSafeMarkdownFragment(r.ecosystem) && isSafeMarkdownFragment(r.name) && isSafeMarkdownFragment(r.reason),
+  );
+  if (refusals.length === 0) return undefined;
+  const byReason = new Map<string, Set<string>>();
+  for (const r of refusals) {
+    const names = byReason.get(r.reason) ?? new Set<string>();
+    names.add(`${r.ecosystem} \`${r.name}\``);
+    byReason.set(r.reason, names);
+  }
+  const lines = [
+    "> [!WARNING]",
+    "> **Dependency install incomplete.** Wardby's package registry refused packages during this run, so its installs did not finish and failed checks under **Tests** may come from the sandbox rather than this change.",
+  ];
+  for (const [reason, names] of byReason) {
+    const listed = [...names];
+    const shown = listed.slice(0, MAX_WARNING_NAMES).join(", ");
+    const more = listed.length > MAX_WARNING_NAMES ? ` and ${listed.length - MAX_WARNING_NAMES} more` : "";
+    const meaning = REFUSAL_MEANING[reason];
+    lines.push(`> - ${shown}${more}: \`${reason}\`${meaning ? ` (${meaning})` : ""}`);
+  }
+  const lockfiles = (input.changedLockfiles ?? []).filter(isSafeMarkdownFragment);
+  if (lockfiles.length > 0) {
+    lines.push(
+      `> ${lockfiles.map((f) => `\`${f}\``).join(", ")} changed in this run and may be incomplete: a clean install (\`npm ci\` or similar) in CI may fail until it is regenerated.`,
+    );
+  }
+  return lines.join("\n");
+}
+
 /** The hidden run marker stays first and unconditional: createOrFindDraftPullRequest's idempotent lookup depends on it. */
 export function pullRequestBody(input: PullRequestInput): string {
   const sections = [`${RUN_MARKER_PREFIX}${input.runId} -->`];
   // Hidden marker stays first; the issue link is the first visible line.
   const issue = issueLine(input);
   if (issue) sections.push(issue);
+  try {
+    const warning = refusalWarning(input);
+    if (warning) sections.push(warning);
+  } catch {
+    // omitted, like the packages section
+  }
   if (input.summary) sections.push(input.summary);
   if (input.tests?.length) {
     sections.push(["**Tests:**", ...input.tests.map((test) => `- \`${test.command}\`: ${test.outcome}`)].join("\n"));
