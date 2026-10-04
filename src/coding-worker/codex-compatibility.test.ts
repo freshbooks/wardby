@@ -173,10 +173,10 @@ describe.skipIf(RECORD)("pinned Codex version", () => {
 describe.runIf(RECORD)("record the pinned Codex CLI's Responses requests", () => {
   it("writes the request fixture for the pinned version", async () => {
     expect(codexBinaryInstalled(), "the host's Codex binary (@openai/codex-<platform>) is not installed").toBe(true);
-    const requests = await recordCodexRequests({ log: (line) => console.log(`[codex-record] ${line}`) });
+    const requests = await recordCodexRequests({ log: (line) => process.stderr.write(`[codex-record] ${line}\n`) });
     const target = join(FIXTURES, `codex-${pinnedCodexVersion()}-responses-requests.json`);
     await writeFile(target, `${JSON.stringify(requests, null, 2)}\n`);
-    console.log(`[codex-record] wrote ${requests.length} requests to ${target}`);
+    process.stderr.write(`[codex-record] wrote ${requests.length} requests to ${target}\n`);
   }, 900_000);
 });
 
