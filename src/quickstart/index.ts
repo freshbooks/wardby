@@ -310,6 +310,17 @@ function clientInstalled(command: "codex" | "claude"): boolean {
   return runCommand(command, ["--version"]).status === 0;
 }
 
+/**
+ * Arguments for `<client> mcp add`. The server name comes right after `add`:
+ * Claude Code's `-e/--env <env...>` is variadic and would otherwise read the
+ * name as another KEY=value ("Invalid environment variable format: wardby").
+ */
+export function mcpAddArgs(client: "codex" | "claude", projectDir: string, packageSpec: string): string[] {
+  const env = `WARDBY_PROJECT_DIR=${projectDir}`;
+  const options = client === "codex" ? ["--env", env] : ["--scope", "local", "-e", env];
+  return ["mcp", "add", "wardby", ...options, "--", "npx", "--yes", packageSpec, "mcp"];
+}
+
 function configureOneMcpClient(client: "codex" | "claude", paths: QuickstartPaths): boolean {
   if (!clientInstalled(client)) {
     console.warn(`! ${client} is not installed; skipped its MCP configuration.`);
@@ -322,35 +333,7 @@ function configureOneMcpClient(client: "codex" | "claude", paths: QuickstartPath
     return true;
   }
 
-  const packageSpec = `@wardby/cli@${packageJson.version}`;
-  const args =
-    client === "codex"
-      ? [
-          "mcp",
-          "add",
-          "--env",
-          `WARDBY_PROJECT_DIR=${paths.projectDir}`,
-          "wardby",
-          "--",
-          "npx",
-          "--yes",
-          packageSpec,
-          "mcp",
-        ]
-      : [
-          "mcp",
-          "add",
-          "--scope",
-          "local",
-          "-e",
-          `WARDBY_PROJECT_DIR=${paths.projectDir}`,
-          "wardby",
-          "--",
-          "npx",
-          "--yes",
-          packageSpec,
-          "mcp",
-        ];
+  const args = mcpAddArgs(client, paths.projectDir, `@wardby/cli@${packageJson.version}`);
   const result = runCommand(client, args, { cwd: paths.projectDir });
   if (result.status !== 0) commandFailure(`${client} MCP configuration`, result);
   console.log(`✓ Configured Wardby MCP for ${client}.`);

@@ -19,4 +19,9 @@ const projectDir = resolve(process.env.WARDBY_PROJECT_DIR || process.cwd());
 // process variable, preserving explicit shell/container configuration as the
 // highest-priority source in either mode.
 dotenvFlow.config({ path: join(projectDir, ".wardby"), silent: true });
-dotenvFlow.config({ path: projectDir });
+// The application's own .env files are optional: dotenv-flow reports "no .env*
+// files" as a failure, so only load when some exist. Not `silent: true`, which
+// would also hide parse errors in a real .env.
+if (dotenvFlow.listFiles({ path: projectDir, node_env: process.env.NODE_ENV }).length > 0) {
+  dotenvFlow.config({ path: projectDir });
+}
