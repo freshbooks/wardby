@@ -13,6 +13,10 @@ Each recipe gives the one-paragraph ask you paste into Claude or Codex, the
 configuration that results, and what it produces. Both use `your-org/your-repo`
 as a placeholder repository.
 
+Agent names are unique across the whole instance, so the examples use
+repo-scoped names such as `<repo>-architect`. The sub-agent bound names
+(`architect`, `builder`) stay fixed so the delegate tools keep their names.
+
 ## Before you start
 
 These recipes go beyond the quickstart. Check each item.
@@ -64,11 +68,11 @@ reviewer step runs on every pull request.
 ### The MCP ask
 
 > Set up an architecture keeper for `your-org/your-repo`. Create a Claude Code
-> coding agent called `architect` with the reference architecture-agent prompt
+> coding agent called `<repo>-architect` with the reference architecture-agent prompt
 > from the Wardby knowledge guide and a $3 per-run budget. Trigger it once and
 > show me the run; don't schedule it yet. After I've reviewed its first pull
 > request, schedule it for Mondays at 6:00 AM. Then create a small, cheap native
-> agent called `merge-watcher` with the reference watcher prompt, attach
+> agent called `<repo>-merge-watcher` with the reference watcher prompt, attach
 > `architect` to it as a sub-agent named `architect`, and link it to the
 > repository with the `push` trigger. Finally, add the reviewer step to my
 > existing code-review agent's prompt.
@@ -90,7 +94,7 @@ Do the steps in this order; each depends on the one before.
 
 | Setting           | Value                                                                                                    |
 | ----------------- | -------------------------------------------------------------------------------------------------------- |
-| `name`            | `architect`                                                                                              |
+| `name`            | `<repo>-architect`                                                                                       |
 | `kind`            | `coding`                                                                                                 |
 | `model`           | a capable coding model, for example `claude-sonnet-5` with `provider: "claude-code"`                     |
 | `budgetUsd`       | `3` per run (docs-only work)                                                                             |
@@ -118,7 +122,7 @@ from it. Copy it from there, unchanged, as the agent's `systemPrompt`.
 
 | Setting       | Value                                                                                                                          |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `name`        | `merge-watcher`                                                                                                                |
+| `name`        | `<repo>-merge-watcher`                                                                                                         |
 | `kind`        | `native`                                                                                                                       |
 | `model`       | a small fast model, for example `claude-haiku-4-5`                                                                             |
 | `budgetUsd`   | Sized for the architect's per-run cost: the run tree shares one budget, so at least `3` plus a little for the watcher itself   |
@@ -179,10 +183,10 @@ write access to the repository can start it.
 
 ### The MCP ask
 
-> For `your-org/your-repo`, create a Codex coding agent called `builder` with a
+> For `your-org/your-repo`, create a Codex coding agent called `<repo>-builder` with a
 > $5 per-run budget and a 30 minute timeout, starting from the default branch.
 > Allow it to install these packages from the registry: (your dependencies).
-> Then create a small native agent called `router` with a $6 budget, attach
+> Then create a small native agent called `<repo>-router` with a $6 budget, attach
 > `builder` to it as a sub-agent named `builder`, and link it to the repository
 > with the `mention` trigger. The router should ask for details when a request is
 > unclear and otherwise delegate one precise task to the builder. Never merge
@@ -197,7 +201,7 @@ Pick the language section below for the toolchain and package settings.
 
 | Setting     | Value                                                                                                  |
 | ----------- | ------------------------------------------------------------------------------------------------------ |
-| `name`      | `router`                                                                                               |
+| `name`      | `<repo>-router`                                                                                        |
 | `kind`      | `native`                                                                                               |
 | `model`     | a small fast model, for example `claude-haiku-4-5`                                                     |
 | `budgetUsd` | The builder's budget plus a little: the run tree shares one budget                                     |
