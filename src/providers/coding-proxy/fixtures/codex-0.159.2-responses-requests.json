@@ -195,7 +195,7 @@
                 {
                   "type": "function",
                   "name": "spawn_agent",
-                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6-astra`: Our most capable model for complex, demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-5.6-sol`: Latest frontier agentic coding model. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority, ultrafas…[truncated for the fixture]",
+                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6.1-sol`: Latest workhorse model for coding and everyday work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-6-astra`: Frontier intelligence for the most demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: prio…[truncated for the fixture]",
                   "strict": false,
                   "parameters": {
                     "type": "object",
@@ -426,7 +426,7 @@
         "thread_id": "00000000-0000-7000-8000-000000000009",
         "turn_id": "00000000-0000-7000-8000-00000000000a",
         "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000009\",\"thread_id\":\"00000000-0000-7000-8000-000000000009\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000000a\",\"window_id\":\"00000000-0000-7000-8000-000000000009:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000000c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000000a\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000009\",\"thread_id\":\"00000000-0000-7000-8000-000000000009\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000000a\",\"window_id\":\"00000000-0000-7000-8000-000000000009:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000000c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000000a\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.6-terra\",\"reasoning_effort\":\"medium\"}",
         "x-codex-window-id": "00000000-0000-7000-8000-000000000009:0"
       }
     }
@@ -627,7 +627,7 @@
                 {
                   "type": "function",
                   "name": "spawn_agent",
-                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6-astra`: Our most capable model for complex, demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-5.6-sol`: Latest frontier agentic coding model. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority, ultrafas…[truncated for the fixture]",
+                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6.1-sol`: Latest workhorse model for coding and everyday work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-6-astra`: Frontier intelligence for the most demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: prio…[truncated for the fixture]",
                   "strict": false,
                   "parameters": {
                     "type": "object",
@@ -871,7 +871,7 @@
         "thread_id": "00000000-0000-7000-8000-000000000015",
         "turn_id": "00000000-0000-7000-8000-000000000016",
         "x-codex-installation-id": "00000000-0000-7000-8000-000000000017",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000017\",\"session_id\":\"00000000-0000-7000-8000-000000000015\",\"thread_id\":\"00000000-0000-7000-8000-000000000015\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000016\",\"window_id\":\"00000000-0000-7000-8000-000000000015:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000018\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000016\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000017\",\"session_id\":\"00000000-0000-7000-8000-000000000015\",\"thread_id\":\"00000000-0000-7000-8000-000000000015\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000016\",\"window_id\":\"00000000-0000-7000-8000-000000000015:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000018\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000016\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.6-terra\",\"reasoning_effort\":\"medium\"}",
         "x-codex-window-id": "00000000-0000-7000-8000-000000000015:0"
       }
     }
@@ -1072,7 +1072,7 @@
                 {
                   "type": "function",
                   "name": "spawn_agent",
-                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6-astra`: Our most capable model for complex, demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-5.6-sol`: Latest frontier agentic coding model. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority, ultrafas…[truncated for the fixture]",
+                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6.1-sol`: Latest workhorse model for coding and everyday work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-6-astra`: Frontier intelligence for the most demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: prio…[truncated for the fixture]",
                   "strict": false,
                   "parameters": {
                     "type": "object",
@@ -1308,7 +1308,7 @@
         "thread_id": "00000000-0000-7000-8000-000000000021",
         "turn_id": "00000000-0000-7000-8000-000000000022",
         "x-codex-installation-id": "00000000-0000-7000-8000-000000000023",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000023\",\"session_id\":\"00000000-0000-7000-8000-000000000021\",\"thread_id\":\"00000000-0000-7000-8000-000000000021\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000022\",\"window_id\":\"00000000-0000-7000-8000-000000000021:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000023\",\"session_id\":\"00000000-0000-7000-8000-000000000021\",\"thread_id\":\"00000000-0000-7000-8000-000000000021\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000022\",\"window_id\":\"00000000-0000-7000-8000-000000000021:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.6-terra\",\"reasoning_effort\":\"medium\"}",
         "x-codex-window-id": "00000000-0000-7000-8000-000000000021:0"
       }
     }
@@ -1527,7 +1527,7 @@
         "turn_id": "00000000-0000-7000-8000-00000000002f",
         "x-codex-installation-id": "00000000-0000-7000-8000-000000000030",
         "x-codex-parent-thread-id": "00000000-0000-7000-8000-00000000002c",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000030\",\"session_id\":\"00000000-0000-7000-8000-00000000002c\",\"thread_id\":\"00000000-0000-7000-8000-00000000002e\",\"agent_name\":\"/root/child\",\"turn_id\":\"00000000-0000-7000-8000-00000000002f\",\"window_id\":\"00000000-0000-7000-8000-00000000002e:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000031\",\"request_kind\":\"turn\",\"parent_thread_id\":\"00000000-0000-7000-8000-00000000002c\",\"parent_turn_id\":\"00000000-0000-7000-8000-00000000002d\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000002d\",\"subagent_kind\":\"thread_spawn\",\"thread_source\":\"subagent\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000030\",\"session_id\":\"00000000-0000-7000-8000-00000000002c\",\"thread_id\":\"00000000-0000-7000-8000-00000000002e\",\"agent_name\":\"/root/child\",\"turn_id\":\"00000000-0000-7000-8000-00000000002f\",\"window_id\":\"00000000-0000-7000-8000-00000000002e:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000031\",\"request_kind\":\"turn\",\"parent_thread_id\":\"00000000-0000-7000-8000-00000000002c\",\"parent_turn_id\":\"00000000-0000-7000-8000-00000000002d\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000002d\",\"subagent_kind\":\"thread_spawn\",\"thread_source\":\"subagent\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.6-luna\",\"reasoning_effort\":\"high\"}",
         "x-codex-window-id": "00000000-0000-7000-8000-00000000002e:0",
         "x-openai-subagent": "collab_spawn"
       }
@@ -1790,7 +1790,7 @@
                 {
                   "type": "function",
                   "name": "spawn_agent",
-                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6-astra`: Our most capable model for complex, demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-5.6-sol`: Latest frontier agentic coding model. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority, ultrafas…[truncated for the fixture]",
+                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6.1-sol`: Latest workhorse model for coding and everyday work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-6-astra`: Frontier intelligence for the most demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: prio…[truncated for the fixture]",
                   "strict": false,
                   "parameters": {
                     "type": "object",
@@ -1987,7 +1987,7 @@
         "thread_id": "00000000-0000-7000-8000-000000000039",
         "turn_id": "00000000-0000-7000-8000-00000000003a",
         "x-codex-installation-id": "00000000-0000-7000-8000-00000000003b",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000003b\",\"session_id\":\"00000000-0000-7000-8000-000000000039\",\"thread_id\":\"00000000-0000-7000-8000-000000000039\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000003a\",\"window_id\":\"00000000-0000-7000-8000-000000000039:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000003c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000003a\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000003b\",\"session_id\":\"00000000-0000-7000-8000-000000000039\",\"thread_id\":\"00000000-0000-7000-8000-000000000039\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000003a\",\"window_id\":\"00000000-0000-7000-8000-000000000039:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000003c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000003a\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-6-astra\",\"reasoning_effort\":\"low\"}",
         "x-codex-window-id": "00000000-0000-7000-8000-000000000039:0"
       }
     }
@@ -2188,7 +2188,7 @@
                 {
                   "type": "function",
                   "name": "spawn_agent",
-                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6-astra`: Our most capable model for complex, demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-5.6-sol`: Latest frontier agentic coding model. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority, ultrafas…[truncated for the fixture]",
+                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6.1-sol`: Latest workhorse model for coding and everyday work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-6-astra`: Frontier intelligence for the most demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: prio…[truncated for the fixture]",
                   "strict": false,
                   "parameters": {
                     "type": "object",
@@ -2381,7 +2381,7 @@
         "thread_id": "00000000-0000-7000-8000-000000000044",
         "turn_id": "00000000-0000-7000-8000-000000000045",
         "x-codex-installation-id": "00000000-0000-7000-8000-000000000046",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000046\",\"session_id\":\"00000000-0000-7000-8000-000000000044\",\"thread_id\":\"00000000-0000-7000-8000-000000000044\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000045\",\"window_id\":\"00000000-0000-7000-8000-000000000044:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000047\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000045\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000046\",\"session_id\":\"00000000-0000-7000-8000-000000000044\",\"thread_id\":\"00000000-0000-7000-8000-000000000044\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000045\",\"window_id\":\"00000000-0000-7000-8000-000000000044:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000047\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000045\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.6-sol\",\"reasoning_effort\":\"low\"}",
         "x-codex-window-id": "00000000-0000-7000-8000-000000000044:0"
       }
     }
@@ -2539,7 +2539,7 @@
         "thread_id": "00000000-0000-7000-8000-000000000050",
         "turn_id": "00000000-0000-7000-8000-000000000051",
         "x-codex-installation-id": "00000000-0000-7000-8000-000000000052",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000052\",\"session_id\":\"00000000-0000-7000-8000-000000000050\",\"thread_id\":\"00000000-0000-7000-8000-000000000050\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000051\",\"window_id\":\"00000000-0000-7000-8000-000000000050:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000053\",\"request_kind\":\"compaction\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000051\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"compaction\":{\"trigger\":\"auto\",\"reason\":\"context_limit\",\"implementation\":\"responses\",\"phase\":\"mid_turn\",\"strategy\":\"memento\"}}",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000052\",\"session_id\":\"00000000-0000-7000-8000-000000000050\",\"thread_id\":\"00000000-0000-7000-8000-000000000050\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000051\",\"window_id\":\"00000000-0000-7000-8000-000000000050:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000053\",\"request_kind\":\"compaction\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000051\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"compaction\":{\"trigger\":\"auto\",\"reason\":\"context_limit\",\"implementation\":\"responses\",\"phase\":\"mid_turn\",\"strategy\":\"memento\"}}",
         "x-codex-window-id": "00000000-0000-7000-8000-000000000050:0"
       }
     }
@@ -2740,7 +2740,7 @@
                 {
                   "type": "function",
                   "name": "spawn_agent",
-                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6-astra`: Our most capable model for complex, demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-5.6-sol`: Latest frontier agentic coding model. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority, ultrafas…[truncated for the fixture]",
+                  "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6.1-sol`: Latest workhorse model for coding and everyday work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-6-astra`: Frontier intelligence for the most demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: prio…[truncated for the fixture]",
                   "strict": false,
                   "parameters": {
                     "type": "object",
@@ -2856,7 +2856,7 @@
         },
         {
           "type": "message",
-          "id": "msg_00000000-0000-7000-8000-000000000059",
+          "id": "msg_00000000-0000-7000-8000-00000000004e",
           "role": "user",
           "content": [
             {
@@ -2867,7 +2867,7 @@
         },
         {
           "type": "message",
-          "id": "msg_00000000-0000-7000-8000-00000000005a",
+          "id": "msg_00000000-0000-7000-8000-000000000059",
           "role": "user",
           "content": [
             {
@@ -2944,7 +2944,7 @@
         "thread_id": "00000000-0000-7000-8000-000000000050",
         "turn_id": "00000000-0000-7000-8000-000000000051",
         "x-codex-installation-id": "00000000-0000-7000-8000-000000000052",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000052\",\"session_id\":\"00000000-0000-7000-8000-000000000050\",\"thread_id\":\"00000000-0000-7000-8000-000000000050\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000051\",\"window_id\":\"00000000-0000-7000-8000-000000000050:1\",\"window_number\":1,\"context_window_id\":\"00000000-0000-7000-8000-00000000005b\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000051\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000052\",\"session_id\":\"00000000-0000-7000-8000-000000000050\",\"thread_id\":\"00000000-0000-7000-8000-000000000050\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000051\",\"window_id\":\"00000000-0000-7000-8000-000000000050:1\",\"window_number\":1,\"context_window_id\":\"00000000-0000-7000-8000-00000000005a\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000051\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-5.6-terra\",\"reasoning_effort\":\"medium\"}",
         "x-codex-window-id": "00000000-0000-7000-8000-000000000050:1"
       }
     }
@@ -2957,7 +2957,7 @@
       "input": [
         {
           "type": "message",
-          "id": "msg_00000000-0000-7000-8000-00000000005c",
+          "id": "msg_00000000-0000-7000-8000-00000000005b",
           "role": "developer",
           "content": [
             {
@@ -2976,7 +2976,7 @@
         },
         {
           "type": "message",
-          "id": "msg_00000000-0000-7000-8000-00000000005d",
+          "id": "msg_00000000-0000-7000-8000-00000000005c",
           "role": "user",
           "content": [
             {
@@ -2987,7 +2987,7 @@
         },
         {
           "type": "message",
-          "id": "msg_00000000-0000-7000-8000-00000000005e",
+          "id": "msg_00000000-0000-7000-8000-00000000005d",
           "role": "user",
           "content": [
             {
@@ -3017,7 +3017,7 @@
         },
         {
           "type": "function_call_output",
-          "id": "fco_00000000-0000-7000-8000-00000000005f",
+          "id": "fco_00000000-0000-7000-8000-00000000005e",
           "call_id": "call_1",
           "output": [
             {
@@ -3036,7 +3036,7 @@
         },
         {
           "type": "function_call_output",
-          "id": "fco_00000000-0000-7000-8000-000000000060",
+          "id": "fco_00000000-0000-7000-8000-00000000005f",
           "call_id": "call_2",
           "output": "Chunk ID: 000000\nWall time: 0.0 seconds\nProcess exited with code 0\nOriginal token count: 1\nOutput:\nhi\n"
         }
@@ -3301,7 +3301,7 @@
             {
               "type": "function",
               "name": "spawn_agent",
-              "description": "\n        \n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6-astra`: Our most capable model for complex, demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-5.6-sol`: Latest frontier agentic coding model. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority,…[truncated for the fixture]",
+              "description": "\n        \n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6.1-sol`: Latest workhorse model for coding and everyday work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-6-astra`: Frontier intelligence for the most demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service ti…[truncated for the fixture]",
               "strict": false,
               "parameters": {
                 "type": "object",
@@ -3422,15 +3422,15 @@
         {
           "type": "function",
           "name": "update_goal",
-          "description": "Update the existing goal.\nUse this tool only to mark the goal achieved or genuinely blocked.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nSet status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the …[truncated for the fixture]",
+          "description": "Update the existing goal.\nSet status to `paused` only at the user's explicit request to pause this goal, never on your own initiative. Ask if unclear; a later resume revokes that request. Report the returned status and stop goal work. Budget limits take precedence over pausing.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nSet status to `…[truncated for the fixture]",
           "strict": false,
           "parameters": {
             "type": "object",
             "properties": {
               "status": {
                 "type": "string",
-                "description": "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit.",
-                "enum": ["complete", "blocked"]
+                "description": "Required. `paused` requires an explicit user request. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit.",
+                "enum": ["complete", "blocked", "paused"]
               }
             },
             "required": ["status"],
@@ -3446,7 +3446,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "00000000-0000-7000-8000-000000000061",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000060",
       "text": {
         "format": {
           "type": "json_schema",
@@ -3498,13 +3498,13 @@
         }
       },
       "client_metadata": {
-        "root_turn_id": "00000000-0000-7000-8000-000000000062",
-        "session_id": "00000000-0000-7000-8000-000000000061",
-        "thread_id": "00000000-0000-7000-8000-000000000061",
-        "turn_id": "00000000-0000-7000-8000-000000000062",
-        "x-codex-installation-id": "00000000-0000-7000-8000-000000000063",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000063\",\"session_id\":\"00000000-0000-7000-8000-000000000061\",\"thread_id\":\"00000000-0000-7000-8000-000000000061\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000062\",\"window_id\":\"00000000-0000-7000-8000-000000000061:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000064\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000062\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
-        "x-codex-window-id": "00000000-0000-7000-8000-000000000061:0"
+        "root_turn_id": "00000000-0000-7000-8000-000000000061",
+        "session_id": "00000000-0000-7000-8000-000000000060",
+        "thread_id": "00000000-0000-7000-8000-000000000060",
+        "turn_id": "00000000-0000-7000-8000-000000000061",
+        "x-codex-installation-id": "00000000-0000-7000-8000-000000000062",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000062\",\"session_id\":\"00000000-0000-7000-8000-000000000060\",\"thread_id\":\"00000000-0000-7000-8000-000000000060\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000061\",\"window_id\":\"00000000-0000-7000-8000-000000000060:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000063\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000061\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-4.1\"}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000060:0"
       }
     }
   },
@@ -3516,7 +3516,7 @@
       "input": [
         {
           "type": "message",
-          "id": "msg_00000000-0000-7000-8000-000000000065",
+          "id": "msg_00000000-0000-7000-8000-000000000064",
           "role": "developer",
           "content": [
             {
@@ -3535,7 +3535,7 @@
         },
         {
           "type": "message",
-          "id": "msg_00000000-0000-7000-8000-000000000066",
+          "id": "msg_00000000-0000-7000-8000-000000000065",
           "role": "user",
           "content": [
             {
@@ -3546,7 +3546,7 @@
         },
         {
           "type": "message",
-          "id": "msg_00000000-0000-7000-8000-000000000067",
+          "id": "msg_00000000-0000-7000-8000-000000000066",
           "role": "user",
           "content": [
             {
@@ -3594,7 +3594,7 @@
         },
         {
           "type": "function_call_output",
-          "id": "fco_00000000-0000-7000-8000-000000000068",
+          "id": "fco_00000000-0000-7000-8000-000000000067",
           "call_id": "call_1",
           "output": "invalid agent id x: Error(ParseChar { character: 'x', index: 1 })"
         }
@@ -3859,7 +3859,7 @@
             {
               "type": "function",
               "name": "spawn_agent",
-              "description": "\n        \n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6-astra`: Our most capable model for complex, demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-5.6-sol`: Latest frontier agentic coding model. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority,…[truncated for the fixture]",
+              "description": "\n        \n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6.1-sol`: Latest workhorse model for coding and everyday work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service tiers: priority.\n- `gpt-6-astra`: Frontier intelligence for the most demanding work. Reasoning efforts: low (default), medium, high, xhigh, max, ultra. Service ti…[truncated for the fixture]",
               "strict": false,
               "parameters": {
                 "type": "object",
@@ -3980,15 +3980,15 @@
         {
           "type": "function",
           "name": "update_goal",
-          "description": "Update the existing goal.\nUse this tool only to mark the goal achieved or genuinely blocked.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nSet status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the …[truncated for the fixture]",
+          "description": "Update the existing goal.\nSet status to `paused` only at the user's explicit request to pause this goal, never on your own initiative. Ask if unclear; a later resume revokes that request. Report the returned status and stop goal work. Budget limits take precedence over pausing.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nSet status to `…[truncated for the fixture]",
           "strict": false,
           "parameters": {
             "type": "object",
             "properties": {
               "status": {
                 "type": "string",
-                "description": "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit.",
-                "enum": ["complete", "blocked"]
+                "description": "Required. `paused` requires an explicit user request. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit.",
+                "enum": ["complete", "blocked", "paused"]
               }
             },
             "required": ["status"],
@@ -4004,7 +4004,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "00000000-0000-7000-8000-000000000069",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000068",
       "text": {
         "format": {
           "type": "json_schema",
@@ -4056,13 +4056,13 @@
         }
       },
       "client_metadata": {
-        "root_turn_id": "00000000-0000-7000-8000-00000000006a",
-        "session_id": "00000000-0000-7000-8000-000000000069",
-        "thread_id": "00000000-0000-7000-8000-000000000069",
-        "turn_id": "00000000-0000-7000-8000-00000000006a",
-        "x-codex-installation-id": "00000000-0000-7000-8000-00000000006b",
-        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000006b\",\"session_id\":\"00000000-0000-7000-8000-000000000069\",\"thread_id\":\"00000000-0000-7000-8000-000000000069\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000006a\",\"window_id\":\"00000000-0000-7000-8000-000000000069:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000006c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000006a\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
-        "x-codex-window-id": "00000000-0000-7000-8000-000000000069:0"
+        "root_turn_id": "00000000-0000-7000-8000-000000000069",
+        "session_id": "00000000-0000-7000-8000-000000000068",
+        "thread_id": "00000000-0000-7000-8000-000000000068",
+        "turn_id": "00000000-0000-7000-8000-000000000069",
+        "x-codex-installation-id": "00000000-0000-7000-8000-00000000006a",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000006a\",\"session_id\":\"00000000-0000-7000-8000-000000000068\",\"thread_id\":\"00000000-0000-7000-8000-000000000068\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000069\",\"window_id\":\"00000000-0000-7000-8000-000000000068:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000006b\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000069\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"analytics_enabled\":true,\"model\":\"gpt-4.1\"}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000068:0"
       }
     }
   }
