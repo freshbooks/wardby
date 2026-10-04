@@ -243,21 +243,22 @@ to include secrets or internal details. See
 <details>
 <summary>Builder (coding agent) fields that matter</summary>
 
-| Field (`codingProfile`) | What to set                                                                                                                             |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider`              | `codex` or `claude-code`; the agent's `model` must be one that provider supports                                                        |
-| `repository`            | `your-org/your-repo`; your linked GitHub account needs write access                                                                     |
-| `baseRef`               | The branch runs start from, usually your default branch                                                                                 |
-| `toolchain`             | `node` or `node-python` (per language below)                                                                                            |
-| `toolchainVersion`      | `"3.12"` for `node-python`; omit for `node`                                                                                             |
-| `packageAllowlist`      | Top-level packages per ecosystem (`npm`, `pypi`). Needs `packages:approve` or `agents:admin`                                            |
-| `packagePolicy`         | Optional `minReleaseAgeDays` (0 to 30)                                                                                                  |
-| `services`              | Catalog service names the agent may start, for example `["postgres"]`; see [Services](coding-services.md)                               |
-| `protectedPaths`        | Globs a run may not change, for example `[".github/**", "CODEOWNERS"]`. `.wardby/**` is always protected except `.wardby/services.yaml` |
-| `timeoutSec`            | 60 to 7200; for example `1800`                                                                                                          |
-| `workerImageRef`        | Digest-pinned custom image; needs `agents:admin` (see "Other languages")                                                                |
-| `defaultTask`           | Needed only to schedule the agent                                                                                                       |
-| Agent `budgetUsd`       | Per-run budget, reserved at dispatch, for example `5`                                                                                   |
+| Field (`codingProfile`) | What to set                                                                                                                                                  |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `model` (agent field)   | A capable coding model the chosen provider supports, for example `gpt-5.6-terra` with `codex` or `claude-sonnet-5` with `claude-code`; a mismatch is refused |
+| `provider`              | `codex` or `claude-code`; the agent's `model` must be one that provider supports                                                                             |
+| `repository`            | `your-org/your-repo`; your linked GitHub account needs write access                                                                                          |
+| `baseRef`               | The branch runs start from, usually your default branch                                                                                                      |
+| `toolchain`             | `node` or `node-python` (per language below)                                                                                                                 |
+| `toolchainVersion`      | `"3.12"` for `node-python`; omit for `node`                                                                                                                  |
+| `packageAllowlist`      | Top-level packages per ecosystem (`npm`, `pypi`). Needs `packages:approve` or `agents:admin`                                                                 |
+| `packagePolicy`         | Optional `minReleaseAgeDays` (0 to 30)                                                                                                                       |
+| `services`              | Catalog service names the agent may start, for example `["postgres"]`; see [Services](coding-services.md)                                                    |
+| `protectedPaths`        | Globs a run may not change, for example `[".github/**", "CODEOWNERS"]`. `.wardby/**` is always protected except `.wardby/services.yaml`                      |
+| `timeoutSec`            | 60 to 7200; for example `1800`                                                                                                                               |
+| `workerImageRef`        | Digest-pinned custom image; needs `agents:admin` (see "Other languages")                                                                                     |
+| `defaultTask`           | Needed only to schedule the agent                                                                                                                            |
+| Agent `budgetUsd`       | Per-run budget, reserved at dispatch, for example `5`                                                                                                        |
 
 The agent's `systemPrompt` is placed ahead of each request as standing
 instructions. The template below is generic.
@@ -333,7 +334,7 @@ Lockfile installs are verified against the registry before npm runs; see
 Use the `node-python` toolchain with version `3.12`, which adds Python 3 with
 `pytest` and `ruff` next to Node. Pip installs go through the registry proxy
 into a virtual environment, and only wheels are served (source distributions are
-refused), so allow packages that publish wheels:
+refused), so allow packages that publish wheels. Extras such as `[binary]` are not accepted in an allowlist entry; list the wheel package's own name instead (`psycopg-binary`, not `psycopg[binary]`):
 
 ```json
 {
@@ -344,7 +345,7 @@ refused), so allow packages that publish wheels:
   "toolchainVersion": "3.12",
   "timeoutSec": 1800,
   "packageAllowlist": {
-    "pypi": ["flask>=3", "sqlalchemy>=2", "psycopg[binary]"]
+    "pypi": ["flask>=3", "sqlalchemy>=2", "psycopg-binary>=3"]
   },
   "services": ["postgres"]
 }
@@ -384,6 +385,8 @@ in [Bring-your-own worker images](coding-worker-byo-images.md).
   "timeoutSec": 1800
 }
 ```
+
+`toolchain` is still required; the worker image's own toolchain is what runs.
 
 What the package registry covers: only **npm and PyPI** are mediated. A Go,
 Maven, Cargo, or other ecosystem has no registry proxy, and the worker has no
