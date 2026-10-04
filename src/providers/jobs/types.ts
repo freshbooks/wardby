@@ -83,6 +83,13 @@ export interface JobLauncher {
    * cannot know the handle in advance omit this, and callers persist only after `launch` returns.
    */
   plannedHandle?: (spec: JobSpec) => JobHandle | undefined;
+  /**
+   * Whether the cluster has room for this spec's job right now (Kubernetes: the namespace
+   * ResourceQuota). Asked before a run claims a slot; false keeps the run queued so it is retried
+   * later instead of failing when the job is refused. Absent, or any doubt, means yes: the launch
+   * itself stays the authority.
+   */
+  hasCapacityFor?: (spec: JobSpec) => Promise<boolean>;
   launch: (spec: JobSpec) => Promise<JobHandle>;
   status: (handle: JobHandle) => Promise<JobStatus>;
   collect: (handle: JobHandle) => Promise<JobResult>;

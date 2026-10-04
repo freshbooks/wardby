@@ -427,6 +427,20 @@ never takes a free slot ahead of an older queued run. A run still queued after
 Slot usage is derived from run state, so a crashed replica cannot leak slots:
 its runs are reconciled to `lost`, which frees them.
 
+On Kubernetes, a run slot is not enough on its own: the namespace's
+ResourceQuota can be full even when slots are free, because run pods differ in
+size (a service sidecar adds to a run's CPU and memory) and other pods share the
+quota. Set `KUBERNETES_RESOURCE_QUOTA` to the quota's name and the launcher
+checks, before a run claims a slot, whether the pod it would create fits the
+quota's free room. A run that doesn't fit is queued the same way as a run over
+`CODING_MAX_CONCURRENT`, and is retried when a run ends and on each leader tick;
+without the check, the API server refuses the pod and the run fails. The check
+reads one ResourceQuota by name (`get` on `resourcequotas` with that
+`resourceName` in the launcher's Role). If the quota is missing or can't be
+read, the launcher logs `kubernetes_resource_quota_missing` or
+`kubernetes_resource_quota_unreadable` once and launches as before. Size
+`CODING_MAX_CONCURRENT` to the quota too, so slots and quota agree.
+
 Operating the queue across replicas:
 
 - Every replica must set the same `CODING_MAX_CONCURRENT`. Each claim
@@ -547,13 +561,14 @@ control plane refuses to start if any of them is set to anything else.
 Kubernetes-specific settings (`src/config/providers.ts`,
 `loadKubernetesJobConfig`):
 
-| Variable                        | Default                                         | Meaning                                                                                                                                                                                                                 |
-| ------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `KUBERNETES_NAMESPACE`          | `wardby-coding`                                 | The one namespace holding the proxy and every per-run object.                                                                                                                                                           |
-| `KUBERNETES_PROXY_SERVICE`      | `wardby-coding-proxy`                           | The proxy's Service name; its ClusterIP is what `hostAliases` points runs at.                                                                                                                                           |
-| `KUBERNETES_CONTEXT`            | (unset → in-cluster/default kubeconfig context) | Which kubeconfig context `ClientNodeKubernetesApi` connects with.                                                                                                                                                       |
-| `KUBERNETES_RUNTIME_CLASS`      | (unset)                                         | e.g. `gvisor` on GKE. Unset means pods run without a sandboxing runtime class — logged once per launch as `kubernetes_runtime_class_unset` and development-only.                                                        |
-| `KUBERNETES_RUN_PRIORITY_CLASS` | (unset)                                         | PriorityClass for run pods and the preflight canary, e.g. `wardby-coding-run` in the GKE overlay. Must be an existing class and a DNS-1123 subdomain; `system-` classes are refused. Unset means no class (priority 0). |
+| Variable                        | Default                                         | Meaning                                                                                                                                                                                                                                                                                               |
+| ------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KUBERNETES_NAMESPACE`          | `wardby-coding`                                 | The one namespace holding the proxy and every per-run object.                                                                                                                                                                                                                                         |
+| `KUBERNETES_PROXY_SERVICE`      | `wardby-coding-proxy`                           | The proxy's Service name; its ClusterIP is what `hostAliases` points runs at.                                                                                                                                                                                                                         |
+| `KUBERNETES_CONTEXT`            | (unset → in-cluster/default kubeconfig context) | Which kubeconfig context `ClientNodeKubernetesApi` connects with.                                                                                                                                                                                                                                     |
+| `KUBERNETES_RUNTIME_CLASS`      | (unset)                                         | e.g. `gvisor` on GKE. Unset means pods run without a sandboxing runtime class — logged once per launch as `kubernetes_runtime_class_unset` and development-only.                                                                                                                                      |
+| `KUBERNETES_RESOURCE_QUOTA`     | (unset)                                         | Name of the namespace ResourceQuota run pods count against, e.g. `wardby-coding` in the GKE overlay. When set, a run whose pod would not fit the quota's free room waits in the coding queue instead of failing at pod create. Needs `get` on that one `resourcequotas` object. Unset means no check. |
+| `KUBERNETES_RUN_PRIORITY_CLASS` | (unset)                                         | PriorityClass for run pods and the preflight canary, e.g. `wardby-coding-run` in the GKE overlay. Must be an existing class and a DNS-1123 subdomain; `system-` classes are refused. Unset means no class (priority 0).                                                                               |
 
 The `CODING_CPUS` / `CODING_MEMORY_MB` / `CODING_PIDS` / `CODING_DISK_MB` /
 `CODING_MAX_DISK_MB` settings above apply identically; the per-agent

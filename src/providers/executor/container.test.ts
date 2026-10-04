@@ -149,6 +149,12 @@ class FakeStore implements ContainerExecutionStore {
 
   /** When true, the next claims report every slot taken. */
   slotsFull = false;
+  /** Runs put in the queue because the cluster had no room (markQueued). */
+  queuedForCapacity: string[] = [];
+
+  async markQueued(runId: string): Promise<void> {
+    this.queuedForCapacity.push(runId);
+  }
 
   async claimProvisioning(_runId: string, claimId: string): Promise<ProvisioningClaim> {
     if (this.run.jobHandle || this.run.provisioningClaim) return "unavailable";
@@ -232,6 +238,14 @@ class FakeJobs implements WorkspaceJobLauncher {
 
   plannedHandle(spec: JobSpec): JobHandle | undefined {
     return this.planned ? { ...this.planned, id: `${this.planned.id}-${spec.runId}` } : undefined;
+  }
+  /** What hasCapacityFor answers (or throws); undefined behaves like a launcher without the check. */
+  capacity?: boolean | Error;
+  capacityChecks: JobSpec[] = [];
+  async hasCapacityFor(spec: JobSpec): Promise<boolean> {
+    this.capacityChecks.push(spec);
+    if (this.capacity instanceof Error) throw this.capacity;
+    return this.capacity ?? true;
   }
   async launch(spec: JobSpec): Promise<JobHandle> {
     this.launches += 1;
@@ -1283,6 +1297,30 @@ describe("ContainerExecutor", () => {
     expect(created.vcs.prepared).toBe(0);
     expect(created.sessions.creates).toBe(0);
     expect(created.jobs.launches).toBe(0);
+  });
+
+  it("queues a run the cluster has no room for, before claiming a slot or touching anything", async () => {
+    const created = await harness({ status: "pending" });
+    created.jobs.capacity = false;
+    await created.executor.start("run-1");
+    expect(created.store.queuedForCapacity).toEqual(["run-1"]);
+    expect(created.store.run.status).toBe("pending");
+    expect(created.store.run.provisioningClaim ?? null).toBeNull();
+    expect(created.store.terminations).toEqual([]);
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.sessions.creates).toBe(0);
+    expect(created.jobs.launches).toBe(0);
+    expect(created.jobs.capacityChecks[0]?.runId).toBe("run-1");
+  });
+
+  it("launches as usual when the cluster has room, or when the capacity check itself fails", async () => {
+    for (const capacity of [true, new Error("quota api down")]) {
+      const created = await harness({});
+      created.jobs.capacity = capacity;
+      await created.executor.start("run-1");
+      expect(created.store.queuedForCapacity).toEqual([]);
+      expect(created.jobs.launches).toBe(1);
+    }
   });
 
   it("persists a derivable handle before launching, and again after, idempotently", async () => {

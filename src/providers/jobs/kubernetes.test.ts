@@ -27,7 +27,7 @@ afterEach(async () => {
 
 async function harness(
   runId = "run-k8s-test",
-  options: { runtimeClassName?: string; priorityClassName?: string } = {},
+  options: { runtimeClassName?: string; priorityClassName?: string; resourceQuota?: string } = {},
   launcherOptions: Partial<KubernetesJobLauncherOptions> = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "wardby-k8s-launcher-"));
@@ -1720,5 +1720,44 @@ describe("coding-run services", () => {
         { runId: "run-svc-report-slow", name: "postgres", state: "failed", reason: "timed_out" },
       ]);
     });
+  });
+});
+
+describe("KubernetesJobLauncher capacity check", () => {
+  const quota = (used: Record<string, string>) => ({
+    metadata: { name: "wardby-coding" },
+    status: {
+      hard: { "requests.cpu": "8", "limits.cpu": "8", "requests.memory": "16Gi", "limits.memory": "16Gi", pods: "20" },
+      used,
+    },
+  });
+
+  it("answers yes when no quota is configured, without reading one", async () => {
+    const h = await harness();
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
+  });
+
+  it("answers no when the run's pod would exceed the quota, and yes when it fits", async () => {
+    const h = await harness(undefined, { resourceQuota: "wardby-coding" });
+    h.api.put("resourcequota", "wardby-coding", quota({ "requests.cpu": "7800m", "limits.cpu": "7800m" }));
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(false);
+    h.api.put("resourcequota", "wardby-coding", quota({ "requests.cpu": "1", "limits.cpu": "1" }));
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
+  });
+
+  it("answers yes, warning once, when the configured quota doesn't exist", async () => {
+    const h = await harness(undefined, { resourceQuota: "missing-quota" });
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
+    expect(h.warnings.filter((w) => w.startsWith("kubernetes_resource_quota_missing"))).toHaveLength(1);
+  });
+
+  it("answers yes when the quota can't be read (for example, no RBAC grant)", async () => {
+    const h = await harness(undefined, { resourceQuota: "wardby-coding" });
+    h.api.readResourceQuota = async () => {
+      throw new Error("forbidden");
+    };
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
+    expect(h.warnings.some((w) => w.startsWith("kubernetes_resource_quota_unreadable"))).toBe(true);
   });
 });

@@ -283,6 +283,20 @@ spec:
             # preempt anything themselves.
             - name: KUBERNETES_RUN_PRIORITY_CLASS
               value: wardby-coding-run
+            # The namespace ResourceQuota (base/quota.yaml) run pods count
+            # against. Before a run claims a slot the launcher checks the
+            # quota's free room against the pod it would create; a run that
+            # doesn't fit waits in the coding queue instead of failing when
+            # the API server refuses the pod. Read by name (launcher-role.yaml).
+            - name: KUBERNETES_RESOURCE_QUOTA
+              value: wardby-coding
+            # How many coding runs may hold a slot at once. Size it to the
+            # quota: the control plane, the proxy and the headroom pod use part
+            # of it, and a run pod with a service sidecar asks for about 1.75
+            # CPU. 3 fits the base quota's 8 CPU with room to spare; raise both
+            # together.
+            - name: CODING_MAX_CONCURRENT
+              value: "3"
             # The defaults (90s preflight, 120s ready) assume a cluster with a
             # warm node pool. Autopilot provisions per pod, and a gVisor node
             # takes roughly two minutes to appear from cold -- so on an idle

@@ -1,4 +1,12 @@
-import type { V1ConfigMap, V1Endpoints, V1NetworkPolicy, V1Pod, V1Secret, V1Service } from "@kubernetes/client-node";
+import type {
+  V1ConfigMap,
+  V1Endpoints,
+  V1NetworkPolicy,
+  V1Pod,
+  V1ResourceQuota,
+  V1Secret,
+  V1Service,
+} from "@kubernetes/client-node";
 import type { Readable, Writable } from "node:stream";
 import {
   KubernetesAlreadyExistsError,
@@ -18,7 +26,7 @@ export interface FakeExecCall {
   timeoutMs: number;
 }
 
-type Kind = "configmap" | "secret" | "pod" | "networkpolicy" | "service" | "endpoints";
+type Kind = "configmap" | "secret" | "pod" | "networkpolicy" | "service" | "endpoints" | "resourcequota";
 type Obj = { metadata?: { name?: string; namespace?: string; resourceVersion?: string } };
 
 /** In-memory KubernetesApi for unit tests. Tests drive pod status and exec behavior directly. */
@@ -135,6 +143,9 @@ export class FakeKubernetesApi implements KubernetesApi {
   }
   async readEndpoints(namespace: string, name: string) {
     return this.read<V1Endpoints>("endpoints", namespace, name);
+  }
+  async readResourceQuota(namespace: string, name: string) {
+    return this.read<V1ResourceQuota>("resourcequota", namespace, name);
   }
   async readApiServerVersion() {
     return this.apiServerVersion;

@@ -340,6 +340,12 @@ export interface KubernetesJobConfig {
    * alone is sufficient — no separate overall-timeout knob needs to move in lockstep.
    */
   enforcementExecTimeoutMs?: number;
+  /**
+   * The namespace ResourceQuota coding-run pods count against (KUBERNETES_RESOURCE_QUOTA). When
+   * set, a run whose pod would not fit the quota's free room waits in the coding queue instead of
+   * failing when the API server refuses the pod. Unset = no check (the RBAC grant is by name).
+   */
+  resourceQuota?: string;
 }
 
 export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): KubernetesJobConfig {
@@ -353,6 +359,9 @@ export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): K
     platform,
   };
   if (env.KUBERNETES_CONTEXT) config.context = env.KUBERNETES_CONTEXT;
+  if (env.KUBERNETES_RESOURCE_QUOTA) {
+    config.resourceQuota = dnsLabel(env.KUBERNETES_RESOURCE_QUOTA, "KUBERNETES_RESOURCE_QUOTA", "");
+  }
   if (env.KUBERNETES_RUNTIME_CLASS) {
     config.runtimeClassName = dnsLabel(env.KUBERNETES_RUNTIME_CLASS, "KUBERNETES_RUNTIME_CLASS", "");
   }
