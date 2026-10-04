@@ -28,7 +28,7 @@ import { PassThrough, Writable, type Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
-import type { V1ConfigMap, V1ContainerStatus, V1Pod } from "@kubernetes/client-node";
+import type { V1ConfigMap, V1ContainerStatus, V1Pod, V1ResourceQuota } from "@kubernetes/client-node";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
 import {
@@ -63,6 +63,7 @@ import {
   validateKubernetesSpec,
 } from "./kubernetes-isolation.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
+import { podQuotaUsage, quotaShortfall, type PodQuotaUsage } from "./kubernetes-quota.js";
 import { readProxyWitness } from "./kubernetes-witness.js";
 import { safeExtract } from "./safe-extract.js";
 import {
@@ -250,6 +251,9 @@ const TOKEN = /^[a-f0-9]{20}$/;
 const WORKSPACE_STORAGE = `${STORAGE_ROOT}/workspace`;
 const INPUT_STORAGE = `${STORAGE_ROOT}/input`;
 const RESULT_PATH = `${STORAGE_ROOT}/output/result.json`;
+/** Stands in for the proxy ClusterIP when building a pod only to count its resources. */
+const QUOTA_PROBE_PROXY_IP = "10.0.0.1";
+
 const kubernetesLog = logger.child({ module: "kubernetes-jobs" });
 
 type Phase = "provisioning" | "active" | "succeeded" | "failed" | "stopped" | "lost" | "removed";
@@ -570,6 +574,52 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       // An invalid spec has no handle; launch() rejects with the real reason.
       return undefined;
     }
+  }
+
+  /**
+   * Whether this spec's pod fits the free room in the namespace's ResourceQuota
+   * (KubernetesJobConfig.resourceQuota), counted from the same pod `launch` would create. Any
+   * doubt (no quota configured, unreadable, unparseable, a spec the pod builder rejects) answers
+   * yes, so the launch and the API server stay the authority.
+   */
+  async hasCapacityFor(spec: JobSpec): Promise<boolean> {
+    const quotaName = this.options.config.resourceQuota;
+    if (!quotaName) return true;
+    let quota: V1ResourceQuota | undefined;
+    try {
+      quota = await this.api.readResourceQuota(this.namespace, quotaName);
+    } catch {
+      this.warnOnce("kubernetes_resource_quota_unreadable: capacity is not checked before launch");
+      return true;
+    }
+    if (!quota) {
+      this.warnOnce(`kubernetes_resource_quota_missing: ${quotaName}; capacity is not checked before launch`);
+      return true;
+    }
+    let usage: PodQuotaUsage;
+    try {
+      const { runtimeClassName, priorityClassName, platform } = this.options.config;
+      // The proxy address only fills a hosts entry; it doesn't change what the pod requests.
+      const pod = buildRunPod(spec, {
+        namespace: this.namespace,
+        proxyIp: QUOTA_PROBE_PROXY_IP,
+        runtimeClassName,
+        priorityClassName,
+        platform,
+      });
+      usage = podQuotaUsage(pod);
+    } catch {
+      return true;
+    }
+    return quotaShortfall(quota, usage) === null;
+  }
+
+  private readonly warnedOnce = new Set<string>();
+
+  private warnOnce(message: string): void {
+    if (this.warnedOnce.has(message)) return;
+    this.warnedOnce.add(message);
+    this.warn(message);
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {

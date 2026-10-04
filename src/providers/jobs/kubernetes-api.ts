@@ -3,7 +3,15 @@
  * so every launcher behavior is unit-tested against FakeKubernetesApi and
  * re-proven against a real cluster by kubernetes.integration.test.ts.
  */
-import type { V1ConfigMap, V1Endpoints, V1NetworkPolicy, V1Pod, V1Secret, V1Service } from "@kubernetes/client-node";
+import type {
+  V1ConfigMap,
+  V1Endpoints,
+  V1NetworkPolicy,
+  V1Pod,
+  V1ResourceQuota,
+  V1Secret,
+  V1Service,
+} from "@kubernetes/client-node";
 import type { Readable, Writable } from "node:stream";
 
 export class KubernetesNotFoundError extends Error {
@@ -60,6 +68,8 @@ export interface KubernetesApi {
    * resource (migrating to it is a follow-up); Endpoints is read by name so RBAC stays one object wide.
    */
   readEndpoints(namespace: string, name: string): Promise<V1Endpoints | undefined>;
+  /** Reads one ResourceQuota by name (its status carries hard and used), for the launcher's capacity check. */
+  readResourceQuota(namespace: string, name: string): Promise<V1ResourceQuota | undefined>;
   readNamespace(name: string): Promise<boolean>;
   /** Runs a command in a container; resolves with its exit code. Never uses a shell. */
   exec(

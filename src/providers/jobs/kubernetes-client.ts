@@ -12,6 +12,7 @@ import {
   VersionApi,
   type V1ConfigMap,
   type V1Endpoints,
+  type V1ResourceQuota,
   type V1NetworkPolicy,
   type V1Pod,
   type V1Secret,
@@ -174,6 +175,10 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
 
   readEndpoints(namespace: string, name: string): Promise<V1Endpoints | undefined> {
     return readOrUndefined(() => this.core.readNamespacedEndpoints({ namespace, name }));
+  }
+
+  readResourceQuota(namespace: string, name: string): Promise<V1ResourceQuota | undefined> {
+    return readOrUndefined(() => this.core.readNamespacedResourceQuota({ namespace, name }));
   }
 
   async readApiServerVersion(): Promise<string> {

@@ -255,6 +255,14 @@ describe("loadKubernetesJobConfig", () => {
     });
   });
 
+  it("reads KUBERNETES_RESOURCE_QUOTA as a DNS label, unset by default", () => {
+    expect(loadKubernetesJobConfig({}).resourceQuota).toBeUndefined();
+    expect(loadKubernetesJobConfig({ KUBERNETES_RESOURCE_QUOTA: "wardby-coding" }).resourceQuota).toBe("wardby-coding");
+    expect(() => loadKubernetesJobConfig({ KUBERNETES_RESOURCE_QUOTA: "Not A Label" })).toThrow(
+      /KUBERNETES_RESOURCE_QUOTA/,
+    );
+  });
+
   it.each(["", "Upper", "under_score", "-leading", "x".repeat(64)])("rejects KUBERNETES_NAMESPACE=%j", (value) => {
     expect(() => loadKubernetesJobConfig({ KUBERNETES_NAMESPACE: value })).toThrow(
       "KUBERNETES_NAMESPACE must be a DNS-1123 label.",

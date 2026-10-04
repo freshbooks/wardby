@@ -43,6 +43,13 @@ rules:
     resources: ["endpoints"]
     resourceNames: ["wardby-coding-proxy"]
     verbs: ["get"]
+  - apiGroups: [""]
+    # The capacity check (KUBERNETES_RESOURCE_QUOTA): the launcher reads the namespace quota's
+    # used/hard before a run claims a slot, so a pod that would be refused waits in the queue.
+    # One object wide; with no grant the check is skipped and launches behave as before.
+    resources: ["resourcequotas"]
+    resourceNames: ["wardby-coding"]
+    verbs: ["get"]
 ---
 # The preflight's `namespace` check reads the namespace back to confirm it exists
 # and is the one configured, before any run object is created. A Namespace is a

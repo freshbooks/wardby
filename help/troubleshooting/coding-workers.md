@@ -30,7 +30,17 @@ turn limit (worker error `coding_turn_limit`): 200 model calls by default. The
 work was too large for the limit, or the agent was looping. Read the run's
 summary and debug trace (`codingProfile.debugTraceMinutes`) to tell which;
 raise `codingProfile.maxTurns` (up to 1000) with `update_agent` for the first,
-or narrow the task for the second. Codex runs have no turn limit.
+or narrow the task for the second. Codex runs have no turn limit. See
+[Coding run reached its turn limit](../errors/coding-turn-limit.md).
+
+## Runs that wait for cluster capacity
+
+On Kubernetes with `KUBERNETES_RESOURCE_QUOTA` set, a run whose pod would not
+fit the namespace quota stays `pending` with `codingQueuedAt` set, like a run
+over `CODING_MAX_CONCURRENT`, and starts once other runs finish. A run still
+waiting after `CODING_QUEUE_TIMEOUT_SEC` fails with `coding_queue_timeout`:
+raise the quota, lower the run pods' size, or lower `CODING_MAX_CONCURRENT` so
+fewer runs compete.
 
 ## Service refusals and failures
 

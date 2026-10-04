@@ -54,6 +54,8 @@ import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 
 const containerLog = logger.child({ module: "container-executor" });
 
+/** The input path in a spec built only to ask the launcher about capacity; never written or read. */
+const CAPACITY_PROBE_INPUT = "/dev/null";
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
 const PROVISIONING_BACKEND = "provisioning";
 /** Serializes concurrency-slot claims across replicas. Distinct from the OAuth client lock (7412901). */
@@ -154,6 +156,12 @@ export type ProvisioningClaim = "claimed" | "unavailable" | "queued";
 export interface ContainerExecutionStore {
   load(runId: string): Promise<ContainerRunSnapshot | null>;
   claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim>;
+  /**
+   * Puts a pending, unclaimed run in the coding queue (sets CodingRun.queuedAt if unset), for a run
+   * the cluster has no room for yet. drainCodingQueue retries it when a run ends and on each
+   * scheduler tick, until CODING_QUEUE_TIMEOUT_SEC.
+   */
+  markQueued?(runId: string): Promise<void>;
   persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void>;
   heartbeat(runId: string): Promise<void>;
   complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void>;
@@ -321,6 +329,13 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       if (err instanceof RunNoLongerActiveError) return "unavailable";
       throw err;
     }
+  }
+
+  async markQueued(runId: string): Promise<void> {
+    await this.db.codingRun.updateMany({
+      where: { runId, jobBackend: null, jobHandle: null, queuedAt: null, run: { status: "pending" } },
+      data: { queuedAt: new Date() },
+    });
   }
 
   async persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void> {
@@ -657,6 +672,9 @@ export class ContainerExecutor implements Executor {
       const prepared = this.preflight(run);
       if (!handle) {
         if (run.provisioningClaim) return;
+        // No room in the cluster yet (the namespace quota): wait in the queue rather than claim a
+        // slot and then fail when the API server refuses the job.
+        if (!(await this.fitsCluster(run))) return;
         claimId = randomUUID();
         // "queued": every slot is taken; the run stays pending and
         // drainCodingQueue starts it when one frees. "unavailable": another
@@ -1170,6 +1188,21 @@ export class ContainerExecutor implements Executor {
     const current = await this.options.store.load(runId);
     if (!current) throw new Error("coding_run_not_found");
     return current;
+  }
+
+  /**
+   * False when the launcher reports this run's job would not fit the cluster right now; the run
+   * is then queued and drainCodingQueue retries it. Launchers and stores without the hooks, and
+   * any error, answer true: the launch stays the authority.
+   */
+  private async fitsCluster(run: ContainerRunSnapshot): Promise<boolean> {
+    const { jobs, store } = this.options;
+    if (!jobs.hasCapacityFor || !store.markQueued) return true;
+    const fits = await jobs.hasCapacityFor(this.jobSpec(run, CAPACITY_PROBE_INPUT)).catch(() => true);
+    if (fits) return true;
+    await store.markQueued(run.runId);
+    this.emit({ stage: "queued", runId: run.runId });
+    return false;
   }
 
   private jobSpec(run: ContainerRunSnapshot, inputArtifact: string): JobSpec {
