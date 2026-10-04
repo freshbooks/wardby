@@ -10,12 +10,21 @@ import type { CodeReviewHost, PullRequestOrigin } from "../providers/review-host
 
 export const STOPPED_LABEL = "wardby-autofix-limit";
 export const OPT_OUT_LABEL = "wardby-autofix-off";
-const ROUND_LABEL = /^wardby-autofix-[0-9]+$/;
+const ROUND_LABEL = /^wardby-autofix-([0-9]+)$/;
+
+/** The round numbers already labeled on the PR, from its current label set. */
+function roundNumbers(origin: PullRequestOrigin): number[] {
+  return origin.labels
+    .map((label) => ROUND_LABEL.exec(label))
+    .filter((match): match is RegExpExecArray => match !== null)
+    .map((match) => Number(match[1]));
+}
 
 export interface FixRoundLedger {
   rounds(origin: PullRequestOrigin): number;
   optedOut(origin: PullRequestOrigin): boolean;
-  recordRound(repository: string, prNumber: number, round: number): Promise<void>;
+  /** Labels the next unused round number (highest existing + 1), never reusing one already on the PR. */
+  recordRound(repository: string, prNumber: number, origin: PullRequestOrigin): Promise<void>;
   /** True only the first time, so the caller comments once. */
   markStopped(repository: string, prNumber: number, origin: PullRequestOrigin): Promise<boolean>;
 }
@@ -24,9 +33,18 @@ export function fixRoundLedger(host: CodeReviewHost): FixRoundLedger | null {
   if (!host.addLabel) return null;
   const addLabel = host.addLabel.bind(host);
   return {
-    rounds: (origin) => origin.labels.filter((label) => ROUND_LABEL.test(label)).length,
+    rounds: (origin) => roundNumbers(origin).length,
     optedOut: (origin) => origin.labels.includes(OPT_OUT_LABEL),
-    recordRound: (repository, prNumber, round) => addLabel(repository, prNumber, `wardby-autofix-${round}`),
+    recordRound: (repository, prNumber, origin) => {
+      // The round count and the label number can diverge (a gap from a label removed by hand,
+      // or a race with another delivery), so the next label is always one past the highest
+      // number actually on the PR, never derived from the round count: that count is what the
+      // caller reports in the task text and heading, but reusing it as a label here could
+      // collide with a label already there and make addLabel a silent no-op (the count would
+      // then never grow and the cap would never trip).
+      const next = Math.max(0, ...roundNumbers(origin)) + 1;
+      return addLabel(repository, prNumber, `wardby-autofix-${next}`);
+    },
     markStopped: async (repository, prNumber, origin) => {
       if (origin.labels.includes(STOPPED_LABEL)) return false;
       await addLabel(repository, prNumber, STOPPED_LABEL);

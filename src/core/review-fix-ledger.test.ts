@@ -22,10 +22,23 @@ describe("label fix-round ledger", () => {
     expect(ledger.optedOut(origin([]))).toBe(false);
   });
 
-  it("records a round as its label", async () => {
+  it("records the first round when the PR has none yet", async () => {
     const addLabel = vi.fn(async () => undefined);
-    await fixRoundLedger({ addLabel } as unknown as CodeReviewHost)!.recordRound("o/r", 7, 2);
-    expect(addLabel).toHaveBeenCalledWith("o/r", 7, "wardby-autofix-2");
+    await fixRoundLedger({ addLabel } as unknown as CodeReviewHost)!.recordRound("o/r", 7, origin([]));
+    expect(addLabel).toHaveBeenCalledWith("o/r", 7, "wardby-autofix-1");
+  });
+
+  it("records one past the highest existing round label, never reusing one already there", async () => {
+    const addLabel = vi.fn(async () => undefined);
+    // Only "wardby-autofix-2" is on the PR (a gap: round 1's label was removed, say), so the
+    // round *count* is 1, but the next label must still be 3, not 2 (which addLabel would treat
+    // as a no-op) and not 2 derived from count+1 either.
+    await fixRoundLedger({ addLabel } as unknown as CodeReviewHost)!.recordRound(
+      "o/r",
+      7,
+      origin(["wardby-autofix-2"]),
+    );
+    expect(addLabel).toHaveBeenCalledWith("o/r", 7, "wardby-autofix-3");
   });
 
   it("marks stopped once", async () => {

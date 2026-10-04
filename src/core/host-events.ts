@@ -326,6 +326,15 @@ async function verifyCitations(
 
 type MentionEvent = Extract<HostEvent, { kind: "mention" }>;
 
+/** The continuation hint a router agent follows to continue a PR's branch instead of opening a new one. */
+export function continuationHint(prNumber: number, runId: string): string {
+  return (
+    `[This request is a follow-up on PR #${prNumber}, originally opened by wardby run ${runId}. ` +
+    `If you delegate, pass continuePriorRun set to exactly "${runId}" so the same PR/branch is ` +
+    `continued instead of opening a new one.]`
+  );
+}
+
 /**
  * The mention agent's task text. Deterministic so a prompt can parse it.
  *
@@ -342,15 +351,6 @@ type MentionEvent = Extract<HostEvent, { kind: "mention" }>;
  * never in the system prompt. composeTaskOverride stores both in the one
  * taskOverride column.
  */
-/** The continuation hint a router agent follows to continue a PR's branch instead of opening a new one. */
-export function continuationHint(prNumber: number, runId: string): string {
-  return (
-    `[This request is a follow-up on PR #${prNumber}, originally opened by wardby run ${runId}. ` +
-    `If you delegate, pass continuePriorRun set to exactly "${runId}" so the same PR/branch is ` +
-    `continued instead of opening a new one.]`
-  );
-}
-
 export function mentionTaskText(event: MentionEvent): string {
   const kind = event.isPullRequest ? "PR" : "issue";
   const Kind = event.isPullRequest ? "PR" : "Issue";

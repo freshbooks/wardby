@@ -108,7 +108,13 @@ export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFix
     required: requiredLevel("write"),
     authorizedVia: link.authorizedVia,
   });
-  if (!access.ok) return skipped("not_authorized");
+  if (!access.ok) {
+    log.warn(
+      { repository: req.repository, agentId: link.agentId, reason: access.reason },
+      "review fix round skipped: its agent's repository access is not authorized",
+    );
+    return skipped("not_authorized");
+  }
 
   const origin = await host.pullRequestOrigin(req.repository, req.prNumber);
   if (origin.state !== "open" || origin.isFork || origin.headSha !== req.headSha) return skipped("not_current");
@@ -136,6 +142,21 @@ export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFix
   }
   const round = done + 1;
 
+  // Counted before the run starts, and deliberately not rolled back if the dispatch below is
+  // declined: once the round is labeled it must never be retried under the same number (a
+  // retry recounting it would let one review push past the cap by restarting the same round
+  // forever), so this fails closed — a round that was never labeled is the only kind that can
+  // be retried, and that is exactly what returning here, before any dispatch, leaves behind.
+  try {
+    await ledger.recordRound(req.repository, req.prNumber, origin);
+  } catch (err) {
+    log.warn(
+      { err, repository: req.repository, number: req.prNumber },
+      "could not record the fix round; not dispatching",
+    );
+    return skipped("dispatch_declined");
+  }
+
   const dispatched = await dispatchRun({
     db: deps.db,
     executor: deps.executor,
@@ -158,7 +179,6 @@ export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFix
     },
   });
   if (!dispatched) return skipped("dispatch_declined");
-  await ledger.recordRound(req.repository, req.prNumber, round);
   await postMentionStatus(
     deps.db,
     host,
