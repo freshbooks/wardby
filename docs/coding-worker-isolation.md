@@ -168,10 +168,37 @@ deeply to process is refused with `request_nesting_too_deep`.
     forces `store: false` and `background: false` and adds a
     `max_output_tokens` ceiling when Codex omits it.
 
-Upgrading the pinned `@openai/codex-sdk` means re-recording that fixture
-against a local fake upstream and rerunning the compatibility test. A Codex
-release that sends a new key or item type fails closed at the proxy rather
-than silently widening what reaches OpenAI.
+A Codex release that sends a new key or item type fails closed at the proxy
+rather than silently widening what reaches OpenAI. Upgrading the pinned
+`@openai/codex-sdk` is therefore one command plus a review:
+
+1. Change the pin in `src/coding-worker/package.json` (a dependency bot's
+   pull request does this). Until the fixture is re-recorded, the "pinned
+   Codex version" test fails with `Codex SDK bump detected (...)`.
+2. On that branch, run `npm run codex:rerecord` on a machine where npm
+   installs the host's Codex binary. It sets the root devDependency
+   `@openai/codex-sdk` to the worker's pin and installs it, drives the pinned
+   Codex CLI through a fixed set of scenarios (responses-lite and classic tool
+   layouts, code-mode `exec` with `view_image` and `apply_patch`, namespaced
+   tool calls, a spawned sub-agent, local context compaction) against a local
+   fake of the proxy's `/v1/responses` endpoint — nothing is sent to OpenAI —
+   and writes `codex-<version>-responses-requests.json`, replacing the
+   previous version's fixture. Paths, ids, timestamps and long prompt texts
+   are normalized so a re-record of the same version is byte-identical. It
+   then runs the compatibility test (the real Codex through the real proxy)
+   and the proxy's fixture-replay tests, and prints a request-shape diff
+   against the previous fixture: new or removed top-level keys, input item
+   and content types, tool types, `include`/`reasoning`/`text`/`tool_choice`/
+   `service_tier` values and `client_metadata` keys.
+3. Review that diff. If the tests pass and the diff is empty or shows only
+   shapes the allowlist already accepts, commit the new fixture with
+   `package.json` and `package-lock.json`. If the proxy refuses a request
+   (an `openai_*_not_allowed` code in the test output), do not widen the
+   allowlist to make it pass: first find out what the new key, item, tool
+   type or value does (Codex's changelog and source) and whether it can
+   reach anything outside the worker or bill outside the metered tokens,
+   then widen `parseOpenAiRequest` only for what that review accepts, and
+   document it in the list above.
 
 The proxy also binds a second listener, the **deny port** (`8788`,
 `CODING_PROXY_DENY_PORT`), which serves nothing: it accepts a connection,

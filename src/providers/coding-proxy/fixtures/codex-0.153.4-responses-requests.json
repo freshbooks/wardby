@@ -6,7 +6,7 @@
       "input": [
         {
           "type": "additional_tools",
-          "id": "at_061a18c3-13d9-5001-a274-cb238445c460",
+          "id": "at_00000000-0000-7000-8000-000000000001",
           "role": "developer",
           "tools": [
             {
@@ -248,7 +248,7 @@
         },
         {
           "type": "message",
-          "id": "msg_9c402a3e-cb69-54f4-8369-1267b86bba38",
+          "id": "msg_00000000-0000-7000-8000-000000000002",
           "role": "developer",
           "content": [
             {
@@ -259,7 +259,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-19bc-7772-ac3b-bdb15f2ea26e",
+          "id": "msg_00000000-0000-7000-8000-000000000003",
           "role": "developer",
           "content": [
             {
@@ -268,7 +268,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -278,7 +278,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-19bc-7772-ac3b-bdca14e8baaf",
+          "id": "msg_00000000-0000-7000-8000-000000000004",
           "role": "developer",
           "content": [
             {
@@ -289,7 +289,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-19bc-7772-ac3b-bdd5540a150f",
+          "id": "msg_00000000-0000-7000-8000-000000000005",
           "role": "developer",
           "content": [
             {
@@ -300,18 +300,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-19bc-7772-ac3b-bde4651abf68",
+          "id": "msg_00000000-0000-7000-8000-000000000006",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-19c1-7843-b715-94364a968edb",
+          "id": "msg_00000000-0000-7000-8000-000000000007",
           "role": "user",
           "content": [
             {
@@ -341,7 +341,7 @@
         },
         {
           "type": "custom_tool_call_output",
-          "id": "ctco_01a0df85-1a0a-7bd1-aa6b-5d90ec72c236",
+          "id": "ctco_00000000-0000-7000-8000-000000000008",
           "call_id": "call_1",
           "output": [
             {
@@ -368,7 +368,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df85-19a3-7cf3-b5a2-30b1e685d2d0",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000009",
       "text": {
         "verbosity": "low",
         "format": {
@@ -421,13 +421,13 @@
         }
       },
       "client_metadata": {
-        "x-codex-installation-id": "43bc9eb6-f737-4011-a06d-a2b2fbd88c77",
-        "thread_id": "01a0df85-19a3-7cf3-b5a2-30b1e685d2d0",
-        "x-codex-window-id": "01a0df85-19a3-7cf3-b5a2-30b1e685d2d0:0",
-        "root_turn_id": "01a0df85-19b5-70b0-94b0-79fafd8163fd",
-        "turn_id": "01a0df85-19b5-70b0-94b0-79fafd8163fd",
-        "x-codex-turn-metadata": "{\"installation_id\":\"43bc9eb6-f737-4011-a06d-a2b2fbd88c77\",\"session_id\":\"01a0df85-19a3-7cf3-b5a2-30b1e685d2d0\",\"thread_id\":\"01a0df85-19a3-7cf3-b5a2-30b1e685d2d0\",\"agent_name\":\"/root\",\"turn_id\":\"01a0df85-19b5-70b0-94b0-79fafd8163fd\",\"window_id\":\"01a0df85-19a3-7cf3-b5a2-30b1e685d2d0:0\",\"window_number\":0,\"context_window_id\":\"01a0df85-19a3-7cf3-b5a2-30cca4612999\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a0df85-19b5-70b0-94b0-79fafd8163fd\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456437174}",
-        "session_id": "01a0df85-19a3-7cf3-b5a2-30b1e685d2d0"
+        "root_turn_id": "00000000-0000-7000-8000-00000000000a",
+        "session_id": "00000000-0000-7000-8000-000000000009",
+        "thread_id": "00000000-0000-7000-8000-000000000009",
+        "turn_id": "00000000-0000-7000-8000-00000000000a",
+        "x-codex-installation-id": "00000000-0000-7000-8000-00000000000b",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000000b\",\"session_id\":\"00000000-0000-7000-8000-000000000009\",\"thread_id\":\"00000000-0000-7000-8000-000000000009\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000000a\",\"window_id\":\"00000000-0000-7000-8000-000000000009:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000000c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000000a\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000009:0"
       }
     }
   },
@@ -438,7 +438,7 @@
       "input": [
         {
           "type": "additional_tools",
-          "id": "at_07c74033-339c-5db4-8667-b01157fd29ba",
+          "id": "at_00000000-0000-7000-8000-00000000000d",
           "role": "developer",
           "tools": [
             {
@@ -680,7 +680,7 @@
         },
         {
           "type": "message",
-          "id": "msg_e9ac3370-4c0e-516d-a31e-52dd35b635e5",
+          "id": "msg_00000000-0000-7000-8000-00000000000e",
           "role": "developer",
           "content": [
             {
@@ -691,7 +691,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-96d1-7843-a984-6ee64d965b17",
+          "id": "msg_00000000-0000-7000-8000-00000000000f",
           "role": "developer",
           "content": [
             {
@@ -700,7 +700,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -710,7 +710,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-96d1-7843-a984-6ef4a883dfe1",
+          "id": "msg_00000000-0000-7000-8000-000000000010",
           "role": "developer",
           "content": [
             {
@@ -721,7 +721,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-96d1-7843-a984-6f0fb4548582",
+          "id": "msg_00000000-0000-7000-8000-000000000011",
           "role": "developer",
           "content": [
             {
@@ -732,18 +732,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-96d1-7843-a984-6f187fdae9f9",
+          "id": "msg_00000000-0000-7000-8000-000000000012",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-96d8-70f2-83dd-7c0557460e3c",
+          "id": "msg_00000000-0000-7000-8000-000000000013",
           "role": "user",
           "content": [
             {
@@ -790,7 +790,7 @@
         },
         {
           "type": "custom_tool_call_output",
-          "id": "ctco_01a0df85-9723-77b2-8e59-f3df5bb4d502",
+          "id": "ctco_00000000-0000-7000-8000-000000000014",
           "call_id": "call_1",
           "output": [
             {
@@ -813,7 +813,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df85-96c2-7063-9796-725bc2a0b124",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000015",
       "text": {
         "verbosity": "low",
         "format": {
@@ -866,13 +866,13 @@
         }
       },
       "client_metadata": {
-        "turn_id": "01a0df85-96ca-72b3-aff6-deb86609e4af",
-        "x-codex-turn-metadata": "{\"installation_id\":\"a33b27a0-7b9c-4a92-8320-dfafeabc51b4\",\"session_id\":\"01a0df85-96c2-7063-9796-725bc2a0b124\",\"thread_id\":\"01a0df85-96c2-7063-9796-725bc2a0b124\",\"agent_name\":\"/root\",\"turn_id\":\"01a0df85-96ca-72b3-aff6-deb86609e4af\",\"window_id\":\"01a0df85-96c2-7063-9796-725bc2a0b124:0\",\"window_number\":0,\"context_window_id\":\"01a0df85-96c2-7063-9796-726f877acdd5\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a0df85-96ca-72b3-aff6-deb86609e4af\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456469195}",
-        "thread_id": "01a0df85-96c2-7063-9796-725bc2a0b124",
-        "x-codex-installation-id": "a33b27a0-7b9c-4a92-8320-dfafeabc51b4",
-        "session_id": "01a0df85-96c2-7063-9796-725bc2a0b124",
-        "root_turn_id": "01a0df85-96ca-72b3-aff6-deb86609e4af",
-        "x-codex-window-id": "01a0df85-96c2-7063-9796-725bc2a0b124:0"
+        "root_turn_id": "00000000-0000-7000-8000-000000000016",
+        "session_id": "00000000-0000-7000-8000-000000000015",
+        "thread_id": "00000000-0000-7000-8000-000000000015",
+        "turn_id": "00000000-0000-7000-8000-000000000016",
+        "x-codex-installation-id": "00000000-0000-7000-8000-000000000017",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000017\",\"session_id\":\"00000000-0000-7000-8000-000000000015\",\"thread_id\":\"00000000-0000-7000-8000-000000000015\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000016\",\"window_id\":\"00000000-0000-7000-8000-000000000015:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000018\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000016\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000015:0"
       }
     }
   },
@@ -883,7 +883,7 @@
       "input": [
         {
           "type": "additional_tools",
-          "id": "at_a139e484-ba89-5715-bb73-146f812958a7",
+          "id": "at_00000000-0000-7000-8000-000000000019",
           "role": "developer",
           "tools": [
             {
@@ -1125,7 +1125,7 @@
         },
         {
           "type": "message",
-          "id": "msg_efa90dc7-3058-5025-a9ec-d33079bf8bf6",
+          "id": "msg_00000000-0000-7000-8000-00000000001a",
           "role": "developer",
           "content": [
             {
@@ -1136,7 +1136,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-bc65-7fc0-94b3-43676915b696",
+          "id": "msg_00000000-0000-7000-8000-00000000001b",
           "role": "developer",
           "content": [
             {
@@ -1145,7 +1145,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -1155,7 +1155,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-bc65-7fc0-94b3-4379f904b3a3",
+          "id": "msg_00000000-0000-7000-8000-00000000001c",
           "role": "developer",
           "content": [
             {
@@ -1166,7 +1166,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-bc65-7fc0-94b3-4383344f4b02",
+          "id": "msg_00000000-0000-7000-8000-00000000001d",
           "role": "developer",
           "content": [
             {
@@ -1177,18 +1177,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-bc65-7fc0-94b3-439f928a4e06",
+          "id": "msg_00000000-0000-7000-8000-00000000001e",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-bc6c-7d80-9665-1fd272ac216e",
+          "id": "msg_00000000-0000-7000-8000-00000000001f",
           "role": "user",
           "content": [
             {
@@ -1236,7 +1236,7 @@
         },
         {
           "type": "function_call_output",
-          "id": "fco_01a0df85-bc76-7a81-9785-5fcf247486ec",
+          "id": "fco_00000000-0000-7000-8000-000000000020",
           "call_id": "call_1",
           "output": "{\"agents\":[{\"agent_name\":\"/root\",\"agent_status\":\"running\"}]}"
         }
@@ -1250,7 +1250,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df85-bc58-7311-986f-c1b5ae07cd80",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000021",
       "text": {
         "verbosity": "low",
         "format": {
@@ -1303,13 +1303,13 @@
         }
       },
       "client_metadata": {
-        "x-codex-window-id": "01a0df85-bc58-7311-986f-c1b5ae07cd80:0",
-        "thread_id": "01a0df85-bc58-7311-986f-c1b5ae07cd80",
-        "root_turn_id": "01a0df85-bc5e-7783-bece-bd745f848d11",
-        "x-codex-turn-metadata": "{\"installation_id\":\"d06ae137-956c-49b1-b24d-c423a5908cc2\",\"session_id\":\"01a0df85-bc58-7311-986f-c1b5ae07cd80\",\"thread_id\":\"01a0df85-bc58-7311-986f-c1b5ae07cd80\",\"agent_name\":\"/root\",\"turn_id\":\"01a0df85-bc5e-7783-bece-bd745f848d11\",\"window_id\":\"01a0df85-bc58-7311-986f-c1b5ae07cd80:0\",\"window_number\":0,\"context_window_id\":\"01a0df85-bc58-7311-986f-c1c3a9c4bf74\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a0df85-bc5e-7783-bece-bd745f848d11\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456478815}",
-        "turn_id": "01a0df85-bc5e-7783-bece-bd745f848d11",
-        "x-codex-installation-id": "d06ae137-956c-49b1-b24d-c423a5908cc2",
-        "session_id": "01a0df85-bc58-7311-986f-c1b5ae07cd80"
+        "root_turn_id": "00000000-0000-7000-8000-000000000022",
+        "session_id": "00000000-0000-7000-8000-000000000021",
+        "thread_id": "00000000-0000-7000-8000-000000000021",
+        "turn_id": "00000000-0000-7000-8000-000000000022",
+        "x-codex-installation-id": "00000000-0000-7000-8000-000000000023",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000023\",\"session_id\":\"00000000-0000-7000-8000-000000000021\",\"thread_id\":\"00000000-0000-7000-8000-000000000021\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000022\",\"window_id\":\"00000000-0000-7000-8000-000000000021:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000024\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000022\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000021:0"
       }
     }
   },
@@ -1320,7 +1320,7 @@
       "input": [
         {
           "type": "additional_tools",
-          "id": "at_8ceb0986-7980-555d-a92e-0b0c72da9044",
+          "id": "at_00000000-0000-7000-8000-000000000025",
           "role": "developer",
           "tools": [
             {
@@ -1428,7 +1428,7 @@
         },
         {
           "type": "message",
-          "id": "msg_e43ac1ca-39e9-57fb-a207-b1d13601c3cc",
+          "id": "msg_00000000-0000-7000-8000-000000000026",
           "role": "developer",
           "content": [
             {
@@ -1439,7 +1439,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-de76-7b20-a983-4d3064d05a65",
+          "id": "msg_00000000-0000-7000-8000-000000000027",
           "role": "developer",
           "content": [
             {
@@ -1448,7 +1448,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -1458,7 +1458,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-de76-7b20-a983-4d4586500c50",
+          "id": "msg_00000000-0000-7000-8000-000000000028",
           "role": "developer",
           "content": [
             {
@@ -1469,7 +1469,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-de76-7b20-a983-4d543710b8fe",
+          "id": "msg_00000000-0000-7000-8000-000000000029",
           "role": "developer",
           "content": [
             {
@@ -1480,18 +1480,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-de76-7b20-a983-4d660f6774b9",
+          "id": "msg_00000000-0000-7000-8000-00000000002a",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "agent_message",
-          "id": "amsg_01a0df85-de7a-7f92-8b46-0a9ead6661fc",
+          "id": "amsg_00000000-0000-7000-8000-00000000002b",
           "author": "/root",
           "recipient": "/root/child",
           "content": [
@@ -1515,21 +1515,21 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df85-de36-7520-b66a-30ccc0931d8b",
+      "prompt_cache_key": "00000000-0000-7000-8000-00000000002c",
       "text": {
         "verbosity": "low"
       },
       "client_metadata": {
-        "x-codex-turn-metadata": "{\"installation_id\":\"73ac1e96-49ca-4ce9-95bd-ee355969b385\",\"session_id\":\"01a0df85-de36-7520-b66a-30ccc0931d8b\",\"thread_id\":\"01a0df85-de57-7703-be73-6c091584be03\",\"agent_name\":\"/root/child\",\"turn_id\":\"01a0df85-de72-7431-b3b1-2bcd8d2ff9b0\",\"window_id\":\"01a0df85-de57-7703-be73-6c091584be03:0\",\"window_number\":0,\"context_window_id\":\"01a0df85-de57-7703-be73-6c1380fb0034\",\"request_kind\":\"turn\",\"parent_thread_id\":\"01a0df85-de36-7520-b66a-30ccc0931d8b\",\"parent_turn_id\":\"01a0df85-de3e-7f13-87fc-444dccf6828a\",\"root_turn_id\":\"01a0df85-de3e-7f13-87fc-444dccf6828a\",\"subagent_kind\":\"thread_spawn\",\"thread_source\":\"subagent\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456487539}",
-        "session_id": "01a0df85-de36-7520-b66a-30ccc0931d8b",
-        "x-codex-window-id": "01a0df85-de57-7703-be73-6c091584be03:0",
-        "parent_turn_id": "01a0df85-de3e-7f13-87fc-444dccf6828a",
-        "x-codex-parent-thread-id": "01a0df85-de36-7520-b66a-30ccc0931d8b",
-        "x-codex-installation-id": "73ac1e96-49ca-4ce9-95bd-ee355969b385",
-        "thread_id": "01a0df85-de57-7703-be73-6c091584be03",
-        "root_turn_id": "01a0df85-de3e-7f13-87fc-444dccf6828a",
-        "x-openai-subagent": "collab_spawn",
-        "turn_id": "01a0df85-de72-7431-b3b1-2bcd8d2ff9b0"
+        "parent_turn_id": "00000000-0000-7000-8000-00000000002d",
+        "root_turn_id": "00000000-0000-7000-8000-00000000002d",
+        "session_id": "00000000-0000-7000-8000-00000000002c",
+        "thread_id": "00000000-0000-7000-8000-00000000002e",
+        "turn_id": "00000000-0000-7000-8000-00000000002f",
+        "x-codex-installation-id": "00000000-0000-7000-8000-000000000030",
+        "x-codex-parent-thread-id": "00000000-0000-7000-8000-00000000002c",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000030\",\"session_id\":\"00000000-0000-7000-8000-00000000002c\",\"thread_id\":\"00000000-0000-7000-8000-00000000002e\",\"agent_name\":\"/root/child\",\"turn_id\":\"00000000-0000-7000-8000-00000000002f\",\"window_id\":\"00000000-0000-7000-8000-00000000002e:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000031\",\"request_kind\":\"turn\",\"parent_thread_id\":\"00000000-0000-7000-8000-00000000002c\",\"parent_turn_id\":\"00000000-0000-7000-8000-00000000002d\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000002d\",\"subagent_kind\":\"thread_spawn\",\"thread_source\":\"subagent\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-window-id": "00000000-0000-7000-8000-00000000002e:0",
+        "x-openai-subagent": "collab_spawn"
       }
     }
   },
@@ -1540,7 +1540,7 @@
       "input": [
         {
           "type": "additional_tools",
-          "id": "at_10ff8010-8d7f-5764-bb4e-827012ed27e5",
+          "id": "at_00000000-0000-7000-8000-000000000032",
           "role": "developer",
           "tools": [
             {
@@ -1843,7 +1843,7 @@
         },
         {
           "type": "message",
-          "id": "msg_416dc24a-dabb-555c-964e-5b4aaf2495a3",
+          "id": "msg_00000000-0000-7000-8000-000000000033",
           "role": "developer",
           "content": [
             {
@@ -1854,7 +1854,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-21fb-73a1-b34b-e27583d5fd75",
+          "id": "msg_00000000-0000-7000-8000-000000000034",
           "role": "developer",
           "content": [
             {
@@ -1863,7 +1863,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -1877,7 +1877,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-21fb-73a1-b34b-e289a20d0009",
+          "id": "msg_00000000-0000-7000-8000-000000000035",
           "role": "developer",
           "content": [
             {
@@ -1888,7 +1888,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-21fb-73a1-b34b-e29dacd014d0",
+          "id": "msg_00000000-0000-7000-8000-000000000036",
           "role": "developer",
           "content": [
             {
@@ -1899,18 +1899,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-21fb-73a1-b34b-e2a370203248",
+          "id": "msg_00000000-0000-7000-8000-000000000037",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-2202-7592-b290-b3bacc97f102",
+          "id": "msg_00000000-0000-7000-8000-000000000038",
           "role": "user",
           "content": [
             {
@@ -1929,7 +1929,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df84-21bf-7172-8567-e837f66b23cb",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000039",
       "text": {
         "verbosity": "low",
         "format": {
@@ -1982,13 +1982,13 @@
         }
       },
       "client_metadata": {
-        "x-codex-window-id": "01a0df84-21bf-7172-8567-e837f66b23cb:0",
-        "session_id": "01a0df84-21bf-7172-8567-e837f66b23cb",
-        "turn_id": "01a0df84-21e1-7792-884f-a8fd510e5bf2",
-        "x-codex-turn-metadata": "{\"installation_id\":\"9a6f848c-f775-4aed-96dc-0bb8611d9716\",\"session_id\":\"01a0df84-21bf-7172-8567-e837f66b23cb\",\"thread_id\":\"01a0df84-21bf-7172-8567-e837f66b23cb\",\"agent_name\":\"/root\",\"turn_id\":\"01a0df84-21e1-7792-884f-a8fd510e5bf2\",\"window_id\":\"01a0df84-21bf-7172-8567-e837f66b23cb:0\",\"window_number\":0,\"context_window_id\":\"01a0df84-21bf-7172-8567-e84fea25c7e1\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a0df84-21e1-7792-884f-a8fd510e5bf2\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456373732}",
-        "thread_id": "01a0df84-21bf-7172-8567-e837f66b23cb",
-        "x-codex-installation-id": "9a6f848c-f775-4aed-96dc-0bb8611d9716",
-        "root_turn_id": "01a0df84-21e1-7792-884f-a8fd510e5bf2"
+        "root_turn_id": "00000000-0000-7000-8000-00000000003a",
+        "session_id": "00000000-0000-7000-8000-000000000039",
+        "thread_id": "00000000-0000-7000-8000-000000000039",
+        "turn_id": "00000000-0000-7000-8000-00000000003a",
+        "x-codex-installation-id": "00000000-0000-7000-8000-00000000003b",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000003b\",\"session_id\":\"00000000-0000-7000-8000-000000000039\",\"thread_id\":\"00000000-0000-7000-8000-000000000039\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000003a\",\"window_id\":\"00000000-0000-7000-8000-000000000039:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000003c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000003a\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000039:0"
       }
     }
   },
@@ -1999,7 +1999,7 @@
       "input": [
         {
           "type": "additional_tools",
-          "id": "at_90e93502-c069-5e64-b0f3-636371c54baf",
+          "id": "at_00000000-0000-7000-8000-00000000003d",
           "role": "developer",
           "tools": [
             {
@@ -2241,7 +2241,7 @@
         },
         {
           "type": "message",
-          "id": "msg_24e0a92f-091a-53fd-a081-17090d8446b0",
+          "id": "msg_00000000-0000-7000-8000-00000000003e",
           "role": "developer",
           "content": [
             {
@@ -2252,7 +2252,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-237d-7ee0-ba38-6b2d6a4887a2",
+          "id": "msg_00000000-0000-7000-8000-00000000003f",
           "role": "developer",
           "content": [
             {
@@ -2261,7 +2261,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -2271,7 +2271,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-237d-7ee0-ba38-6b34b4a13c13",
+          "id": "msg_00000000-0000-7000-8000-000000000040",
           "role": "developer",
           "content": [
             {
@@ -2282,7 +2282,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-237d-7ee0-ba38-6b431354e63d",
+          "id": "msg_00000000-0000-7000-8000-000000000041",
           "role": "developer",
           "content": [
             {
@@ -2293,18 +2293,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-237d-7ee0-ba38-6b571847f8b2",
+          "id": "msg_00000000-0000-7000-8000-000000000042",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-2384-7461-a84a-756f232c5a60",
+          "id": "msg_00000000-0000-7000-8000-000000000043",
           "role": "user",
           "content": [
             {
@@ -2323,7 +2323,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df84-236f-7aa0-99c2-5f6c0d4b6188",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000044",
       "text": {
         "verbosity": "low",
         "format": {
@@ -2376,13 +2376,13 @@
         }
       },
       "client_metadata": {
-        "x-codex-window-id": "01a0df84-236f-7aa0-99c2-5f6c0d4b6188:0",
-        "session_id": "01a0df84-236f-7aa0-99c2-5f6c0d4b6188",
-        "thread_id": "01a0df84-236f-7aa0-99c2-5f6c0d4b6188",
-        "root_turn_id": "01a0df84-2376-7373-9410-2bf143b19689",
-        "turn_id": "01a0df84-2376-7373-9410-2bf143b19689",
-        "x-codex-turn-metadata": "{\"installation_id\":\"fd9f9a60-4f1e-403c-93fa-02e4fdd84ee3\",\"session_id\":\"01a0df84-236f-7aa0-99c2-5f6c0d4b6188\",\"thread_id\":\"01a0df84-236f-7aa0-99c2-5f6c0d4b6188\",\"agent_name\":\"/root\",\"turn_id\":\"01a0df84-2376-7373-9410-2bf143b19689\",\"window_id\":\"01a0df84-236f-7aa0-99c2-5f6c0d4b6188:0\",\"window_number\":0,\"context_window_id\":\"01a0df84-236f-7aa0-99c2-5f78109993d4\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a0df84-2376-7373-9410-2bf143b19689\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456374135}",
-        "x-codex-installation-id": "fd9f9a60-4f1e-403c-93fa-02e4fdd84ee3"
+        "root_turn_id": "00000000-0000-7000-8000-000000000045",
+        "session_id": "00000000-0000-7000-8000-000000000044",
+        "thread_id": "00000000-0000-7000-8000-000000000044",
+        "turn_id": "00000000-0000-7000-8000-000000000045",
+        "x-codex-installation-id": "00000000-0000-7000-8000-000000000046",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000046\",\"session_id\":\"00000000-0000-7000-8000-000000000044\",\"thread_id\":\"00000000-0000-7000-8000-000000000044\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000045\",\"window_id\":\"00000000-0000-7000-8000-000000000044:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000047\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000045\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000044:0"
       }
     }
   },
@@ -2393,13 +2393,13 @@
       "input": [
         {
           "type": "additional_tools",
-          "id": "at_89e903a0-16a9-561d-9877-d5f4ffd74658",
+          "id": "at_00000000-0000-7000-8000-000000000048",
           "role": "developer",
           "tools": []
         },
         {
           "type": "message",
-          "id": "msg_ec952486-9d26-5861-b1b9-e64eb991a763",
+          "id": "msg_00000000-0000-7000-8000-000000000049",
           "role": "developer",
           "content": [
             {
@@ -2410,7 +2410,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a05-72f3-bf21-bc088f9a14f4",
+          "id": "msg_00000000-0000-7000-8000-00000000004a",
           "role": "developer",
           "content": [
             {
@@ -2419,7 +2419,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -2429,7 +2429,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a05-72f3-bf21-bc1c31c0d26b",
+          "id": "msg_00000000-0000-7000-8000-00000000004b",
           "role": "developer",
           "content": [
             {
@@ -2440,7 +2440,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a05-72f3-bf21-bc235aa0193f",
+          "id": "msg_00000000-0000-7000-8000-00000000004c",
           "role": "developer",
           "content": [
             {
@@ -2451,18 +2451,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a05-72f3-bf21-bc3d9eda3e25",
+          "id": "msg_00000000-0000-7000-8000-00000000004d",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a0c-7c11-9fee-5db357ce1711",
+          "id": "msg_00000000-0000-7000-8000-00000000004e",
           "role": "user",
           "content": [
             {
@@ -2492,7 +2492,7 @@
         },
         {
           "type": "custom_tool_call_output",
-          "id": "ctco_01a0df85-3a54-7e53-b61a-a45cda0f672b",
+          "id": "ctco_00000000-0000-7000-8000-00000000004f",
           "call_id": "call_1",
           "output": [
             {
@@ -2529,18 +2529,18 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df85-39f7-7e02-9eb9-8bf291a02304",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000050",
       "text": {
         "verbosity": "low"
       },
       "client_metadata": {
-        "x-codex-turn-metadata": "{\"installation_id\":\"63d803ff-b193-48c5-8f0f-6db62ad0f747\",\"session_id\":\"01a0df85-39f7-7e02-9eb9-8bf291a02304\",\"thread_id\":\"01a0df85-39f7-7e02-9eb9-8bf291a02304\",\"agent_name\":\"/root\",\"turn_id\":\"01a0df85-39ff-7d83-aa5e-5ad167280c85\",\"window_id\":\"01a0df85-39f7-7e02-9eb9-8bf291a02304:0\",\"window_number\":0,\"context_window_id\":\"01a0df85-39f7-7e02-9eb9-8c0238bd7245\",\"request_kind\":\"compaction\",\"root_turn_id\":\"01a0df85-39ff-7d83-aa5e-5ad167280c85\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456445440,\"compaction\":{\"trigger\":\"auto\",\"reason\":\"context_limit\",\"implementation\":\"responses\",\"phase\":\"mid_turn\",\"strategy\":\"memento\"}}",
-        "root_turn_id": "01a0df85-39ff-7d83-aa5e-5ad167280c85",
-        "x-codex-installation-id": "63d803ff-b193-48c5-8f0f-6db62ad0f747",
-        "session_id": "01a0df85-39f7-7e02-9eb9-8bf291a02304",
-        "x-codex-window-id": "01a0df85-39f7-7e02-9eb9-8bf291a02304:0",
-        "thread_id": "01a0df85-39f7-7e02-9eb9-8bf291a02304",
-        "turn_id": "01a0df85-39ff-7d83-aa5e-5ad167280c85"
+        "root_turn_id": "00000000-0000-7000-8000-000000000051",
+        "session_id": "00000000-0000-7000-8000-000000000050",
+        "thread_id": "00000000-0000-7000-8000-000000000050",
+        "turn_id": "00000000-0000-7000-8000-000000000051",
+        "x-codex-installation-id": "00000000-0000-7000-8000-000000000052",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000052\",\"session_id\":\"00000000-0000-7000-8000-000000000050\",\"thread_id\":\"00000000-0000-7000-8000-000000000050\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000051\",\"window_id\":\"00000000-0000-7000-8000-000000000050:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000053\",\"request_kind\":\"compaction\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000051\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000,\"compaction\":{\"trigger\":\"auto\",\"reason\":\"context_limit\",\"implementation\":\"responses\",\"phase\":\"mid_turn\",\"strategy\":\"memento\"}}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000050:0"
       }
     }
   },
@@ -2551,7 +2551,7 @@
       "input": [
         {
           "type": "additional_tools",
-          "id": "at_2fc69d36-6a01-593c-819d-87d30101941b",
+          "id": "at_00000000-0000-7000-8000-000000000054",
           "role": "developer",
           "tools": [
             {
@@ -2793,7 +2793,7 @@
         },
         {
           "type": "message",
-          "id": "msg_ec952486-9d26-5861-b1b9-e64eb991a763",
+          "id": "msg_00000000-0000-7000-8000-000000000049",
           "role": "developer",
           "content": [
             {
@@ -2804,7 +2804,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a58-70b3-b7d6-a9e6a4c59c84",
+          "id": "msg_00000000-0000-7000-8000-000000000055",
           "role": "developer",
           "content": [
             {
@@ -2813,7 +2813,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -2823,7 +2823,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a58-70b3-b7d6-a9f8827e8354",
+          "id": "msg_00000000-0000-7000-8000-000000000056",
           "role": "developer",
           "content": [
             {
@@ -2834,7 +2834,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a58-70b3-b7d6-aa0d38c9b1ef",
+          "id": "msg_00000000-0000-7000-8000-000000000057",
           "role": "developer",
           "content": [
             {
@@ -2845,18 +2845,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a58-70b3-b7d6-aa1e9a08d947",
+          "id": "msg_00000000-0000-7000-8000-000000000058",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a58-70b3-b7d6-aa264d8d77b5",
+          "id": "msg_00000000-0000-7000-8000-000000000059",
           "role": "user",
           "content": [
             {
@@ -2867,7 +2867,7 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-3a58-70b3-b7d6-aa30b7a5b223",
+          "id": "msg_00000000-0000-7000-8000-00000000005a",
           "role": "user",
           "content": [
             {
@@ -2886,7 +2886,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df85-39f7-7e02-9eb9-8bf291a02304",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000050",
       "text": {
         "verbosity": "low",
         "format": {
@@ -2939,13 +2939,13 @@
         }
       },
       "client_metadata": {
-        "x-codex-installation-id": "63d803ff-b193-48c5-8f0f-6db62ad0f747",
-        "x-codex-turn-metadata": "{\"installation_id\":\"63d803ff-b193-48c5-8f0f-6db62ad0f747\",\"session_id\":\"01a0df85-39f7-7e02-9eb9-8bf291a02304\",\"thread_id\":\"01a0df85-39f7-7e02-9eb9-8bf291a02304\",\"agent_name\":\"/root\",\"turn_id\":\"01a0df85-39ff-7d83-aa5e-5ad167280c85\",\"window_id\":\"01a0df85-39f7-7e02-9eb9-8bf291a02304:1\",\"window_number\":1,\"context_window_id\":\"01a0df85-3a58-70b3-b7d6-a9b6430271d9\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a0df85-39ff-7d83-aa5e-5ad167280c85\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456445440}",
-        "thread_id": "01a0df85-39f7-7e02-9eb9-8bf291a02304",
-        "session_id": "01a0df85-39f7-7e02-9eb9-8bf291a02304",
-        "x-codex-window-id": "01a0df85-39f7-7e02-9eb9-8bf291a02304:1",
-        "turn_id": "01a0df85-39ff-7d83-aa5e-5ad167280c85",
-        "root_turn_id": "01a0df85-39ff-7d83-aa5e-5ad167280c85"
+        "root_turn_id": "00000000-0000-7000-8000-000000000051",
+        "session_id": "00000000-0000-7000-8000-000000000050",
+        "thread_id": "00000000-0000-7000-8000-000000000050",
+        "turn_id": "00000000-0000-7000-8000-000000000051",
+        "x-codex-installation-id": "00000000-0000-7000-8000-000000000052",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000052\",\"session_id\":\"00000000-0000-7000-8000-000000000050\",\"thread_id\":\"00000000-0000-7000-8000-000000000050\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000051\",\"window_id\":\"00000000-0000-7000-8000-000000000050:1\",\"window_number\":1,\"context_window_id\":\"00000000-0000-7000-8000-00000000005b\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000051\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000050:1"
       }
     }
   },
@@ -2957,7 +2957,7 @@
       "input": [
         {
           "type": "message",
-          "id": "msg_01a0df84-d833-7822-9958-f775b04c73d5",
+          "id": "msg_00000000-0000-7000-8000-00000000005c",
           "role": "developer",
           "content": [
             {
@@ -2966,7 +2966,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -2976,18 +2976,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-d833-7822-9958-f78e405b4cf8",
+          "id": "msg_00000000-0000-7000-8000-00000000005d",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "message",
-          "id": "msg_01a0df84-d83a-78c2-bc5b-b8721685b2a3",
+          "id": "msg_00000000-0000-7000-8000-00000000005e",
           "role": "user",
           "content": [
             {
@@ -3017,7 +3017,7 @@
         },
         {
           "type": "function_call_output",
-          "id": "fco_01a0df84-d843-73f3-9b53-62897d47bc32",
+          "id": "fco_00000000-0000-7000-8000-00000000005f",
           "call_id": "call_1",
           "output": [
             {
@@ -3036,9 +3036,9 @@
         },
         {
           "type": "function_call_output",
-          "id": "fco_01a0df84-d872-7a72-bfa6-1870431c23e0",
+          "id": "fco_00000000-0000-7000-8000-000000000060",
           "call_id": "call_2",
-          "output": "Chunk ID: c2d1db\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 1\nOutput:\nhi\n"
+          "output": "Chunk ID: 000000\nWall time: 0.0 seconds\nProcess exited with code 0\nOriginal token count: 1\nOutput:\nhi\n"
         }
       ],
       "tools": [
@@ -3446,7 +3446,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df84-d826-7fe0-924d-f3c2ee728dd2",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000061",
       "text": {
         "format": {
           "type": "json_schema",
@@ -3498,13 +3498,13 @@
         }
       },
       "client_metadata": {
-        "thread_id": "01a0df84-d826-7fe0-924d-f3c2ee728dd2",
-        "x-codex-installation-id": "11b284ad-936b-4f53-8c52-1e6d5f3d315d",
-        "x-codex-window-id": "01a0df84-d826-7fe0-924d-f3c2ee728dd2:0",
-        "turn_id": "01a0df84-d82d-7d12-90f7-94660e0cf7d2",
-        "x-codex-turn-metadata": "{\"installation_id\":\"11b284ad-936b-4f53-8c52-1e6d5f3d315d\",\"session_id\":\"01a0df84-d826-7fe0-924d-f3c2ee728dd2\",\"thread_id\":\"01a0df84-d826-7fe0-924d-f3c2ee728dd2\",\"agent_name\":\"/root\",\"turn_id\":\"01a0df84-d82d-7d12-90f7-94660e0cf7d2\",\"window_id\":\"01a0df84-d826-7fe0-924d-f3c2ee728dd2:0\",\"window_number\":0,\"context_window_id\":\"01a0df84-d826-7fe0-924d-f3dee1cd9b10\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a0df84-d82d-7d12-90f7-94660e0cf7d2\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456420398}",
-        "root_turn_id": "01a0df84-d82d-7d12-90f7-94660e0cf7d2",
-        "session_id": "01a0df84-d826-7fe0-924d-f3c2ee728dd2"
+        "root_turn_id": "00000000-0000-7000-8000-000000000062",
+        "session_id": "00000000-0000-7000-8000-000000000061",
+        "thread_id": "00000000-0000-7000-8000-000000000061",
+        "turn_id": "00000000-0000-7000-8000-000000000062",
+        "x-codex-installation-id": "00000000-0000-7000-8000-000000000063",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-000000000063\",\"session_id\":\"00000000-0000-7000-8000-000000000061\",\"thread_id\":\"00000000-0000-7000-8000-000000000061\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-000000000062\",\"window_id\":\"00000000-0000-7000-8000-000000000061:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-000000000064\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-000000000062\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000061:0"
       }
     }
   },
@@ -3516,7 +3516,7 @@
       "input": [
         {
           "type": "message",
-          "id": "msg_01a0df85-be00-7653-bd06-67a7a07c0025",
+          "id": "msg_00000000-0000-7000-8000-000000000065",
           "role": "developer",
           "content": [
             {
@@ -3525,7 +3525,7 @@
             },
             {
               "type": "input_text",
-              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/private/tmp/codex-capture/ho…[truncated for the fixture]"
+              "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and a short path that can be expanded into an absolute path using the skill roots table.\n### Skill roots\n- `r0` = `/tmp/codex-capture/home/.codex/skills/.system`\n### Available skills\n- imagegen: …[truncated for the fixture]"
             },
             {
               "type": "input_text",
@@ -3535,18 +3535,18 @@
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-be00-7653-bd06-67be2b9bc7b0",
+          "id": "msg_00000000-0000-7000-8000-000000000066",
           "role": "user",
           "content": [
             {
               "type": "input_text",
-              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-09-26</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_…[truncated for the fixture]"
+              "text": "<environment_context>\n  <cwd>/tmp/codex-capture/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>2026-01-01</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/tmp/codex-capture/workspace</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
             }
           ]
         },
         {
           "type": "message",
-          "id": "msg_01a0df85-be08-7f81-8ba5-dd34ffc065e1",
+          "id": "msg_00000000-0000-7000-8000-000000000067",
           "role": "user",
           "content": [
             {
@@ -3594,7 +3594,7 @@
         },
         {
           "type": "function_call_output",
-          "id": "fco_01a0df85-be13-72f0-abff-31d741fec41e",
+          "id": "fco_00000000-0000-7000-8000-000000000068",
           "call_id": "call_1",
           "output": "invalid agent id x: Error(ParseChar { character: 'x', index: 1 })"
         }
@@ -4004,7 +4004,7 @@
       "store": false,
       "stream": true,
       "include": ["reasoning.encrypted_content"],
-      "prompt_cache_key": "01a0df85-bdef-76c1-88e3-ac638a790298",
+      "prompt_cache_key": "00000000-0000-7000-8000-000000000069",
       "text": {
         "format": {
           "type": "json_schema",
@@ -4056,13 +4056,13 @@
         }
       },
       "client_metadata": {
-        "root_turn_id": "01a0df85-bdf7-72c1-877a-debe18e79971",
-        "thread_id": "01a0df85-bdef-76c1-88e3-ac638a790298",
-        "x-codex-window-id": "01a0df85-bdef-76c1-88e3-ac638a790298:0",
-        "turn_id": "01a0df85-bdf7-72c1-877a-debe18e79971",
-        "session_id": "01a0df85-bdef-76c1-88e3-ac638a790298",
-        "x-codex-installation-id": "f3e34590-e59e-4682-9c28-32f677426080",
-        "x-codex-turn-metadata": "{\"installation_id\":\"f3e34590-e59e-4682-9c28-32f677426080\",\"session_id\":\"01a0df85-bdef-76c1-88e3-ac638a790298\",\"thread_id\":\"01a0df85-bdef-76c1-88e3-ac638a790298\",\"agent_name\":\"/root\",\"turn_id\":\"01a0df85-bdf7-72c1-877a-debe18e79971\",\"window_id\":\"01a0df85-bdef-76c1-88e3-ac638a790298:0\",\"window_number\":0,\"context_window_id\":\"01a0df85-bdef-76c1-88e3-ac74e80981b0\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a0df85-bdf7-72c1-877a-debe18e79971\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790456479224}"
+        "root_turn_id": "00000000-0000-7000-8000-00000000006a",
+        "session_id": "00000000-0000-7000-8000-000000000069",
+        "thread_id": "00000000-0000-7000-8000-000000000069",
+        "turn_id": "00000000-0000-7000-8000-00000000006a",
+        "x-codex-installation-id": "00000000-0000-7000-8000-00000000006b",
+        "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-7000-8000-00000000006b\",\"session_id\":\"00000000-0000-7000-8000-000000000069\",\"thread_id\":\"00000000-0000-7000-8000-000000000069\",\"agent_name\":\"/root\",\"turn_id\":\"00000000-0000-7000-8000-00000000006a\",\"window_id\":\"00000000-0000-7000-8000-000000000069:0\",\"window_number\":0,\"context_window_id\":\"00000000-0000-7000-8000-00000000006c\",\"request_kind\":\"turn\",\"root_turn_id\":\"00000000-0000-7000-8000-00000000006a\",\"thread_source\":\"user\",\"sandbox\":\"none\",\"sandbox_mode\":\"danger-full-access\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1790000000000}",
+        "x-codex-window-id": "00000000-0000-7000-8000-000000000069:0"
       }
     }
   }
