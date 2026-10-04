@@ -28,6 +28,12 @@ locals {
     "github-app-client-secret",
     "auth-signing-key",
     "auth-credential-hash-key",
+    # Optional, all or none (seed-secrets.mjs): left empty when Jira is unused.
+    "jira-site-url",
+    "jira-api-base-url",
+    "jira-api-token",
+    "jira-api-token-expires-at",
+    "jira-webhook-secret",
   ])
 
   # The namespace and service account are fixed by the manifests in

@@ -161,6 +161,11 @@ spec:
           envFrom:
             - secretRef:
                 name: wardby-control-plane-env
+            # Jira settings, present only when the operator uses Jira
+            # (secrets/external-secrets-jira.yaml).
+            - secretRef:
+                name: wardby-jira-env
+                optional: true
           env:
             # Password-less: the Auth Proxy sidecar logs in as this pod's Google
             # identity. This is the only source of DATABASE_URL -- the Secret

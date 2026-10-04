@@ -8,13 +8,15 @@
 // source of truth once seeded. An empty secret is filled from, in order, the live
 // cluster's wardby-control-plane-env Secret (so today's SECRET_APP_KEY and auth
 // keys carry over), .env.local, or -- for the two auth keys only -- a new random
-// key.
+// key. An optional group (Jira) is seeded only when every one of its values has
+// a source, and left empty when none does; anything in between is an error.
 //
 // Values travel over stdin and stdout only, never in a process argument, and are
 // never printed. Every decision is made before anything is written, so a missing
 // value stops the run with nothing half-seeded.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 export const SECRETS = [
@@ -30,6 +32,15 @@ export const SECRETS = [
   { id: "github-app-client-secret", env: "GITHUB_APP_CLIENT_SECRET", source: "carry" },
   { id: "auth-signing-key", env: "AUTH_SIGNING_KEY", source: "carry-or-generate" },
   { id: "auth-credential-hash-key", env: "AUTH_CREDENTIAL_HASH_KEY", source: "carry-or-generate" },
+  // Jira Cloud (docs/jira-agents.md). Optional, all or none: an operator who
+  // doesn't use Jira leaves these empty, and up.sh then skips the
+  // wardby-jira-env ExternalSecret. The expiry date is in the group because
+  // every service account token has one.
+  { id: "jira-site-url", env: "WARDBY_JIRA_SITE_URL", source: "optional", group: "jira" },
+  { id: "jira-api-base-url", env: "WARDBY_JIRA_API_BASE_URL", source: "optional", group: "jira" },
+  { id: "jira-api-token", env: "WARDBY_JIRA_API_TOKEN", source: "optional", group: "jira" },
+  { id: "jira-api-token-expires-at", env: "WARDBY_JIRA_API_TOKEN_EXPIRES_AT", source: "optional", group: "jira" },
+  { id: "jira-webhook-secret", env: "WARDBY_JIRA_WEBHOOK_SECRET", source: "optional", group: "jira" },
 ];
 
 const CONTROL_PLANE_SECRET = "wardby-control-plane-env";
@@ -46,6 +57,7 @@ export function decideSeed(entry, state) {
   if (state.cluster) return { action: "add", from: "cluster", value: state.cluster };
   if (state.env) return { action: "add", from: ".env.local", value: state.env };
   if (entry.source === "carry-or-generate") return { action: "add", from: "generated", value: state.generate() };
+  if (entry.source === "optional") return { action: "skip" };
   return {
     action: "error",
     message: `${entry.id}: no value in Secret Manager, the cluster, or .env.local (${entry.env})`,
@@ -124,13 +136,29 @@ export async function seed({
       env: env[entry.env],
       generate,
     });
-    plan.push({ name, decision });
+    plan.push({ entry, name, decision });
   }
 
   const errors = plan.filter((p) => p.decision.action === "error").map((p) => p.decision.message);
+  const enabledGroups = [];
+  for (const group of new Set(SECRETS.map((s) => s.group).filter(Boolean))) {
+    const members = plan.filter((p) => p.entry.group === group);
+    const missing = members.filter((p) => p.decision.action === "skip");
+    if (missing.length === 0) enabledGroups.push(group);
+    else if (missing.length < members.length) {
+      errors.push(
+        `${group}: set all of ${members.map((p) => p.entry.env).join(", ")} or none of them ` +
+          `(no value for ${missing.map((p) => p.entry.env).join(", ")})`,
+      );
+    }
+  }
   if (errors.length > 0) throw new Error(`nothing was written:\n  ${errors.join("\n  ")}`);
 
   for (const { name, decision } of plan) {
+    if (decision.action === "skip") {
+      log(`left ${name} empty (optional)`);
+      continue;
+    }
     if (decision.action === "keep") {
       log(`kept ${name}`);
       continue;
@@ -140,6 +168,7 @@ export async function seed({
     });
     log(`added ${name} (from ${decision.from})`);
   }
+  return { enabledGroups };
 }
 
 function parseArgs(argv) {
@@ -160,13 +189,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     // operator's shell OPENAI_API_KEY could then be mistaken for a source.
     // parse()+listFiles() reads the files without touching process.env.
     const env = dotenvFlow.parse(dotenvFlow.listFiles({}));
-    await seed({
+    const { enabledGroups } = await seed({
       project: options.project,
       prefix: options.prefix,
       context: options.context,
       namespace: options.namespace,
       env,
     });
+    // up.sh reads this to decide which optional ExternalSecrets to apply.
+    if (options["groups-out"]) writeFileSync(options["groups-out"], enabledGroups.map((g) => `${g}\n`).join(""));
   } catch (error) {
     console.error(`seed-secrets: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);

@@ -3,7 +3,7 @@ id: deploy-gke
 title: Deploy Wardby on GKE Autopilot
 summary: Use the supported Google Cloud path for a private database, isolated coding workers, and HTTPS ingress.
 audience: operator
-tags: [deployment, gke, gcp, kubernetes, production]
+tags: [deployment, gke, gcp, kubernetes, production, secrets, jira]
 appliesTo: >=0.2.1
 ---
 
@@ -27,6 +27,7 @@ The deployment process is:
    Gateway's address, certificate map, Cloud Armor policy, and DNS record.
 3. Put first-time values in an untracked `.env.local`; `deploy/gke/up.sh`
    seeds Secret Manager without overwriting existing production values.
+   Jira settings are optional there, all or none; see [Jira](jira.md).
 4. Run `HOSTNAME=wardby.example.com deploy/gke/up.sh`, then verify DNS,
    certificate issuance, database IAM bootstrap, and service health.
 
