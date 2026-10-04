@@ -61,8 +61,8 @@ export interface FailedChild {
 
 export const runLine = (runId: string): string => `<sub>wardby run \`${runId}\`</sub>`;
 
-export function workingBody(runId: string): string {
-  return `👀 Working on it.\n\n${runLine(runId)}`;
+export function workingBody(runId: string, heading = "👀 Working on it."): string {
+  return `${heading}\n\n${runLine(runId)}`;
 }
 
 /** The status row for a mention run, created in the same transaction as the run. */
@@ -304,13 +304,14 @@ export async function postMentionStatus(
   host: CodeReviewHost,
   runId: string,
   hosts: ReviewHostRegistry | undefined,
+  heading?: string,
 ): Promise<void> {
   try {
     const status = await db.runHostStatus.findUnique({ where: { runId } });
     if (!status || status.commentId || status.completedAt) return;
     const posted = await host.comment(status.repository, {
       number: status.number,
-      body: workingBody(runId),
+      body: workingBody(runId, heading),
       ...(status.replyToReviewCommentId ? { replyToReviewCommentId: status.replyToReviewCommentId } : {}),
     });
     const claimed = await db.runHostStatus.updateMany({

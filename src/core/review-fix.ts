@@ -1,0 +1,192 @@
+/**
+ * Automatic review fix rounds: when a reviewer run's own check requested
+ * changes on a pull request a wardby coding run opened, start the
+ * repository's `review_fix` agent on that PR's branch, up to the link's
+ * round cap. Started from the reviewer run's finalizer
+ * (startReviewFixAfterReview), once per run. What the agent does with the
+ * review is up to its own instructions; this module only decides whether a
+ * round may start. See docs/private/2026-10-03-review-fix-rounds-design.md.
+ */
+import type { PrismaClient } from "#prisma";
+import type { Executor } from "../providers/executor/types.js";
+import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
+import type { ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
+import { checkContinuation, dispatchRun, type DispatchDb } from "./dispatch.js";
+import { continuationHint, unknownPriorRunBody } from "./host-events.js";
+import { mentionStatusRow, postMentionStatus } from "./host-status.js";
+import { logger } from "./logger.js";
+import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
+import { fixRoundLedger } from "./review-fix-ledger.js";
+import { MAX_REVIEW_BODY_CHARS } from "./review-host-tools.js";
+import { composeTaskOverride } from "./untrusted-content.js";
+
+const log = logger.child({ module: "review-fix" });
+
+export const DEFAULT_MAX_FIX_ROUNDS = 2;
+
+export type ReviewFixDb = DispatchDb &
+  Pick<PrismaClient, "agentRepository" | "codingRun" | "runHostStatus" | "runHostCheck" | "agentIssueProject">;
+
+export interface ReviewFixDeps {
+  db: ReviewFixDb;
+  executor: Executor;
+  hosts: ReviewHostRegistry;
+  repoAccess: RepoAccessGate;
+  issueTrackers?: IssueTrackerRegistry;
+}
+
+export interface ReviewFixRequest {
+  provider: ReviewHostProvider;
+  repository: string;
+  prNumber: number;
+  headSha: string;
+  reviewBody: string;
+}
+
+export type ReviewFixSkip =
+  | "no_host"
+  | "no_link"
+  | "not_authorized"
+  | "not_current"
+  | "not_wardby_pr"
+  | "opted_out"
+  | "cannot_continue"
+  | "capped"
+  | "dispatch_declined";
+
+export type ReviewFixResult =
+  { kind: "dispatched"; runId: string; round: number; maxRounds: number } | { kind: "skipped"; reason: ReviewFixSkip };
+
+const skipped = (reason: ReviewFixSkip): ReviewFixResult => ({ kind: "skipped", reason });
+
+export function capBody(maxRounds: number): string {
+  return (
+    `🛑 The wardby review still requests changes after ${maxRounds} automatic fix ` +
+    `round${maxRounds === 1 ? "" : "s"}, so wardby has stopped fixing this pull request by itself. ` +
+    "Review the findings, then fix them by hand or @-mention the App with what to change."
+  );
+}
+
+export function reviewFixTaskText(input: {
+  repository: string;
+  prNumber: number;
+  headSha: string;
+  round: number;
+  maxRounds: number;
+  priorRunId: string;
+  reviewBody: string;
+}): string {
+  return composeTaskOverride(
+    [
+      continuationHint(input.prNumber, input.priorRunId),
+      [`[GitHub PR #${input.prNumber}]`, `Repository: ${input.repository}`, "Requested by the wardby review"].join(
+        "\n",
+      ),
+      `Request comment:\nAutomatic fix round ${input.round} of ${input.maxRounds} for PR #${input.prNumber}: ` +
+        `the wardby code review of ${input.headSha.slice(0, 7)} requested changes. Fix every CRITICAL and MAJOR ` +
+        "finding and every MUST_FIX recommendation in the review below, with tests where the review asks for " +
+        "them. Do not change anything the review does not ask for. Leave MINOR findings and SUGGESTED/FUTURE " +
+        `recommendations alone.\n\nReview:\n${input.reviewBody.slice(0, MAX_REVIEW_BODY_CHARS)}`,
+    ].join("\n\n"),
+  );
+}
+
+export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFixDeps): Promise<ReviewFixResult> {
+  const host = deps.hosts[req.provider];
+  const ledger = host ? fixRoundLedger(host) : null;
+  if (!host?.pullRequestOrigin || !ledger) return skipped("no_host");
+
+  const link = await deps.db.agentRepository.findFirst({
+    where: { provider: req.provider, repository: req.repository, access: "write", triggers: { has: "review_fix" } },
+    include: { agent: { select: { ownerId: true } } },
+  });
+  if (!link) return skipped("no_link");
+  const access = await deps.repoAccess.authorizeUse({
+    ownerId: link.agent.ownerId,
+    provider: req.provider,
+    repository: req.repository,
+    required: requiredLevel("write"),
+    authorizedVia: link.authorizedVia,
+  });
+  if (!access.ok) return skipped("not_authorized");
+
+  const origin = await host.pullRequestOrigin(req.repository, req.prNumber);
+  if (origin.state !== "open" || origin.isFork || origin.headSha !== req.headSha) return skipped("not_current");
+  if (!origin.markerRunId) return skipped("not_wardby_pr");
+  if (ledger.optedOut(origin)) return skipped("opted_out");
+
+  const comment = async (body: string) => {
+    await host.comment(req.repository, { number: req.prNumber, body }).catch((err: unknown) => {
+      log.warn({ err, repository: req.repository, number: req.prNumber }, "could not post the fix-round comment");
+    });
+  };
+
+  const continuation = await checkContinuation(deps.db, origin.markerRunId, req.repository);
+  if (!continuation.ok || continuation.root.pullRequestNumber !== req.prNumber) {
+    if (await ledger.markStopped(req.repository, req.prNumber, origin))
+      await comment(unknownPriorRunBody(origin.markerRunId));
+    return skipped("cannot_continue");
+  }
+
+  const maxRounds = link.reviewFixMaxRounds ?? DEFAULT_MAX_FIX_ROUNDS;
+  const done = ledger.rounds(origin);
+  if (done >= maxRounds) {
+    if (await ledger.markStopped(req.repository, req.prNumber, origin)) await comment(capBody(maxRounds));
+    return skipped("capped");
+  }
+  const round = done + 1;
+
+  const dispatched = await dispatchRun({
+    db: deps.db,
+    executor: deps.executor,
+    selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
+    agentId: link.agentId,
+    trigger: "host_event",
+    taskOverride: reviewFixTaskText({
+      repository: req.repository,
+      prNumber: req.prNumber,
+      headSha: req.headSha,
+      round,
+      maxRounds,
+      priorRunId: origin.markerRunId,
+      reviewBody: req.reviewBody,
+    }),
+    afterPersist: async (tx, run) => {
+      await tx.runHostStatus.create({
+        data: mentionStatusRow(req.provider, { repository: req.repository, number: req.prNumber }, run.id),
+      });
+    },
+  });
+  if (!dispatched) return skipped("dispatch_declined");
+  await ledger.recordRound(req.repository, req.prNumber, round);
+  await postMentionStatus(
+    deps.db,
+    host,
+    dispatched.run.id,
+    deps.hosts,
+    `🔁 Fix round ${round} of ${maxRounds}: working on it.`,
+  );
+  return { kind: "dispatched", runId: dispatched.run.id, round, maxRounds };
+}
+
+/** The finalizer's entry point: a fix round for the review this run published, if it requested changes. Never throws. */
+export async function startReviewFixAfterReview(runId: string, deps: ReviewFixDeps): Promise<void> {
+  try {
+    const check = await deps.db.runHostCheck.findUnique({ where: { runId } });
+    if (!check || check.verdict !== "CHANGES_REQUESTED" || check.prNumber === null || !check.reviewBody) return;
+    if (check.provider !== "github") return;
+    const result = await startReviewFixRound(
+      {
+        provider: check.provider,
+        repository: check.repository,
+        prNumber: check.prNumber,
+        headSha: check.headSha,
+        reviewBody: check.reviewBody,
+      },
+      deps,
+    );
+    log.info({ runId, repository: check.repository, number: check.prNumber, ...result }, "review fix round");
+  } catch (err) {
+    log.warn({ err, runId }, "could not start a review fix round");
+  }
+}
