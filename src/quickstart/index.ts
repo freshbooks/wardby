@@ -475,15 +475,18 @@ export async function quickstartCommand(args: string[]): Promise<void> {
 
 /** The closing "build your first agent" hint; the assistant prompts only make sense once an MCP client is configured. */
 export function nextStepLines(mcpConfigured: boolean): string[] {
+  const guide = "the guide: npx @wardby/cli@latest help open agent-recipes";
   const lines = ["", "Next: build your first agent."];
   if (mcpConfigured) {
     lines.push(
       "Ask your assistant one of:",
       '  "Set up the Wardby architecture keeper for this repository"',
       '  "Set up a Wardby builder for this repository"',
+      `Or read ${guide}`,
     );
+  } else {
+    lines.push(`Read ${guide}`);
   }
-  lines.push("Or read the guide: npx @wardby/cli@latest help open agent-recipes");
   return lines;
 }
 

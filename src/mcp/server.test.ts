@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import { InMemoryTransport, inputRequired } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
@@ -64,6 +65,15 @@ async function connectClient(
 }
 
 describe("buildMcpServer", () => {
+  it("reports the package version in its server info", async () => {
+    const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
+    const { client } = await connectClient(mcp);
+    const { version } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
+      version: string;
+    };
+    expect(client.getServerVersion()?.version).toBe(version);
+  });
+
   it("discover() advertises the Tasks extension", async () => {
     const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
     const result = await mcp.discover();
