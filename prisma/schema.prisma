@@ -41,6 +41,8 @@ model Agent {
   // Phase 3: tools + multi-turn loop.
   tools    AgentTool[]
   maxTurns Int         @default(10)
+  /// Sub-agent delegations one run may make (delegate_to_*), each to a different sub-agent. 1 = route to exactly one.
+  maxDelegationsPerRun Int @default(1)
 
   // Phase 4: ownership. Null = owner-less, a transition state only: access
   // then comes from ResourceGrant rows alone (the migration gives everyone
@@ -398,6 +400,8 @@ model CodingAgentProfile {
   defaultTask              String?
   allowWebhookTaskOverride Boolean @default(false)
   timeoutSec               Int     @default(1800)
+  /// Claude Code runs only: the most agent turns a run may take. Null = the worker default (200).
+  maxTurns                 Int?
   /// Unused; dropped after rollout (see the package-registry plan, Task 14).
   allowedEgress            Json    @default("[]")
   protectedPaths           Json
@@ -464,6 +468,8 @@ model CodingRun {
   /// Fixed at dispatch from the profile's debugTraceUntil: the worker writes a
   /// full stream trace to its own pod log (never to the database).
   debugTrace        Boolean             @default(false)
+  /// Fixed at dispatch from the profile's maxTurns: the Claude Code worker's turn limit. Null = the worker default.
+  maxTurns          Int?
   /// Coding-run services resolved at dispatch from the base branch's
   /// .wardby/services.yaml: one snapshot per service (the catalog entry minus
   /// kind), fixed for the run's lifetime. Empty = none.

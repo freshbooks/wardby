@@ -8,6 +8,7 @@
 import { Prisma, type CodingAgentProfile } from "#prisma";
 import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
+import { DEFAULT_CLAUDE_MAX_TURNS, MAX_CODING_TURNS } from "../../coding/protocol.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { assertAgentModelAvailable } from "../../core/run-pricing.js";
 import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
@@ -62,6 +63,8 @@ const MAX_AGENT_NAME_CHARS = 200;
 const MAX_SYSTEM_PROMPT_CHARS = 64 * 1024;
 const MAX_MODEL_CHARS = 128;
 const MAX_BUDGET_USD = 1_000_000;
+/** Upper bound on Agent.maxDelegationsPerRun: a lead fanning out to one builder per repository. */
+const MAX_DELEGATIONS_PER_RUN = 20;
 
 const agentFields = {
   name: z.string().trim().min(1).max(MAX_AGENT_NAME_CHARS),
@@ -69,6 +72,7 @@ const agentFields = {
   model: z.string().trim().min(1).max(MAX_MODEL_CHARS),
   budgetUsd: z.number().finite().positive().max(MAX_BUDGET_USD),
   maxTurns: z.number().int().min(1).max(100),
+  maxDelegationsPerRun: z.number().int().min(1).max(MAX_DELEGATIONS_PER_RUN),
   schedule: z.string().trim().min(1).max(256),
   timezone: z.string().trim().min(1).max(128),
   scheduleEnabled: z.boolean(),
@@ -107,6 +111,7 @@ const CreateAgentSchema = z
     model: agentFields.model,
     budgetUsd: agentFields.budgetUsd,
     maxTurns: agentFields.maxTurns.optional(),
+    maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
     schedule: agentFields.schedule.optional(),
     timezone: agentFields.timezone.optional(),
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
@@ -164,6 +169,7 @@ const UpdateAgentSchema = z
     model: agentFields.model.optional(),
     budgetUsd: agentFields.budgetUsd.optional(),
     maxTurns: agentFields.maxTurns.optional(),
+    maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
     schedule: agentFields.schedule.nullable().optional(),
     timezone: agentFields.timezone.optional(),
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
@@ -232,6 +238,12 @@ const profileJsonSchema = {
       maximum: 32768,
       description:
         "Workspace disk size in MiB. Null uses the deployment default (CODING_DISK_MB), capped by the operator's CODING_MAX_DISK_MB.",
+    },
+    maxTurns: {
+      type: ["integer", "null"],
+      minimum: 1,
+      maximum: MAX_CODING_TURNS,
+      description: `Claude Code runs only: the most agent turns (model calls) a run may take before it stops with coding_turn_limit. Null uses the worker default (${DEFAULT_CLAUDE_MAX_TURNS}). The run's budget and timeout still apply. Codex runs have no turn limit.`,
     },
     packageAllowlist: {
       type: "object",
@@ -332,6 +344,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     toolchainVersion: profile.toolchainVersion,
     workerImageRef: profile.workerImageRef,
     workspaceDiskMb: profile.workspaceDiskMb,
+    maxTurns: profile.maxTurns,
     packageAllowlist: profile.packageAllowlist,
     packagePolicy: profile.packagePolicy,
     services: profile.services,
@@ -371,6 +384,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         model: { type: "string" },
         budgetUsd: { type: "number" },
         maxTurns: { type: "integer" },
+        maxDelegationsPerRun: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_DELEGATIONS_PER_RUN,
+          description:
+            "Native agents with sub-agents: how many delegate_to_* calls one run may make, each to a different sub-agent (they run one after another). Default 1: route to exactly one.",
+        },
         schedule: { type: "string" },
         timezone: { type: "string" },
         scheduleEnabled: { type: "boolean" },
@@ -447,6 +467,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         model: { type: "string" },
         budgetUsd: { type: "number" },
         maxTurns: { type: "integer" },
+        maxDelegationsPerRun: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_DELEGATIONS_PER_RUN,
+          description:
+            "Native agents with sub-agents: how many delegate_to_* calls one run may make, each to a different sub-agent (they run one after another). Default 1: route to exactly one.",
+        },
         schedule: { type: ["string", "null"] },
         timezone: { type: "string" },
         scheduleEnabled: { type: "boolean" },

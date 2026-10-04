@@ -155,6 +155,17 @@ yourself.`
    `<app-slug>` is the GitHub App's name. A test run is billed up to the
    builder's budget; say so first.
 
+## Step 2C (optional): a lead that fans out
+
+A router delegates once per run by default. For one native agent that splits a
+request across several repositories, attach one builder per repository and set
+the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
+`update_agent`. Each `delegate_to_<name>` call must go to a different
+sub-agent; the calls run one after another; the run tree shares the lead's
+budget, so size `budgetUsd` for every builder it may start. Put the full
+cross-repository contract in each builder's task, since each builder sees only
+its own repository.
+
 ## Step 3: confirm
 
 Summarize what you created: each agent's name and id, the sub-agent bindings,

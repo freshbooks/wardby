@@ -704,6 +704,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               budgetReservedUsd: budgetUsd,
               rootCodingRunId,
               workspaceDiskMb: agent.codingProfile.workspaceDiskMb,
+              maxTurns: agent.codingProfile.maxTurns,
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace:
                 agent.codingProfile.debugTraceUntil != null &&

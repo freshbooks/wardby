@@ -35,6 +35,7 @@ interface FakeAgent {
   model: string;
   budgetUsd: number;
   maxTurns: number;
+  maxDelegationsPerRun?: number;
   budgetGroupId?: string | null;
   kind?: "native" | "coding";
   codingProfile?: FakeCodingProfile;
@@ -982,6 +983,73 @@ describe("delegate_to_<boundName> dispatch tool", () => {
 
     const childRuns = await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } });
     expect(childRuns).toHaveLength(1); // only the plan dispatch went through
+  });
+
+  describe("maxDelegationsPerRun", () => {
+    const child = (id: string): FakeAgent => ({
+      id,
+      name: `wmd-${id}`,
+      systemPrompt: "unused",
+      model: "gpt-5.6-luna",
+      budgetUsd: 3,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    });
+    const lead = (maxDelegationsPerRun?: number): FakeAgent => ({
+      id: "lead-agent",
+      name: "wmd-delivery",
+      systemPrompt: "sys",
+      model: "m",
+      budgetUsd: 20,
+      maxTurns: 10,
+      ...(maxDelegationsPerRun === undefined ? {} : { maxDelegationsPerRun }),
+    });
+    const edges = ["order", "bff", "app"].map((name) => ({
+      parentAgentId: "lead-agent",
+      childAgentId: name,
+      boundName: name,
+    }));
+
+    async function run(limit: number | undefined, calls: string[]) {
+      const db = fakeDb([lead(limit), child("order"), child("bff"), child("app")], edges);
+      const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+      const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.01 });
+      const llm = scriptedLlm([
+        ...calls.map((name) => toolCall(`delegate_to_${name}`, JSON.stringify({ task: `work in ${name}` }))),
+        finalAnswer("reported"),
+      ]);
+      await executeRun(parentRun.id, providers(llm, executor), db);
+      const children = await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } });
+      const toolResults = llm.calls
+        .flatMap((call) => call.messages)
+        .filter((m) => m.role === "tool")
+        .map((m) => String(m.content));
+      return { children, toolResults };
+    }
+
+    it("lets a lead fan out to several different sub-agents, one after another, up to its limit", async () => {
+      const { children, toolResults } = await run(3, ["order", "bff", "app"]);
+      expect(children.map((c) => c.agentId).sort()).toEqual(["app", "bff", "order"]);
+      expect(toolResults.some((r) => r.includes("already_dispatched"))).toBe(false);
+    });
+
+    it("refuses the delegation that would exceed the limit, naming it", async () => {
+      const { children, toolResults } = await run(2, ["order", "bff", "app"]);
+      expect(children.map((c) => c.agentId).sort()).toEqual(["bff", "order"]);
+      expect(toolResults.some((r) => r.includes("already_dispatched") && r.includes("2 delegations"))).toBe(true);
+    });
+
+    it("never delegates to the same sub-agent twice in one run, even under the limit", async () => {
+      const { children, toolResults } = await run(3, ["order", "order"]);
+      expect(children.map((c) => c.agentId)).toEqual(["order"]);
+      expect(toolResults.some((r) => r.includes("already_dispatched") && r.includes("at most once"))).toBe(true);
+    });
+
+    it("keeps one delegation per run when the agent sets no limit", async () => {
+      const { children } = await run(undefined, ["order", "bff"]);
+      expect(children.map((c) => c.agentId)).toEqual(["order"]);
+    });
   });
 });
 

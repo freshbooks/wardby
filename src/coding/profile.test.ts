@@ -15,6 +15,7 @@ describe("CodingProfileSchema", () => {
       toolchainVersion: null,
       workerImageRef: null,
       workspaceDiskMb: null,
+      maxTurns: null,
       collectExclude: [],
       packageAllowlist: {},
       packagePolicy: {},
@@ -36,6 +37,9 @@ describe("CodingProfileSchema", () => {
   it.each([
     { repository: "https://token@github.com/openai/example" },
     { repository: "openai/example", baseRef: "-c core.hooksPath=/tmp/pwn" },
+    { repository: "openai/example", maxTurns: 0 },
+    { repository: "openai/example", maxTurns: 1001 },
+    { repository: "openai/example", maxTurns: 12.5 },
     { repository: "openai/example", timeoutSec: 59 },
     { repository: "openai/example", timeoutSec: 7201 },
     { repository: "openai/example", allowedEgress: [] },

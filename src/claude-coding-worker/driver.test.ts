@@ -70,6 +70,52 @@ describe("runClaudeCodingWorker", () => {
     expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).toContain("wardby_tools MCP tool");
   });
 
+  it("uses the run's turn limit, or the worker default when the agent sets none", async () => {
+    const seen: number[] = [];
+    const createQuery: ClaudeQueryFactory = (options) => {
+      seen.push(options.maxTurns);
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify({
+            schemaVersion: 1,
+            runId: input.runId,
+            outcome: "no_changes",
+            summary: "None.",
+            tests: [],
+          }),
+        };
+      })();
+    };
+    const base = { proxyBaseUrl: "http://proxy", capability: "cap", signal: new AbortController().signal, createQuery };
+    await runClaudeCodingWorker({ ...base, input });
+    await runClaudeCodingWorker({ ...base, input: { ...input, maxTurns: 40 } });
+    expect(seen).toEqual([200, 40]);
+  });
+
+  it("reports running out of turns as coding_turn_limit, whether the SDK returns or throws it", async () => {
+    const run = (stream: () => AsyncGenerator<{ type: string; subtype?: string }>) =>
+      runClaudeCodingWorker({
+        input,
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createQuery: stream,
+      });
+    await expect(
+      run(async function* () {
+        yield { type: "result", subtype: "error_max_turns" };
+      }),
+    ).rejects.toThrow("coding_turn_limit");
+    await expect(
+      run(async function* () {
+        yield { type: "system" };
+        throw new Error("Claude Code returned an error result: Reached maximum number of turns (16)");
+      }),
+    ).rejects.toThrow("coding_turn_limit");
+  });
+
   it("maps only the SDK budget terminal result to a safe budget outcome", async () => {
     const result = await runClaudeCodingWorker({
       input,

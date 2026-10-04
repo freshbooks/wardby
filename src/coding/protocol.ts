@@ -329,6 +329,11 @@ const testResultSchema = z
   })
   .strict();
 
+/** Upper bound on CodingAgentProfile.maxTurns (Claude Code runs). */
+export const MAX_CODING_TURNS = 1000;
+/** The Claude Code worker's turn limit when the agent sets none; the run's budget and timeout are the real limits. */
+export const DEFAULT_CLAUDE_MAX_TURNS = 200;
+
 /** Longest line a debug-traced worker writes to its log (src/coding-worker/debug-trace.ts). */
 export const MAX_DEBUG_TRACE_LINE_BYTES = 16 * 1024;
 
@@ -359,6 +364,12 @@ export const CodingTaskInputSchema = z
      * untraced run is unchanged for workers that predate it.
      */
     debugTrace: z.boolean().optional(),
+    /**
+     * Claude Code turn limit (CodingAgentProfile.maxTurns, fixed on the run at
+     * dispatch). Absent means the worker default; written only when the agent
+     * sets one, so other runs' input is unchanged for workers that predate it.
+     */
+    maxTurns: z.number().int().min(1).max(MAX_CODING_TURNS).optional(),
     /**
      * Coding-run services started next to this run (docs/coding-services.md):
      * each one's catalog name and version, and the variables the agent's shells

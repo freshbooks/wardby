@@ -165,6 +165,24 @@ recorded cost always counts. `wardby run` records the run as `cancelled` on
 Ctrl-C or SIGTERM. If a row is still stuck in `running` for another reason,
 only its real cost counts once its hold lapses.
 
+## Turn limit (Claude Code)
+
+A Claude Code run stops after a fixed number of agent turns (model calls),
+200 by default. Every file it reads, command it runs and edit it makes is a
+turn, so raise the limit for agents that make large changes, or lower it to
+stop runaway loops sooner:
+
+```json
+{ "id": "<coding agent id>", "codingProfile": { "maxTurns": 400 } }
+```
+
+`maxTurns` is 1 to 1000; `null` restores the default. It is fixed on each run
+when the run is dispatched. A run that reaches it fails with failure category
+`turn_limit` (worker error `coding_turn_limit`) rather than a generic stream
+failure. The run's `budgetUsd` and `timeoutSec` still apply and are usually the
+better limits. Codex runs have no turn limit, so `maxTurns` does not affect
+them.
+
 ## Stop the setup
 
 ```sh

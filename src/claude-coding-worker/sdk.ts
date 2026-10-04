@@ -12,7 +12,7 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     abortController,
     cwd: "/opt/wardby/empty-workspace",
     model: config.model,
-    maxTurns: 16,
+    maxTurns: config.maxTurns,
     maxBudgetUsd: config.budgetUsd,
     tools: [],
     allowedTools: [TOOL_NAME],

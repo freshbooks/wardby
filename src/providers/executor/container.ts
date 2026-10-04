@@ -128,6 +128,8 @@ export interface ContainerRunSnapshot {
   workspaceDiskMb: number | null;
   /** Admin-requested debug trace, fixed at dispatch (CodingRun.debugTrace). */
   debugTrace?: boolean;
+  /** Claude Code turn limit, fixed at dispatch (CodingRun.maxTurns); null = the worker default. */
+  maxTurns?: number | null;
   /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
   services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
@@ -238,6 +240,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       toolImage: row.codingRun.toolImage,
       workspaceDiskMb: row.codingRun.workspaceDiskMb,
       debugTrace: row.codingRun.debugTrace,
+      maxTurns: row.codingRun.maxTurns,
       services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
@@ -1234,6 +1237,8 @@ export class ContainerExecutor implements Executor {
       continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
       // Only when true: an untraced run's input stays exactly what older workers expect.
       ...(run.debugTrace ? { debugTrace: true } : {}),
+      // Only when the agent sets one: every other run's input stays exactly what older workers expect.
+      ...(run.maxTurns ? { maxTurns: run.maxTurns } : {}),
       // Only when there are some: every other run's input stays exactly what older workers expect.
       ...(services.length > 0 ? { services: workerServices(services) } : {}),
     });
@@ -1476,6 +1481,8 @@ function safeError(error: unknown): string {
  * "workspace" because "github" contains "git".
  */
 const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
+  // Claude Code reached the agent's turn limit (codingProfile.maxTurns) before finishing.
+  ["job_coding_turn_limit", "turn_limit"],
   // A service sidecar never became ready (src/providers/jobs/kubernetes.ts).
   [SERVICE_UNREADY_ERROR, SERVICE_UNREADY_CATEGORY],
   // Services on a launcher that can't start them: refused at dispatch, failed here as a backstop.

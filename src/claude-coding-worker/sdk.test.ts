@@ -7,6 +7,7 @@ function config(signal = new AbortController().signal): ClaudeQueryOptions {
     prompt: "Untrusted task text",
     model: "claude-sonnet-5",
     budgetUsd: 1,
+    maxTurns: 200,
     signal,
     environment: { ANTHROPIC_API_KEY: "private-run-capability" },
     relayEnvironment: { PATH: "/usr/bin:/bin" },
@@ -16,11 +17,15 @@ function config(signal = new AbortController().signal): ClaudeQueryOptions {
 }
 
 describe("Claude SDK configuration", () => {
+  it("passes the run's turn limit through to the SDK", () => {
+    expect(buildClaudeSdkOptions({ ...config(), maxTurns: 40 }).maxTurns).toBe(40);
+  });
+
   it("allows only the private socket relay and no Claude built-in tools", () => {
     const options = buildClaudeSdkOptions(config());
     expect(options).toMatchObject({
       cwd: "/opt/wardby/empty-workspace",
-      maxTurns: 16,
+      maxTurns: 200,
       maxBudgetUsd: 1,
       tools: [],
       allowedTools: ["mcp__wardby_tools__run_command"],

@@ -521,6 +521,30 @@ describe("dispatchRun", () => {
     expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, debugTrace: expected })]);
   });
 
+  it.each([
+    ["the profile's turn limit", 120, 120],
+    ["no turn limit", null, null],
+  ] as const)("fixes maxTurns on the run at dispatch from %s", async (_label, maxTurns, expected) => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+        maxTurns,
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = { async start() {}, async stop() {} };
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, maxTurns: expected })]);
+  });
+
   it("copies the profile's collectExclude onto the run at dispatch", async () => {
     const agent = {
       ...nativeAgent(),
