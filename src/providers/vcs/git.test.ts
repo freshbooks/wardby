@@ -227,7 +227,7 @@ describe("GitVcsProvider", () => {
     const prepared = await provider.prepareWorkspace(input);
     git.changedPaths = ["src/app.ts", "package-lock.json", "web/yarn.lock", "notes.lock.md"];
     await provider.finalizeChanges(prepared);
-    expect(github.pullRequestCalls[0]!.changedLockfiles).toEqual(["package-lock.json", "web/yarn.lock"]);
+    expect(github.pullRequestCalls[0].changedLockfiles).toEqual(["package-lock.json", "web/yarn.lock"]);
   });
 
   it("commits with controlled settings, pushes once, and creates one typed draft PR result", async () => {

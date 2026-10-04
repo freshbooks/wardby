@@ -572,6 +572,6 @@ describe("collectRunOutcome", () => {
       },
     } as never;
     const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
-    expect(out.pullRequests[0]!.failedChecks).toBe(2);
+    expect(out.pullRequests[0].failedChecks).toBe(2);
   });
 });
