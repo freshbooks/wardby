@@ -393,7 +393,9 @@ bundle current.
 A mention from someone with write access gets a "Working on it" status comment
 from the App. The router either asks a question or delegates, the builder
 pushes a unique branch and opens at most one draft pull request, and the App
-edits the status comment with the pull request link or the failure. A person
+edits the status comment with the pull request link or the failure. The
+link carries ⚠️ instead of ✅ when any of the builder's own checks failed in
+the run; the pull request description says which. A person
 reviews and merges; Wardby never merges for you. A later mention on that pull
 request continues the same branch.
 

@@ -728,6 +728,52 @@ describe("GitHubAppClient", () => {
   });
 });
 
+describe("pullRequestBody refusal warning", () => {
+  const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
+
+  it("warns above the summary, grouped by reason, and names a changed lock file", () => {
+    const body = pullRequestBody({
+      ...base,
+      summary: "Added a cart.",
+      packageRefusals: [
+        { ecosystem: "npm", name: "braces", reason: "wardby_version_filtered" },
+        { ecosystem: "npm", name: "fill-range", reason: "wardby_package_not_allowed" },
+        { ecosystem: "npm", name: "is-number", reason: "wardby_package_not_allowed" },
+      ],
+      changedLockfiles: ["package-lock.json"],
+    });
+    const warning = body.indexOf("**Dependency install incomplete.**");
+    expect(warning).toBeGreaterThan(-1);
+    expect(warning).toBeLessThan(body.indexOf("Added a cart."));
+    expect(body).toContain("> - npm `braces`: `wardby_version_filtered` (withheld:");
+    expect(body).toContain("> - npm `fill-range`, npm `is-number`: `wardby_package_not_allowed`");
+    expect(body).toContain("`package-lock.json` changed in this run and may be incomplete");
+  });
+
+  it("does not mention lock files when none changed", () => {
+    const body = pullRequestBody({
+      ...base,
+      packageRefusals: [{ ecosystem: "pypi", name: "annotated-doc", reason: "wardby_package_not_allowed" }],
+    });
+    expect(body).toContain("**Dependency install incomplete.**");
+    expect(body).not.toContain("may be incomplete: a clean install");
+  });
+
+  it("has no warning without refusals, even when a lock file changed", () => {
+    const body = pullRequestBody({ ...base, changedLockfiles: ["package-lock.json"] });
+    expect(body).not.toContain("Dependency install incomplete");
+  });
+
+  it("caps the names shown per reason", () => {
+    const packageRefusals = Array.from({ length: 12 }, (_, i) => ({
+      ecosystem: "npm",
+      name: `p${i}`,
+      reason: "wardby_package_not_allowed",
+    }));
+    expect(pullRequestBody({ ...base, packageRefusals })).toContain("npm `p7` and 4 more:");
+  });
+});
+
 describe("pullRequestBody packages section", () => {
   const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
 

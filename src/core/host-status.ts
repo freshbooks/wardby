@@ -43,6 +43,8 @@ export interface PullRequestOutcome {
   codeProvider: string;
   /** The coding sub-run that produced it; set by collectRunOutcome. */
   runId?: string;
+  /** How many of the run's own checks (result.tests) failed; the commands stay in the PR body. */
+  failedChecks?: number;
 }
 
 /** A sub-run that ended without succeeding. */
@@ -91,7 +93,17 @@ function pullRequestOutcome(result: unknown): PullRequestOutcome | null {
     pullRequestNumber: r.pullRequestNumber,
     codeProvider: CODING_CODE_PROVIDER,
     ...(typeof r.pullRequestUrl === "string" ? { pullRequestUrl: r.pullRequestUrl } : {}),
+    ...failedCheckCount(r.tests),
   };
+}
+
+/** Only a count reaches the comment: test commands are agent-authored and belong in the PR body. */
+function failedCheckCount(tests: unknown): { failedChecks?: number } {
+  if (!Array.isArray(tests)) return {};
+  const failed = tests.filter(
+    (t) => t && typeof t === "object" && (t as Record<string, unknown>).outcome === "failed",
+  ).length;
+  return failed > 0 ? { failedChecks: failed } : {};
 }
 
 /** The agent's reply as a quote, cut to MAX_REPLY_CHARS, with @-mentions defused so nobody is pinged. */
@@ -184,6 +196,11 @@ export function outcomeBody(
       lines.push(`A sub-run did not succeed: ${other.map((c) => `\`${c.id}\` (\`${c.status}\`)`).join(", ")}.`);
     }
     return `❌ ${lines.join(" ")}${partial}${quoted}\n\n${footer}`;
+  }
+  const failedChecks = pullRequests.reduce((sum, pr) => sum + (pr.failedChecks ?? 0), 0);
+  if (links.length > 0 && failedChecks > 0) {
+    const checks = failedChecks === 1 ? "1 check" : `${failedChecks} checks`;
+    return `⚠️ ${links.join(", ")}, but ${checks} failed in the run: see the pull request's description before merging.\n\n${footer}`;
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
   if (opts.replyAsAnswer && reply) return `✅ ${cutReply(reply)}\n\n${footer}`;
