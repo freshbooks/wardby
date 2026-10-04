@@ -7,6 +7,7 @@
 import type { GitHubAppClient } from "../vcs/github.js";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
 import { partitionComments } from "./diff-lines.js";
+import { appMarkerRunId } from "./github-events.js";
 import {
   findingMarker,
   hasFindingMarker,
@@ -31,6 +32,7 @@ import {
   type PublishReviewResult,
   type PullRequestFileView,
   type PullRequestHead,
+  type PullRequestOrigin,
   type PullRequestView,
   type ReviewThreadView,
   type StartCheckInput,
@@ -256,6 +258,30 @@ export class GitHubReviewHost implements CodeReviewHost {
     return this.withToken(repository, READ, async (get) => {
       const pr = record(await (await get(`${repoPath(repository)}/pulls/${prNumber}`)).json());
       return this.head(repository, pr);
+    });
+  }
+
+  async pullRequestOrigin(repository: string, prNumber: number): Promise<PullRequestOrigin> {
+    const { slug } = await this.client.appIdentity();
+    return this.withToken(repository, READ, async (get) => {
+      const pr = record(await (await get(`${repoPath(repository)}/pulls/${prNumber}`)).json());
+      const labels = Array.isArray(pr.labels)
+        ? pr.labels
+            .map((l) => (l && typeof l === "object" ? str((l as Record<string, unknown>).name) : ""))
+            .filter((name) => name !== "")
+        : [];
+      const markerRunId = appMarkerRunId(pr, slug);
+      return { ...this.head(repository, pr), labels, ...(markerRunId ? { markerRunId } : {}) };
+    });
+  }
+
+  async addLabel(repository: string, prNumber: number, label: string): Promise<void> {
+    await this.withToken(repository, COMMENT_WRITE, async (get) => {
+      await get(
+        `${repoPath(repository)}/issues/${prNumber}/labels`,
+        { method: "POST", body: JSON.stringify({ labels: [label] }) },
+        [200],
+      );
     });
   }
 

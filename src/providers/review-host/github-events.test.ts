@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { normalizeGitHubEvent, verifyGitHubSignature } from "./github-events.js";
+import { appMarkerRunId, normalizeGitHubEvent, verifyGitHubSignature } from "./github-events.js";
 
 const APP = { id: 777, slug: "wardby" };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -15,6 +15,18 @@ describe("verifyGitHubSignature", () => {
     expect(verifyGitHubSignature(body, sig, "other")).toBe(false);
     expect(verifyGitHubSignature(body, undefined, "s3cret")).toBe(false);
     expect(verifyGitHubSignature(body, "sha256=zz", "s3cret")).toBe(false);
+  });
+});
+
+describe("appMarkerRunId", () => {
+  const bot = { type: "Bot", login: "wardby[bot]" };
+  it("reads the marker only from a PR the App authored, open or not", () => {
+    expect(appMarkerRunId({ user: bot, state: "closed", body: "<!-- wardby:run_1 -->\n\nx" }, "wardby")).toBe("run_1");
+    expect(
+      appMarkerRunId({ user: { type: "User", login: "x" }, body: "<!-- wardby:run_1 -->" }, "wardby"),
+    ).toBeUndefined();
+    expect(appMarkerRunId({ user: bot, body: "no marker" }, "wardby")).toBeUndefined();
+    expect(appMarkerRunId({ user: bot, body: "<!-- wardby:../bad -->" }, "wardby")).toBeUndefined();
   });
 });
 
