@@ -1,11 +1,6 @@
 import { z } from "zod";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
-import {
-  MAX_CODING_TASK_BYTES,
-  MAX_CODING_TURNS,
-  normalizeGitHubRepository,
-  normalizeGitRef,
-} from "./protocol.js";
+import { MAX_CODING_TASK_BYTES, MAX_CODING_TURNS, normalizeGitHubRepository, normalizeGitRef } from "./protocol.js";
 import { MAX_COLLECT_EXCLUDE_PATHS, validateCollectExcludePath } from "./collect-exclude.js";
 import { CODING_PROVIDERS } from "./provider.js";
 import { WARDBY_PROTECTED_PATHS, isWellFormedProtectedPath, protectsSomePath } from "./protected-paths.js";

@@ -78,7 +78,13 @@ describe("runClaudeCodingWorker", () => {
         yield {
           type: "result",
           subtype: "success",
-          result: JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome: "no_changes", summary: "None.", tests: [] }),
+          result: JSON.stringify({
+            schemaVersion: 1,
+            runId: input.runId,
+            outcome: "no_changes",
+            summary: "None.",
+            tests: [],
+          }),
         };
       })();
     };
