@@ -132,6 +132,10 @@ GitHub App, worker image, and job launcher from
 [Coding-agent setup](coding-agent-setup.md). Their event triggers need GitHub to
 reach your instance at a public HTTPS URL.
 
+The assistant the quickstart connected can walk you through either recipe. Ask it
+"Set up the Wardby architecture keeper for this repository" or "Set up a Wardby
+builder for this repository"; it follows the `agent-recipes` help article.
+
 ## Next steps
 
 - [Agent recipes](agent-recipes.md)

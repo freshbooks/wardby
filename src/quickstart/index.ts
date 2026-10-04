@@ -466,6 +466,21 @@ export async function quickstartCommand(args: string[]): Promise<void> {
   console.log("  npx @wardby/cli@latest status");
   console.log("  npx @wardby/cli@latest doctor");
   console.log("  npx @wardby/cli@latest down");
+  for (const line of nextStepLines(client)) console.log(line);
+}
+
+/** The closing "build your first agent" hint; the assistant prompts only make sense once an MCP client is configured. */
+export function nextStepLines(client: McpClient): string[] {
+  const lines = ["", "Next: build your first agent."];
+  if (client !== "none") {
+    lines.push(
+      "Ask your assistant one of:",
+      '  "Set up the Wardby architecture keeper for this repository"',
+      '  "Set up a Wardby builder for this repository"',
+    );
+  }
+  lines.push("Or read the guide: npx @wardby/cli@latest help open agent-recipes");
+  return lines;
 }
 
 async function databaseHealthy(paths: QuickstartPaths): Promise<boolean> {
