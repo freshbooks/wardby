@@ -22,6 +22,7 @@ import type {
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
+import type { RelatedPullRequestEntry } from "../vcs/github.js";
 import {
   ContainerExecutor,
   RunCapabilityVault,
@@ -140,6 +141,12 @@ class FakeStore implements ContainerExecutionStore {
   /** Every handle written, in order, so tests can see whether one was stored before launching. */
   persistedHandles: JobHandle[] = [];
   heartbeats = 0;
+  /** Answers relatedPullRequests when set; left undefined, the store has no such method behavior. */
+  related?: RelatedPullRequestEntry[] | Error;
+  async relatedPullRequests(): Promise<RelatedPullRequestEntry[]> {
+    if (this.related instanceof Error) throw this.related;
+    return this.related ?? [];
+  }
 
   constructor(public run: ContainerRunSnapshot) {}
 
@@ -848,6 +855,35 @@ describe("ContainerExecutor", () => {
         const created = await harness(overrides, IMAGE, undefined, undefined, { issueUrl });
         await created.executor.start("run-1");
         expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("issue");
+      }
+    });
+  });
+
+  describe("related pull requests on a new pull request", () => {
+    it("lists the request's earlier pull requests, then this one, with the issue", async () => {
+      const created = await harness({ issueProvider: "jira", issueKey: "PROJ-13" });
+      created.store.related = [{ repository: "acme/order-service", number: 2 }];
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.related).toEqual({
+        entries: [
+          { repository: "acme/order-service", number: 2 },
+          { repository: "openai/example", self: true },
+        ],
+        issue: { key: "PROJ-13", trackerName: "Jira" },
+      });
+    });
+
+    it("adds nothing for the first pull request, a continuation, or a store that fails", async () => {
+      for (const [overrides, related] of [
+        [{}, []],
+        [{ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" }, [{ repository: "acme/x", number: 1 }]],
+        [{}, new Error("db down")],
+      ] as const) {
+        const created = await harness(overrides);
+        created.store.related = related as never;
+        await created.executor.start("run-1");
+        expect(created.store.run.result).toMatchObject({ pullRequestNumber: 42 });
+        expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("related");
       }
     });
   });

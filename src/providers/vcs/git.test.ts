@@ -230,6 +230,20 @@ describe("GitVcsProvider", () => {
     expect(github.pullRequestCalls[0].changedLockfiles).toEqual(["package-lock.json", "web/yarn.lock"]);
   });
 
+  it("passes the related pull requests through to the PR it opens", async () => {
+    const { provider, github, input } = await harness();
+    const prepared = await provider.prepareWorkspace(input);
+    await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+    const related = {
+      entries: [
+        { repository: "acme/bff", number: 3 },
+        { repository: "openai/example", self: true },
+      ],
+    };
+    await provider.finalizeChanges(prepared, { related });
+    expect(github.pullRequestCalls[0].related).toEqual(related);
+  });
+
   it("commits with controlled settings, pushes once, and creates one typed draft PR result", async () => {
     const { provider, github, git, input } = await harness();
     const prepared = await provider.prepareWorkspace(input);

@@ -531,6 +531,7 @@ export class GitVcsProvider implements VcsProvider {
       packageRefusals: details?.packageRefusals,
       changedLockfiles: changed.filter(isLockfilePath),
       ...(details?.issue ? { issue: details.issue } : {}),
+      ...(details?.related ? { related: details.related } : {}),
     });
     return {
       outcome: prepared.continuation ? "pull_request_updated" : "pull_request_opened",

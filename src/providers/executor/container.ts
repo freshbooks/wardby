@@ -51,6 +51,8 @@ import type { ContinuationOutcome, PreparedWorkspace, VcsPrepareInput, VcsProvid
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 import { ISSUE_KEY, ISSUE_TRACKER_NAMES, type IssueTrackerProvider } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
+import { collectRelatedPullRequests } from "../../core/related-pull-requests.js";
+import type { RelatedPullRequestEntry, RelatedPullRequestsInput } from "../vcs/github.js";
 
 const containerLog = logger.child({ module: "container-executor" });
 
@@ -164,6 +166,12 @@ export interface ContainerExecutionStore {
   markQueued?(runId: string): Promise<void>;
   persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void>;
   heartbeat(runId: string): Promise<void>;
+  /**
+   * The pull requests already opened for the same request as this run (same
+   * top-level run tree or tracked issue), in dispatch order, for the new PR's
+   * Related pull requests section. Optional: without it no section is written.
+   */
+  relatedPullRequests?(runId: string): Promise<RelatedPullRequestEntry[]>;
   complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void>;
   terminate(
     runId: string,
@@ -256,6 +264,16 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       pricingVersion: row.pricingVersion,
       pricingSnapshot: row.pricingSnapshot,
     };
+  }
+
+  async relatedPullRequests(runId: string): Promise<RelatedPullRequestEntry[]> {
+    const group = await collectRelatedPullRequests(this.db, runId);
+    // Every PR of the request so far, merged/closed ones included (listed as context).
+    return group.pullRequests.map((pr) => ({
+      repository: pr.repository,
+      number: pr.number,
+      ...(pr.state ? { state: pr.state } : {}),
+    }));
   }
 
   async claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim> {
@@ -864,6 +882,26 @@ export class ContainerExecutor implements Executor {
     };
   }
 
+  /** The new PR's Related pull requests input: earlier PRs of the same request, then this one. Never throws. */
+  private async relatedFor(run: ContainerRunSnapshot): Promise<{ related?: RelatedPullRequestsInput }> {
+    // A continuation pushes onto an existing PR, whose body is never rewritten here.
+    if (run.rootCodingRunId || !this.options.store.relatedPullRequests) return {};
+    try {
+      const earlier = await this.options.store.relatedPullRequests(run.runId);
+      if (earlier.length === 0) return {};
+      const { issue } = this.issueFor(run);
+      return {
+        related: {
+          entries: [...earlier, { repository: run.repository, self: true }],
+          ...(issue ? { issue } : {}),
+        },
+      };
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not list the request's related pull requests");
+      return {};
+    }
+  }
+
   /** The run's stored model terms; a run from before the catalog resolves them from the current catalog. */
   private modelTerms(run: ContainerRunSnapshot): ProxyModelTerms {
     if (run.provider !== "codex" && run.provider !== "claude-code") throw new Error("coding_provider_unsupported");
@@ -1017,6 +1055,7 @@ export class ContainerExecutor implements Executor {
         tag: output.tag,
         ...report,
         ...this.issueFor(current),
+        ...(await this.relatedFor(current)),
       });
       const result = this.resultFor(output, current, finalized.outcome, finalized);
       await this.options.store.complete(run.runId, "succeeded", result);

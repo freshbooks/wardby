@@ -1,4 +1,4 @@
-import type { RepositoryFileInput } from "./github.js";
+import type { RelatedPullRequestsInput, RepositoryFileInput } from "./github.js";
 
 export interface VcsPrepareInput {
   runId: string;
@@ -55,6 +55,8 @@ export interface FinalizeChangesDetails {
   packageRefusals?: readonly { ecosystem: string; name: string; reason: string }[];
   /** Originating issue (control-plane data): named in the PR title and body. Provider-neutral. */
   issue?: { key: string; url?: string; trackerName?: string };
+  /** The request's other pull requests (control-plane rows): the PR body's Related pull requests section. */
+  related?: RelatedPullRequestsInput;
 }
 
 export type FinalizeChangesResult =
