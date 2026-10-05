@@ -72,6 +72,17 @@ export interface EngineRunContext {
   providers: Pick<ProviderRegistry, "llm">;
   /** Host bridge: validates params (Zod-in-sandbox) then runs the tool body in the WASM sandbox. Never throws — a tool/validation failure is a JSON error result string, fed back to the model as the tool's result. */
   runSandboxTool(name: string, argsJson: string): Promise<string>;
+  /**
+   * Consecutive tool calls of one model turn for which this returns true run
+   * at the same time as each other (a lead's delegate_to_* calls, when the
+   * agent opted in to parallelDelegations); every other call, including a
+   * lone eligible one, runs alone, in order. Calls are never reordered, and
+   * results still go back to the model in call order. Absent: every call runs
+   * one after another. Under a checkpointing `step`, an engine must start the
+   * concurrent steps in an order fixed by the turn's calls alone (see
+   * NativeEngine.runToolCalls).
+   */
+  runsConcurrently?: (toolName: string) => boolean;
   onText?: (delta: string) => void;
   /** Called after each model turn that completed without error; the engine awaits it. */
   onProgress?: (progress: EngineProgress) => Promise<void>;
