@@ -2,7 +2,18 @@ import { generateKeyPairSync } from "node:crypto";
 import { decodeJwt } from "jose";
 import { describe, expect, it, vi } from "vitest";
 import { ISSUE_KEY } from "../issue-tracker/types.js";
-import { GitHubAppClient, PR_ISSUE_KEY, pullRequestBody, pullRequestTitle, type PullRequestInput } from "./github.js";
+import {
+  DEPENDENCY_INSTALL_INCOMPLETE,
+  GitHubAppClient,
+  PR_ISSUE_KEY,
+  RELATED_SECTION_END,
+  RELATED_SECTION_START,
+  pullRequestBody,
+  pullRequestTitle,
+  renderRelatedSection,
+  upsertRelatedSection,
+  type PullRequestInput,
+} from "./github.js";
 
 const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 const NOW = new Date("2026-09-06T12:00:00.000Z");
@@ -904,5 +915,128 @@ describe("pull request issue reference", () => {
     await expect(
       client.createOrFindDraftPullRequest({ ...base, issue: { key: "OTHER-9", url: issue.url } }),
     ).resolves.toMatchObject({ number: 7 });
+  });
+});
+
+describe("related pull requests section", () => {
+  const entries = [
+    { repository: "acme/order-service", number: 2, state: "open" as const },
+    { repository: "acme/bff", number: 3, state: "merged" as const },
+    { repository: "acme/app", number: 4, self: true },
+  ];
+
+  it("numbers only open PRs as the suggested merge order and lists merged/closed ones as context", () => {
+    const block = renderRelatedSection({
+      entries: [...entries, { repository: "acme/notification-service", number: 2, state: "closed" as const }],
+      issue: { key: "PROJ-13", url: "https://example.atlassian.net/browse/PROJ-13", trackerName: "Jira" },
+    })!;
+    expect(block.startsWith(RELATED_SECTION_START)).toBe(true);
+    expect(block.endsWith(RELATED_SECTION_END)).toBe(true);
+    expect(block).toContain("for Jira issue [PROJ-13](https://example.atlassian.net/browse/PROJ-13)");
+    expect(block).toContain("Suggested merge order (the order Wardby's agent opened them in");
+    expect(block).toContain("1. [acme/order-service#2](https://github.com/acme/order-service/pull/2) — open");
+    expect(block).toContain("2. **This pull request**");
+    expect(block).toContain("Already merged or closed (context only):");
+    expect(block).toContain("- [acme/bff#3](https://github.com/acme/bff/pull/3) — merged");
+    expect(block).toContain(
+      "- [acme/notification-service#2](https://github.com/acme/notification-service/pull/2) — closed",
+    );
+    expect(block.indexOf("2. **This pull request**")).toBeLessThan(block.indexOf("Already merged"));
+  });
+
+  it("still renders the context list when every other PR is merged", () => {
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "acme/bff", number: 3, state: "merged" },
+        { repository: "acme/app", self: true },
+      ],
+    })!;
+    expect(block).toContain("1. **This pull request**");
+    expect(block).toContain("- [acme/bff#3](https://github.com/acme/bff/pull/3) — merged");
+  });
+
+  it("renders nothing without another valid pull request", () => {
+    expect(renderRelatedSection({ entries: [{ repository: "acme/app", number: 4, self: true }] })).toBeUndefined();
+    expect(
+      renderRelatedSection({
+        entries: [
+          { repository: "acme/app", self: true },
+          { repository: "acme/x`y", number: 1 },
+          { repository: "acme/ok", number: 0 },
+          { repository: "not a repo", number: 2 },
+        ],
+      }),
+    ).toBeUndefined();
+  });
+
+  it("drops a malformed issue key or a non-https url, keeping a valid key as plain text", () => {
+    expect(renderRelatedSection({ entries, issue: { key: "proj-1" } })).not.toContain("proj-1");
+    const block = renderRelatedSection({ entries, issue: { key: "PROJ-1", url: "http://x/PROJ-1" } })!;
+    expect(block).toContain("for issue PROJ-1");
+    expect(block).not.toContain("http://x");
+  });
+
+  it("caps the list and counts the rest", () => {
+    const many = Array.from({ length: 25 }, (_, i) => ({ repository: `acme/r${i}`, number: i + 1 }));
+    const block = renderRelatedSection({ entries: many })!;
+    expect(block).toContain("20. [acme/r19#20]");
+    expect(block).not.toContain("acme/r20#21");
+    expect(block).toContain("…and 5 more");
+  });
+
+  it("inserts after the run marker and the Resolves line, then replaces in place", () => {
+    const body = "<!-- wardby:run_1 -->\n\nResolves Jira issue [PROJ-13](https://x)\n\nSummary text";
+    const first = upsertRelatedSection(body, `${RELATED_SECTION_START}\nA\n${RELATED_SECTION_END}`)!;
+    expect(first).toBe(
+      `<!-- wardby:run_1 -->\n\nResolves Jira issue [PROJ-13](https://x)\n\n${RELATED_SECTION_START}\nA\n${RELATED_SECTION_END}\n\nSummary text`,
+    );
+    const second = upsertRelatedSection(first, `${RELATED_SECTION_START}\nB\n${RELATED_SECTION_END}`)!;
+    expect(second).toBe(first.replace("\nA\n", "\nB\n"));
+    expect(upsertRelatedSection(second, `${RELATED_SECTION_START}\nB\n${RELATED_SECTION_END}`)).toBe(second);
+  });
+
+  it("inserts right after the marker without a Resolves line, and handles CRLF bodies edited on github.com", () => {
+    const block = `${RELATED_SECTION_START}\nA\n${RELATED_SECTION_END}`;
+    expect(upsertRelatedSection("<!-- wardby:run_1 -->\n\nSummary", block)).toBe(
+      `<!-- wardby:run_1 -->\n\n${block}\n\nSummary`,
+    );
+    expect(upsertRelatedSection("<!-- wardby:run_1 -->\r\n\r\nSummary", block)).toBe(
+      `<!-- wardby:run_1 -->\n\n${block}\n\nSummary`,
+    );
+    expect(upsertRelatedSection("<!-- wardby:run_1 -->", block)).toBe(`<!-- wardby:run_1 -->\n\n${block}`);
+  });
+
+  it("refuses to write without a leading run marker or with malformed section markers", () => {
+    const block = `${RELATED_SECTION_START}\nA\n${RELATED_SECTION_END}`;
+    expect(upsertRelatedSection("Summary only", block)).toBeNull();
+    expect(upsertRelatedSection(`<!-- wardby:r -->\n\n${RELATED_SECTION_START}\nhalf`, block)).toBeNull();
+    expect(
+      upsertRelatedSection(`<!-- wardby:r -->\n\n${RELATED_SECTION_END}\n${RELATED_SECTION_START}`, block),
+    ).toBeNull();
+    expect(upsertRelatedSection("<!-- wardby:r -->", "no markers")).toBeNull();
+  });
+
+  it("puts the section into a new PR body after the issue line and before the warning", () => {
+    const body = pullRequestBody({
+      runId: "run_1",
+      repository: "acme/app",
+      baseRef: "main",
+      headRef: "wardby/run-run_1",
+      summary: "Adds it",
+      issue: { key: "PROJ-13", url: "https://example.atlassian.net/browse/PROJ-13", trackerName: "Jira" },
+      packageRefusals: [{ ecosystem: "npm", name: "left-pad", reason: "wardby_version_filtered" }],
+      related: {
+        entries: [
+          { repository: "acme/bff", number: 3 },
+          { repository: "acme/app", self: true },
+        ],
+      },
+    });
+    const parts = body.split("\n\n");
+    expect(parts[0]).toBe("<!-- wardby:run_1 -->");
+    expect(parts[1]).toMatch(/^Resolves Jira issue/);
+    expect(parts[2].startsWith(RELATED_SECTION_START)).toBe(true);
+    expect(body).toContain("1. [acme/bff#3](https://github.com/acme/bff/pull/3)\n2. **This pull request**");
+    expect(body.indexOf(RELATED_SECTION_END)).toBeLessThan(body.indexOf(`**${DEPENDENCY_INSTALL_INCOMPLETE}**`));
   });
 });
