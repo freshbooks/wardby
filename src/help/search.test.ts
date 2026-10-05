@@ -40,6 +40,17 @@ const catalog: HelpCatalog = {
       plainText: "Configure Codex and Claude Code worker isolation before a coding run.",
       headings: [{ level: 1, text: "Troubleshoot coding workers", slug: "troubleshoot-coding-workers" }],
     }),
+    page({
+      id: "review-fix-rounds",
+      title: "Automatic review fix rounds",
+      summary: "Let wardby fix its own review's findings on pull requests its runs opened, with a round cap.",
+      tags: ["github", "code-review", "review_fix", "autofix", "fix-round", "pull-requests"],
+      plainText:
+        "Automatic review fix rounds. Link an agent with the review_fix trigger and wardby will try to fix its " +
+        "own review's findings automatically. A round starts when wardby's own review check comes back " +
+        "CHANGES_REQUESTED. Rounds are tracked with wardby-autofix labels on the pull request.",
+      headings: [{ level: 1, text: "Automatic review fix rounds", slug: "automatic-review-fix-rounds" }],
+    }),
   ],
 };
 
@@ -58,5 +69,11 @@ describe("searchHelp", () => {
   it("uses a stable id tie-breaker", () => {
     const tied: HelpCatalog = { ...catalog, pages: [...catalog.pages].reverse() };
     expect(searchHelp(tied, "coding").map((result) => result.page.id)).toEqual(["coding-workers"]);
+  });
+
+  it("finds the review fix rounds article by trigger name, tag, and feature phrase", () => {
+    expect(searchHelp(catalog, "review_fix")[0]?.page.id).toBe("review-fix-rounds");
+    expect(searchHelp(catalog, "autofix")[0]?.page.id).toBe("review-fix-rounds");
+    expect(searchHelp(catalog, "fix round")[0]?.page.id).toBe("review-fix-rounds");
   });
 });

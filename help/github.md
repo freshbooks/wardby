@@ -40,9 +40,14 @@ separate checkbox.
 | `pull_request` | A pull request is opened or pushed to; a re-run of the review check | Pull request, Check run (re-runs of the review check)                                  |
 | `mention`      | Someone with write access `@`-mentions the App                      | Issue comment, Issues, Pull request review comment (mentions in inline review threads) |
 | `push`         | A commit lands on the repository's default branch                   | Push                                                                                   |
+| `review_fix`   | Wardby's own review check requests changes on a PR it opened        | Same events as `pull_request` (it reacts to that check's own verdict, no extra event)  |
 
 The `push` trigger starts a merge-watcher agent; only default-branch pushes
 count (tags, other branches, and deletions are ignored). See
 [Keep the knowledge bundle current on merge](help://architecture-agent).
+
+The `review_fix` trigger lets Wardby fix its own review's findings
+automatically, up to a round cap, on pull requests its own coding runs
+opened. See [Automatic review fix rounds](review-fix-rounds.md).
 
 For Jira Cloud instead of GitHub, see [Run Jira agents](jira.md).

@@ -67,6 +67,7 @@ import {
 import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
 import { fileSelfDefect } from "./self-defects.js";
+import { startReviewFixAfterReview } from "./review-fix.js";
 import { recordNativeModelUsage } from "./model-usage.js";
 import { pinNativeRunPricing } from "./run-pricing.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
@@ -173,6 +174,7 @@ export type RunnerDb = Pick<
   | "issuePullRequest"
   | "runIssueStatus"
   | "issueFingerprint"
+  | "workItem"
 >;
 
 /** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */
@@ -648,8 +650,14 @@ async function executeTrackedRun(
                   prNumber: check.prNumber,
                 }
               : null,
-          markRunCheckCompleted: async () => {
-            await db.runHostCheck.update({ where: { runId }, data: { completedAt: new Date() } });
+          markRunCheckCompleted: async (review) => {
+            await db.runHostCheck.update({
+              where: { runId },
+              data: {
+                completedAt: new Date(),
+                ...(review ? { verdict: review.verdict, reviewBody: review.body } : {}),
+              },
+            });
           },
           // Live, not from the pinned load: the link's current stamp and
           // access, and the agent's CURRENT owner (a make_owner, unlink, or
@@ -1021,6 +1029,15 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    if (claimed && providers.executor && reviewHosts && repoAccess) {
+      await startReviewFixAfterReview(runId, {
+        db,
+        executor: providers.executor,
+        hosts: reviewHosts,
+        repoAccess,
+        issueTrackers,
+      });
+    }
     // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
     // filed twice. Bounded and never throws.
     if (claimed) await fileSelfDefect(db, issueTrackers, finished);
@@ -1039,6 +1056,15 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    if (claimed && providers.executor && reviewHosts && repoAccess) {
+      await startReviewFixAfterReview(runId, {
+        db,
+        executor: providers.executor,
+        hosts: reviewHosts,
+        repoAccess,
+        issueTrackers,
+      });
+    }
     // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
     // filed twice. Bounded and never throws.
     if (claimed) await fileSelfDefect(db, issueTrackers, finished);

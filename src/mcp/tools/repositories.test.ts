@@ -26,6 +26,7 @@ interface FakeRepositoryRow {
   access: string;
   triggers: string[];
   checkName: string | null;
+  reviewFixMaxRounds?: number | null;
   createdAt: Date;
   authorizedVia?: string | null;
   authorizedById?: string | null;
@@ -373,6 +374,82 @@ describe("repository tools", () => {
       },
     });
     expect(selfUpdate.isError).toBeFalsy();
+    await client.close();
+  });
+
+  it("links a review_fix agent with a cap, and rejects a cap without the trigger or out of range", async () => {
+    const { mcp } = setup([{ id: "a1", name: "delivery", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const ok = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/example",
+        access: "write",
+        triggers: ["mention", "review_fix"],
+        reviewFixMaxRounds: 3,
+      },
+    });
+    expect(ok.isError).toBeFalsy();
+    const parsed = parseText(ok as never) as { link: Record<string, unknown> };
+    expect(parsed.link).toMatchObject({ reviewFixMaxRounds: 3 });
+
+    const noTrigger = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/example",
+        access: "write",
+        triggers: ["mention"],
+        reviewFixMaxRounds: 3,
+      },
+    });
+    expect(errorText(noTrigger as never)).toContain("reviewFixMaxRounds needs the review_fix trigger");
+
+    const tooMany = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/example",
+        access: "write",
+        triggers: ["review_fix"],
+        reviewFixMaxRounds: 11,
+      },
+    });
+    expect(tooMany.isError).toBeTruthy();
+    await client.close();
+  });
+
+  it("allows one review_fix agent per repository", async () => {
+    const { mcp } = setup(
+      [
+        { id: "a1", name: "one", ownerId: "p1", kind: "native" },
+        { id: "a2", name: "two", ownerId: "p1", kind: "native" },
+      ],
+      "p1",
+    );
+    const client = await connectClient(mcp);
+    await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a1", repository: "openai/example", access: "write", triggers: ["review_fix"] },
+    });
+    const second = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a2", repository: "openai/example", access: "write", triggers: ["review_fix"] },
+    });
+    expect(errorText(second as never)).toContain("already handles automatic review fixes");
+    await client.close();
+  });
+
+  it("requires write access for the review_fix trigger", async () => {
+    const { mcp } = setup([{ id: "a1", name: "delivery", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a1", repository: "openai/example", access: "read", triggers: ["review_fix"] },
+    });
+    expect(result.isError).toBeTruthy();
+    expect(errorText(result as never)).toContain("Event triggers need write access.");
     await client.close();
   });
 

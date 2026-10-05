@@ -133,6 +133,39 @@ describe("GitHubReviewHost reads", () => {
     });
   });
 
+  it("reads origin: head, labels, and the run marker on a PR the App authored", async () => {
+    const pr = {
+      ...PR,
+      user: { type: "Bot", login: "wardby[bot]" },
+      body: "<!-- wardby:run_1 -->",
+      labels: [{ name: "wardby-autofix-1" }],
+    };
+    const { client } = fakeGitHub(({ path }) => (path === `${BASE}/pulls/7` ? json(pr) : undefined));
+    await expect(new GitHubReviewHost(client).pullRequestOrigin(REPO, 7)).resolves.toEqual({
+      headSha: SHA,
+      isFork: false,
+      state: "open",
+      labels: ["wardby-autofix-1"],
+      markerRunId: "run_1",
+    });
+  });
+
+  it("omits markerRunId when the PR was not authored by the App", async () => {
+    const pr = {
+      ...PR,
+      user: { type: "User", login: "chfields" },
+      body: "<!-- wardby:run_1 -->",
+      labels: [],
+    };
+    const { client } = fakeGitHub(({ path }) => (path === `${BASE}/pulls/7` ? json(pr) : undefined));
+    await expect(new GitHubReviewHost(client).pullRequestOrigin(REPO, 7)).resolves.toEqual({
+      headSha: SHA,
+      isFork: false,
+      state: "open",
+      labels: [],
+    });
+  });
+
   it("reads a file window with line numbers, a directory, and a missing path", async () => {
     const { client } = fakeGitHub(({ path, accept }) => {
       expect(accept).toBe("application/vnd.github.raw+json");
@@ -564,6 +597,18 @@ describe("GitHubReviewHost writes", () => {
     expect(grants).toEqual([{ checks: "write" }, { checks: "write" }]);
     expect(calls[0].body).toMatchObject({ name: "wardby review", head_sha: SHA, status: "in_progress" });
     expect((calls[1].body as { output: { text: string } }).output.text.length).toBe(65_535);
+  });
+
+  it("adds a label (created if missing) with issues+pull_requests write", async () => {
+    const { client, calls, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "POST" && path === `${BASE}/issues/7/labels`) return json([{ name: "wardby-autofix-2" }], 200);
+      return undefined;
+    });
+    await new GitHubReviewHost(client).addLabel(REPO, 7, "wardby-autofix-2");
+    expect(calls.map((c) => [c.method, c.path, c.body])).toEqual([
+      ["POST", `${BASE}/issues/7/labels`, { labels: ["wardby-autofix-2"] }],
+    ]);
+    expect(grants).toEqual([{ issues: "write", pull_requests: "write" }]);
   });
 });
 

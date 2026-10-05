@@ -53,18 +53,25 @@ function subjectOf(item: Json | null): { title: string; body: string } | undefin
 }
 
 /**
- * The run that opened this PR. Only a PR the App itself authored counts:
- * anyone can write the marker into their own PR's description. Only an open
- * PR counts too: a merged or closed PR's branch is stale (a squash merge leaves
- * its commits behind), so a follow-up there starts from the default branch.
+ * The run id in a PR description's marker. Only a PR the App itself authored
+ * counts: anyone can write the marker into their own PR's description.
  */
-function priorRunIdOf(pr: Json | null, slug: string): string | undefined {
-  if (pr?.state !== "open") return undefined;
+export function appMarkerRunId(pr: Json | null, slug: string): string | undefined {
   const author = obj(pr?.user);
   if (author?.type !== "Bot" || typeof author.login !== "string") return undefined;
   if (author.login.toLowerCase() !== `${slug}[bot]`.toLowerCase()) return undefined;
   const id = RUN_MARKER.exec(text(pr?.body))?.[1];
   return id && SAFE_RUN_ID.test(id) ? id : undefined;
+}
+
+/**
+ * The run that opened this PR, for a follow-up. Only an open PR counts: a
+ * merged or closed PR's branch is stale (a squash merge leaves its commits
+ * behind), so a follow-up there starts from the default branch.
+ */
+function priorRunIdOf(pr: Json | null, slug: string): string | undefined {
+  if (pr?.state !== "open") return undefined;
+  return appMarkerRunId(pr, slug);
 }
 
 /**

@@ -8,7 +8,7 @@
  * died first, say) still gets one: the reconciler posts the outcome as a new
  * comment. Best effort throughout: nothing here throws.
  */
-import type { Prisma, PrismaClient, Run } from "#prisma";
+import type { Prisma, PrismaClient, Run, RunStatus } from "#prisma";
 import { CODING_CODE_PROVIDER } from "../coding/protocol.js";
 import { storedServiceNames } from "../coding/services/catalog.js";
 import {
@@ -26,7 +26,16 @@ const log = logger.child({ module: "host-status" });
 
 /** Keeps the edited comment readable; the full reply stays on the run. */
 const MAX_REPLY_CHARS = 2000;
-const TERMINAL = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
+/** The run statuses a run never leaves. */
+export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
+  "succeeded",
+  "failed",
+  "refused",
+  "lost",
+  "budget_exhausted",
+  "cancelled",
+];
+const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
 
 export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run">;
 
@@ -61,8 +70,8 @@ export interface FailedChild {
 
 export const runLine = (runId: string): string => `<sub>wardby run \`${runId}\`</sub>`;
 
-export function workingBody(runId: string): string {
-  return `👀 Working on it.\n\n${runLine(runId)}`;
+export function workingBody(runId: string, heading = "👀 Working on it."): string {
+  return `${heading}\n\n${runLine(runId)}`;
 }
 
 /** The status row for a mention run, created in the same transaction as the run. */
@@ -304,13 +313,14 @@ export async function postMentionStatus(
   host: CodeReviewHost,
   runId: string,
   hosts: ReviewHostRegistry | undefined,
+  heading?: string,
 ): Promise<void> {
   try {
     const status = await db.runHostStatus.findUnique({ where: { runId } });
     if (!status || status.commentId || status.completedAt) return;
     const posted = await host.comment(status.repository, {
       number: status.number,
-      body: workingBody(runId),
+      body: workingBody(runId, heading),
       ...(status.replyToReviewCommentId ? { replyToReviewCommentId: status.replyToReviewCommentId } : {}),
     });
     const claimed = await db.runHostStatus.updateMany({

@@ -326,6 +326,15 @@ async function verifyCitations(
 
 type MentionEvent = Extract<HostEvent, { kind: "mention" }>;
 
+/** The continuation hint a router agent follows to continue a PR's branch instead of opening a new one. */
+export function continuationHint(prNumber: number, runId: string): string {
+  return (
+    `[This request is a follow-up on PR #${prNumber}, originally opened by wardby run ${runId}. ` +
+    `If you delegate, pass continuePriorRun set to exactly "${runId}" so the same PR/branch is ` +
+    `continued instead of opening a new one.]`
+  );
+}
+
 /**
  * The mention agent's task text. Deterministic so a prompt can parse it.
  *
@@ -347,13 +356,7 @@ export function mentionTaskText(event: MentionEvent): string {
   const Kind = event.isPullRequest ? "PR" : "Issue";
   const inSubject = event.comment.kind === "subject";
   const sections: string[] = [];
-  if (event.priorRunId) {
-    sections.push(
-      `[This request is a follow-up on PR #${event.number}, originally opened by wardby run ${event.priorRunId}. ` +
-        `If you delegate, pass continuePriorRun set to exactly "${event.priorRunId}" so the same PR/branch is ` +
-        `continued instead of opening a new one.]`,
-    );
-  }
+  if (event.priorRunId) sections.push(continuationHint(event.number, event.priorRunId));
   const title = event.subject?.title.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE);
   const description = event.subject?.body.trim() ? event.subject.body.slice(0, MAX_TASK_BODY) : "";
   sections.push(

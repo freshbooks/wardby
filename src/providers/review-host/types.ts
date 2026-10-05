@@ -69,6 +69,13 @@ export interface PullRequestHead {
   state: string;
 }
 
+export interface PullRequestOrigin extends PullRequestHead {
+  /** The run id in the description's marker; only on a PR the App itself authored. */
+  markerRunId?: string;
+  /** The PR's label names; empty on a host without labels. */
+  labels: string[];
+}
+
 export type FileReadResult =
   | {
       kind: "file";
@@ -217,6 +224,10 @@ export interface CodeReviewHost {
     opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string },
   ): Promise<PullRequestView>;
   pullRequestHead(repository: string, prNumber: number): Promise<PullRequestHead>;
+  /** Head, labels, and (on an App-authored PR) the run marker. Hosts that can't say leave it out. */
+  pullRequestOrigin?(repository: string, prNumber: number): Promise<PullRequestOrigin>;
+  /** Adds a label to a pull request (created if missing). Absent on hosts without labels. */
+  addLabel?(repository: string, prNumber: number, label: string): Promise<void>;
   readFile(
     repository: string,
     path: string,

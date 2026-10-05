@@ -22,6 +22,15 @@ import { describeDenial, type RepoAccessDecision } from "./repo-access.js";
 
 const log = logger.child({ module: "review-host-tools" });
 
+/** What a run published on its own check, kept for an automatic fix round. */
+export interface PublishedReview {
+  verdict: "APPROVE" | "CHANGES_REQUESTED" | "COMMENT";
+  body: string;
+}
+
+/** Cap on the review text kept on the check row and handed to a fix round. */
+export const MAX_REVIEW_BODY_CHARS = 20_000;
+
 export interface RepositoryLink {
   provider: ReviewHostProvider;
   repository: string;
@@ -49,8 +58,8 @@ export interface ReviewToolContext {
   hosts: ReviewHostRegistry;
   /** The run's open check, if the control plane started one. */
   runCheck: RunHostCheckRef | null;
-  /** Records that the run's check is now completed (RunHostCheck.completedAt). */
-  markRunCheckCompleted: () => Promise<void>;
+  /** Records that the run's check is now completed (RunHostCheck.completedAt), with the review it published, if any. */
+  markRunCheckCompleted: (review?: PublishedReview) => Promise<void>;
   /**
    * Re-authorizes the link against its current stamp and the agent's current
    * owner (core/repo-access.ts). Called before every host call; a denial or a
@@ -272,9 +281,9 @@ function error(code: string, message: string = code): string {
 }
 
 /** Bookkeeping only: a failure to record the check completed is logged and never changes the tool result. */
-async function markCompleted(ctx: ReviewToolContext): Promise<void> {
+async function markCompleted(ctx: ReviewToolContext, review?: PublishedReview): Promise<void> {
   try {
-    await ctx.markRunCheckCompleted();
+    await ctx.markRunCheckCompleted(review);
   } catch (err) {
     log.warn({ err, agentId: ctx.agentId }, "could not record the run's check completed");
   }
@@ -388,7 +397,12 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           ...(ownsCheck ? { checkId: runCheck.checkId } : {}),
           ...(a.resolveThreadIds?.length ? { resolveThreadIds: a.resolveThreadIds } : {}),
         });
-        if (ownsCheck) await markCompleted(ctx);
+        if (ownsCheck) {
+          await markCompleted(ctx, {
+            verdict: a.verdict,
+            body: `${a.summary}\n\n${a.body}`.slice(0, MAX_REVIEW_BODY_CHARS),
+          });
+        }
         return JSON.stringify(result);
       }
       case "repo_comment": {
