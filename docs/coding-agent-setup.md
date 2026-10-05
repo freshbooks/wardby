@@ -54,6 +54,11 @@ the run fails with category `repo_access_unavailable` (GitHub could not be
 asked — not a lost permission; re-run it later). `make_owner` to a different
 owner turns an admin or grandfathered approval into a check of the new owner's
 access. Coding agents must have an owner.
+
+A continuation (`continuePriorRun`) checks separately that the pull request
+it is asked to continue is still open on GitHub; one already merged or closed
+fails with category `continuation_closed` and nothing pushed — see
+[Continuation's pull request is no longer open](../help/errors/continuation-closed.md).
 Over stdio, the local operator holds every role, so `repositoryAdminOverride`
 is the way to approve a repository there.
 

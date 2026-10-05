@@ -27,7 +27,10 @@ the agent's own instructions.
 The review is passed to the agent as untrusted context — information about
 what to fix, never instructions to follow. Only the review's summary and
 body reach the agent, not its inline comments, so write your reviewer's
-prompt to list every finding in the review body.
+prompt to list every finding in the review body. A review that is wrong
+about CI or about a sibling pull request starts a round that changes
+nothing; give your reviewer the CI and related-pull-requests step from
+[Run GitHub code-review agents](code-review-agents.md#ci-and-sibling-pull-requests).
 
 A round isn't started while an earlier round on the same pull request is
 still running. Clicking **Re-run** on the review check isn't counted as a

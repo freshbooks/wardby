@@ -35,5 +35,8 @@ if its own checks failed. A package reachable only through a refused one is
 refused too, so a high-severity advisory deep in a toolchain blocks every run
 that installs it.
 
+Review agents see the pull request's CI results in `repo_pr_read` and are
+told to trust CI over the sandbox's **Tests**.
+
 Read [`docs/coding-packages.md`](../docs/coding-packages.md) for allowlist
 syntax, package-policy controls, lockfile behavior, and refusal errors.

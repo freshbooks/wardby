@@ -70,4 +70,5 @@ branch still matches what wardby recorded and that the `<!-- wardby:... -->`
 marker is still in its description, unedited.
 
 Related: [Run GitHub code-review agents](../code-review-agents.md),
-[Automatic review fix rounds](../review-fix-rounds.md).
+[Automatic review fix rounds](../review-fix-rounds.md),
+[Related pull requests across repositories](../related-pull-requests.md).

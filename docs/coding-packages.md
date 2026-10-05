@@ -412,6 +412,11 @@ file may be missing entries, so a clean install in CI can fail until it is
 regenerated outside the sandbox. Wardby writes this from the registry's
 records and the run's diff, not from the agent's summary.
 
+Review agents see the pull request's CI results through `repo_pr_read`
+(`ci`), and its note tells them to trust CI over a sandbox **Tests**
+failure; see
+[code-review-agents.md](code-review-agents.md#the-repo_-tools).
+
 A package that is only reachable through a refused one is refused too, as
 `wardby_package_not_allowed`. When a dependency deep in a toolchain has a
 high-severity advisory and no fixed version, every run that installs that

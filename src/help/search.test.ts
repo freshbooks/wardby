@@ -51,6 +51,47 @@ const catalog: HelpCatalog = {
         "CHANGES_REQUESTED. Rounds are tracked with wardby-autofix labels on the pull request.",
       headings: [{ level: 1, text: "Automatic review fix rounds", slug: "automatic-review-fix-rounds" }],
     }),
+    page({
+      id: "related-pull-requests",
+      title: "Related pull requests across repositories",
+      summary:
+        "Wardby lists the other pull requests from the same request in each pull request's description, " +
+        "with a suggested merge order.",
+      tags: ["github", "pull-requests", "multi-repo", "merge-order", "related", "siblings", "continuePriorRun"],
+      plainText:
+        "Related pull requests across repositories. Wardby adds a Related pull requests section to each pull " +
+        "request's description, with links, state, and a suggested merge order. A follow-up task lists every " +
+        "open sibling pull request with the continuePriorRun value that continues it.",
+      headings: [
+        {
+          level: 1,
+          text: "Related pull requests across repositories",
+          slug: "related-pull-requests-across-repositories",
+        },
+        {
+          level: 2,
+          text: "Follow-up runs and sibling pull requests",
+          slug: "follow-up-runs-and-sibling-pull-requests",
+        },
+      ],
+    }),
+    page({
+      id: "errors/continuation-closed",
+      title: "Continuation's pull request is no longer open",
+      summary: "A run asked to continue a pull request that was already merged or closed, so nothing was pushed.",
+      tags: ["error", "vcs", "pull-requests", "continuation", "continuePriorRun"],
+      plainText:
+        "A run started with continuePriorRun reuses the branch and pull request the named run originally " +
+        "opened. A run that stopped with category continuation_closed got a definite answer that the pull " +
+        "request is no longer open: it was merged or closed.",
+      headings: [
+        {
+          level: 1,
+          text: "Continuation's pull request is no longer open",
+          slug: "continuations-pull-request-is-no-longer-open",
+        },
+      ],
+    }),
   ],
 };
 
@@ -75,5 +116,15 @@ describe("searchHelp", () => {
     expect(searchHelp(catalog, "review_fix")[0]?.page.id).toBe("review-fix-rounds");
     expect(searchHelp(catalog, "autofix")[0]?.page.id).toBe("review-fix-rounds");
     expect(searchHelp(catalog, "fix round")[0]?.page.id).toBe("review-fix-rounds");
+  });
+
+  it("finds the related pull requests article by name, merge order, and continuation phrase", () => {
+    expect(searchHelp(catalog, "related pull requests")[0]?.page.id).toBe("related-pull-requests");
+    expect(searchHelp(catalog, "merge order")[0]?.page.id).toBe("related-pull-requests");
+    expect(searchHelp(catalog, "continuePriorRun sibling")[0]?.page.id).toBe("related-pull-requests");
+  });
+
+  it("finds the continuation-closed error article by its failure category", () => {
+    expect(searchHelp(catalog, "continuation_closed")[0]?.page.id).toBe("errors/continuation-closed");
   });
 });
