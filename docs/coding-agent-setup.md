@@ -161,8 +161,12 @@ don't starve each other.
 Sub-agents dispatched together by a lead with `parallelDelegations` share the
 run tree the same way: each in-flight sibling's unspent reservation counts
 against the tree, so they can never jointly reserve more than the lead's
-budget, and a sibling admitted after the tree is spent is refused with
-`run_tree_exhausted`.
+budget. A sibling admitted after the tree is spent waits for another
+still-running sibling to finish and free its reservation, then retries, up to
+roughly its own normal wait bound — so the total wait can reach about twice
+that bound before it gives up. With no sibling still running, it is refused
+immediately with `run_tree_exhausted`. The check that triggers the wait is an
+estimate, so a retry can still end in the same refusal.
 
 A hold lapses by itself when the run stops showing signs of life, so a crashed
 process or an interrupted `wardby run` cannot pin a group for the rest of the

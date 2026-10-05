@@ -31,6 +31,13 @@ that spends heavily before delegating can leave a sub-agent refused with
 
 Sub-agents started together (a lead with `parallelDelegations`) also count each
 other's unspent reservations, so the last one admitted can be refused with
-`run_tree_exhausted` even though no sub-agent has spent much yet.
+`run_tree_exhausted` even though no sub-agent has spent much yet. If a
+sibling is still running when that happens, the refused sub-agent waits for
+it to finish and retries instead of failing immediately — up to roughly
+twice its normal wait bound in total; with no sibling running, the refusal is
+immediate. A sub-agent that is waiting for budget still counts toward the
+lead's `maxDelegationsPerRun`, so a delegation beyond the limit is refused
+with `already_dispatched` and a message naming how many delegations were
+made and how many are waiting for budget.
 
 For a shared-group refusal, read [Budget group exhausted](../errors/budget-group-exhausted.md).
