@@ -49,4 +49,30 @@ describe("label fix-round ledger", () => {
     expect(await ledger.markStopped("o/r", 7, origin([STOPPED_LABEL]))).toBe(false);
     expect(addLabel).toHaveBeenCalledTimes(1);
   });
+
+  describe("matches labels case-insensitively, as GitHub does", () => {
+    it("counts mixed-case round labels and sees a mixed-case opt-out", () => {
+      const ledger = fixRoundLedger({ addLabel: vi.fn() } as unknown as CodeReviewHost)!;
+      const o = origin(["Wardby-Autofix-1", "WARDBY-AUTOFIX-2", "Wardby-Autofix-Off"]);
+      expect(ledger.rounds(o)).toBe(2);
+      expect(ledger.optedOut(o)).toBe(true);
+    });
+
+    it("numbers the next round past the highest mixed-case label", async () => {
+      const addLabel = vi.fn(async () => undefined);
+      await fixRoundLedger({ addLabel } as unknown as CodeReviewHost)!.recordRound(
+        "o/r",
+        7,
+        origin(["wardby-autofix-1", "Wardby-Autofix-4"]),
+      );
+      expect(addLabel).toHaveBeenCalledWith("o/r", 7, "wardby-autofix-5");
+    });
+
+    it("sees a mixed-case stopped label, so it is not added again", async () => {
+      const addLabel = vi.fn(async () => undefined);
+      const ledger = fixRoundLedger({ addLabel } as unknown as CodeReviewHost)!;
+      expect(await ledger.markStopped("o/r", 7, origin(["Wardby-AutoFix-Limit"]))).toBe(false);
+      expect(addLabel).not.toHaveBeenCalled();
+    });
+  });
 });

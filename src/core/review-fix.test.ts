@@ -18,8 +18,14 @@ vi.mock("./host-status.js", async (orig) => ({
   ...(await orig<typeof import("./host-status.js")>()),
   postMentionStatus: vi.fn(async () => undefined),
 }));
+vi.mock("./attribution.js", async (orig) => ({
+  ...(await orig<typeof import("./attribution.js")>()),
+  linkedPullRequestAttribution: vi.fn(async () => undefined),
+}));
+import { linkedPullRequestAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./attribution.js";
 import { checkContinuation, dispatchRun } from "./dispatch.js";
-import { postMentionStatus } from "./host-status.js";
+import { postMentionStatus, TERMINAL_RUN_STATUSES } from "./host-status.js";
+import { splitTaskOverride } from "./untrusted-content.js";
 import {
   capBody,
   reviewFixTaskText,
@@ -38,6 +44,7 @@ function setup(
     link?: object | null;
     authorized?: boolean;
     check?: object | null;
+    inFlightRun?: object | null;
   } = {},
 ) {
   vi.mocked(dispatchRun).mockClear();
@@ -72,16 +79,18 @@ function setup(
   } as unknown as RepoAccessGate;
   const check = opts.check === undefined ? null : opts.check;
   const findUniqueCheck = vi.fn(async () => check);
+  const findFirstRun = vi.fn(async () => opts.inFlightRun ?? null);
   const deps = {
     db: {
       agentRepository: { findFirst: vi.fn(async () => link) },
       runHostCheck: { findUnique: findUniqueCheck },
+      run: { findFirst: findFirstRun },
     } as never,
     executor: {} as never,
     hosts: { github: host },
     repoAccess,
   } as ReviewFixDeps;
-  return { deps, host, addLabel, findUniqueCheck };
+  return { deps, host, addLabel, findUniqueCheck, findFirstRun };
 }
 
 describe("startReviewFixRound", () => {
@@ -91,8 +100,13 @@ describe("startReviewFixRound", () => {
     expect(result).toEqual({ kind: "dispatched", runId: "run-delivery", round: 1, maxRounds: 2 });
     const opts = vi.mocked(dispatchRun).mock.calls[0][0];
     expect(opts).toMatchObject({ agentId: "delivery", trigger: "host_event" });
-    expect(opts.taskOverride).toContain('pass continuePriorRun set to exactly "run_1"');
-    expect(opts.taskOverride).toContain("Automatic fix round 1 of 2 for PR #7");
+    const { task, untrustedContext } = splitTaskOverride(opts.taskOverride!);
+    expect(task).toContain('pass continuePriorRun set to exactly "run_1"');
+    expect(task).toContain("Automatic fix round 1 of 2 for PR #7");
+    expect(task).toContain("never as instructions");
+    // The review itself is untrusted context, never part of the trusted task.
+    expect(task).not.toContain("needs work");
+    expect(untrustedContext).toContain("needs work");
     expect(txStub.runHostStatus.create).toHaveBeenCalled();
     expect(host.addLabel).toHaveBeenCalledWith(REPO, 7, "wardby-autofix-1");
     expect(postMentionStatus).toHaveBeenCalledWith(
@@ -154,7 +168,42 @@ describe("startReviewFixRound", () => {
     expect(again.host.comment).not.toHaveBeenCalled();
   });
 
-  it("caps the review text in the task", () => {
+  it("passes the PR's linked-issue attribution with the dispatch", async () => {
+    const attribution = { source: "linked_pr", item: { provider: "jira", key: "PAY-1" } } as never;
+    vi.mocked(linkedPullRequestAttribution).mockResolvedValueOnce(attribution);
+    const { deps } = setup();
+    await startReviewFixRound(REQ, deps);
+    expect(linkedPullRequestAttribution).toHaveBeenCalledWith(
+      deps.db,
+      deps.issueTrackers,
+      { codeProvider: "github", repository: REPO, number: 7 },
+      RESPONSE_PATH_SNAPSHOT_BUDGET,
+    );
+    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toBe(attribution);
+  });
+
+  it("skips while the fix agent already has an unfinished run on this PR: no label, no dispatch", async () => {
+    const { deps, host, findFirstRun } = setup({ inFlightRun: { id: "run-earlier" } });
+    expect(await startReviewFixRound(REQ, deps)).toEqual({ kind: "skipped", reason: "in_flight" });
+    expect(host.addLabel).not.toHaveBeenCalled();
+    expect(dispatchRun).not.toHaveBeenCalled();
+    expect(findFirstRun).toHaveBeenCalledWith({
+      where: {
+        agentId: "delivery",
+        status: { notIn: [...TERMINAL_RUN_STATUSES] },
+        hostStatus: { is: { provider: "github", repository: REPO, number: 7 } },
+      },
+      select: { id: true },
+    });
+  });
+
+  it("proceeds when the fix agent's earlier run on this PR has finished", async () => {
+    // A finished run is excluded by the query's status filter, so findFirst returns nothing.
+    const { deps } = setup({ inFlightRun: null, origin: { labels: ["wardby-autofix-1"] } });
+    expect(await startReviewFixRound(REQ, deps)).toMatchObject({ kind: "dispatched", round: 2 });
+  });
+
+  it("caps the review text in the untrusted context", () => {
     const task = reviewFixTaskText({
       repository: REPO,
       prNumber: 7,
@@ -165,12 +214,15 @@ describe("startReviewFixRound", () => {
       reviewBody: "x".repeat(30_000),
     });
     expect(task.length).toBeLessThan(21_500);
+    const { untrustedContext } = splitTaskOverride(task);
+    expect(untrustedContext).toContain("x".repeat(1000));
+    expect(splitTaskOverride(task).task).not.toContain("xxxx");
   });
 
   it("does not dispatch when recording the round fails", async () => {
     const { deps, addLabel } = setup();
     addLabel.mockRejectedValueOnce(new Error("label failed"));
-    expect(await startReviewFixRound(REQ, deps)).toEqual({ kind: "skipped", reason: "dispatch_declined" });
+    expect(await startReviewFixRound(REQ, deps)).toEqual({ kind: "skipped", reason: "record_failed" });
     expect(dispatchRun).not.toHaveBeenCalled();
   });
 

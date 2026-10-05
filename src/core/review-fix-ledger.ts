@@ -10,7 +10,14 @@ import type { CodeReviewHost, PullRequestOrigin } from "../providers/review-host
 
 export const STOPPED_LABEL = "wardby-autofix-limit";
 export const OPT_OUT_LABEL = "wardby-autofix-off";
-const ROUND_LABEL = /^wardby-autofix-([0-9]+)$/;
+/** GitHub matches label names case-insensitively, so a PR may report `Wardby-Autofix-1` for a pre-existing repo label. */
+const ROUND_LABEL = /^wardby-autofix-([0-9]+)$/i;
+
+/** True when the PR carries `name`, compared case-insensitively as GitHub does. */
+function hasLabel(origin: PullRequestOrigin, name: string): boolean {
+  const wanted = name.toLowerCase();
+  return origin.labels.some((label) => label.toLowerCase() === wanted);
+}
 
 /** The round numbers already labeled on the PR, from its current label set. */
 function roundNumbers(origin: PullRequestOrigin): number[] {
@@ -34,7 +41,7 @@ export function fixRoundLedger(host: CodeReviewHost): FixRoundLedger | null {
   const addLabel = host.addLabel.bind(host);
   return {
     rounds: (origin) => roundNumbers(origin).length,
-    optedOut: (origin) => origin.labels.includes(OPT_OUT_LABEL),
+    optedOut: (origin) => hasLabel(origin, OPT_OUT_LABEL),
     recordRound: (repository, prNumber, origin) => {
       // The round count and the label number can diverge (a gap from a label removed by hand,
       // or a race with another delivery), so the next label is always one past the highest
@@ -46,7 +53,7 @@ export function fixRoundLedger(host: CodeReviewHost): FixRoundLedger | null {
       return addLabel(repository, prNumber, `wardby-autofix-${next}`);
     },
     markStopped: async (repository, prNumber, origin) => {
-      if (origin.labels.includes(STOPPED_LABEL)) return false;
+      if (hasLabel(origin, STOPPED_LABEL)) return false;
       await addLabel(repository, prNumber, STOPPED_LABEL);
       return true;
     },

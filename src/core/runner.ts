@@ -174,6 +174,7 @@ export type RunnerDb = Pick<
   | "issuePullRequest"
   | "runIssueStatus"
   | "issueFingerprint"
+  | "workItem"
 >;
 
 /** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */

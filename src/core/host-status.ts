@@ -8,7 +8,7 @@
  * died first, say) still gets one: the reconciler posts the outcome as a new
  * comment. Best effort throughout: nothing here throws.
  */
-import type { Prisma, PrismaClient, Run } from "#prisma";
+import type { Prisma, PrismaClient, Run, RunStatus } from "#prisma";
 import { CODING_CODE_PROVIDER } from "../coding/protocol.js";
 import { storedServiceNames } from "../coding/services/catalog.js";
 import {
@@ -26,7 +26,16 @@ const log = logger.child({ module: "host-status" });
 
 /** Keeps the edited comment readable; the full reply stays on the run. */
 const MAX_REPLY_CHARS = 2000;
-const TERMINAL = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
+/** The run statuses a run never leaves. */
+export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
+  "succeeded",
+  "failed",
+  "refused",
+  "lost",
+  "budget_exhausted",
+  "cancelled",
+];
+const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
 
 export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run">;
 
