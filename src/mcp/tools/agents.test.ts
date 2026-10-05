@@ -461,6 +461,40 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  it("parallelDelegations defaults to false, round-trips through create and update, and must be a boolean", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const base = { systemPrompt: "Plan, then delegate.", model: "gpt-5.6-luna", budgetUsd: 5 };
+
+    const plain = await client.callTool({ name: "create_agent", arguments: { name: "router", ...base } });
+    const plainAgent = JSON.parse((plain.content as { text: string }[])[0].text);
+    expect(plainAgent.parallelDelegations ?? false).toBe(false);
+
+    const lead = await client.callTool({
+      name: "create_agent",
+      arguments: { name: "lead", ...base, maxDelegationsPerRun: 4, parallelDelegations: true },
+    });
+    expect(lead.isError).toBeFalsy();
+    expect(JSON.parse((lead.content as { text: string }[])[0].text).parallelDelegations).toBe(true);
+
+    const off = await client.callTool({
+      name: "update_agent",
+      arguments: { id: JSON.parse((lead.content as { text: string }[])[0].text).id, parallelDelegations: false },
+    });
+    expect(off.isError).toBeFalsy();
+    expect(JSON.parse((off.content as { text: string }[])[0].text).parallelDelegations).toBe(false);
+
+    const bad = await client.callTool({
+      name: "update_agent",
+      arguments: { id: plainAgent.id, parallelDelegations: "yes" },
+    });
+    expect(bad.isError).toBe(true);
+    await client.close();
+  });
+
   it("collectExclude round-trips through create_agent and update_agent with agents:write", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
