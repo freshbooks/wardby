@@ -29,4 +29,8 @@ what the parent (and any earlier sub-agents) have already spent, so a parent
 that spends heavily before delegating can leave a sub-agent refused with
 `run_tree_exhausted`.
 
+Sub-agents started together (a lead with `parallelDelegations`) also count each
+other's unspent reservations, so the last one admitted can be refused with
+`run_tree_exhausted` even though no sub-agent has spent much yet.
+
 For a shared-group refusal, read [Budget group exhausted](../errors/budget-group-exhausted.md).

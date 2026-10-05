@@ -3,7 +3,7 @@ id: agent-recipes
 title: Agent recipes
 summary: Two copyable agent setups, an architecture keeper and a per-language builder, with the version, GitHub App, and webhook prerequisites each needs, written as a procedure an MCP assistant can follow.
 audience: operator
-tags: [recipes, examples, coding-agents, architecture, builder, router, mention, push, getting-started]
+tags: [recipes, examples, coding-agents, architecture, builder, router, mention, push, getting-started, fan-out, parallel-delegations, parallelDelegations, maxDelegationsPerRun]
 appliesTo: >=0.4.0
 ---
 
@@ -161,10 +161,15 @@ A router delegates once per run by default. For one native agent that splits a
 request across several repositories, attach one builder per repository and set
 the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
 `update_agent`. Each `delegate_to_<name>` call must go to a different
-sub-agent; the calls run one after another; the run tree shares the lead's
-budget, so size `budgetUsd` for every builder it may start. Put the full
-cross-repository contract in each builder's task, since each builder sees only
-its own repository. Each builder's result includes `pullRequest` (`outcome`,
+sub-agent; the calls run one after another unless you also set
+`parallelDelegations: true`, which starts the delegations the lead makes in
+one turn together (tell the lead to make them all in one turn; coding
+builders beyond `CODING_MAX_CONCURRENT` queue); the run tree shares the
+lead's budget, so size `budgetUsd` for every builder it may start. Builders
+started together each reserve their budget up front, so size the lead's
+`budgetUsd` for all of them. Put the full cross-repository contract in each
+builder's task, since each builder sees only its own repository. Each
+builder's result includes `pullRequest` (`outcome`,
 `repository`, `number`, `url`) from Wardby's own record when it opened or
 pushed to one, so the lead can report the links.
 

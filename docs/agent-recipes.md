@@ -372,15 +372,37 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
 
 - Each `delegate_to_<name>` call still goes to a different sub-agent; a second
   call to the same one in the same run is refused with `already_dispatched`.
-- The calls run one after another, in the order the lead makes them, so
-  delegate the repositories that own the data first.
+- By default the calls run one after another, in the order the lead makes
+  them. To run them at the same time, also set `parallelDelegations`:
+
+  ```json
+  { "id": "<lead agent id>", "maxDelegationsPerRun": 6, "parallelDelegations": true }
+  ```
+
+  The `delegate_to_*` calls the lead makes **in one model turn** then start
+  together; its other tool calls still run one at a time, in order, and the
+  lead gets every builder's result before its next turn. Tell the lead to
+  make all of its delegations in a single turn. A prompt that asks for
+  delegations "in dependency order", one per turn, still runs them one
+  after another. Use it only when every builder's task already carries the
+  whole cross-repository contract, so no builder needs another's output.
+
+- With `parallelDelegations`, builders compete for coding slots: runs beyond
+  `CODING_MAX_CONCURRENT` (or beyond a Kubernetes quota set with
+  `KUBERNETES_RESOURCE_QUOTA`) wait in the queue and start as others finish.
+  A builder that waits longer than `CODING_QUEUE_TIMEOUT_SEC` fails with
+  `coding_queue_timeout`, and the lead sees that in its result.
 - Each coding sub-agent's result tells the lead its `status`, its summary
   (`finalText`), cost and tokens, and, when it opened or pushed to a pull
   request, `pullRequest` (`outcome` `opened` or `updated`, `repository`,
   `number`, `url`) taken from Wardby's own record of the run. A lead prompt can
   ask the agent to report those links.
-- The whole run tree shares one budget: give the lead a `budgetUsd` that covers
-  every builder it may start, plus its own planning.
+- The whole run tree shares one budget: give the lead a `budgetUsd` that
+  covers every builder it may start, plus its own planning. Builders started
+  together each reserve their own `budgetUsd` up front, so the ones admitted
+  last get what the earlier ones leave and are refused with
+  `run_tree_exhausted` when nothing is left. Size the lead for the sum of its
+  builders' budgets.
 - Each builder works only in its own repository and can't see the others, so
   the lead's task to each one must carry everything that crosses a repository
   boundary (routes, field names and types, error codes), word for word the same.

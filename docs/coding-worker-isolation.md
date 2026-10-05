@@ -427,6 +427,12 @@ never takes a free slot ahead of an older queued run. A run still queued after
 Slot usage is derived from run state, so a crashed replica cannot leak slots:
 its runs are reconciled to `lost`, which frees them.
 
+A native lead with `parallelDelegations` can dispatch several coding runs at
+once. They count against `CODING_MAX_CONCURRENT` like any other runs, and the
+ones over the cap queue. The lead waits for each run's queue time plus its
+`timeoutSec` before giving up on it, so size `CODING_QUEUE_TIMEOUT_SEC` and the
+cap for the fan-out you expect.
+
 On Kubernetes, a run slot is not enough on its own: the namespace's
 ResourceQuota can be full even when slots are free, because run pods differ in
 size (a service sidecar adds to a run's CPU and memory) and other pods share the

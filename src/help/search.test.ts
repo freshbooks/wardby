@@ -76,6 +76,34 @@ const catalog: HelpCatalog = {
       ],
     }),
     page({
+      id: "agent-recipes",
+      title: "Agent recipes",
+      summary:
+        "Two copyable agent setups, an architecture keeper and a per-language builder, with the version, " +
+        "GitHub App, and webhook prerequisites each needs, written as a procedure an MCP assistant can follow.",
+      tags: [
+        "recipes",
+        "examples",
+        "architecture",
+        "builder",
+        "router",
+        "mention",
+        "push",
+        "getting-started",
+        "fan-out",
+        "parallel-delegations",
+        "parallelDelegations",
+        "maxDelegationsPerRun",
+      ],
+      plainText:
+        "Agent recipes. A lead that fans out: the calls run one after another unless you also set " +
+        "parallelDelegations: true, which starts the delegations the lead makes in one turn together.",
+      headings: [
+        { level: 1, text: "Agent recipes", slug: "agent-recipes" },
+        { level: 2, text: "Step 2C (optional): a lead that fans out", slug: "step-2c-optional-a-lead-that-fans-out" },
+      ],
+    }),
+    page({
       id: "errors/continuation-closed",
       title: "Continuation's pull request is no longer open",
       summary: "A run asked to continue a pull request that was already merged or closed, so nothing was pushed.",
@@ -126,5 +154,10 @@ describe("searchHelp", () => {
 
   it("finds the continuation-closed error article by its failure category", () => {
     expect(searchHelp(catalog, "continuation_closed")[0]?.page.id).toBe("errors/continuation-closed");
+  });
+
+  it("finds the agent recipes article by the parallelDelegations flag", () => {
+    expect(searchHelp(catalog, "parallelDelegations")[0]?.page.id).toBe("agent-recipes");
+    expect(searchHelp(catalog, "parallel delegations")[0]?.page.id).toBe("agent-recipes");
   });
 });

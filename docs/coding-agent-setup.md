@@ -158,6 +158,12 @@ Native runs are served first come, first served: a native run only counts the
 holds of runs that started before it, so members dispatched on the same tick
 don't starve each other.
 
+Sub-agents dispatched together by a lead with `parallelDelegations` share the
+run tree the same way: each in-flight sibling's unspent reservation counts
+against the tree, so they can never jointly reserve more than the lead's
+budget, and a sibling admitted after the tree is spent is refused with
+`run_tree_exhausted`.
+
 A hold lapses by itself when the run stops showing signs of life, so a crashed
 process or an interrupted `wardby run` cannot pin a group for the rest of the
 period. A run holds while its last heartbeat (or its start, before the first
