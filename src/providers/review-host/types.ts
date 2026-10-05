@@ -35,6 +35,33 @@ export interface ReviewThreadView {
   body: string;
 }
 
+export type CiState = "passing" | "failing" | "pending" | "inconclusive" | "none" | "unavailable";
+
+/** One CI result on a commit: a check run or a commit status. */
+export interface CiCheckView {
+  /** Check run name or status context (repository-controlled text), capped at 100 characters. */
+  name: string;
+  kind: "check_run" | "status";
+  status: "queued" | "in_progress" | "completed";
+  /** Set when completed: success, failure, neutral, cancelled, skipped, timed_out, action_required, stale, startup_failure, error. */
+  conclusion: string | null;
+  /** The app that reported a check run (e.g. "github-actions"); null for statuses. */
+  app: string | null;
+}
+
+/** CI on the PR's head commit, excluding everything wardby's own App reported. */
+export interface CiView {
+  headSha: string;
+  state: CiState;
+  checks: CiCheckView[];
+  /** More results exist than are listed. */
+  truncated: boolean;
+  /** Commit statuses could not be read (permission not granted); only check runs are listed. */
+  statusesUnavailable: boolean;
+  /** Set when state is "unavailable": a host error code. */
+  unavailableReason?: string;
+}
+
 export interface PullRequestView {
   number: number;
   title: string;
@@ -61,6 +88,8 @@ export interface PullRequestView {
   files: PullRequestFileView[];
   /** This agent's own unresolved review threads on the PR (the first 100 threads are searched). */
   openThreads: ReviewThreadView[];
+  /** CI on headSha (check runs and commit statuses, minus wardby's own); absent on hosts that can't read CI. */
+  ci?: CiView;
 }
 
 export interface PullRequestHead {

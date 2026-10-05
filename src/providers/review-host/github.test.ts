@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { RELATED_SECTION_END, RELATED_SECTION_START, type GitHubAppClient } from "../vcs/github.js";
 import { GitHubReviewHost } from "./github.js";
-import { BY_APP, fakeGitHub, json, OLD_SHA, PATCH, PR, REPO, SHA } from "./github.test-support.js";
+import { APP_ID, BY_APP, fakeGitHub, json, OLD_SHA, PATCH, PR, REPO, SHA } from "./github.test-support.js";
 import { reviewMarker } from "./review-format.js";
 
 const BASE = "/repos/chfields/knock-knock-jokes";
@@ -29,7 +29,7 @@ describe("GitHubReviewHost reads", () => {
       maxPatchChars: PATCH.length + 5,
       agentMarker: "agent1",
     });
-    expect(grants).toEqual([{ contents: "read", pull_requests: "read" }]);
+    expect(grants).toEqual([{ contents: "read", pull_requests: "read" }, { checks: "read" }, { statuses: "read" }]);
     expect(view).toMatchObject({
       number: 7,
       headSha: SHA,
@@ -40,6 +40,76 @@ describe("GitHubReviewHost reads", () => {
     });
     expect(view.files[0]).toMatchObject({ patch: PATCH, patchTruncated: false });
     expect(view.files[1]).toMatchObject({ patch: PATCH.slice(0, 5), patchTruncated: true });
+  });
+
+  it("reads CI on the head with separate checks/statuses tokens, dropping the App's own checks", async () => {
+    const { client, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+      if (path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+      if (path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+      if (path === `${BASE}/commits/${SHA}/check-runs?filter=latest&per_page=100`) {
+        return json({
+          total_count: 3,
+          check_runs: [
+            { name: "e2e-web", status: "completed", conclusion: "success", app: { id: 15368, slug: "github-actions" } },
+            { name: "wardby review", status: "in_progress", conclusion: null, app: { id: APP_ID, slug: "wardby" } },
+            {
+              name: "wardby/continuation",
+              status: "completed",
+              conclusion: "success",
+              app: { id: APP_ID, slug: "wardby" },
+            },
+          ],
+        });
+      }
+      if (path === `${BASE}/commits/${SHA}/status?per_page=100`) {
+        return json({ state: "pending", statuses: [{ context: "ci/legacy", state: "pending" }] });
+      }
+      return undefined;
+    });
+    const view = await new GitHubReviewHost(client).readPullRequest(REPO, 7, { maxPatchChars: 100, agentMarker: "a" });
+    expect(grants).toEqual([{ contents: "read", pull_requests: "read" }, { checks: "read" }, { statuses: "read" }]);
+    expect(view.ci).toEqual({
+      headSha: SHA,
+      state: "pending",
+      checks: [
+        { name: "e2e-web", kind: "check_run", status: "completed", conclusion: "success", app: "github-actions" },
+        { name: "ci/legacy", kind: "status", status: "in_progress", conclusion: null, app: null },
+      ],
+      truncated: false,
+      statusesUnavailable: false,
+    });
+  });
+
+  it("still returns the PR, with check runs only, when the App can't read commit statuses", async () => {
+    const { client } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+      if (path.startsWith(`${BASE}/pulls/7/files`) || path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+      if (path.includes("/check-runs")) {
+        return json({
+          total_count: 1,
+          check_runs: [
+            { name: "build", status: "completed", conclusion: "failure", app: { id: 1, slug: "github-actions" } },
+          ],
+        });
+      }
+      return undefined;
+    });
+    // The fake grants every token; simulate the missing permission by having the status read fail.
+    const view = await new GitHubReviewHost(client).readPullRequest(REPO, 7, { maxPatchChars: 100, agentMarker: "a" });
+    expect(view.number).toBe(7);
+    expect(view.ci).toMatchObject({ state: "failing", statusesUnavailable: true });
+  });
+
+  it("marks CI unavailable, without failing the read, when check runs can't be read", async () => {
+    const { client } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(PR);
+      if (path.startsWith(`${BASE}/pulls/7/files`) || path.startsWith(`${BASE}/issues/7/comments`)) return json([]);
+      if (path.includes("/check-runs")) return json({ message: "nope" }, 403);
+      return undefined;
+    });
+    const view = await new GitHubReviewHost(client).readPullRequest(REPO, 7, { maxPatchChars: 100, agentMarker: "a" });
+    expect(view.ci).toMatchObject({ state: "unavailable", checks: [], unavailableReason: "host_api_error" });
   });
 
   it("ignores a marker in a comment the App did not write", async () => {
