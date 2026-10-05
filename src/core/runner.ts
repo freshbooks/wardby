@@ -30,6 +30,8 @@ import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
+import { createDelegationSiblings } from "./delegation-siblings.js";
+import { createSerialGate } from "./serial-gate.js";
 import { withRunHeartbeat } from "./run-heartbeat.js";
 import { ContinuationRefusedError, dispatchRun } from "./dispatch.js";
 import { canDelegate } from "./grants.js";
@@ -82,11 +84,15 @@ const runnerLog = logger.child({ module: "runner" });
 /**
  * Sub-agent dispatch uses one synthetic tool per declared child, named by the
  * boundName it's attached
- * under. Synchronous only for v1: the parent's turn blocks until the child
- * run reaches a terminal state, and its result comes back as this tool
- * call's result. At most one dispatch is honored per run (see the
- * "already dispatched" check below) — a haiku-tier classifier deciding
- * plan-vs-implement should commit to exactly one child, not spray both.
+ * under. The parent's tool call blocks until the child run reaches a
+ * terminal state, and its result comes back as this tool call's result.
+ * A run delegates at most maxDelegationsPerRun times (default one: a
+ * classifier deciding plan-vs-implement commits to exactly one child) and to
+ * each child at most once. With Agent.parallelDelegations, the delegate_to_*
+ * calls of one turn run at the same time (NativeEngine.runToolCalls); their
+ * admission (the checks below plus the child row) is still one at a time,
+ * through the run's delegation gate, and a child refused for budget while a
+ * sibling runs waits for that sibling to finish (delegation-siblings.ts).
  *
  * Two execution paths depending on the child's `kind`:
  * - `native`: calls `executeRun` directly, bypassing any `Executor` — the
@@ -110,10 +116,13 @@ const runnerLog = logger.child({ module: "runner" });
  * The `delegate_to_` prefix lives in core/tool-names.ts, which reserves it
  * so no user tool can be created under a name this dispatch would shadow.
  */
-function delegateToolDef(boundName: string): LoadedTool {
+function delegateToolDef(boundName: string, parallel: boolean): LoadedTool {
+  const timing = parallel
+    ? "Blocks until it finishes. Several delegate_to_* calls made in the same turn run at the same time, so make them together when their tasks don't need each other's results."
+    : "Runs synchronously and blocks until it finishes.";
   return {
     name: `${DELEGATE_TOOL_PREFIX}${boundName}`,
-    description: `Delegates a task to your "${boundName}" sub-agent. Runs synchronously and blocks until it finishes; its spend counts against your own run's shared budget scope. If the sub-agent belongs to another owner it runs only its own instructions: pass an empty task.`,
+    description: `Delegates a task to your "${boundName}" sub-agent. ${timing} Its spend counts against your own run's shared budget scope. If the sub-agent belongs to another owner it runs only its own instructions: pass an empty task.`,
     jsonSchema: {
       type: "object",
       properties: {
@@ -562,6 +571,8 @@ async function executeTrackedRun(
       subAgentEdges,
       // Only when above the default of one, so a default agent's pinned step result is unchanged.
       ...(agent.maxDelegationsPerRun > 1 ? { maxDelegationsPerRun: agent.maxDelegationsPerRun } : {}),
+      // Only when on, so a default agent's pinned step result is unchanged.
+      ...(agent.parallelDelegations ? { parallelDelegations: true } : {}),
       repositoryLinks,
       issueProjectLinks,
       agent: {
@@ -594,7 +605,7 @@ async function executeTrackedRun(
         ...(agent.memoryEnabled ? MEMORY_TOOL_DEFS : []),
         ...(subAgentEdges.length > 0 ? [SUBAGENT_MEMORY_GET_TOOL] : []),
         ...(isDispatchedChild ? [PARENT_MEMORY_GET_TOOL] : []),
-        ...subAgentEdges.map((edge): LoadedTool => delegateToolDef(edge.boundName)),
+        ...subAgentEdges.map((edge): LoadedTool => delegateToolDef(edge.boundName, agent.parallelDelegations)),
         ...(repositoryLinks.length > 0 ? REVIEW_HOST_TOOL_DEFS : []),
         ...(issueProjectLinks.length > 0 ? ISSUE_TRACKER_TOOL_DEFS : []),
       ],
@@ -661,6 +672,13 @@ async function executeTrackedRun(
     // jira_create_issue's per-run cap counter: shared by every tool call of this attempt (a resumed attempt
     // starts a fresh one, floored by the run's recorded fingerprint creates).
     const issueCreationCounters = new Map<string, RunCreationCounter>();
+    // One per attempt: admits this run's delegations one at a time (see the delegate branch).
+    const delegationGate = createSerialGate();
+    // The children this attempt's delegations have running, and the sub-agents whose delegation is
+    // waiting for one of them to free budget (parallelDelegations): a waiting delegation keeps its
+    // place in the same-child and limit checks while the gate is open to the others.
+    const delegationSiblings = createDelegationSiblings();
+    const waitingDelegations = new Set<string>();
 
     const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
       if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
@@ -761,218 +779,293 @@ async function executeTrackedRun(
             message: `No sub-agent is bound to name "${boundName}".`,
           });
         }
-        // At most maxDelegationsPerRun dispatches per run (default one: a
-        // classifier deciding plan-vs-implement commits to exactly one child),
-        // and never the same child twice, so a retry can't leave two children
-        // racing on the same task. A lead that fans out to several builders
-        // raises the limit; its children still run one after another.
-        const limit = loaded.maxDelegationsPerRun ?? 1;
-        const priorDispatches = await db.run.findMany({ where: { parentRunId: { in: [runId] } } });
-        if (priorDispatches.some((prior) => prior.agentId === edge.childAgentId)) {
-          return JSON.stringify({
-            error: "already_dispatched",
-            message: `This run already delegated to "${boundName}"; a run delegates to each sub-agent at most once.`,
-          });
-        }
-        if (priorDispatches.length >= limit) {
-          return JSON.stringify({
-            error: "already_dispatched",
-            message:
-              limit === 1
-                ? "This run already delegated to a sub-agent; only one delegation is allowed per run."
-                : `This run already made ${limit} delegations, the most this agent allows per run.`,
-          });
-        }
-        let parsed: unknown;
+        let release = await delegationGate.acquire();
+        let finishSibling = (): void => {};
         try {
-          parsed = JSON.parse(argsJson || "{}");
-        } catch (err) {
-          return JSON.stringify({
-            error: "invalid_arguments_json",
-            message: err instanceof Error ? err.message : String(err),
-          });
-        }
-        let args: z.infer<typeof DelegateArgs>;
-        try {
-          args = DelegateArgs.parse(parsed);
-        } catch (err) {
-          if (err instanceof z.ZodError) {
+          // At most maxDelegationsPerRun dispatches per run (default one: a
+          // classifier deciding plan-vs-implement commits to exactly one child),
+          // and never the same child twice, so a retry can't leave two children
+          // racing on the same task. Checked and the child row written under the
+          // run's delegation gate: delegations started together in one turn
+          // (parallelDelegations) are admitted one at a time.
+          const limit = loaded.maxDelegationsPerRun ?? 1;
+          const priorDispatches = await db.run.findMany({ where: { parentRunId: { in: [runId] } } });
+          if (
+            priorDispatches.some((prior) => prior.agentId === edge.childAgentId) ||
+            waitingDelegations.has(edge.childAgentId)
+          ) {
             return JSON.stringify({
-              error: "validation_failed",
-              message: err.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; "),
+              error: "already_dispatched",
+              message: `This run already delegated to "${boundName}"; a run delegates to each sub-agent at most once.`,
             });
           }
-          throw err;
-        }
-
-        // Owners are re-read live on every delegation (resource-sharing
-        // grants spec §3.4.4, N1): the child must have the parent's current
-        // owner, or that owner must still hold execute on the child. A
-        // revoked grant or a make_owner transfer stops the very next call.
-        const [parentNow, childAgent] = await Promise.all([
-          db.agent.findUnique({ where: { id: loaded.agentId }, select: { ownerId: true } }),
-          db.agent.findUniqueOrThrow({
-            where: { id: edge.childAgentId },
-            select: {
-              id: true,
-              kind: true,
-              budgetGroupId: true,
-              budgetUsd: true,
-              ownerId: true,
-              codingProfile: { select: { allowWebhookTaskOverride: true } },
-            },
-          }),
-        ]);
-        const parentOwnerId = parentNow?.ownerId ?? null;
-        const childOwnerId = childAgent.ownerId ?? null;
-        if (
-          !parentNow ||
-          !(await canDelegate(db, { ownerId: parentOwnerId }, { id: childAgent.id, ownerId: childOwnerId }))
-        ) {
-          return JSON.stringify({
-            error: "subagent_not_authorized",
-            message: `The "${boundName}" sub-agent belongs to another owner who has not given this agent's owner execute access to it.`,
-          });
-        }
-        if (parentOwnerId !== childOwnerId) {
-          // Across owners the edge carries execute and nothing more: no
-          // model-chosen memory grant, no continuation of another run's PR,
-          // and no task text the caller couldn't give the child directly --
-          // the trigger_agent rule (review I3): a coding child only with its
-          // owner's allowWebhookTaskOverride opt-in, a native child never
-          // (it runs its owner's fixed prompt; pass an empty task).
-          const refusal =
-            (args.grantParentMemoryKeys?.length ?? 0) > 0
-              ? "grantParentMemoryKeys is only allowed when the sub-agent has the same owner."
-              : args.continuePriorRun !== undefined
-                ? "continuePriorRun is only allowed when the sub-agent has the same owner."
-                : childAgent.kind === "coding" && !childAgent.codingProfile?.allowWebhookTaskOverride
-                  ? "This coding sub-agent belongs to another owner and does not accept task text from others (allowWebhookTaskOverride)."
-                  : childAgent.kind !== "coding" && (args.task.trim() !== "" || args.datastoreRef !== undefined)
-                    ? 'This sub-agent belongs to another owner and runs only its own instructions: delegate with task "" and no datastoreRef.'
-                    : null;
-          if (refusal) return JSON.stringify({ error: "cross_owner_not_allowed", message: refusal });
-        }
-
-        if (args.continuePriorRun !== undefined && childAgent.kind !== "coding") {
-          return JSON.stringify({
-            error: "continuation_requires_coding_agent",
-            message: "continuePriorRun is only supported when the sub-agent is coding-kind.",
-          });
-        }
-
-        if (childAgent.kind === "coding") {
-          // Coding-kind children need a real Docker container (Codex/Claude
-          // Code), which executeRun explicitly refuses to drive — go through
-          // the same dispatchRun path webhooks/trigger_agent use instead.
-          // datastoreRef/grantParentMemoryKeys have no equivalent inside a
-          // coding container's own tool surface (subagent_memory_get/
-          // parent_memory_get are native-engine built-ins only), so they're
-          // deliberately dropped here rather than silently implying a
-          // capability that doesn't exist for this path.
-          if (!providers.executor) {
+          if (priorDispatches.length + waitingDelegations.size >= limit) {
             return JSON.stringify({
-              error: "coding_dispatch_unavailable",
+              error: "already_dispatched",
               message:
-                "This execution context has no Executor wired in, so a coding-kind sub-agent cannot be dispatched.",
+                limit === 1
+                  ? "This run already delegated to a sub-agent; only one delegation is allowed per run."
+                  : `This run already made ${limit} delegations, the most this agent allows per run.`,
             });
           }
-          // dispatchRun reserves the child's budget itself, inside its persist
-          // transaction: the agent's budgetUsd tightened by its budget group and
-          // by this run tree (parentRunId), or refused when either is spent.
-          let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+          let parsed: unknown;
           try {
-            dispatched = await dispatchRun({
+            parsed = JSON.parse(argsJson || "{}");
+          } catch (err) {
+            return JSON.stringify({
+              error: "invalid_arguments_json",
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+          let args: z.infer<typeof DelegateArgs>;
+          try {
+            args = DelegateArgs.parse(parsed);
+          } catch (err) {
+            if (err instanceof z.ZodError) {
+              return JSON.stringify({
+                error: "validation_failed",
+                message: err.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; "),
+              });
+            }
+            throw err;
+          }
+
+          // Owners are re-read live on every delegation (resource-sharing
+          // grants spec §3.4.4, N1): the child must have the parent's current
+          // owner, or that owner must still hold execute on the child. A
+          // revoked grant or a make_owner transfer stops the very next call.
+          const [parentNow, childAgent] = await Promise.all([
+            db.agent.findUnique({ where: { id: loaded.agentId }, select: { ownerId: true } }),
+            db.agent.findUniqueOrThrow({
+              where: { id: edge.childAgentId },
+              select: {
+                id: true,
+                kind: true,
+                budgetGroupId: true,
+                budgetUsd: true,
+                ownerId: true,
+                codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true } },
+              },
+            }),
+          ]);
+          const parentOwnerId = parentNow?.ownerId ?? null;
+          const childOwnerId = childAgent.ownerId ?? null;
+          if (
+            !parentNow ||
+            !(await canDelegate(db, { ownerId: parentOwnerId }, { id: childAgent.id, ownerId: childOwnerId }))
+          ) {
+            return JSON.stringify({
+              error: "subagent_not_authorized",
+              message: `The "${boundName}" sub-agent belongs to another owner who has not given this agent's owner execute access to it.`,
+            });
+          }
+          if (parentOwnerId !== childOwnerId) {
+            // Across owners the edge carries execute and nothing more: no
+            // model-chosen memory grant, no continuation of another run's PR,
+            // and no task text the caller couldn't give the child directly --
+            // the trigger_agent rule (review I3): a coding child only with its
+            // owner's allowWebhookTaskOverride opt-in, a native child never
+            // (it runs its owner's fixed prompt; pass an empty task).
+            const refusal =
+              (args.grantParentMemoryKeys?.length ?? 0) > 0
+                ? "grantParentMemoryKeys is only allowed when the sub-agent has the same owner."
+                : args.continuePriorRun !== undefined
+                  ? "continuePriorRun is only allowed when the sub-agent has the same owner."
+                  : childAgent.kind === "coding" && !childAgent.codingProfile?.allowWebhookTaskOverride
+                    ? "This coding sub-agent belongs to another owner and does not accept task text from others (allowWebhookTaskOverride)."
+                    : childAgent.kind !== "coding" && (args.task.trim() !== "" || args.datastoreRef !== undefined)
+                      ? 'This sub-agent belongs to another owner and runs only its own instructions: delegate with task "" and no datastoreRef.'
+                      : null;
+            if (refusal) return JSON.stringify({ error: "cross_owner_not_allowed", message: refusal });
+          }
+
+          if (args.continuePriorRun !== undefined && childAgent.kind !== "coding") {
+            return JSON.stringify({
+              error: "continuation_requires_coding_agent",
+              message: "continuePriorRun is only supported when the sub-agent is coding-kind.",
+            });
+          }
+
+          // parallelDelegations: a child the budget would refuse (run_tree_exhausted or
+          // budget_group_exhausted:*) while a sibling still runs waits for a sibling to finish and
+          // free its hold, then tries again while siblings remain, up to the child's own wait bound
+          // (as for waitForCodingChild below). With no sibling running, it is refused as before.
+          if (loaded.parallelDelegations && delegationSiblings.inFlight > 0) {
+            const { queueTimeoutSec } = loadCodingConcurrencyConfig();
+            const runTimeoutSec = childAgent.kind === "coding" ? (childAgent.codingProfile?.timeoutSec ?? 0) : 0;
+            const deadline = Date.now() + (queueTimeoutSec + runTimeoutSec + CODING_CHILD_WAIT_GRACE_SEC) * 1000;
+            while (delegationSiblings.inFlight > 0) {
+              const { exhaustedBy } = await effectiveBudgetForRun(db, childAgent, new Date(), runId);
+              const remainingMs = deadline - Date.now();
+              if (!exhaustedBy || remainingMs <= 0) break;
+              runnerLog.info(
+                { runId, boundName, exhaustedBy, siblingsInFlight: delegationSiblings.inFlight },
+                "delegation waiting for a sibling to free budget",
+              );
+              waitingDelegations.add(edge.childAgentId);
+              release();
+              try {
+                await delegationSiblings.nextFinish(remainingMs);
+              } finally {
+                release = await delegationGate.acquire();
+                waitingDelegations.delete(edge.childAgentId);
+              }
+            }
+          }
+
+          if (childAgent.kind === "coding") {
+            // Coding-kind children need a real Docker container (Codex/Claude
+            // Code), which executeRun explicitly refuses to drive — go through
+            // the same dispatchRun path webhooks/trigger_agent use instead.
+            // datastoreRef/grantParentMemoryKeys have no equivalent inside a
+            // coding container's own tool surface (subagent_memory_get/
+            // parent_memory_get are native-engine built-ins only), so they're
+            // deliberately dropped here rather than silently implying a
+            // capability that doesn't exist for this path.
+            if (!providers.executor) {
+              return JSON.stringify({
+                error: "coding_dispatch_unavailable",
+                message:
+                  "This execution context has no Executor wired in, so a coding-kind sub-agent cannot be dispatched.",
+              });
+            }
+            // dispatchRun reserves the child's budget itself, inside its persist
+            // transaction: the agent's budgetUsd tightened by its budget group and
+            // by this run tree (parentRunId), or refused when either is spent.
+            let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+            try {
+              dispatched = await dispatchRun({
+                db,
+                executor: providers.executor,
+                selfDefects: { db, issueTrackers },
+                agentId: edge.childAgentId,
+                trigger: "subagent",
+                codingTask: args.task,
+                continuesCodingRunId: args.continuePriorRun,
+                parentRunId: runId,
+                // The child's result flows back into this run, which the
+                // triggerer sees, so the child is visible to them too.
+                triggeredById: existingRun.triggeredById,
+                awaitExecution: true,
+                // The child row is committed: count it as running (unless refused at dispatch) and
+                // admit the next delegation while this one's run starts or queues.
+                onPersisted: (persistedRun) => {
+                  if (persistedRun.status !== "refused" && persistedRun.status !== "failed") {
+                    finishSibling = delegationSiblings.start();
+                  }
+                  release();
+                },
+              });
+            } catch (err) {
+              // A continuation this deployment cannot make (the run id came from
+              // a pull request another deployment opened, say) is the model's to
+              // report, not a reason to fail the whole run.
+              if (!(err instanceof ContinuationRefusedError)) throw err;
+              return JSON.stringify({
+                error: "continuation_refused",
+                message:
+                  `${err.message} No sub-agent run was started. Do not open a new pull request in its place: ` +
+                  "tell the requester that this wardby deployment cannot continue that pull request's branch.",
+              });
+            }
+            if (!dispatched) {
+              return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
+            }
+            const childRunId = dispatched.run.id;
+            const startedAt = Date.now();
+            runnerLog.info({ runId, childRunId, boundName, kind: "coding" }, "delegation started");
+            const codingRun = await db.codingRun.findUnique({
+              where: { runId: childRunId },
+              select: { timeoutSec: true },
+            });
+            const { queueTimeoutSec } = loadCodingConcurrencyConfig();
+            const waited = await waitForCodingChild({
               db,
               executor: providers.executor,
-              selfDefects: { db, issueTrackers },
+              childRunId,
+              parentRunId: runId,
+              boundMs: (queueTimeoutSec + (codingRun?.timeoutSec ?? 0) + CODING_CHILD_WAIT_GRACE_SEC) * 1000,
+            });
+            finishSibling();
+            runnerLog.info(
+              {
+                runId,
+                childRunId,
+                boundName,
+                outcome: waited.kind === "terminal" ? waited.run.status : waited.kind,
+                durationMs: Date.now() - startedAt,
+              },
+              "delegation finished",
+            );
+            if (waited.kind === "timed_out") {
+              return JSON.stringify({
+                error: "subagent_wait_timed_out",
+                runId: childRunId,
+                message:
+                  "The coding sub-agent did not finish within its queue timeout plus run timeout; it was stopped and produced no result.",
+              });
+            }
+            if (waited.kind === "parent_cancelled") {
+              return JSON.stringify({
+                error: "parent_cancelled",
+                runId: childRunId,
+                message: "This run was cancelled while waiting for the coding sub-agent; the sub-agent was stopped.",
+              });
+            }
+            const stored = await db.codingRun
+              .findUnique({ where: { runId: childRunId }, select: { result: true } })
+              .catch((err: unknown) => {
+                runnerLog.warn({ err, childRunId }, "could not read the coding sub-run's result");
+                return null;
+              });
+            return codingChildResult(waited.run, stored?.result);
+          }
+
+          const taskOverride = args.datastoreRef
+            ? `${args.task}\n\n[Referenced datastore: name="${args.datastoreRef.name}", key="${args.datastoreRef.key}" — use your datastore tools to read it.]`
+            : args.task.trim() !== ""
+              ? args.task
+              : undefined;
+          const childRun = await db.run.create({
+            data: {
               agentId: edge.childAgentId,
               trigger: "subagent",
-              codingTask: args.task,
-              continuesCodingRunId: args.continuePriorRun,
               parentRunId: runId,
-              // The child's result flows back into this run, which the
-              // triggerer sees, so the child is visible to them too.
+              grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
+              taskOverride,
               triggeredById: existingRun.triggeredById,
-              awaitExecution: true,
-            });
-          } catch (err) {
-            // A continuation this deployment cannot make (the run id came from
-            // a pull request another deployment opened, say) is the model's to
-            // report, not a reason to fail the whole run.
-            if (!(err instanceof ContinuationRefusedError)) throw err;
-            return JSON.stringify({
-              error: "continuation_refused",
-              message:
-                `${err.message} No sub-agent run was started. Do not open a new pull request in its place: ` +
-                "tell the requester that this wardby deployment cannot continue that pull request's branch.",
-            });
-          }
-          if (!dispatched) {
-            return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
-          }
-          const childRunId = dispatched.run.id;
-          const codingRun = await db.codingRun.findUnique({
-            where: { runId: childRunId },
-            select: { timeoutSec: true },
+            },
           });
-          const { queueTimeoutSec } = loadCodingConcurrencyConfig();
-          const waited = await waitForCodingChild({
-            db,
-            executor: providers.executor,
-            childRunId,
-            parentRunId: runId,
-            boundMs: (queueTimeoutSec + (codingRun?.timeoutSec ?? 0) + CODING_CHILD_WAIT_GRACE_SEC) * 1000,
+          finishSibling = delegationSiblings.start();
+          // The child row exists: admit the next delegation while this child runs.
+          release();
+          const startedAt = Date.now();
+          runnerLog.info({ runId, childRunId: childRun.id, boundName, kind: "native" }, "delegation started");
+          // Runs inline, so no executor beats for it: beat here to keep its
+          // budget-group hold live while it runs (and let it lapse if we die).
+          const childResult = await withRunHeartbeat(db, childRun.id, () => executeRun(childRun.id, providers, db));
+          finishSibling();
+          runnerLog.info(
+            {
+              runId,
+              childRunId: childRun.id,
+              boundName,
+              outcome: childResult.status,
+              durationMs: Date.now() - startedAt,
+            },
+            "delegation finished",
+          );
+          return JSON.stringify({
+            status: childResult.status,
+            finalText: childResult.finalText,
+            costUsd: Number(childResult.costUsd),
+            tokensIn: childResult.tokensIn,
+            tokensOut: childResult.tokensOut,
           });
-          if (waited.kind === "timed_out") {
-            return JSON.stringify({
-              error: "subagent_wait_timed_out",
-              runId: childRunId,
-              message:
-                "The coding sub-agent did not finish within its queue timeout plus run timeout; it was stopped and produced no result.",
-            });
-          }
-          if (waited.kind === "parent_cancelled") {
-            return JSON.stringify({
-              error: "parent_cancelled",
-              runId: childRunId,
-              message: "This run was cancelled while waiting for the coding sub-agent; the sub-agent was stopped.",
-            });
-          }
-          const stored = await db.codingRun
-            .findUnique({ where: { runId: childRunId }, select: { result: true } })
-            .catch((err: unknown) => {
-              runnerLog.warn({ err, childRunId }, "could not read the coding sub-run's result");
-              return null;
-            });
-          return codingChildResult(waited.run, stored?.result);
+        } finally {
+          finishSibling();
+          release();
         }
-
-        const taskOverride = args.datastoreRef
-          ? `${args.task}\n\n[Referenced datastore: name="${args.datastoreRef.name}", key="${args.datastoreRef.key}" — use your datastore tools to read it.]`
-          : args.task.trim() !== ""
-            ? args.task
-            : undefined;
-        const childRun = await db.run.create({
-          data: {
-            agentId: edge.childAgentId,
-            trigger: "subagent",
-            parentRunId: runId,
-            grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
-            taskOverride,
-            triggeredById: existingRun.triggeredById,
-          },
-        });
-        // Runs inline, so no executor beats for it: beat here to keep its
-        // budget-group hold live while it runs (and let it lapse if we die).
-        const childResult = await withRunHeartbeat(db, childRun.id, () => executeRun(childRun.id, providers, db));
-        return JSON.stringify({
-          status: childResult.status,
-          finalText: childResult.finalText,
-          costUsd: Number(childResult.costUsd),
-          tokensIn: childResult.tokensIn,
-          tokensOut: childResult.tokensOut,
-        });
       }
 
       const tool = toolsByName.get(name);
@@ -1047,6 +1140,10 @@ async function executeTrackedRun(
             : providers.llm,
       },
       runSandboxTool,
+      // A replay recorded before this flag existed has none: its delegations stay sequential.
+      ...(loaded.parallelDelegations
+        ? { runsConcurrently: (toolName: string) => toolName.startsWith(DELEGATE_TOOL_PREFIX) }
+        : {}),
       onText,
       onProgress,
       step,

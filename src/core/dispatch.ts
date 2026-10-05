@@ -131,6 +131,14 @@ export interface DispatchRunOptions {
    * e.g. a sub-agent dispatch tool blocking the parent's own turn.
    */
   awaitExecution?: boolean;
+  /**
+   * Called once, right after the persist transaction commits and before the
+   * executor starts the run (refused and failed rows included): the moment
+   * the run row is visible to other transactions. The runner releases its
+   * delegation admission gate here, so a sibling delegation is admitted
+   * while this one's coding run is still starting or queued.
+   */
+  onPersisted?: (run: Run) => void;
 }
 
 export interface DispatchRunResult {
@@ -779,6 +787,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   }
 
   if (!persisted) return null;
+  options.onPersisted?.(persisted.run);
   if (persisted.run.status === "refused" || persisted.run.status === "failed") {
     dispatchLog.warn(
       { runId: persisted.run.id, agentId: options.agentId, reason: persisted.run.error },

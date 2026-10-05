@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Datastore } from "../providers/datastore/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { LlmProvider, LlmRequest, LlmStreamEvent } from "../providers/llm/types.js";
@@ -36,6 +36,7 @@ interface FakeAgent {
   budgetUsd: number;
   maxTurns: number;
   maxDelegationsPerRun?: number;
+  parallelDelegations?: boolean;
   budgetGroupId?: string | null;
   kind?: "native" | "coding";
   codingProfile?: FakeCodingProfile;
@@ -1049,6 +1050,364 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     it("keeps one delegation per run when the agent sets no limit", async () => {
       const { children } = await run(undefined, ["order", "bff"]);
       expect(children.map((c) => c.agentId)).toEqual(["order"]);
+    });
+  });
+
+  describe("parallelDelegations", () => {
+    const coder = (id: string, extra: Partial<FakeAgent> = {}): FakeAgent => ({
+      id,
+      name: `wmd-${id}`,
+      systemPrompt: "unused",
+      model: "gpt-5.6-luna",
+      budgetUsd: 3,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+      ...extra,
+    });
+    const lead = (parallel: boolean, limit = 3): FakeAgent => ({
+      id: "lead-agent",
+      name: "wmd-delivery",
+      systemPrompt: "sys",
+      model: "m",
+      budgetUsd: 20,
+      maxTurns: 10,
+      maxDelegationsPerRun: limit,
+      parallelDelegations: parallel,
+    });
+    const edges = ["order", "bff", "app"].map((name) => ({
+      parentAgentId: "lead-agent",
+      childAgentId: name,
+      boundName: name,
+    }));
+    const oneTurn = (names: string[]): LlmStreamEvent[] => [
+      ...names.map((name, i) => ({
+        type: "tool_call" as const,
+        id: `call-${i}`,
+        name: `delegate_to_${name}`,
+        argsJson: JSON.stringify({ task: `work in ${name}` }),
+      })),
+      { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.01 } },
+    ];
+
+    /** A coding executor whose runs take a moment, recording how many were in flight at once. */
+    function overlappingExecutor(db: RunnerDb) {
+      let inFlight = 0;
+      const state = { max: 0, started: [] as string[] };
+      return {
+        state,
+        async start(runId: string) {
+          state.started.push(runId);
+          inFlight += 1;
+          state.max = Math.max(state.max, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          inFlight -= 1;
+          await (db as any).run.update({
+            where: { id: runId },
+            data: { status: "succeeded", finalText: `done ${runId}`, costUsd: 0.01, finishedAt: new Date() },
+          });
+        },
+        async stop() {},
+      };
+    }
+
+    async function run(parallel: boolean, names: string[], limit = 3) {
+      const db = fakeDb([lead(parallel, limit), coder("order"), coder("bff"), coder("app")], edges);
+      const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+      const executor = overlappingExecutor(db);
+      const llm = scriptedLlm([oneTurn(names), finalAnswer("reported")]);
+      const finished = await executeRun(parentRun.id, providers(llm, executor), db);
+      const children = await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } });
+      const toolMessages = llm.calls[1].messages.filter((m) => m.role === "tool");
+      return { finished, children, executor, toolMessages };
+    }
+
+    it("runs the delegations of one turn at the same time and answers each call id with its own child", async () => {
+      const { finished, children, executor, toolMessages } = await run(true, ["order", "bff", "app"]);
+      expect(finished.status).toBe("succeeded");
+      expect(executor.state.max).toBe(3);
+      expect(toolMessages.map((m) => m.toolCallId)).toEqual(["call-0", "call-1", "call-2"]);
+      for (const [i, name] of ["order", "bff", "app"].entries()) {
+        const child = children.find((c) => c.agentId === name)!;
+        expect(String(toolMessages[i].content)).toContain(`done ${child.id}`);
+        expect(String(toolMessages[i].content)).toContain('"status":"succeeded"');
+      }
+    });
+
+    it("keeps running them one after another when the agent has not opted in", async () => {
+      const { children, executor } = await run(false, ["order", "bff", "app"]);
+      expect(children).toHaveLength(3);
+      expect(executor.state.max).toBe(1);
+    });
+
+    it("admits the same sub-agent only once even when both calls start together", async () => {
+      const { children, toolMessages } = await run(true, ["order", "order"]);
+      expect(children.map((c) => c.agentId)).toEqual(["order"]);
+      expect(toolMessages.filter((m) => String(m.content).includes("already_dispatched"))).toHaveLength(1);
+      expect(toolMessages.some((m) => String(m.content).includes("at most once"))).toBe(true);
+    });
+
+    it("never admits more than maxDelegationsPerRun when the calls start together", async () => {
+      const { children, toolMessages } = await run(true, ["order", "bff", "app"], 2);
+      expect(children).toHaveLength(2);
+      expect(toolMessages.filter((m) => String(m.content).includes("2 delegations"))).toHaveLength(1);
+    });
+
+    it("runs native sub-agents at the same time too", async () => {
+      const native = (id: string): FakeAgent => ({
+        id,
+        name: id,
+        systemPrompt: "CHILD",
+        model: "m",
+        budgetUsd: 3,
+        maxTurns: 5,
+      });
+      const db = fakeDb([lead(true), native("order"), native("bff")], edges.slice(0, 2));
+      const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+      let inFlight = 0;
+      let max = 0;
+      let leadTurn = 0;
+      const leadScripts = [oneTurn(["order", "bff"]), finalAnswer("reported")];
+      const llm: LlmProvider & { calls: LlmRequest[] } = {
+        calls: [],
+        async *stream(req) {
+          llm.calls.push(req);
+          if (String(req.messages[0].content).startsWith("CHILD")) {
+            inFlight += 1;
+            max = Math.max(max, inFlight);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            inFlight -= 1;
+            for (const event of finalAnswer("child done")) yield event;
+            return;
+          }
+          for (const event of leadScripts[leadTurn++] ?? []) yield event;
+        },
+        async countTokens() {
+          return 10;
+        },
+        priceUsd(_model, usage) {
+          return (usage.inputTokens + usage.outputTokens) / 1000;
+        },
+      };
+      const finished = await executeRun(parentRun.id, providers(llm), db);
+      expect(finished.status).toBe("succeeded");
+      expect(max).toBe(2);
+      const children = await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } });
+      expect(children.map((c) => c.status)).toEqual(["succeeded", "succeeded"]);
+    });
+
+    it("tells the model that delegations in one turn run together, only when the agent opted in", async () => {
+      for (const parallel of [true, false]) {
+        const db = fakeDb([lead(parallel), coder("order")], edges.slice(0, 1));
+        const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+        const llm = scriptedLlm([finalAnswer("nothing to do")]);
+        await executeRun(parentRun.id, providers(llm), db);
+        const tool = llm.calls[0].tools?.find((t) => t.name === "delegate_to_order");
+        expect(tool?.description.includes("in the same turn run at the same time")).toBe(parallel);
+      }
+    });
+
+    describe("a delegation refused for budget while a sibling runs", () => {
+      const group = (dailyBudgetUsd: number): FakeBudgetGroup => ({
+        id: "g-wmd",
+        name: "wmd",
+        dailyBudgetUsd,
+        weeklyBudgetUsd: null,
+        monthlyBudgetUsd: null,
+        warnThresholdRatio: 0.99,
+      });
+      /** A finished run of another group member that spent the group's whole daily cap. */
+      const groupSpent = (costUsd: number): FakeRun => ({
+        id: "run-other",
+        agentId: "other",
+        status: "succeeded",
+        trigger: "manual",
+        tokensIn: 0,
+        tokensOut: 0,
+        costUsd,
+        error: null,
+        startedAt: new Date(),
+        finishedAt: new Date(),
+        heartbeatAt: null,
+        finalText: "done",
+        turns: 1,
+        parentRunId: null,
+        grantedParentMemoryKeys: [],
+        taskOverride: null,
+      });
+
+      async function runGrouped(options: {
+        parallel: boolean;
+        agents: FakeAgent[];
+        priorRuns?: FakeRun[];
+        dailyBudgetUsd: number;
+        names: string[];
+        executor?: (db: RunnerDb) => { start(runId: string): Promise<void>; stop(runId: string): Promise<void> };
+      }) {
+        const db = fakeDb(
+          [lead(options.parallel), ...options.agents],
+          edges,
+          options.priorRuns ?? [],
+          [],
+          [],
+          [group(options.dailyBudgetUsd)],
+        );
+        const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+        const executor = options.executor ? options.executor(db) : overlappingExecutor(db);
+        const llm = scriptedLlm([oneTurn(options.names), finalAnswer("reported")]);
+        const finished = await executeRun(parentRun.id, providers(llm, executor as never), db);
+        const children = (await db.run.findMany({
+          where: { parentRunId: { in: [parentRun.id] } },
+        })) as unknown as FakeRun[];
+        const toolMessages = llm.calls[1].messages.filter((m) => m.role === "tool").map((m) => String(m.content));
+        return { finished, children, executor, toolMessages, parentRun: parentRun as unknown as FakeRun };
+      }
+
+      it("waits until the sibling holding the group's budget finishes, then is admitted", async () => {
+        // A $3 daily cap: order's $3 hold takes all of it while order runs; its $0.01 spend frees the rest.
+        const { children, executor, toolMessages } = await runGrouped({
+          parallel: true,
+          agents: [coder("order", { budgetGroupId: "g-wmd" }), coder("bff", { budgetGroupId: "g-wmd" })],
+          dailyBudgetUsd: 3,
+          names: ["order", "bff"],
+        });
+        expect(children.map((c) => [c.agentId, c.status])).toEqual([
+          ["order", "succeeded"],
+          ["bff", "succeeded"],
+        ]);
+        // bff was dispatched only after order finished.
+        expect((executor as ReturnType<typeof overlappingExecutor>).state.max).toBe(1);
+        expect(toolMessages[1]).toContain('"status":"succeeded"');
+      });
+
+      it("returns the refusal at once when no sibling is in flight", async () => {
+        const started = Date.now();
+        const { children, toolMessages } = await runGrouped({
+          parallel: true,
+          agents: [
+            coder("order", { budgetGroupId: "g-wmd" }),
+            coder("bff", { budgetGroupId: "g-wmd" }),
+            coder("other", { budgetGroupId: "g-wmd" }),
+          ],
+          priorRuns: [groupSpent(3)],
+          dailyBudgetUsd: 3,
+          names: ["order", "bff"],
+        });
+        expect(Date.now() - started).toBeLessThan(2_000);
+        expect(children.map((c) => [c.agentId, c.status])).toEqual([
+          ["order", "refused"],
+          ["bff", "refused"],
+        ]);
+        for (const child of children) expect(child.error).toMatch(/^budget_group_exhausted:day\b/);
+        for (const message of toolMessages) expect(message).toContain('"status":"refused"');
+      });
+
+      it("returns the refusal once its own wait bound passes with the sibling still running", async () => {
+        vi.useFakeTimers();
+        try {
+          // order (ungrouped) never finishes; bff's group is spent by another member, so bff waits on order.
+          const stuck = (db: RunnerDb) => ({
+            async start() {},
+            async stop(runId: string) {
+              await (db as any).run.update({
+                where: { id: runId },
+                data: { status: "cancelled", finishedAt: new Date() },
+              });
+            },
+          });
+          const shortProfile = { ...codingProfile, timeoutSec: 60 };
+          const outcome = runGrouped({
+            parallel: true,
+            agents: [
+              coder("order"),
+              coder("bff", { budgetGroupId: "g-wmd", codingProfile: shortProfile }),
+              coder("other", { budgetGroupId: "g-wmd" }),
+            ],
+            priorRuns: [groupSpent(3)],
+            dailyBudgetUsd: 3,
+            names: ["order", "bff"],
+            executor: stuck,
+          });
+          let settled = false;
+          void outcome.finally(() => (settled = true));
+          for (let i = 0; i < 200 && !settled; i += 1) await vi.advanceTimersByTimeAsync(60_000);
+          const { children, toolMessages, parentRun } = await outcome;
+          const bff = children.find((c) => c.agentId === "bff")!;
+          expect(bff.status).toBe("refused");
+          expect(bff.error).toMatch(/^budget_group_exhausted:day\b/);
+          // Refused only after bff's own bound: queue timeout + its 60s run timeout + the grace.
+          const boundMs = (3600 + 60 + 60) * 1000;
+          expect(bff.startedAt.getTime() - parentRun.startedAt.getTime()).toBeGreaterThanOrEqual(boundMs);
+          expect(bff.startedAt.getTime() - parentRun.startedAt.getTime()).toBeLessThan(boundMs + 120_000);
+          expect(toolMessages[1]).toContain('"status":"refused"');
+          expect(toolMessages[0]).toContain("subagent_wait_timed_out");
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("does not wait when the agent has not opted in", async () => {
+        // Sequential: order finishes before bff is admitted, exactly as without the flag today.
+        const { children, executor } = await runGrouped({
+          parallel: false,
+          agents: [coder("order", { budgetGroupId: "g-wmd" }), coder("bff", { budgetGroupId: "g-wmd" })],
+          dailyBudgetUsd: 3,
+          names: ["order", "bff"],
+        });
+        expect(children.map((c) => [c.agentId, c.status])).toEqual([
+          ["order", "succeeded"],
+          ["bff", "succeeded"],
+        ]);
+        expect((executor as ReturnType<typeof overlappingExecutor>).state.max).toBe(1);
+      });
+
+      it("waits for a native sibling's hold too", async () => {
+        const native = (id: string): FakeAgent => ({
+          id,
+          name: id,
+          systemPrompt: "CHILD",
+          model: "m",
+          budgetUsd: 3,
+          maxTurns: 5,
+          budgetGroupId: "g-wmd",
+        });
+        const db = fakeDb([lead(true), native("order"), native("bff")], edges.slice(0, 2), [], [], [], [group(3)]);
+        const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+        let inFlight = 0;
+        let max = 0;
+        let leadTurn = 0;
+        const leadScripts = [oneTurn(["order", "bff"]), finalAnswer("reported")];
+        const llm: LlmProvider & { calls: LlmRequest[] } = {
+          calls: [],
+          async *stream(req) {
+            llm.calls.push(req);
+            if (String(req.messages[0].content).startsWith("CHILD")) {
+              inFlight += 1;
+              max = Math.max(max, inFlight);
+              await new Promise((resolve) => setTimeout(resolve, 20));
+              inFlight -= 1;
+              for (const event of finalAnswer("child done")) yield event;
+              return;
+            }
+            for (const event of leadScripts[leadTurn++] ?? []) yield event;
+          },
+          async countTokens() {
+            return 10;
+          },
+          priceUsd(_model, usage) {
+            return (usage.inputTokens + usage.outputTokens) / 1000;
+          },
+        };
+        await executeRun(parentRun.id, providers(llm), db);
+        const children = (await db.run.findMany({
+          where: { parentRunId: { in: [parentRun.id] } },
+        })) as unknown as FakeRun[];
+        expect(children.map((c) => [c.agentId, c.status])).toEqual([
+          ["order", "succeeded"],
+          ["bff", "succeeded"],
+        ]);
+        expect(max).toBe(1);
+      });
     });
   });
 });
