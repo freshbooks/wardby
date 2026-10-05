@@ -18,8 +18,9 @@ COPY src/claude-coding-worker/package.json src/claude-coding-worker/package-lock
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
+# perl-base: the pinned base image ships an older build; take Debian's security fixes.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates perl-base \
     && npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/* \
