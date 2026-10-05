@@ -359,6 +359,90 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect(resumedLlm.calls[0].messages.some((m) => m.role === "tool")).toBe(true);
   }, 30_000);
 
+  it("runs a lead's delegations of one turn concurrently as steps started in call order", async () => {
+    // The previous test leaves DBOS launched under its "-restart" executor
+    // id without closing it (it's adopting an orphaned workflow, not this
+    // test's own executor); close it here so `build(llm)` below can launch
+    // fresh under the suite's base executorId.
+    await executor?.close();
+    const lead = `dbos-lead-${suffix}`;
+    const kids = [`dbos-kid-a-${suffix}`, `dbos-kid-b-${suffix}`];
+    await db.agent.create({
+      data: {
+        id: lead,
+        name: lead,
+        systemPrompt: "LEAD",
+        model: "m",
+        budgetUsd: 1,
+        maxTurns: 5,
+        maxDelegationsPerRun: 2,
+        parallelDelegations: true,
+      },
+    });
+    for (const kid of kids) {
+      await db.agent.create({
+        data: { id: kid, name: kid, systemPrompt: "CHILD", model: "m", budgetUsd: 0.1, maxTurns: 3 },
+      });
+    }
+    await db.agentSubAgent.createMany({
+      data: kids.map((kid, i) => ({ parentAgentId: lead, childAgentId: kid, boundName: i === 0 ? "a" : "b" })),
+    });
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let leadTurn = 0;
+    const leadScripts: LlmStreamEvent[][] = [
+      [
+        { type: "tool_call", id: "c0", name: "delegate_to_a", argsJson: JSON.stringify({ task: "x" }) },
+        { type: "tool_call", id: "c1", name: "delegate_to_b", argsJson: JSON.stringify({ task: "y" }) },
+        { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.012 } },
+      ],
+      finalAnswer("lead done"),
+    ];
+    const llm: LlmProvider & { calls: LlmRequest[] } = {
+      calls: [],
+      async *stream(req) {
+        llm.calls.push(req);
+        if (String(req.messages[0].content).startsWith("CHILD")) {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          inFlight -= 1;
+          for (const event of finalAnswer("child done")) yield event;
+          return;
+        }
+        for (const event of leadScripts[leadTurn++] ?? []) yield event;
+      },
+      async countTokens() {
+        return 10;
+      },
+      priceUsd(_model, usage) {
+        return (usage.inputTokens + usage.outputTokens) / 1000;
+      },
+    };
+    executor = build(llm);
+    await executor.launch();
+    const run = await db.run.create({ data: { agentId: lead, executionManaged: true } });
+
+    await executor.start(run.id);
+
+    const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.status).toBe("succeeded");
+    expect(maxInFlight).toBe(2);
+    const steps = (await DBOS.listWorkflowSteps(run.id)) ?? [];
+    const toolSteps = steps
+      .filter((s) => s.name.startsWith("turn:1:tool:"))
+      .sort((x, y) => x.functionID - y.functionID);
+    expect(toolSteps.map((s) => s.name)).toEqual(["turn:1:tool:0", "turn:1:tool:1"]);
+    const children = await db.run.findMany({ where: { parentRunId: run.id } });
+    expect(children.map((c) => c.status).sort()).toEqual(["succeeded", "succeeded"]);
+
+    await db.run.deleteMany({ where: { parentRunId: run.id } });
+    await db.agentSubAgent.deleteMany({ where: { parentAgentId: lead } });
+    await db.run.deleteMany({ where: { agentId: lead } });
+    await db.agent.deleteMany({ where: { id: { in: [lead, ...kids] } } });
+  }, 30_000);
+
   it("refuses to launch a second executor with a different id in a process where DBOS is already launched", async () => {
     // DBOS is a process singleton: launch() would silently skip setConfig and
     // leave this executor's recovery decisions made against someone else's id.
