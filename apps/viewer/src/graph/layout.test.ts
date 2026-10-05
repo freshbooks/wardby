@@ -75,6 +75,35 @@ describe("layoutGraph", () => {
     expect(q.bottom).toBeLessThanOrEqual(p.top);
   });
 
+  it("lays out a pull-request chain as one tree", async () => {
+    const at = (n: number) => new Date(Date.UTC(2026, 9, 6, 10, n)).toISOString();
+    const pr = {
+      kind: "pull_request",
+      provider: "github",
+      repository: "o/r",
+      number: 6,
+      url: "https://github.com/o/r/pull/6",
+      state: "open",
+      at: null,
+    } as const;
+    const review = { kind: "code_host", provider: "github", repository: "o/r", number: 6, event: "review" } as const;
+    const chained = buildGraph(
+      [
+        { ...run("build", null, at(0)), outcomes: [pr] },
+        { ...run("rev", null, at(5)), trigger: review, outcomes: [] },
+        run("other", null, at(9)),
+      ] as GraphRun[],
+      initialFilters,
+      null,
+    );
+    const pos = await layoutGraph(chained);
+    // The review sits right of the PR box it links from, in the same band; the unrelated tree is stacked apart.
+    expect(pos.get("r:rev")!.x).toBeGreaterThan(pos.get("o:build:0")!.x);
+    const other = pos.get("r:other")!.y;
+    const band = [pos.get("r:build")!.y, pos.get("r:rev")!.y];
+    expect(band.every((y) => y > other) || band.every((y) => y < other)).toBe(true);
+  });
+
   it("is deterministic", async () => {
     const a = await layoutGraph(graph);
     const b = await layoutGraph(graph);
