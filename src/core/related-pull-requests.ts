@@ -4,7 +4,10 @@
  * fanned out to several repositories), plus any recorded for the same tracker
  * issue (IssuePullRequest). Control-plane rows only. Ordered by when each
  * pull request's coding run was dispatched — the lead's delegation order,
- * since a native run's tool calls run one after another.
+ * since a native run's tool calls run one after another. Continuations join
+ * the set in both directions: a follow-up that continued one of the set's
+ * pull requests brings the original request's tree, and the original request
+ * brings every later follow-up tree that continued one of its pull requests.
  */
 import { Prisma, type PrismaClient, type Run } from "#prisma";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
@@ -23,8 +26,10 @@ const log = logger.child({ module: "related-pull-requests" });
 
 /** Most pull requests a group holds; the description shows fewer (MAX_RELATED_PULL_REQUESTS). */
 export const MAX_RELATED_GROUP = 50;
-/** Most coding runs read per tree walk. */
+/** Most coding runs read per tree walk (and per continuation lookup). */
 const MAX_TREE_CODING_RUNS = 200;
+/** Most forward/reverse expansion passes after the seed's own tree walk. */
+const MAX_EXPANSION_PASSES = 4;
 
 export type RelatedPullRequestsDb = Pick<PrismaClient, "run" | "codingRun" | "issuePullRequest" | "$queryRaw">;
 
@@ -100,25 +105,48 @@ export async function collectRelatedPullRequests(
 ): Promise<RelatedPullRequestGroup> {
   const rows = await treeCodingRuns(db, [runId]);
   const seen = new Set(rows.map((r) => r.runId));
-  // A continuation's pull request belongs to the request that opened it: walk that tree too.
-  const roots = [
-    ...new Set(
-      rows.flatMap((r) =>
-        pullRequestOutcome(r.result)?.outcome === "pull_request_updated" &&
-        r.rootCodingRunId &&
-        !seen.has(r.rootCodingRunId)
-          ? [r.rootCodingRunId]
-          : [],
-      ),
-    ),
-  ];
-  if (roots.length > 0) {
-    for (const extra of await treeCodingRuns(db, roots)) {
+  // A continuation's pull request belongs to the request that opened it, so
+  // the set is closed in both directions: forward (a continuation row walks
+  // to its root's tree) and reverse (an opener's later continuations, found
+  // through the indexed rootCodingRunId, walk their own trees, which may
+  // have opened new pull requests). Repeated until nothing new turns up, at
+  // most MAX_EXPANSION_PASSES times, and never past a full group.
+  const expandedOpeners = new Set<string>();
+  for (let pass = 0; pass < MAX_EXPANSION_PASSES; pass++) {
+    const roots: string[] = [];
+    const openers: string[] = [];
+    let opened = 0;
+    for (const r of rows) {
+      const outcome = pullRequestOutcome(r.result)?.outcome;
+      if (outcome === "pull_request_updated" && r.rootCodingRunId && !seen.has(r.rootCodingRunId)) {
+        roots.push(r.rootCodingRunId);
+      } else if (outcome === "pull_request_opened") {
+        opened++;
+        if (!expandedOpeners.has(r.runId)) openers.push(r.runId);
+      }
+    }
+    if (opened >= MAX_RELATED_GROUP) break;
+    for (const opener of openers) expandedOpeners.add(opener);
+    const continuations =
+      openers.length > 0
+        ? await db.codingRun.findMany({
+            where: { rootCodingRunId: { in: openers } },
+            select: { runId: true },
+            orderBy: { runId: "asc" },
+            take: MAX_TREE_CODING_RUNS,
+          })
+        : [];
+    const seeds = [...new Set([...roots, ...continuations.map((c) => c.runId)])].filter((id) => !seen.has(id));
+    if (seeds.length === 0) break;
+    let added = 0;
+    for (const extra of await treeCodingRuns(db, seeds)) {
       if (!seen.has(extra.runId)) {
         seen.add(extra.runId);
         rows.push(extra);
+        added++;
       }
     }
+    if (added === 0) break;
   }
 
   const byKey = new Map<string, RelatedPullRequest>();
@@ -237,6 +265,11 @@ export async function updateRelatedPullRequests(
 
     const live: LivePullRequest[] = [];
     for (const pr of group.pullRequests) {
+      // A stored merged/closed state is final and such a PR is never edited: no host read.
+      if (pr.state === "merged" || pr.state === "closed") {
+        live.push({ repository: pr.repository, number: pr.number, state: pr.state });
+        continue;
+      }
       try {
         const origin = await host.pullRequestOrigin(pr.repository, pr.number);
         const state: RelatedPullRequestState = origin.merged

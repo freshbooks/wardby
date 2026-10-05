@@ -26,15 +26,23 @@ interface Row {
   startedAt: Date;
 }
 
-/** $queryRaw answers per call from `passes`; issuePullRequest.findMany from `issueRows`. */
-function db(passes: Row[][], issueRows: unknown[] = []) {
+/**
+ * $queryRaw answers per call from `passes`; issuePullRequest.findMany from `issueRows`;
+ * codingRun.findMany (the reverse continuation lookup) from `continuedBy`: opener runId -> continuing runIds.
+ */
+function db(passes: Row[][], issueRows: unknown[] = [], continuedBy: Record<string, string[]> = {}) {
   const queryRaw = vi.fn(async () => passes.shift() ?? []);
+  const continuations = vi.fn(async ({ where }: { where: { rootCodingRunId: { in: string[] } } }) =>
+    where.rootCodingRunId.in.flatMap((root) => (continuedBy[root] ?? []).map((runId) => ({ runId }))),
+  );
   return {
     db: {
       $queryRaw: queryRaw,
       issuePullRequest: { findMany: vi.fn(async () => issueRows) },
+      codingRun: { findMany: continuations },
     } as unknown as RelatedPullRequestsDb,
     queryRaw,
+    continuations,
   };
 }
 
@@ -129,15 +137,20 @@ function host(origins: Record<string, { state: string; merged?: boolean; draft?:
 }
 
 /** `passes`: the collector's $queryRaw answers in order (a second pass only for a continuation). */
-function finalizerDb(passes: Row[][], recorded: Record<string, string>) {
-  const { db: base } = db(passes);
+function finalizerDb(
+  passes: Row[][],
+  recorded: Record<string, string>,
+  issueRows: unknown[] = [],
+  continuedBy: Record<string, string[]> = {},
+) {
+  const { db: base } = db(passes, issueRows, continuedBy);
+  Object.assign(base.codingRun, {
+    findUnique: vi.fn(async ({ where }: { where: { runId: string } }) =>
+      recorded[where.runId] ? { repository: recorded[where.runId] } : null,
+    ),
+  });
   return Object.assign(base, {
     run: { findFirst: vi.fn(async () => ({ id: "child" })) },
-    codingRun: {
-      findUnique: vi.fn(async ({ where }: { where: { runId: string } }) =>
-        recorded[where.runId] ? { repository: recorded[where.runId] } : null,
-      ),
-    },
   }) as unknown as RelatedPullRequestsDb;
 }
 
@@ -230,20 +243,108 @@ describe("updateRelatedPullRequests", () => {
     );
   });
 
-  it("falls back to the stored state when a PR can't be read live", async () => {
+  it("uses a stored merged/closed state without reading the PR, and falls back to a stored open state", async () => {
     const h = host({ "acme/app#4": { state: "open", markerRunId: "c3" } });
-    const { db: base } = db(
-      [[rows[2]]],
-      [{ repository: "acme/bff", number: 3, createdAt: at(0), openedByRunId: "old", state: "merged" }],
-    );
-    const fake = Object.assign(base, {
-      run: { findFirst: vi.fn(async () => ({ id: "child" })) },
-      codingRun: { findUnique: vi.fn(async () => ({ repository: "acme/app" })) },
-    }) as unknown as RelatedPullRequestsDb;
+    const fake = finalizerDb([[rows[2]]], { c3: "acme/app" }, [
+      { repository: "acme/bff", number: 3, createdAt: at(0), openedByRunId: "old", state: "merged" },
+      { repository: "acme/web", number: 5, createdAt: at(1), openedByRunId: "old2", state: "closed" },
+      { repository: "acme/api", number: 6, createdAt: at(2), openedByRunId: "old3", state: "open" }, // 404s live
+    ]);
     await updateRelatedPullRequests(fake, { id: "lead" }, { github: h }, undefined);
-    expect(h.replaceRelatedSection.mock.calls[0][2].block).toContain(
-      "- [acme/bff#3](https://github.com/acme/bff/pull/3) — merged",
+    // Stored merged/closed: never read. Stored open (and the tree's own app#4): read live.
+    expect(h.pullRequestOrigin.mock.calls.map((c) => `${c[0]}#${c[1]}`)).toEqual(["acme/api#6", "acme/app#4"]);
+    expect(h.replaceRelatedSection).toHaveBeenCalledTimes(1);
+    const block = h.replaceRelatedSection.mock.calls[0][2].block as string;
+    expect(block).toContain("1. [acme/api#6](https://github.com/acme/api/pull/6) — open");
+    expect(block).toContain("- [acme/bff#3](https://github.com/acme/bff/pull/3) — merged");
+    expect(block).toContain("- [acme/web#5](https://github.com/acme/web/pull/5) — closed");
+  });
+
+  it("never edits a PR whose marker names a coding run this deployment recorded for a different repository", async () => {
+    const h = host({
+      "acme/order-service#2": { state: "open", markerRunId: "c1" },
+      // The marker names c1, a real run here, but c1 was recorded for acme/order-service, not acme/bff.
+      "acme/bff#3": { state: "open", markerRunId: "c1" },
+      "acme/app#4": { state: "open", markerRunId: "c3" },
+    });
+    await updateRelatedPullRequests(finalizerDb([rows], recorded), { id: "lead" }, { github: h }, undefined);
+    expect(h.replaceRelatedSection.mock.calls.map((c) => `${c[0]}#${c[1]}`)).toEqual([
+      "acme/order-service#2",
+      "acme/app#4",
+    ]);
+  });
+});
+
+// A request without a tracked issue: lead opens A#1 and B#2; a mention on A#1 starts follow-up F,
+// which continues A#1 and opens C#3; later a mention on B#2 starts G, which continues B#2 only.
+// The set reached from B (or G) must still include C#3: the collector walks forward to the lead's
+// tree, then reverse from the lead's openers to F's tree.
+describe("continuations in both directions (no tracked issue)", () => {
+  const none = { issueProvider: null, issueKey: null };
+  const a = row("a", opened("acme/a", 1), 1, none);
+  const b = row("b", opened("acme/b", 2), 2, none);
+  const f1 = row("f1", { ...opened("acme/a", 1), outcome: "pull_request_updated" }, 10, {
+    ...none,
+    rootCodingRunId: "a",
+  });
+  const f2 = row("f2", opened("acme/c", 3), 11, none);
+  const g1 = row("g1", { ...opened("acme/b", 2), outcome: "pull_request_updated" }, 20, {
+    ...none,
+    rootCodingRunId: "b",
+  });
+  const continuedBy = { a: ["f1"], b: ["g1"] };
+
+  it("G's finalizer writes the section on A#1, B#2 and C#3, each listing all three", async () => {
+    const h = host({
+      "acme/a#1": { state: "open", markerRunId: "a" },
+      "acme/b#2": { state: "open", markerRunId: "b" },
+      "acme/c#3": { state: "open", markerRunId: "f2" },
+    });
+    const fake = finalizerDb(
+      [[g1], [a, b], [f1, f2]], // G's tree, forward to the lead's tree, reverse to F's tree
+      { a: "acme/a", b: "acme/b", f2: "acme/c" },
+      [],
+      continuedBy,
     );
+    await updateRelatedPullRequests(fake, { id: "G" }, { github: h }, undefined);
+    expect(h.replaceRelatedSection.mock.calls.map((c) => `${c[0]}#${c[1]}`)).toEqual([
+      "acme/a#1",
+      "acme/b#2",
+      "acme/c#3",
+    ]);
+    expect(h.replaceRelatedSection.mock.calls[1][2].block).toContain(
+      "1. [acme/a#1](https://github.com/acme/a/pull/1) — open\n2. **This pull request** — open\n3. [acme/c#3](https://github.com/acme/c/pull/3) — open",
+    );
+  });
+
+  it("a mention on B#2 hints A#1 and C#3", async () => {
+    const { db: fake, queryRaw } = db(
+      [
+        [a, b],
+        [f1, f2, g1],
+      ],
+      [],
+      continuedBy,
+    );
+    expect(await openSiblings(fake, "b", { repository: "acme/b", number: 2 })).toEqual([
+      { repository: "acme/a", number: 1, openedByRunId: "a" },
+      { repository: "acme/c", number: 3, openedByRunId: "f2" },
+    ]);
+    expect(queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops after a bounded number of passes on a chain that keeps growing", async () => {
+    // Each pass's walk turns up a new opener that has a further continuation.
+    const chain = Array.from({ length: 10 }, (_, i) => row(`o${i}`, opened(`acme/r${i}`, 1), i, none));
+    const continued = Object.fromEntries(chain.map((r, i) => [r.runId, [`o${i + 1}`]]));
+    const { db: fake, queryRaw } = db(
+      chain.map((r) => [r]),
+      [],
+      continued,
+    );
+    const group = await collectRelatedPullRequests(fake, "o0");
+    expect(queryRaw).toHaveBeenCalledTimes(5); // the seed's walk plus MAX_EXPANSION_PASSES (4)
+    expect(group.pullRequests).toHaveLength(5);
   });
 });
 

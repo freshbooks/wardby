@@ -44,7 +44,9 @@ describe("ciForAgent", () => {
     expect(ciNote(ci({ state: "unavailable", checks: [], unavailableReason: "host_api_error" }), false)).toContain(
       "could not be read (host_api_error)",
     );
-    expect(ciNote(ci({ statusesUnavailable: true }), false)).toContain("commit statuses could not be read");
+    expect(ciNote(ci({ statusesUnavailable: true }), false)).toContain(
+      ". Commit statuses could not be read (often because the App lacks Commit statuses: Read), so only check runs are listed.",
+    );
     expect(ciForAgent({ headSha: SHA, body: "", ci: undefined })).toMatchObject({
       state: "unavailable",
       unavailableReason: "host_unsupported",

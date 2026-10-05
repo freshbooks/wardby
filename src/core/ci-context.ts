@@ -31,7 +31,7 @@ export function ciNote(ci: CiView, sandboxInstallIncomplete: boolean): string {
     : "";
   const statuses =
     ci.statusesUnavailable && ci.state !== "unavailable"
-      ? " commit statuses could not be read (the App lacks permission), so only check runs are listed."
+      ? " Commit statuses could not be read (often because the App lacks Commit statuses: Read), so only check runs are listed."
       : "";
   let main: string;
   switch (ci.state) {

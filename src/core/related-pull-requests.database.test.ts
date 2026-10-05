@@ -1,8 +1,8 @@
-/** The group query against real PostgreSQL: up to the top-level run, down every depth, continuation second pass. Skipped without DATABASE_URL. */
+/** The group query against real PostgreSQL: up to the top-level run, down every depth, continuations both ways. Skipped without DATABASE_URL. */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "./db.js";
-import { collectRelatedPullRequests } from "./related-pull-requests.js";
+import { collectRelatedPullRequests, openSiblings } from "./related-pull-requests.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("collectRelatedPullRequests (database)", () => {
   const db = createPrismaClient();
@@ -17,12 +17,12 @@ describe.skipIf(!process.env.DATABASE_URL)("collectRelatedPullRequests (database
       data: { id: runId, agentId, status: "succeeded", startedAt: t(minute), ...(parentRunId ? { parentRunId } : {}) },
     });
   }
-  async function coding(runId: string, result: unknown, rootCodingRunId?: string) {
+  async function coding(runId: string, result: unknown, rootCodingRunId?: string, issue = true) {
     await db.codingRun.create({
       data: {
         runId,
         task: "t",
-        repository: "acme/app",
+        repository: (result as { repository: string }).repository ?? "acme/app",
         baseRef: "main",
         headRef: `wardby/run-${runId}`,
         provider: "codex",
@@ -31,8 +31,7 @@ describe.skipIf(!process.env.DATABASE_URL)("collectRelatedPullRequests (database
         protectedPaths: [],
         budgetReservedUsd: 1,
         result: result as object,
-        issueProvider: "jira",
-        issueKey: "RELPR-1",
+        ...(issue ? { issueProvider: "jira", issueKey: "RELPR-1" } : {}),
         ...(rootCodingRunId ? { rootCodingRunId } : {}),
       },
     });
@@ -58,6 +57,21 @@ describe.skipIf(!process.env.DATABASE_URL)("collectRelatedPullRequests (database
     await run(id("follow"), 30); // a later, separate request continuing acme/app#4
     await run(id("c9"), 31, id("follow"));
     await coding(id("c9"), { ...opened("acme/app", 4), outcome: "pull_request_updated" }, id("c2"));
+
+    // No tracked issue: lead2 opens A#1, B#2; follow-up F continues A#1 and opens C#3; G continues B#2 only.
+    await run(id("lead2"), 40);
+    await run(id("a"), 41, id("lead2"));
+    await coding(id("a"), opened("acme/a", 1), undefined, false);
+    await run(id("b"), 42, id("lead2"));
+    await coding(id("b"), opened("acme/b", 2), undefined, false);
+    await run(id("F"), 50);
+    await run(id("f1"), 51, id("F"));
+    await coding(id("f1"), { ...opened("acme/a", 1), outcome: "pull_request_updated" }, id("a"), false);
+    await run(id("f2"), 52, id("F"));
+    await coding(id("f2"), opened("acme/c", 3), undefined, false);
+    await run(id("G"), 60);
+    await run(id("g1"), 61, id("G"));
+    await coding(id("g1"), { ...opened("acme/b", 2), outcome: "pull_request_updated" }, id("b"), false);
   });
 
   afterAll(async () => {
@@ -85,5 +99,15 @@ describe.skipIf(!process.env.DATABASE_URL)("collectRelatedPullRequests (database
       "acme/app#4",
     ]);
     expect(group.issue).toEqual({ provider: "jira", key: "RELPR-1" });
+  });
+
+  it("reaches a later follow-up's new pull request from a sibling it never touched", async () => {
+    const group = await collectRelatedPullRequests(db, id("G"));
+    expect(group.pullRequests.map((p) => `${p.repository}#${p.number}`)).toEqual(["acme/a#1", "acme/b#2", "acme/c#3"]);
+    expect(group.issue).toBeUndefined();
+    expect(await openSiblings(db, id("b"), { repository: "acme/b", number: 2 })).toEqual([
+      { repository: "acme/a", number: 1, openedByRunId: id("a") },
+      { repository: "acme/c", number: 3, openedByRunId: id("f2") },
+    ]);
   });
 });
