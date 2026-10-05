@@ -12,6 +12,7 @@ import {
 } from "../../coding/protected-paths.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { globRegex } from "../../core/glob.js";
+import { logger } from "../../core/logger.js";
 import type { Writable } from "node:stream";
 import {
   MAX_REDACTED_SPAN,
@@ -19,10 +20,12 @@ import {
   normalizeGitHubRepository,
   normalizeGitRef,
 } from "../../coding/protocol.js";
+import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import {
   isLockfilePath,
   isSafeGitHubInstallationToken,
   type GitHubRepositoryAccess,
+  type PullRequestResult,
   type RepositoryFileInput,
 } from "./github.js";
 import type {
@@ -206,7 +209,12 @@ export interface GitVcsProviderOptions {
   maxDiffBytes?: number;
   /** Test-only transport override; production composition always uses github.com. */
   cloneUrlForRepository?: (repository: string) => string;
+  /** Test-only delay override for assertContinuationOpen's single retry wait. */
+  sleep?: (milliseconds: number) => Promise<void>;
 }
+
+/** How long assertContinuationOpen waits before its single retry on a transient open-PR check failure. */
+const CONTINUATION_OPEN_RETRY_DELAY_MS = 1_000;
 
 /** Validates one protectedPaths entry; a leading "!" makes it an exception (see protectedPathMatcher). */
 function validateProtectedPath(value: string): string {
@@ -279,6 +287,7 @@ export class GitVcsProvider implements VcsProvider {
   private readonly maxChangedFiles: number;
   private readonly maxDiffBytes: number;
   private readonly cloneUrlForRepository: (repository: string) => string;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
 
   constructor(private readonly options: GitVcsProviderOptions) {
     this.rootDir = resolve(options.rootDir);
@@ -296,10 +305,13 @@ export class GitVcsProvider implements VcsProvider {
     }
     this.cloneUrlForRepository =
       options.cloneUrlForRepository ?? ((repository) => `https://github.com/${repository}.git`);
+    this.sleep =
+      options.sleep ?? ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
   }
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
     const normalized = this.validateInput(input);
+    await this.assertContinuationOpen(normalized);
     await ensurePrivateDirectory(this.rootDir);
     await mkdir(resolve(this.rootDir, ".home"), { recursive: true, mode: 0o700 });
     const runRoot = resolve(this.rootDir, normalized.runId);
@@ -509,6 +521,7 @@ export class GitVcsProvider implements VcsProvider {
       commitSha = currentHead;
     }
 
+    await this.assertContinuationOpen(prepared);
     await this.pushOnce(prepared, commitSha);
     // Revision-in-place: identify the PR by the run that originally opened
     // it (createOrFindDraftPullRequest's marker-based lookup keys on that
@@ -531,6 +544,7 @@ export class GitVcsProvider implements VcsProvider {
       packageRefusals: details?.packageRefusals,
       changedLockfiles: changed.filter(isLockfilePath),
       ...(details?.issue ? { issue: details.issue } : {}),
+      ...(details?.related ? { related: details.related } : {}),
     });
     return {
       outcome: prepared.continuation ? "pull_request_updated" : "pull_request_opened",
@@ -803,6 +817,52 @@ export class GitVcsProvider implements VcsProvider {
     ) {
       throw new Error("vcs_git_config_unsafe");
     }
+  }
+
+  /**
+   * A continuation never pushes to a pull request that is no longer open.
+   * Fresh runs (no `continuation`) skip this, and so does a GitHub client
+   * that exposes no `findOpenPullRequest` (optional on GitHubRepositoryAccess).
+   *
+   * GitHub's answer is trusted only when it is definite: a found open PR
+   * proceeds normally, and a confirmed "no open PR" (a successful call that
+   * returns null) refuses outright with CONTINUATION_CLOSED_ERROR. A
+   * transient failure -- network error, 5xx, timeout, rate limit, anything
+   * that makes the call itself throw rather than answer -- is retried once;
+   * if it throws again, this proceeds as if the pull request were still
+   * open and logs a warning, rather than failing the run on an unconfirmed
+   * answer (especially not here, right before the push, after all the
+   * work is already done).
+   */
+  private async assertContinuationOpen(input: {
+    repository: string;
+    baseRef: string;
+    headRef: string;
+    continuation?: { rootRunId: string };
+  }): Promise<void> {
+    if (!input.continuation || !this.options.github.findOpenPullRequest) return;
+    const request = {
+      runId: input.continuation.rootRunId,
+      repository: input.repository,
+      baseRef: input.baseRef,
+      headRef: input.headRef,
+    };
+    let open: PullRequestResult | null;
+    try {
+      open = await this.options.github.findOpenPullRequest(request);
+    } catch {
+      await this.sleep(CONTINUATION_OPEN_RETRY_DELAY_MS);
+      try {
+        open = await this.options.github.findOpenPullRequest(request);
+      } catch (error) {
+        logger.warn(
+          { err: error, runId: request.runId, repository: request.repository },
+          "continuation open-PR check failed twice in a row; proceeding as if the pull request is still open",
+        );
+        return;
+      }
+    }
+    if (!open) throw new Error(CONTINUATION_CLOSED_ERROR);
   }
 
   private async pushOnce(workspace: PreparedWorkspace, commitSha: string): Promise<void> {

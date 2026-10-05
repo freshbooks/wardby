@@ -175,6 +175,10 @@ function nativeAgent() {
     codingProfile: null,
     model: "gpt-5.6-luna",
     budgetUsd: 2,
+    // Continuation's same-owner check (checkContinuation): most fixtures
+    // simulate one owner's deployment, so a continuation root's mock row
+    // carries the same ownerId by default (see openPrCodingRun/priorPrRun).
+    ownerId: "owner_1",
   };
 }
 
@@ -937,6 +941,7 @@ describe("dispatchRun", () => {
       baseRef: "main",
       headRef: "wardby/run-root_run",
       rootCodingRunId: null,
+      run: { agent: { ownerId: "owner_1" } },
       result: {
         schemaVersion: 1,
         outcome: "pull_request_opened",
@@ -1111,6 +1116,7 @@ describe("dispatchRun", () => {
         baseRef: "main",
         headRef: `wardby/run-${runId}`,
         rootCodingRunId: null,
+        run: { agent: { ownerId: "owner_1" } },
         result: {
           schemaVersion: 1,
           outcome: "pull_request_opened",
@@ -1223,6 +1229,62 @@ describe("dispatchRun", () => {
           continuesCodingRunId: "root_run",
         }),
       ).rejects.toThrow(/never opened a pull request/);
+    });
+
+    it("continues a root run opened by the same owner's agent", async () => {
+      const agent = codingAgent({ ownerId: "owner_1" });
+      const state = fakeDb(agent, [openPrCodingRun("root_run", { run: { agent: { ownerId: "owner_1" } } })]);
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        }),
+      ).resolves.not.toBeNull();
+    });
+
+    it("rejects continuing a root run opened by a different owner's agent", async () => {
+      const agent = codingAgent({ ownerId: "owner_1" });
+      const state = fakeDb(agent, [openPrCodingRun("root_run", { run: { agent: { ownerId: "owner_2" } } })]);
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        }),
+      ).rejects.toThrow(/different owner/);
+    });
+
+    it("rejects continuing when the dispatched agent has no owner, even if the root run has none either", async () => {
+      const agent = codingAgent({ ownerId: null });
+      const state = fakeDb(agent, [openPrCodingRun("root_run", { run: { agent: { ownerId: null } } })]);
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        }),
+      ).rejects.toThrow(/different owner/);
+    });
+
+    it("rejects continuing when the root run's agent has no owner", async () => {
+      const agent = codingAgent({ ownerId: "owner_1" });
+      const state = fakeDb(agent, [openPrCodingRun("root_run", { run: { agent: { ownerId: null } } })]);
+
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        }),
+      ).rejects.toThrow(/different owner/);
     });
 
     it("rejects an unknown continuesCodingRunId", async () => {
@@ -1396,6 +1458,7 @@ describe("coding-run services", () => {
       baseRef: "develop",
       headRef: "wardby/run-root_run",
       rootCodingRunId: null,
+      run: { agent: { ownerId: "owner_1" } },
       result: {
         schemaVersion: 1,
         outcome: "pull_request_opened",

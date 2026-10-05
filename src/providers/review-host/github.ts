@@ -4,8 +4,9 @@
  * the narrowest permission set that call needs (GitHubAppClient.withScopedToken),
  * and revokes it afterwards. See docs/private/2026-09-25-code-review-host-design.md §5.1.
  */
-import type { GitHubAppClient } from "../vcs/github.js";
+import { MAX_PULL_REQUEST_BODY_CHARS, upsertRelatedSection, type GitHubAppClient } from "../vcs/github.js";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
+import { MAX_CI_CHECKS, summarizeCi } from "./ci.js";
 import { partitionComments } from "./diff-lines.js";
 import { appMarkerRunId } from "./github-events.js";
 import {
@@ -19,6 +20,8 @@ import {
 } from "./review-format.js";
 import {
   ReviewHostError,
+  type CiCheckView,
+  type CiView,
   type CodeReviewHost,
   type CommentInput,
   type CommentRef,
@@ -49,6 +52,13 @@ const COMMENT_WRITE = { issues: "write", pull_requests: "write" } as const;
 const REVIEW_WRITE = { pull_requests: "write", checks: "write" } as const;
 /** Always implicitly granted to an installation token; enough for the collaborator-permission endpoint. */
 const METADATA_READ = { metadata: "read" } as const;
+/** Editing a pull request's description: nothing else. */
+const PR_WRITE = { pull_requests: "write" } as const;
+/** CI reads, each on its own token: Checks is already granted; Commit statuses may not be. */
+const CHECKS_READ = { checks: "read" } as const;
+const STATUSES_READ = { statuses: "read" } as const;
+const CI_NAME_CHARS = 100;
+const APP_SLUG = /^[a-z0-9-]{1,64}$/;
 const GITHUB_USER_ID = /^[1-9]\d{0,19}$/;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 /** Highest first: user.permissions booleans, which (unlike the legacy field) keep maintain and triage apart. */
@@ -142,6 +152,34 @@ function fileView(raw: Json): PullRequestFileView & { fullPatch: string | undefi
     fullPatch: typeof raw.patch === "string" ? raw.patch : undefined,
     changes: typeof raw.changes === "number" ? raw.changes : num(raw.additions) + num(raw.deletions),
   };
+}
+
+function checkRunView(raw: Json): CiCheckView {
+  const status = raw.status === "completed" ? "completed" : raw.status === "in_progress" ? "in_progress" : "queued";
+  const app = raw.app && typeof raw.app === "object" ? (raw.app as Json) : null;
+  return {
+    name: str(raw.name).slice(0, CI_NAME_CHARS),
+    kind: "check_run",
+    status,
+    conclusion: status === "completed" && typeof raw.conclusion === "string" ? raw.conclusion : null,
+    app: app && typeof app.slug === "string" && APP_SLUG.test(app.slug) ? app.slug : null,
+  };
+}
+
+function statusView(raw: Json): CiCheckView {
+  const state = str(raw.state);
+  return {
+    name: str(raw.context).slice(0, CI_NAME_CHARS),
+    kind: "status",
+    status: state === "pending" ? "in_progress" : "completed",
+    conclusion: state === "pending" ? null : state,
+    app: null,
+  };
+}
+
+/** True for a check run wardby's own App created (its review checks, wardby/continuation). */
+function fromApp(raw: Json, appId: number): boolean {
+  return !!raw.app && typeof raw.app === "object" && (raw.app as Json).id === appId;
 }
 
 type GraphQl = (query: string, variables: Record<string, unknown>) => Promise<Json>;
@@ -271,7 +309,13 @@ export class GitHubReviewHost implements CodeReviewHost {
             .filter((name) => name !== "")
         : [];
       const markerRunId = appMarkerRunId(pr, slug);
-      return { ...this.head(repository, pr), labels, ...(markerRunId ? { markerRunId } : {}) };
+      return {
+        ...this.head(repository, pr),
+        labels,
+        merged: pr.merged === true,
+        draft: pr.draft === true,
+        ...(markerRunId ? { markerRunId } : {}),
+      };
     });
   }
 
@@ -282,6 +326,26 @@ export class GitHubReviewHost implements CodeReviewHost {
         { method: "POST", body: JSON.stringify({ labels: [label] }) },
         [200],
       );
+    });
+  }
+
+  async replaceRelatedSection(
+    repository: string,
+    prNumber: number,
+    input: { expectedMarkerRunId: string; block: string },
+  ): Promise<"updated" | "unchanged" | "skipped"> {
+    const { slug } = await this.client.appIdentity();
+    const base = repoPath(repository);
+    return this.withToken(repository, PR_WRITE, async (get) => {
+      const pr = record(await (await get(`${base}/pulls/${prNumber}`)).json());
+      // Re-checked on the body actually being edited: only the App's own PR for this run.
+      if (pr.state !== "open" || appMarkerRunId(pr, slug) !== input.expectedMarkerRunId) return "skipped";
+      const body = typeof pr.body === "string" ? pr.body : "";
+      const next = upsertRelatedSection(body, input.block);
+      if (next === null || next.length > MAX_PULL_REQUEST_BODY_CHARS) return "skipped";
+      if (next === body) return "unchanged";
+      await get(`${base}/pulls/${prNumber}`, { method: "PATCH", body: JSON.stringify({ body: next }) }, [200]);
+      return "updated";
     });
   }
 
@@ -297,13 +361,69 @@ export class GitHubReviewHost implements CodeReviewHost {
     return { headSha, isFork, state: str(pr.state) };
   }
 
+  /**
+   * CI on one commit: check runs (Checks: read) minus wardby's own, then
+   * commit statuses (Commit statuses: read) best effort. Never throws: a
+   * failure reading check runs is state "unavailable", a failure reading
+   * statuses only sets statusesUnavailable. Both reads are attempted
+   * independently, so a failed checks read still mints (and attempts) the
+   * statuses token.
+   */
+  private async readCi(repository: string, headSha: string): Promise<CiView> {
+    const base = repoPath(repository);
+    let checks: CiCheckView[] = [];
+    let truncated = false;
+    let unavailableReason: string | undefined;
+    try {
+      const { id: appId } = await this.client.appIdentity();
+      ({ checks, truncated } = await this.withToken(repository, CHECKS_READ, async (get) => {
+        const payload = record(
+          await (await get(`${base}/commits/${headSha}/check-runs?filter=latest&per_page=100`)).json(),
+        );
+        const runs = list(payload.check_runs ?? []);
+        const total = typeof payload.total_count === "number" ? payload.total_count : runs.length;
+        return { checks: runs.filter((r) => !fromApp(r, appId)).map(checkRunView), truncated: total > runs.length };
+      }));
+    } catch (err) {
+      unavailableReason = toReviewHostError(err).code;
+    }
+    let statusesUnavailable = false;
+    try {
+      const statuses = await this.withToken(repository, STATUSES_READ, async (get) => {
+        const payload = record(await (await get(`${base}/commits/${headSha}/status?per_page=100`)).json());
+        return list(payload.statuses ?? []).map(statusView);
+      });
+      checks = [...checks, ...statuses];
+    } catch {
+      statusesUnavailable = true;
+    }
+    if (unavailableReason !== undefined) {
+      return {
+        headSha,
+        state: "unavailable",
+        checks: [],
+        truncated: false,
+        statusesUnavailable: true,
+        unavailableReason,
+      };
+    }
+    const shown = checks.slice(0, MAX_CI_CHECKS);
+    return {
+      headSha,
+      state: summarizeCi(checks),
+      checks: shown,
+      truncated: truncated || shown.length < checks.length,
+      statusesUnavailable,
+    };
+  }
+
   async readPullRequest(
     repository: string,
     prNumber: number,
     opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string },
   ): Promise<PullRequestView> {
     const base = repoPath(repository);
-    return this.withToken(repository, READ, async (get, graphql) => {
+    const view = await this.withToken(repository, READ, async (get, graphql) => {
       const pr = record(await (await get(`${base}/pulls/${prNumber}`)).json());
       const { headSha, isFork, state } = this.head(repository, pr);
 
@@ -389,6 +509,7 @@ export class GitHubReviewHost implements CodeReviewHost {
         openThreads,
       };
     });
+    return { ...view, ci: await this.readCi(repository, view.headSha) };
   }
 
   async readFile(

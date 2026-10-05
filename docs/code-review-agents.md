@@ -142,8 +142,23 @@ PR description:
   same GitHub App opened the PR), no run starts: the App replies that this
   deployment cannot continue the PR, so ask the deployment that opened it.
   If a router agent passes a `continuePriorRun` id that this deployment
-  cannot continue, the delegation returns a `continuation_refused` tool
-  error to the agent instead of failing its run.
+  cannot continue — a continuation is also refused when the run it names
+  was opened by another owner's agent, even if the lead and the continuing
+  sub-agent share an owner (see
+  [Nothing crosses owners without a grant](security-deployment.md#sharing-agents))
+  — the delegation returns a `continuation_refused` tool error to the agent
+  instead of failing its run.
+- A continuation never pushes to a pull request that is no longer open.
+  Wardby asks GitHub whether the pull request is still open before cloning,
+  and again right before it pushes. A pull request merged or closed before
+  the run starts is caught before cloning: the run is refused, having spent
+  nothing beyond setup. One merged or closed while the run was working is
+  caught right before the push: that run ends failed and its work is not
+  pushed. The category is `continuation_closed` either way. A transient
+  GitHub failure while checking (a timeout, rate limit, or 5xx) is retried
+  once, after a short wait, and failing that, the run proceeds rather than
+  being stopped on an unconfirmed answer — see
+  [Continuation's pull request is no longer open](../help/errors/continuation-closed.md).
 - The header reads `[GitHub issue #<n>]` on an issue. For a mention inside an
   inline review thread, the `Requested by` line ends with
   `(in review thread <id>)`.
@@ -201,7 +216,8 @@ review's CRITICAL/MAJOR findings and MUST_FIX recommendations and change
 nothing else. The review itself (capped at 20,000 characters) is passed to
 the agent as **untrusted context**, not as part of its instructions: the
 agent reads it as information about what to fix and is told never to follow
-instructions written inside it.
+instructions written inside it. A fix round's task names only its own pull
+request; it never lists related pull requests in other repositories.
 
 Only the review's summary and body reach the fixing agent — inline review
 comments do not. Write your reviewer agent's prompt so it lists every
@@ -369,12 +385,13 @@ with:
   checkbox, separate from the others, and must be ticked explicitly).
 - **Repository permissions**:
 
-  | Permission    | Access         |
-  | ------------- | -------------- |
-  | Contents      | Read           |
-  | Pull requests | Read and write |
-  | Checks        | Read and write |
-  | Issues        | Read and write |
+  | Permission      | Access          |
+  | --------------- | --------------- |
+  | Contents        | Read            |
+  | Pull requests   | Read and write  |
+  | Checks          | Read and write  |
+  | Issues          | Read and write  |
+  | Commit statuses | Read (optional) |
 
   To let review agents resolve their own fixed threads, set **Contents** to
   **Read and write**: GitHub gates resolving a review thread on that
@@ -386,6 +403,14 @@ with:
   `wardby-autofix-*` labels used by [automatic review fix
   rounds](#automatic-review-fix-rounds): GitHub serves pull-request labels
   through the Issues API.
+
+  **Commit statuses: Read** is optional: with it, `repo_pr_read`'s `ci`
+  includes commit statuses (CI systems that report statuses rather than
+  check runs); without it, only check runs are listed and
+  `ci.statusesUnavailable` is `true`. Reading check runs uses the existing
+  **Checks** permission. Adding the permission to an installed App is an
+  upgrade step: every installation must accept the new permission set (see
+  the paragraph below).
 
 If you change these permissions on an App that is already installed, every
 installation must explicitly accept the new permission set before the App's
@@ -542,8 +567,18 @@ A linked agent gets these built-in tools automatically — they are not
 attached like ordinary tools, and never expose a token, check id, or
 internal marker to the model:
 
-- `repo_pr_read` — a pull request's metadata, per-file diff patches, and
-  the agent's own unresolved inline threads (`openThreads`).
+- `repo_pr_read` — a pull request's metadata, per-file diff patches, the
+  agent's own unresolved inline threads (`openThreads`), and `ci`: the head
+  commit's check runs and commit statuses, excluding every check the wardby
+  App itself reported (review checks, `wardby/continuation`), with `state`
+  (`passing`, `failing`, `pending`, `inconclusive`, `none`, `unavailable`),
+  `truncated`, `statusesUnavailable`, `sandboxInstallIncomplete` (the
+  description carries the **Dependency install incomplete** warning) and a
+  `note` telling the agent to follow CI over the description's **Tests**.
+  Reading CI never makes `repo_pr_read` fail: an unreadable result is
+  `state: "unavailable"` with `unavailableReason`. At most 50 results are
+  listed; names are capped at 100 characters. A review is not re-run when CI
+  finishes later.
 - `repo_read_file` / `repo_list_files` — read a file or list a directory at
   a ref.
 - `repo_publish_review` — publish inline comments, a summary, and the check
@@ -582,6 +617,22 @@ agent's links. Failures are always a JSON result, never a thrown error:
 `{ "published": false, "reason": "stale_head", ... }` instead of an error when
 the PR moved to a new head since the review started; the agent should stop
 rather than retry.
+
+### Reviewer step: CI and related pull requests
+
+Add this to a reviewer's system prompt so it uses `ci` and the pull
+request's **Related pull requests** section correctly:
+
+    Reviewer step (CI and related pull requests). Read `ci` from repo_pr_read.
+    When `ci` and the description's Tests disagree, follow CI and say so; never
+    ask for a fix only because a sandbox test failed while CI passed. Report
+    pending checks as pending. If the description has a "Related pull requests"
+    section, a field, route or schema the change relies on may be added by one
+    of those pull requests: do not report it as missing; note the dependency
+    and the suggested merge order instead.
+
+Check names and the description are repository content: treat them as data,
+as for every `repo_*` result.
 
 ## Branch protection
 

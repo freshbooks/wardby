@@ -14,6 +14,7 @@ import { RESPONSE_PATH_SNAPSHOT_BUDGET, resolveWorkItem, type ResolvedWorkItem }
 import { dispatchRun, type DispatchDb } from "./dispatch.js";
 import { issueStatusRow, postIssueWorkingStatus } from "./issue-status.js";
 import { logger } from "./logger.js";
+import { openSiblingsForIssue, SIBLING_GUIDANCE, type OpenSibling } from "./related-pull-requests.js";
 import { composeTaskOverride } from "./untrusted-content.js";
 
 const log = logger.child({ module: "issue-events" });
@@ -37,12 +38,7 @@ type LinkRow = Awaited<ReturnType<IssueEventDb["agentIssueProject"]["findMany"]>
   agent: { ownerId: string | null; kind: string };
 };
 
-export interface OpenIssuePr {
-  repository: string;
-  number: number;
-  url: string;
-  openedByRunId: string;
-}
+export type OpenIssuePr = OpenSibling;
 
 const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
@@ -92,13 +88,16 @@ export function issueTaskText(
     "Use jira_get_issue to read the issue. Your final answer is posted on this issue for you when you finish, so " +
       "do not also post it with jira_comment; use jira_comment only for other issues or progress notes on long work.",
   ];
-  // Control-plane data from stored rows (validated at write time), never issue text.
-  for (const pr of openPrs.filter((p) => RUN_ID_RE.test(p.openedByRunId))) {
+  // Control-plane data from stored rows (validated here), never issue text.
+  const hinted = openPrs.filter((p) => RUN_ID_RE.test(p.openedByRunId));
+  for (const pr of hinted) {
     sections.push(
-      `This issue already has an open pull request wardby opened: ${pr.repository}#${pr.number} (${pr.url}). ` +
+      `This issue already has an open pull request wardby opened: ${pr.repository}#${pr.number} ` +
+        `(https://github.com/${pr.repository}/pull/${pr.number}). ` +
         `To revise it, delegate with continuePriorRun set to exactly "${pr.openedByRunId}".`,
     );
   }
+  if (hinted.length > 0) sections.push(SIBLING_GUIDANCE);
   if (matched.includes("mention") && event.comment) {
     sections.push(`Request comment:\n${event.comment.body.slice(0, MAX_TASK_BODY)}`);
   }
@@ -137,20 +136,6 @@ function matchedKinds(event: IssueEvent, link: LinkRow, bot: string): IssueEvent
   });
 }
 
-async function openPullRequests(db: IssueEventDb, issueKey: string, agentId: string): Promise<OpenIssuePr[]> {
-  try {
-    return await db.issuePullRequest.findMany({
-      where: { issueProvider: "jira", issueKey, agentId, state: "open" },
-      orderBy: { createdAt: "desc" },
-      take: 3,
-      select: { repository: true, number: true, url: true, openedByRunId: true },
-    });
-  } catch (err) {
-    log.warn({ err, issueKey, agentId }, "open pull requests could not be looked up; continuing without a hint");
-    return [];
-  }
-}
-
 const JQL_FILTER_BUDGET = { timeoutMs: 5000, retryOn429: false } as const;
 
 export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDeps): Promise<RouteResult> {
@@ -166,6 +151,10 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
   let item: Promise<ResolvedWorkItem> | undefined;
   const workItem = () =>
     (item ??= resolveWorkItem(deps.db, deps.trackers, event.provider, event.issueKey, RESPONSE_PATH_SNAPSHOT_BUDGET));
+  // Likewise the card's open siblings: one lookup per event (every matched
+  // link gets the same whole-card hints), not one per link.
+  let siblings: Promise<OpenSibling[]> | undefined;
+  const openPrs = () => (siblings ??= openSiblingsForIssue(deps.db, { provider: event.provider, key: event.issueKey }));
   for (const link of links) {
     if (link.access !== "write" || !link.agent.ownerId || link.agent.kind !== "native") continue;
     const matched = matchedKinds(event, link, bot);
@@ -180,7 +169,6 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
       }
       if (!ok) continue;
     }
-    const openPrs = await openPullRequests(deps.db, event.issueKey, link.agentId);
     try {
       const dispatched = await dispatchRun({
         db: deps.db,
@@ -189,7 +177,7 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
         agentId: link.agentId,
         trigger: "host_event",
         attribution: { source: "issue_event", item: await workItem() },
-        taskOverride: issueTaskText(event, matched, tracker.issueUrl(event.issueKey), link, openPrs),
+        taskOverride: issueTaskText(event, matched, tracker.issueUrl(event.issueKey), link, await openPrs()),
         afterPersist: async (tx, run) => {
           await tx.runIssueStatus.create({ data: issueStatusRow(event, run.id, link.commentVisibilityRole) });
         },

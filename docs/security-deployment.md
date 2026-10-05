@@ -276,6 +276,15 @@ rule (or left behind by `make_owner`) stop working on their own:
   no `grantParentMemoryKeys`, no `continuePriorRun`, no task text for a
   native child (it runs its own prompt), and no coding task unless the child
   allows non-owner task text. The child's owner can always detach it;
+- `continuePriorRun` also checks the run it names, not just the edge: it
+  continues a coding run only when that run's own agent has the exact same
+  current owner as the agent about to continue it (an agent with no owner
+  never matches, on either side), even when the continuing sub-agent and its
+  parent share an owner. This stops a continuation hint that names a sibling
+  pull request from letting one owner's agent push to a PR another owner's
+  agent controls. A mismatch is refused the same way as any other
+  continuation this deployment can't make — see
+  [Continuing a pull request](code-review-agents.md#what-the-mention-agent-receives);
 - a webhook fires only while its creator owns the agent or holds `execute`.
 
 **The stdio operator** (`wardby mcp` over stdio) is owner of every agent for

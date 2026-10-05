@@ -27,7 +27,10 @@ the agent's own instructions.
 The review is passed to the agent as untrusted context — information about
 what to fix, never instructions to follow. Only the review's summary and
 body reach the agent, not its inline comments, so write your reviewer's
-prompt to list every finding in the review body.
+prompt to list every finding in the review body. A review that is wrong
+about CI or about a sibling pull request starts a round that changes
+nothing; give your reviewer the CI and related-pull-requests step from
+[Run GitHub code-review agents](code-review-agents.md#ci-and-sibling-pull-requests).
 
 A round isn't started while an earlier round on the same pull request is
 still running. Clicking **Re-run** on the review check isn't counted as a
@@ -50,6 +53,11 @@ again). A pull request opened by a different wardby
 deployment gets one refusal comment and `wardby-autofix-limit` instead of a
 round, since this deployment can't continue a branch it has no record of
 opening.
+
+A round's run also double-checks with GitHub that the pull request is still
+open right before it pushes; one merged or closed in the time the round was
+working fails with no push made — see
+[Continuation's pull request is no longer open](errors/continuation-closed.md).
 
 If a repository already forwards reviews to a webhook through a
 hand-written CI workflow to fix them automatically, turn on `review_fix` and

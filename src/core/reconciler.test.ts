@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { IssueTracker } from "../providers/issue-tracker/types.js";
+
+vi.mock("./pull-request-state-sync.js", () => ({ syncOpenPullRequestStates: vi.fn(async () => 0) }));
+import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
 
 interface FakeRun {
@@ -704,5 +707,25 @@ describe("reconcileOnce self-defects", () => {
     await reconcileOnce(fresh.db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
     expect(tracker.createIssue).not.toHaveBeenCalled();
     expect((fresh.db as any).agent.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("reconcileOnce pull-request state sync", () => {
+  it("syncs stored pull-request states once per pass", async () => {
+    vi.mocked(syncOpenPullRequestStates).mockClear();
+    const hosts = { github: {} } as never;
+    const trackers = { jira: {} } as never;
+    const now = new Date("2026-10-05T12:00:00Z");
+    // Hosts/trackers given, so the existing orphan sweeps also run; the fixture has no such tables.
+    const db = {
+      ...fakeDb([]),
+      runHostCheck: { findMany: vi.fn(async () => []) },
+      runHostStatus: { findMany: vi.fn(async () => []) },
+      runIssueStatus: { findMany: vi.fn(async () => []) },
+    } as unknown as ReconcilerDb;
+
+    await reconcileOnce(db, now, undefined, undefined, hosts, trackers);
+
+    expect(syncOpenPullRequestStates).toHaveBeenCalledWith(expect.anything(), hosts, trackers, now);
   });
 });

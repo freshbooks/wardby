@@ -232,6 +232,13 @@ describe("startReviewFixRound", () => {
     expect(await startReviewFixRound(REQ, deps)).toEqual({ kind: "skipped", reason: "dispatch_declined" });
     expect(addLabel).toHaveBeenCalledWith(REPO, 7, "wardby-autofix-1");
   });
+
+  it("gives a fix round no sibling hints: it fixes only its own pull request", async () => {
+    const { deps } = setup();
+    expect(await startReviewFixRound(REQ, deps)).toMatchObject({ kind: "dispatched" });
+    const { task } = splitTaskOverride(vi.mocked(dispatchRun).mock.calls.at(-1)![0].taskOverride!);
+    expect(task.match(/continuePriorRun set to exactly/g)).toHaveLength(1);
+  });
 });
 
 describe("startReviewFixAfterReview", () => {

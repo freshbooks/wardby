@@ -280,12 +280,13 @@ interface CodingBranch {
   rootCodingRunId?: string;
 }
 
-export type ContinuationRefusal = "unknown_run" | "other_repository" | "no_pull_request";
+export type ContinuationRefusal = "unknown_run" | "other_repository" | "no_pull_request" | "other_owner";
 
 const CONTINUATION_REFUSALS: Readonly<Record<ContinuationRefusal, string>> = {
   unknown_run: "Cannot continue an unknown coding run.",
   other_repository: "Cannot continue a coding run from a different repository.",
   no_pull_request: "Cannot continue a coding run that never opened a pull request.",
+  other_owner: "Cannot continue a coding run opened by a different owner's agent.",
 };
 
 /** A continuation refused because of the run it names. Its message is fixed text, safe to show the model. */
@@ -300,21 +301,36 @@ export type ContinuationCheck =
   | { ok: true; root: { runId: string; baseRef: string; headRef: string; pullRequestNumber: number } }
   | { ok: false; reason: ContinuationRefusal };
 
+/** Carries the root's opening agent's owner along with the row, for the same-owner check below. */
+const CONTINUATION_ROOT_INCLUDE = { run: { select: { agent: { select: { ownerId: true } } } } } as const;
+
 /**
  * Whether this deployment can continue coding run `runId` in `repository`: the
  * run (or its root) is in this database, in that repository, and opened a pull
  * request. A run id read from a pull request can name a run that another
  * deployment sharing the same App made, so check before relying on one.
+ *
+ * `dispatchingOwnerId`, when given (even `null`), additionally fails closed
+ * unless the root's opening agent has that exact owner: a sibling-hint or a
+ * PR's own marker names a run id, but nothing stops it naming a run opened by
+ * another owner's agent in the same repository, and continuing that run would
+ * let this dispatch push to a PR another owner's agent controls. `undefined`
+ * skips the check for callers that only ask "does this deployment know this
+ * run at all" (a user-facing refusal message, not a dispatch).
  */
 export async function checkContinuation(
   reader: Pick<DispatchTx, "codingRun">,
   runId: string,
   repository: string,
+  dispatchingOwnerId?: string | null,
 ): Promise<ContinuationCheck> {
-  const candidate = await reader.codingRun.findUnique({ where: { runId } });
+  const candidate = await reader.codingRun.findUnique({ where: { runId }, include: CONTINUATION_ROOT_INCLUDE });
   if (!candidate) return { ok: false, reason: "unknown_run" };
   const root = candidate.rootCodingRunId
-    ? await reader.codingRun.findUnique({ where: { runId: candidate.rootCodingRunId } })
+    ? await reader.codingRun.findUnique({
+        where: { runId: candidate.rootCodingRunId },
+        include: CONTINUATION_ROOT_INCLUDE,
+      })
     : candidate;
   if (!root) return { ok: false, reason: "unknown_run" };
   if (normalizeGitHubRepository(root.repository) !== normalizeGitHubRepository(repository)) {
@@ -326,6 +342,14 @@ export async function checkContinuation(
     rootResult.pullRequestNumber === undefined
   ) {
     return { ok: false, reason: "no_pull_request" };
+  }
+  if (dispatchingOwnerId !== undefined) {
+    const rootOwnerId = root.run?.agent?.ownerId ?? null;
+    // A null owner on either side is never treated as a match: an owner-less
+    // agent gets no continuation trust, fail closed either direction.
+    if (dispatchingOwnerId === null || rootOwnerId === null || dispatchingOwnerId !== rootOwnerId) {
+      return { ok: false, reason: "other_owner" };
+    }
   }
   return {
     ok: true,
@@ -346,12 +370,14 @@ async function resolveCodingBranch(
   reader: Pick<DispatchTx, "codingRun">,
   options: DispatchRunOptions,
   profile: { repository: string; baseRef: string },
+  /** The dispatched (continuing) agent's current owner; checkContinuation fails closed against it. */
+  ownerId: string | null,
 ): Promise<CodingBranch> {
   if (options.continuesCodingRunId === undefined) return { baseRef: options.codingBaseRef ?? profile.baseRef };
   if (options.codingBaseRef !== undefined) {
     throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
   }
-  const check = await checkContinuation(reader, options.continuesCodingRunId, profile.repository);
+  const check = await checkContinuation(reader, options.continuesCodingRunId, profile.repository, ownerId);
   if (!check.ok) throw new ContinuationRefusedError(check.reason);
   const { root } = check;
   return {
@@ -390,12 +416,13 @@ async function readKnowledgeIndex(
   options: DispatchRunOptions,
   profile: { repository: string; baseRef: string },
   resolvedBranch: { baseRef: string } | undefined,
+  ownerId: string | null,
 ): Promise<KnowledgeNoteInput | undefined> {
   const executor = options.executor;
   if (!executor.readCodingRepositoryFile) return undefined;
   try {
     // Resolved here, inside the try: a branch problem is the transaction's to report, not the note's.
-    const branch = resolvedBranch ?? (await resolveCodingBranch(options.db, options, profile));
+    const branch = resolvedBranch ?? (await resolveCodingBranch(options.db, options, profile, ownerId));
     const indexText = await executor.readCodingRepositoryFile({
       repository: profile.repository,
       baseRef: normalizeGitRef(branch.baseRef),
@@ -425,8 +452,9 @@ async function readKnowledgeIndex(
 async function readServiceDeclaration(
   options: DispatchRunOptions,
   profile: { repository: string; baseRef: string },
+  ownerId: string | null,
 ): Promise<ServiceDeclarationRead> {
-  const branch = await resolveCodingBranch(options.db, options, profile);
+  const branch = await resolveCodingBranch(options.db, options, profile, ownerId);
   const read = { repository: profile.repository, profileBaseRef: profile.baseRef, branch };
   const executor = options.executor;
   if (!executor.readCodingServiceDeclaration) return { ...read, outcome: { kind: "none" } };
@@ -511,6 +539,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     where: { id: options.agentId },
     select: {
       kind: true,
+      ownerId: true,
       budgetGroupId: true,
       codingProfile: { select: { repository: true, baseRef: true, services: true } },
     },
@@ -522,12 +551,12 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     preview?.kind === "coding" &&
     preview.codingProfile &&
     parseAllowedServiceNames(preview.codingProfile.services).length > 0
-      ? await readServiceDeclaration(options, preview.codingProfile)
+      ? await readServiceDeclaration(options, preview.codingProfile, preview.ownerId ?? null)
       : undefined;
   // The knowledge note's input: the repository's bundle index at the run's base (a network call).
   const knowledgeIndex =
     preview?.kind === "coding" && preview.codingProfile && options.executor.readCodingRepositoryFile
-      ? await readKnowledgeIndex(options, preview.codingProfile, declarationRead?.branch)
+      ? await readKnowledgeIndex(options, preview.codingProfile, declarationRead?.branch, preview.ownerId ?? null)
       : undefined;
   const persistOnce = () =>
     options.db.$transaction(
@@ -656,7 +685,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           const budgetUsd = codingBudget.budgetUsd;
 
           // Resolved once: before the transaction when the declaration was read from it.
-          const branch = declarationRead?.branch ?? (await resolveCodingBranch(tx, options, agent.codingProfile));
+          const branch =
+            declarationRead?.branch ?? (await resolveCodingBranch(tx, options, agent.codingProfile, agent.ownerId));
           const { baseRef, continuationOf, rootCodingRunId } = branch;
           const headRef = branch.headRef ?? `wardby/run-${run.id}`;
 

@@ -1,0 +1,89 @@
+---
+id: related-pull-requests
+title: Related pull requests across repositories
+summary: Wardby lists the other pull requests from the same request in each pull request's description, with a suggested merge order.
+audience: operator
+tags: [github, pull-requests, multi-repo, merge-order, related, siblings, continuePriorRun, coding-agents, jira]
+appliesTo: ">=0.4.2"
+---
+
+# Related pull requests across repositories
+
+When one request produces pull requests in several repositories — a lead
+agent that delegates to one coding agent per repository, or several runs for
+the same Jira issue — Wardby adds a **Related pull requests** section to each
+of those pull requests' descriptions. It lists the others with links and
+their state, names the originating issue when there is one, and gives a
+suggested merge order.
+
+Without a tracked Jira issue, the list covers the pull requests opened by
+runs in the same delegation tree (the same lead run and everything it
+started). With a tracked issue, the list covers every pull request Wardby
+has recorded for that issue across every run, merged and closed ones
+included, plus that run tree's own siblings.
+
+- **Written by Wardby, not the model.** The list comes from Wardby's own run
+  records, never from the agent's text. Edits you make inside the section
+  are replaced on the next rewrite; text outside it is left alone.
+- **When.** A pull request already lists the ones opened earlier in the same
+  request when it is opened. When the lead run finishes, Wardby rewrites the
+  section on every open pull request of the request with the full list and
+  current states. A later run that pushes to any pull request in the set
+  refreshes the section on all of them the same way, and never removes it.
+- **Suggested merge order (the order Wardby's agent opened them in)** numbers
+  the open (and draft) pull requests in delegation order. It is not a
+  dependency analysis — it is only reliable when the lead delegates
+  repositories that own shared data first (see
+  [Fanning out to several builders](../docs/agent-recipes.md#fanning-out-to-several-builders)).
+  Check it before merging. Merged and closed pull requests follow in a
+  separate "Already merged or closed" list, as context only.
+- Only open pull requests that Wardby's own GitHub App opened are edited;
+  merged or closed ones are listed but never changed, and a pull request
+  from a different Wardby deployment sharing the same App is never touched.
+- **Repository names are visible across the set.** The section (and the
+  follow-up hints below) lists every pull request in the set by repository
+  name and number, so a request that spans repositories of different
+  visibility can show a private repository's name in a public repository's
+  pull request. If you mix public and private repositories, keep such work in
+  separate requests: separate Jira issues, or separate lead agents.
+
+Reviewers see the section in the pull request description, so a reviewer
+agent can tell that a field, route, or schema a change relies on is added by
+a sibling pull request rather than missing. See the reviewer step in
+[Run GitHub code-review agents](code-review-agents.md#ci-and-sibling-pull-requests).
+
+## Follow-up runs and sibling pull requests
+
+When someone asks for a follow-up on one of these pull requests (an
+`@<app-slug>` mention, or a new Jira event on the issue), the task given to
+the agent also lists every **open** sibling pull request in the set, with
+its link and the exact `continuePriorRun` value that continues it, together
+with guidance not to open a duplicate pull request in a repository that
+already has one open for this request. Automatic review fix rounds get no
+such hints: a fix round's task names only its own pull request. Merged and
+closed pull requests are never listed as continuable: a change there needs a
+new pull request, which joins the set once it is recorded.
+
+Give your own delivery or router agent's system prompt a line such as:
+
+    Continue the pull request you were asked about, and any listed open
+    sibling the change requires; never open a new pull request in a
+    repository that already has an open sibling for this request.
+
+The usual limits still apply: `maxDelegationsPerRun` and never delegating to
+the same sub-agent twice in one run; every push to a sibling pull request
+gets its own review; fix rounds are capped per pull request and only one
+runs at a time on a pull request; and a continuation only ever reaches a
+sub-agent that shares the same owner as the one asked to continue it.
+
+A continuation never pushes to a pull request that has been merged or closed
+in the meantime: the coding run stops before it starts work (or right before
+it pushes) with failure category `continuation_closed`, and the delegating
+agent is told to make the change as a new pull request instead. See
+[Continuation's pull request is no longer open](errors/continuation-closed.md).
+
+Wardby also keeps the recorded state of issue-linked pull requests current
+even when GitHub's merge or close webhook delivery was missed: it re-checks
+open ones in the background, at most ten at a time, each at most every ten
+minutes, and applies the same comment and status move a normal webhook would
+have triggered.

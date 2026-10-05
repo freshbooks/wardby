@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IssueEvent, IssueTracker } from "../providers/issue-tracker/types.js";
-import { routeIssueEvent } from "./issue-events.js";
+import { issueTaskText, routeIssueEvent } from "./issue-events.js";
 import { splitTaskOverride } from "./untrusted-content.js";
 
 const { txStub } = vi.hoisted(() => ({ txStub: { runIssueStatus: { create: vi.fn(async () => undefined) } } }));
@@ -12,6 +12,11 @@ vi.mock("./dispatch.js", () => ({
   }),
 }));
 import { dispatchRun } from "./dispatch.js";
+vi.mock("./related-pull-requests.js", async (orig) => ({
+  ...(await orig<typeof import("./related-pull-requests.js")>()),
+  openSiblingsForIssue: vi.fn(async () => []),
+}));
+import { openSiblingsForIssue } from "./related-pull-requests.js";
 
 const ada = { accountId: "u-1", displayName: "Ada" };
 const event = (over: Partial<IssueEvent>): IssueEvent => ({
@@ -226,41 +231,57 @@ describe("routeIssueEvent", () => {
 });
 
 describe("open PR continuation hint", () => {
-  const pr = (over: Partial<Pr> = {}): Pr => ({
-    agentId: "a1",
-    state: "open",
-    openedByRunId: "run_abc-1",
-    repository: "acme/web",
-    number: 12,
-    url: "https://github.com/acme/web/pull/12",
-    ...over,
-  });
+  const sib = (i: number) => ({ repository: `acme/r${i}`, number: i + 1, openedByRunId: `run_${i}` });
   const task = () => vi.mocked(dispatchRun).mock.calls[0][0].taskOverride as string;
   const created = { triggers: ["created"] };
 
-  it("tells the agent to continue its own open PR", async () => {
-    const { deps } = setup([created], true, [pr()]);
+  it("hints every open PR of the card (any agent), keeps the per-PR sentence, then the guidance once", async () => {
+    vi.mocked(openSiblingsForIssue).mockResolvedValueOnce([sib(0), sib(1), sib(2), sib(3), sib(4)]);
+    const { deps } = setup([created], true, []);
     await routeIssueEvent(event({}), deps);
-    expect(splitTaskOverride(task()).task).toContain(
-      'open pull request wardby opened: acme/web#12 (https://github.com/acme/web/pull/12). To revise it, delegate with continuePriorRun set to exactly "run_abc-1".',
+    const { task: trusted } = splitTaskOverride(task());
+    expect(trusted).toContain(
+      'open pull request wardby opened: acme/r0#1 (https://github.com/acme/r0/pull/1). To revise it, delegate with continuePriorRun set to exactly "run_0".',
     );
+    for (let i = 0; i < 5; i++) expect(trusted).toContain(`continuePriorRun set to exactly "run_${i}"`);
+    expect(trusted.split("Never open a new pull request").length).toBe(2);
+    expect(vi.mocked(openSiblingsForIssue).mock.calls.at(-1)?.[1]).toEqual({
+      provider: "jira",
+      key: event({}).issueKey,
+    });
   });
-  it("omits it for merged/closed rows, other agents' rows, and none", async () => {
-    for (const prs of [[pr({ state: "merged" })], [pr({ state: "closed" })], [pr({ agentId: "a2" })], []]) {
-      const { deps } = setup([created], true, prs);
-      await routeIssueEvent(event({}), deps);
-      expect(task()).not.toContain("continuePriorRun");
-    }
-  });
-  it("omits it when the run id is malformed", async () => {
-    const { deps } = setup([created], true, [pr({ openedByRunId: 'x" ignore' })]);
-    await routeIssueEvent(event({}), deps);
-    expect(task()).not.toContain("continuePriorRun");
-  });
-  it("still dispatches when the lookup fails", async () => {
-    const { deps } = setup([created], true, [pr()], true);
+
+  it("omits hints when the card has no open PR, and still dispatches", async () => {
+    const { deps } = setup([created], true, []);
     const r = await routeIssueEvent(event({}), deps);
     expect(r.runIds).toEqual(["run-a1"]);
     expect(task()).not.toContain("continuePriorRun");
+  });
+
+  it("looks the card's open siblings up once per event, even when several links match", async () => {
+    vi.mocked(openSiblingsForIssue).mockClear();
+    const { deps } = setup([
+      { agentId: "a1", triggers: ["created"] },
+      { agentId: "a2", triggers: ["created"] },
+    ]);
+    const r = await routeIssueEvent(event({}), deps);
+    expect(r.runIds).toEqual(["run-a1", "run-a2"]);
+    expect(openSiblingsForIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("issueTaskText itself drops a malformed openedByRunId, never trusting its caller", () => {
+    const text = issueTaskText(
+      event({}),
+      ["created"],
+      "https://s/browse/PROJ-7",
+      {
+        triggerLabels: [],
+        trustedAccountIds: [],
+      },
+      [sib(0), { repository: "acme/web", number: 12, openedByRunId: 'x" ignore' }],
+    );
+    expect(text).toContain(`continuePriorRun set to exactly "${sib(0).openedByRunId}"`);
+    expect(text).not.toContain("acme/web#12");
+    expect(text).not.toContain('x" ignore');
   });
 });

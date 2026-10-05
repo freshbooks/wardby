@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RunStatus } from "#prisma";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
+import { CONTINUATION_CLOSED_HOST_LINE } from "../coding/continuation-wording.js";
 import {
   collectRunOutcome,
   completeHostStatus,
@@ -251,6 +252,28 @@ describe("outcomeBody", () => {
     expect(body).toBe(
       "❌ A sub-run could not open its changes: it changed a file its agent may not edit, so none of its changes were kept.\n\n<sub>wardby run `r1`</sub>",
     );
+    expect(body).not.toContain("did not succeed");
+  });
+
+  it("says a sub-run's PR was no longer open, without the error code", () => {
+    const body = outcomeBody(
+      run("succeeded"),
+      REPO,
+      [],
+      [{ id: "c1", status: "failed", failureCategory: "continuation_closed" }],
+    );
+    expect(body).toContain(CONTINUATION_CLOSED_HOST_LINE);
+    expect(body).not.toContain("did not succeed");
+  });
+
+  it('says the same thing when the sub-run\'s PR closed before it spent anything (status "refused")', () => {
+    const body = outcomeBody(
+      run("succeeded"),
+      REPO,
+      [],
+      [{ id: "c1", status: "refused", failureCategory: "continuation_closed" }],
+    );
+    expect(body).toContain(CONTINUATION_CLOSED_HOST_LINE);
     expect(body).not.toContain("did not succeed");
   });
 

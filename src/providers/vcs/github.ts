@@ -70,6 +70,11 @@ export interface PullRequestInput {
    * marker, never the title.
    */
   issue?: { key: string; url?: string; trackerName?: string };
+  /**
+   * The request's other pull requests (control-plane rows only), rendered as
+   * the marked "Related pull requests" section. Rendering failures omit it.
+   */
+  related?: RelatedPullRequestsInput;
 }
 
 export interface PullRequestResult {
@@ -115,6 +120,17 @@ const SAFE_FILE_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 export interface GitHubRepositoryAccess {
   withRepositoryToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T>;
   createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult>;
+  /**
+   * The root run's marked pull request if it is still open (draft or ready),
+   * else null (merged, closed, or gone). Optional: without it, continuations
+   * are not checked.
+   */
+  findOpenPullRequest?(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+  }): Promise<PullRequestResult | null>;
   /** Creates the status comment if none exists yet for this run, else updates it. */
   upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void>;
   /** Updates the status comment if one already exists for this run; a no-op otherwise (never creates). */
@@ -177,13 +193,21 @@ export function pullRequestTitle(input: PullRequestInput): string {
   return key ? `[${key}] ${base}` : base;
 }
 
-function issueLine(input: PullRequestInput): string | undefined {
-  const key = validIssueKey(input);
-  const url = input.issue?.url;
-  if (!key || typeof url !== "string" || !url.startsWith("https://") || /[\s<>()]/.test(url)) return undefined;
-  const name = input.issue?.trackerName;
+/** Validated issue parts; the tracker prefix is "" or "<Name> ". */
+function issueParts(issue: PullRequestInput["issue"]): { key: string; url?: string; tracker: string } | undefined {
+  const key = issue?.key;
+  if (typeof key !== "string" || !PR_ISSUE_KEY.test(key)) return undefined;
+  const url = issue?.url;
+  const safeUrl = typeof url === "string" && url.startsWith("https://") && !/[\s<>()]/.test(url) ? url : undefined;
+  const name = issue?.trackerName;
   const tracker = typeof name === "string" && /^[A-Za-z][A-Za-z0-9 .-]{0,39}$/.test(name) ? `${name.trim()} ` : "";
-  return `Resolves ${tracker}issue [${key}](${url})`;
+  return { key, ...(safeUrl ? { url: safeUrl } : {}), tracker };
+}
+
+function issueLine(input: PullRequestInput): string | undefined {
+  const parts = issueParts(input.issue);
+  if (!parts?.url) return undefined;
+  return `Resolves ${parts.tracker}issue [${parts.key}](${parts.url})`;
 }
 
 /**
@@ -196,6 +220,128 @@ function issueLine(input: PullRequestInput): string | undefined {
  */
 function isSafeMarkdownFragment(value: string): boolean {
   return !value.includes("`") && !value.includes("\n") && !value.includes("\r");
+}
+
+export const RELATED_SECTION_START = "<!-- wardby-related:start -->";
+export const RELATED_SECTION_END = "<!-- wardby-related:end -->";
+/** At most this many pull requests are listed; the rest are counted. */
+export const MAX_RELATED_PULL_REQUESTS = 20;
+/** GitHub rejects a pull request body longer than this. */
+export const MAX_PULL_REQUEST_BODY_CHARS = 65_536;
+
+export type RelatedPullRequestState = "open" | "draft" | "merged" | "closed";
+
+/** One pull request of the request's set, from stored control-plane rows only. */
+export interface RelatedPullRequestEntry {
+  repository: string;
+  /** Absent only for `self` while the pull request is being created. */
+  number?: number;
+  /** Live state; absent when unknown (at creation). */
+  state?: RelatedPullRequestState;
+  /** The pull request whose description this section is in. */
+  self?: boolean;
+}
+
+export interface RelatedPullRequestsInput {
+  /** In suggested merge order (the order the request's coding runs were dispatched). */
+  entries: readonly RelatedPullRequestEntry[];
+  issue?: { key: string; url?: string; trackerName?: string };
+}
+
+const RELATED_STATES = new Set<string>(["open", "draft", "merged", "closed"]);
+
+/** The repository normalized, or undefined when it isn't a plain owner/name safe inside a link. */
+function safeRepository(value: string): string | undefined {
+  try {
+    const repository = normalizeGitHubRepository(value);
+    return isSafeMarkdownFragment(repository) && !/[[\]()<>\s]/.test(repository) ? repository : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One list line; `prefix` is "1." … for the merge order, "-" for the context list. */
+function relatedLine(entry: RelatedPullRequestEntry, prefix: string): string | undefined {
+  const repository = safeRepository(entry.repository);
+  if (!repository) return undefined;
+  const state = entry.state && RELATED_STATES.has(entry.state) ? ` — ${entry.state}` : "";
+  if (entry.self) return `${prefix} **This pull request**${state}`;
+  if (!Number.isSafeInteger(entry.number) || (entry.number ?? 0) <= 0) return undefined;
+  return `${prefix} [${repository}#${entry.number}](https://github.com/${repository}/pull/${entry.number})${state}`;
+}
+
+const isDone = (entry: RelatedPullRequestEntry) => entry.state === "merged" || entry.state === "closed";
+
+/**
+ * The "Related pull requests" block, markers included, built only from
+ * stored rows (never agent text). Open (and draft, and not-yet-known) pull
+ * requests form the numbered suggested merge order; merged and closed ones
+ * follow as context. Undefined when no other valid pull request is left after
+ * validation: a set of one is not a set.
+ */
+export function renderRelatedSection(input: RelatedPullRequestsInput): string | undefined {
+  const valid = input.entries.filter((entry) => relatedLine(entry, "-") !== undefined);
+  if (!valid.some((entry) => !entry.self)) return undefined;
+  const issue = issueParts(input.issue);
+  const issueText = issue ? ` for ${issue.tracker}issue ${issue.url ? `[${issue.key}](${issue.url})` : issue.key}` : "";
+  const open = valid.filter((entry) => !isDone(entry)).slice(0, MAX_RELATED_PULL_REQUESTS);
+  const done = valid.filter(isDone).slice(0, MAX_RELATED_PULL_REQUESTS - open.length);
+  const more = valid.length - open.length - done.length;
+  return [
+    RELATED_SECTION_START,
+    "**Related pull requests**",
+    "",
+    `Wardby opened these pull requests for the same request${issueText}.`,
+    ...(open.length > 0
+      ? [
+          "",
+          "Suggested merge order (the order Wardby's agent opened them in; not a guarantee, so check dependencies before merging):",
+          "",
+          ...open.map((entry, index) => relatedLine(entry, `${index + 1}.`)!),
+        ]
+      : []),
+    ...(done.length > 0
+      ? ["", "Already merged or closed (context only):", "", ...done.map((entry) => relatedLine(entry, "-")!)]
+      : []),
+    ...(more > 0 ? ["", `…and ${more} more`] : []),
+    "",
+    "<sub>Written by Wardby from its run records; this section is replaced when the request's runs finish.</sub>",
+    RELATED_SECTION_END,
+  ].join("\n");
+}
+
+/** The run marker, then optionally blank lines and the "Resolves …" line: the section goes right after. */
+const BODY_HEAD =
+  /^[^\S\n]*<!-- (?:wardby|reevo-run):\S+ -->[^\S\n]*(?:\n|$)(?:[^\S\n]*\n)*(?:Resolves [^\n]*(?:\n|$))?/;
+
+/**
+ * The body with `block` in place of the existing marked section, or inserted
+ * after the run marker (and the issue line) when there is none. Null — do not
+ * write — when the body has no leading run marker, its section markers are
+ * malformed (one missing, reversed, or repeated), or `block` isn't a marked block.
+ */
+export function upsertRelatedSection(body: string, block: string): string | null {
+  if (!block.startsWith(RELATED_SECTION_START) || !block.endsWith(RELATED_SECTION_END)) return null;
+  const text = body.replace(/\r\n/g, "\n");
+  const start = text.indexOf(RELATED_SECTION_START);
+  const end = text.indexOf(RELATED_SECTION_END);
+  if (start !== -1 || end !== -1) {
+    if (
+      start === -1 ||
+      end === -1 ||
+      end < start ||
+      text.indexOf(RELATED_SECTION_START, start + 1) !== -1 ||
+      text.indexOf(RELATED_SECTION_END, end + 1) !== -1
+    ) {
+      return null;
+    }
+    return text.slice(0, start) + block + text.slice(end + RELATED_SECTION_END.length);
+  }
+  const head = BODY_HEAD.exec(text);
+  if (!head) return null;
+  const before = text.slice(0, head[0].length).trimEnd();
+  const rest = text.slice(head[0].length).trimStart();
+  return rest ? `${before}\n\n${block}\n\n${rest}` : `${before}\n\n${block}`;
 }
 
 /** At most this many packages, and separately this many refusals, are listed
@@ -297,6 +443,9 @@ const MAX_WARNING_NAMES = 8;
  * Built only from registry records and the run's own diff, never from the
  * agent's summary, so it cannot be softened or left out by the model.
  */
+/** Rendered verbatim in refusalWarning's first line, and used to locate it in tests. */
+export const DEPENDENCY_INSTALL_INCOMPLETE = "Dependency install incomplete.";
+
 function refusalWarning(input: PullRequestInput): string | undefined {
   const refusals = (input.packageRefusals ?? []).filter(
     (r) => isSafeMarkdownFragment(r.ecosystem) && isSafeMarkdownFragment(r.name) && isSafeMarkdownFragment(r.reason),
@@ -310,7 +459,7 @@ function refusalWarning(input: PullRequestInput): string | undefined {
   }
   const lines = [
     "> [!WARNING]",
-    "> **Dependency install incomplete.** Wardby's package registry refused packages during this run, so its installs did not finish and failed checks under **Tests** may come from the sandbox rather than this change.",
+    `> **${DEPENDENCY_INSTALL_INCOMPLETE}** Wardby's package registry refused packages during this run, so its installs did not finish and failed checks under **Tests** may come from the sandbox rather than this change.`,
   ];
   for (const [reason, names] of byReason) {
     const listed = [...names];
@@ -334,6 +483,12 @@ export function pullRequestBody(input: PullRequestInput): string {
   // Hidden marker stays first; the issue link is the first visible line.
   const issue = issueLine(input);
   if (issue) sections.push(issue);
+  try {
+    const related = input.related ? renderRelatedSection(input.related) : undefined;
+    if (related) sections.push(related);
+  } catch {
+    // omitted, like the packages section
+  }
   try {
     const warning = refusalWarning(input);
     if (warning) sections.push(warning);
@@ -669,6 +824,27 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       if (raced) return raced;
       throw safeApiError(response);
     });
+  }
+
+  /**
+   * The root run's marked pull request if GitHub's `state=open` list still
+   * contains it (draft or ready for review), else null -- merged, closed, or
+   * gone. Used by git.ts's revision-in-place continuation to refuse a push to
+   * a pull request that is no longer open.
+   */
+  async findOpenPullRequest(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+  }): Promise<PullRequestResult | null> {
+    const repository = normalizeGitHubRepository(input.repository);
+    const baseRef = normalizeGitRef(input.baseRef);
+    const headRef = normalizeGitRef(input.headRef);
+    if (!SAFE_RUN_ID.test(input.runId)) throw new Error("github_pull_request_input_invalid");
+    return this.withRepositoryToken(repository, (token) =>
+      this.findPullRequest(token, { runId: input.runId, repository, baseRef, headRef, acceptReadyForReview: true }),
+    );
   }
 
   private async appJwt(): Promise<string> {

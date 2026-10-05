@@ -2,7 +2,9 @@ import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
+import { logger } from "../../core/logger.js";
 import type {
   ContinuationCheckRunCompleteInput,
   ContinuationCheckRunInput,
@@ -41,6 +43,20 @@ class FakeGitHub implements GitHubRepositoryAccess {
   }[] = [];
   /** Set to make every continuation-notification call reject, to prove the caller swallows it. */
   failContinuationCalls = false;
+  /** What findOpenPullRequest answers; set null to simulate a merged/closed PR. */
+  openPullRequest: PullRequestResult | null = { number: 42, url: "https://github.com/openai/example/pull/42" };
+  openPullRequestCalls: unknown[] = [];
+  /** Thrown this many times in a row (then answers `openPullRequest` normally) -- simulates a transient GitHub failure. */
+  openPullRequestFailuresRemaining = 0;
+
+  async findOpenPullRequest(input: unknown): Promise<PullRequestResult | null> {
+    this.openPullRequestCalls.push(structuredClone(input));
+    if (this.openPullRequestFailuresRemaining > 0) {
+      this.openPullRequestFailuresRemaining -= 1;
+      throw new Error("github_api_error:503");
+    }
+    return this.openPullRequest;
+  }
 
   async withRepositoryToken<T>(_repository: string, action: (token: string) => Promise<T>): Promise<T> {
     this.tokenCalls += 1;
@@ -169,7 +185,17 @@ async function harness(overrides: Partial<ConstructorParameters<typeof GitVcsPro
   roots.push(rootDir);
   const github = new FakeGitHub();
   const git = new ScriptedGitRunner();
-  const provider = new GitVcsProvider({ rootDir, github, git, ...overrides });
+  const sleeps: number[] = [];
+  const provider = new GitVcsProvider({
+    rootDir,
+    github,
+    git,
+    // No-op by default: a test asserting the real retry delay overrides this.
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+    ...overrides,
+  });
   const input: VcsPrepareInput = {
     runId: "run-1",
     repository: REPOSITORY,
@@ -177,7 +203,7 @@ async function harness(overrides: Partial<ConstructorParameters<typeof GitVcsPro
     headRef: "wardby/run-run-1",
     protectedPaths: [".github/workflows/**", "CODEOWNERS"],
   };
-  return { rootDir, github, git, provider, input };
+  return { rootDir, github, git, provider, input, sleeps };
 }
 
 afterEach(async () => {
@@ -228,6 +254,20 @@ describe("GitVcsProvider", () => {
     git.changedPaths = ["src/app.ts", "package-lock.json", "web/yarn.lock", "notes.lock.md"];
     await provider.finalizeChanges(prepared);
     expect(github.pullRequestCalls[0].changedLockfiles).toEqual(["package-lock.json", "web/yarn.lock"]);
+  });
+
+  it("passes the related pull requests through to the PR it opens", async () => {
+    const { provider, github, input } = await harness();
+    const prepared = await provider.prepareWorkspace(input);
+    await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+    const related = {
+      entries: [
+        { repository: "acme/bff", number: 3 },
+        { repository: "openai/example", self: true },
+      ],
+    };
+    await provider.finalizeChanges(prepared, { related });
+    expect(github.pullRequestCalls[0].related).toEqual(related);
   });
 
   it("commits with controlled settings, pushes once, and creates one typed draft PR result", async () => {
@@ -433,6 +473,66 @@ describe("GitVcsProvider", () => {
         headRef: "wardby/run-run-1",
         acceptReadyForReview: true,
       });
+    });
+
+    it("refuses to prepare a continuation whose PR is no longer open, before cloning", async () => {
+      const { provider, github, git } = await harness();
+      github.openPullRequest = null;
+      await expect(provider.prepareWorkspace(continuationInput())).rejects.toThrow(CONTINUATION_CLOSED_ERROR);
+      expect(github.openPullRequestCalls[0]).toMatchObject({ runId: "run-1", headRef: "wardby/run-run-1" });
+      expect(git.calls.some((call) => call.args.includes("clone"))).toBe(false);
+    });
+
+    it("refuses to push when the PR was merged or closed while the run worked", async () => {
+      const { provider, github, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      git.remoteSha = BASE_SHA;
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      github.openPullRequest = null;
+      await expect(provider.finalizeChanges(prepared)).rejects.toThrow(CONTINUATION_CLOSED_ERROR);
+      expect(git.calls.some((call) => call.args.includes("push"))).toBe(false);
+      expect(github.pullRequestCalls).toHaveLength(0);
+    });
+
+    it("never asks for a fresh run", async () => {
+      const { provider, github, input } = await harness();
+      const prepared = await provider.prepareWorkspace(input);
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      await provider.finalizeChanges(prepared);
+      expect(github.openPullRequestCalls).toHaveLength(0);
+    });
+
+    it("retries once on a transient open-PR check failure, after a short wait, then proceeds as if it were still open", async () => {
+      const { provider, github, sleeps } = await harness();
+      github.openPullRequestFailuresRemaining = 1;
+      await expect(provider.prepareWorkspace(continuationInput())).resolves.toMatchObject({
+        headRef: "wardby/run-run-1",
+      });
+      expect(github.openPullRequestCalls).toHaveLength(2);
+      expect(sleeps).toEqual([1_000]);
+    });
+
+    it("proceeds, with a warning, when the open-PR check fails twice in a row -- never failing the run on an unconfirmed answer", async () => {
+      const { provider, github } = await harness();
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+      github.openPullRequestFailuresRemaining = 2;
+      await expect(provider.prepareWorkspace(continuationInput())).resolves.toMatchObject({
+        headRef: "wardby/run-run-1",
+      });
+      expect(github.openPullRequestCalls).toHaveLength(2);
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it("retries once on a transient open-PR check failure at the pre-push check too, then proceeds", async () => {
+      const { provider, github, sleeps } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      github.openPullRequestFailuresRemaining = 1;
+      await expect(provider.finalizeChanges(prepared)).resolves.toMatchObject({ outcome: "pull_request_updated" });
+      // One call during prepare (succeeded first try), two more at the pre-push check (fail then succeed).
+      expect(github.openPullRequestCalls).toHaveLength(3);
+      expect(sleeps).toEqual([1_000]);
     });
 
     it("recovers a continuation workspace deterministically without minting another token", async () => {

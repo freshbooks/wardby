@@ -14,6 +14,7 @@ import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
+import { MAX_SIBLING_HINTS, openSiblings, SIBLING_GUIDANCE, type OpenSibling } from "./related-pull-requests.js";
 import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { composeTaskOverride } from "./untrusted-content.js";
 import {
@@ -326,13 +327,45 @@ async function verifyCitations(
 
 type MentionEvent = Extract<HostEvent, { kind: "mention" }>;
 
+/** The exact phrase every continuation hint uses (a prompt may match it). */
+export function continuePriorRunPhrase(runId: string): string {
+  return `pass continuePriorRun set to exactly "${runId}"`;
+}
+
 /** The continuation hint a router agent follows to continue a PR's branch instead of opening a new one. */
 export function continuationHint(prNumber: number, runId: string): string {
   return (
     `[This request is a follow-up on PR #${prNumber}, originally opened by wardby run ${runId}. ` +
-    `If you delegate, pass continuePriorRun set to exactly "${runId}" so the same PR/branch is ` +
+    `If you delegate, ${continuePriorRunPhrase(runId)} so the same PR/branch is ` +
     `continued instead of opening a new one.]`
   );
+}
+
+const HINT_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const HINT_REPOSITORY = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+/** One hint per open sibling (stored rows only; links built, ids re-validated), then the shared guidance. */
+export function siblingContinuationHints(siblings: readonly OpenSibling[]): string | undefined {
+  const lines = siblings
+    .filter(
+      (s) =>
+        HINT_RUN_ID.test(s.openedByRunId) &&
+        HINT_REPOSITORY.test(s.repository) &&
+        Number.isSafeInteger(s.number) &&
+        s.number > 0,
+    )
+    .slice(0, MAX_SIBLING_HINTS)
+    .map(
+      (s) =>
+        `- ${s.repository}#${s.number} (https://github.com/${s.repository}/pull/${s.number}): to change it, ` +
+        `delegate to that repository's coding agent and ${continuePriorRunPhrase(s.openedByRunId)}.`,
+    );
+  if (lines.length === 0) return undefined;
+  return [
+    "[This pull request is one of a set wardby opened for the same request. The set's other open pull requests:",
+    ...lines,
+    `${SIBLING_GUIDANCE}]`,
+  ].join("\n");
 }
 
 /**
@@ -351,12 +384,16 @@ export function continuationHint(prNumber: number, runId: string): string {
  * never in the system prompt. composeTaskOverride stores both in the one
  * taskOverride column.
  */
-export function mentionTaskText(event: MentionEvent): string {
+export function mentionTaskText(event: MentionEvent, siblings: readonly OpenSibling[] = []): string {
   const kind = event.isPullRequest ? "PR" : "issue";
   const Kind = event.isPullRequest ? "PR" : "Issue";
   const inSubject = event.comment.kind === "subject";
   const sections: string[] = [];
-  if (event.priorRunId) sections.push(continuationHint(event.number, event.priorRunId));
+  if (event.priorRunId) {
+    sections.push(continuationHint(event.number, event.priorRunId));
+    const hints = siblingContinuationHints(siblings);
+    if (hints) sections.push(hints);
+  }
   const title = event.subject?.title.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE);
   const description = event.subject?.body.trim() ? event.subject.body.slice(0, MAX_TASK_BODY) : "";
   sections.push(
@@ -727,13 +764,18 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         };
         return { runIds: [], followUps: [react, reply] };
       }
+      // Seeded from the PR's validated marker run: the request it belongs to. Stored state only.
+      const siblings =
+        event.isPullRequest && event.priorRunId
+          ? await openSiblings(deps.db, event.priorRunId, { repository: event.repository, number: event.number })
+          : [];
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
         selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
         agentId: allowed[0].agentId,
         trigger: "host_event",
-        taskOverride: mentionTaskText(event),
+        taskOverride: mentionTaskText(event, siblings),
         attribution: event.isPullRequest
           ? await linkedPullRequestAttribution(
               deps.db,

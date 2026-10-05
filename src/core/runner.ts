@@ -55,6 +55,7 @@ import {
 } from "./review-host-tools.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
 import { serviceRefusalSentence } from "../coding/services/wording.js";
+import { CONTINUATION_CLOSED_SENTENCE, isContinuationClosedError } from "../coding/continuation-wording.js";
 import { RUN_TASK_TAG, splitTaskOverride, wrapUntrusted } from "./untrusted-content.js";
 import { completeHostStatus } from "./host-status.js";
 import {
@@ -68,6 +69,7 @@ import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
 import { fileSelfDefect } from "./self-defects.js";
 import { startReviewFixAfterReview } from "./review-fix.js";
+import { updateRelatedPullRequests } from "./related-pull-requests.js";
 import { recordNativeModelUsage } from "./model-usage.js";
 import { pinNativeRunPricing } from "./run-pricing.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
@@ -320,7 +322,16 @@ export function codingChildResult(run: {
   tokensOut: number;
   error: string | null;
 }): string {
-  const refusal = run.status === "refused" ? serviceRefusalSentence(run.error) : null;
+  // Checked before the "refused" branch: a continuation whose PR closed
+  // before the run ever spent anything is stored as "refused" (a preflight
+  // refusal, container.ts), not "failed" -- but it is the same
+  // continuation_closed category either way, and gets the same sentence
+  // regardless of which status it landed on.
+  const refusal = isContinuationClosedError(run.error)
+    ? CONTINUATION_CLOSED_SENTENCE
+    : run.status === "refused"
+      ? serviceRefusalSentence(run.error)
+      : null;
   return JSON.stringify({
     status: run.status,
     finalText: run.finalText,
@@ -1029,6 +1040,8 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    // After the issue status, so IssuePullRequest rows for this run exist. Bounded and never throws.
+    if (claimed) await updateRelatedPullRequests(db, finished, reviewHosts, issueTrackers);
     if (claimed && providers.executor && reviewHosts && repoAccess) {
       await startReviewFixAfterReview(runId, {
         db,
@@ -1056,6 +1069,8 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    // After the issue status, so IssuePullRequest rows for this run exist. Bounded and never throws.
+    if (claimed) await updateRelatedPullRequests(db, finished, reviewHosts, issueTrackers);
     if (claimed && providers.executor && reviewHosts && repoAccess) {
       await startReviewFixAfterReview(runId, {
         db,

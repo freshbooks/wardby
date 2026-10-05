@@ -119,7 +119,11 @@ precise task, and for follow-ups pass the run id from the run message as
 issue gets a web link to it (needs Link issues); Jira's development panel
 shows it only if the Jira and GitHub integration is installed. Merge and close
 comments and the merged status move need the GitHub App to deliver
-`pull_request` events. See the full guide for the recipe.
+`pull_request` events. When one issue leads to pull requests in several
+repositories, each lists the others, and a later event on the issue tells the
+agent how to continue each open one; see
+[Related pull requests across repositories](related-pull-requests.md). See
+the full guide for the recipe.
 
 ## Trust rules
 

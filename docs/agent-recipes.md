@@ -379,6 +379,46 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
 - Each builder works only in its own repository and can't see the others, so
   the lead's task to each one must carry everything that crosses a repository
   boundary (routes, field names and types, error codes), word for word the same.
+- Wardby adds a **Related pull requests** section to each pull request the
+  builders open, listing the others with links, states (open, draft, merged,
+  closed) and the originating issue. With a Jira issue, the list covers every
+  pull request recorded for that issue in any run. Open ones are numbered as a
+  **Suggested merge order** — the order the lead delegated in, not a
+  guarantee; merged and closed ones are listed separately as context. A pull
+  request lists the ones opened before it as soon as it is opened; when the
+  lead run finishes, and whenever a later run pushes to one of them, every
+  open one is rewritten with the full list. Text you add inside the section is
+  replaced; the rest of the description is not touched. Only pull requests the
+  App opened and that are still open are edited.
+- The section, and the follow-up hints below, list every pull request in the
+  set by repository name and number. A request that spans repositories of
+  different visibility can therefore show a private repository's name in a
+  public repository's pull request: if you mix public and private
+  repositories, keep that work in separate requests (separate Jira issues, or
+  separate lead agents).
+
+#### Follow-ups across the set
+
+A human-triggered follow-up task (an `@<app-slug>` mention, or a Jira issue
+event — never an automatic review fix round) lists every open sibling pull
+request in the set, each as `owner/name#n (url): … pass continuePriorRun set
+to exactly "<run id>"`. Recommend this line in your lead agent's own prompt
+too:
+
+    Continue the pull request you were asked about, and any listed open
+    sibling the change requires; never open a new pull request in a
+    repository that already has an open sibling for this request.
+
+The usual delegation rails still apply on top of this: `maxDelegationsPerRun`
+caps calls per run; a second `delegate_to_<name>` call to the same sub-agent
+in one run is refused with `already_dispatched`; dispatch re-checks every
+`continuePriorRun` id (refusing with `continuation_refused` when this
+deployment can't continue the run it names — for example it belongs to a
+different owner's agent); every push to a sibling pull request still gets its
+own review; and fix rounds stay capped and run one at a time per pull
+request. A continuation whose pull request has since been merged or closed
+fails with category `continuation_closed` and pushes nothing — see
+[Continuation's pull request is no longer open](../help/errors/continuation-closed.md).
 
 ### Together with Recipe A
 
