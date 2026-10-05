@@ -47,6 +47,7 @@ import { closeOpenHostCheck } from "./review-host-checks.js";
 import { completeHostStatus } from "./host-status.js";
 import { closeOrphanedIssueStatuses } from "./issue-status.js";
 import { fileSelfDefect } from "./self-defects.js";
+import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
 /** A pass waits this long per self-defect, then moves on; the filing finishes (or logs) in the background. */
@@ -267,6 +268,8 @@ export async function reconcileOnce(
   await closeOrphanedHostChecks(db, reviewHosts, now);
   await closeOrphanedHostStatuses(db, reviewHosts, now);
   await closeOrphanedIssueStatuses(db, issueTrackers, now);
+  // Settle stored pull requests whose merge/close webhook was missed; bounded per pass, never throws.
+  await syncOpenPullRequestStates(db, reviewHosts, issueTrackers, now);
   return lost;
 }
 
