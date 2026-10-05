@@ -27,6 +27,8 @@ const log = logger.child({ module: "review-host-tools" });
 export interface PublishedReview {
   verdict: "APPROVE" | "CHANGES_REQUESTED" | "COMMENT";
   body: string;
+  /** A COMMENT published while CI on the head was still running or had not reported. */
+  ciPending?: boolean;
 }
 
 /** Cap on the review text kept on the check row and handed to a fix round. */
@@ -398,9 +400,13 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           ...(a.resolveThreadIds?.length ? { resolveThreadIds: a.resolveThreadIds } : {}),
         });
         if (ownsCheck) {
+          // A COMMENT while CI is unfinished is often only "waiting for CI":
+          // recorded so CI finishing on this head re-runs the review once.
+          const ci = a.verdict === "COMMENT" && host.readCi ? await host.readCi(link.repository, a.headSha) : null;
           await markCompleted(ctx, {
             verdict: a.verdict,
             body: `${a.summary}\n\n${a.body}`.slice(0, MAX_REVIEW_BODY_CHARS),
+            ...(ci ? { ciPending: ci.state === "pending" || ci.state === "none" } : {}),
           });
         }
         return JSON.stringify(result);

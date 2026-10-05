@@ -708,6 +708,7 @@ async function executeTrackedRun(
               data: {
                 completedAt: new Date(),
                 ...(review ? { verdict: review.verdict, reviewBody: review.body } : {}),
+                ...(review?.ciPending !== undefined ? { ciPendingAtReview: review.ciPending } : {}),
               },
             });
           },

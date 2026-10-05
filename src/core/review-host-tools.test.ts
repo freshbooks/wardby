@@ -163,6 +163,35 @@ describe("handleReviewHostTool", () => {
     });
   });
 
+  it("records whether CI was unfinished when it publishes a COMMENT on its own check", async () => {
+    for (const [state, pending] of [
+      ["pending", true],
+      ["none", true],
+      ["passing", false],
+    ] as const) {
+      const h = fakeHost();
+      h.readCi = vi.fn(async () => ({ headSha: SHA, state, checks: [], truncated: false, statusesUnavailable: false }));
+      const c = ctx({
+        hosts: { github: h },
+        runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA, prNumber: 7 },
+      });
+      await handleReviewHostTool(
+        "repo_publish_review",
+        JSON.stringify({
+          repository: WRITE.repository,
+          prNumber: 7,
+          headSha: SHA,
+          verdict: "COMMENT",
+          summary: "s",
+          body: "b",
+        }),
+        c,
+      );
+      expect(c.markRunCheckCompleted).toHaveBeenCalledWith({ verdict: "COMMENT", body: "s\n\nb", ciPending: pending });
+      expect(h.readCi).toHaveBeenCalledWith(WRITE.repository, SHA);
+    }
+  });
+
   it("passes resolveThreadIds through, and rejects malformed ids", async () => {
     const c = ctx();
     const args = {

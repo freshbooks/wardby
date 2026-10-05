@@ -369,7 +369,7 @@ export class GitHubReviewHost implements CodeReviewHost {
    * independently, so a failed checks read still mints (and attempts) the
    * statuses token.
    */
-  private async readCi(repository: string, headSha: string): Promise<CiView> {
+  async readCi(repository: string, headSha: string): Promise<CiView> {
     const base = repoPath(repository);
     let checks: CiCheckView[] = [];
     let truncated = false;

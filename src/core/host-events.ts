@@ -549,6 +549,67 @@ async function startReviews(
   return runIds;
 }
 
+/**
+ * CI finished on a pull request's head: re-runs, once per head, each review
+ * that published only a COMMENT while CI there was still running or had not
+ * reported (RunHostCheck.ciPendingAtReview). Waits for the last suite: while
+ * any CI on the head is still pending, a later completion decides. Never
+ * throws; a failure is logged and the delivery is not retried.
+ */
+async function rereviewAfterCi(
+  deps: RouteHostEventDeps,
+  host: CodeReviewHost,
+  event: Extract<HostEvent, { kind: "ci_completed" }>,
+  prNumber: number,
+  reviewerLinks: LinkRow[],
+): Promise<string[]> {
+  try {
+    if (!host.readCi) return [];
+    const onHead = await deps.db.runHostCheck.findMany({
+      where: { provider: event.provider, repository: event.repository, prNumber, headSha: event.headSha },
+      select: {
+        runId: true,
+        verdict: true,
+        ciPendingAtReview: true,
+        ciRereviewAt: true,
+        run: { select: { agentId: true } },
+      },
+    });
+    if (onHead.some((r) => r.ciRereviewAt !== null)) return [];
+    const waiting = onHead.filter((r) => r.verdict === "COMMENT" && r.ciPendingAtReview === true);
+    if (waiting.length === 0) return [];
+    const head = await host.pullRequestHead(event.repository, prNumber);
+    if (head.isFork || head.state !== "open" || head.headSha !== event.headSha) return [];
+    const ci = await host.readCi(event.repository, event.headSha);
+    if (ci.state === "pending" || ci.state === "none" || ci.state === "unavailable") return [];
+    // Claimed per row, so concurrent completions re-run each review only once.
+    const agentIds = new Set<string>();
+    for (const row of waiting) {
+      const claimed = await deps.db.runHostCheck.updateMany({
+        where: { runId: row.runId, ciRereviewAt: null },
+        data: { ciRereviewAt: new Date() },
+      });
+      if (claimed.count > 0) agentIds.add(row.run.agentId);
+    }
+    if (agentIds.size === 0) return [];
+    const targets = reviewTargets(
+      await authorizedLinks(
+        deps,
+        event,
+        reviewerLinks.filter((l) => agentIds.has(l.agentId)),
+      ),
+    );
+    log.info(
+      { repository: event.repository, prNumber, headSha: event.headSha, ci: ci.state },
+      "CI finished: re-running the review",
+    );
+    return await startReviews(deps, host, event.repository, prNumber, event.headSha, targets);
+  } catch (err) {
+    log.warn({ err, repository: event.repository, prNumber }, "could not re-run the review after CI finished");
+    return [];
+  }
+}
+
 type LinkRow = Awaited<ReturnType<HostEventDb["agentRepository"]["findMany"]>>[number] & {
   agent: { ownerId: string | null };
 };
@@ -695,6 +756,14 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
         runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers, true),
         followUps: [],
       };
+    }
+    case "ci_completed": {
+      if (reviewerLinks.length === 0) return none;
+      const runIds: string[] = [];
+      for (const prNumber of event.prNumbers) {
+        runIds.push(...(await rereviewAfterCi(deps, host, event, prNumber, reviewerLinks)));
+      }
+      return { runIds, followUps: [] };
     }
     case "check_rerun": {
       const owners = reviewerLinks.filter((l) => l.checkName === event.checkName);

@@ -379,7 +379,8 @@ with:
   below) — generate it with `openssl rand -hex 32` or similar; the ingress
   endpoint answers 404 until this is set.
 - **Subscribe to events**: Pull request, Issue comment, Pull request review
-  comment, Check run, Issues (needed for mentions in a newly opened or
+  comment, Check run, Check suite (re-runs a review that was waiting for CI,
+  once CI finishes), Issues (needed for mentions in a newly opened or
   edited issue; without it only comment mentions are seen), and Push (needed
   for the `push` trigger, which starts merge-watcher agents; it is its own
   checkbox, separate from the others, and must be ticked explicitly).
@@ -577,8 +578,17 @@ internal marker to the model:
   `note` telling the agent to follow CI over the description's **Tests**.
   Reading CI never makes `repo_pr_read` fail: an unreadable result is
   `state: "unavailable"` with `unavailableReason`. At most 50 results are
-  listed; names are capped at 100 characters. A review is not re-run when CI
-  finishes later.
+  listed; names are capped at 100 characters.
+- **Re-review when CI finishes.** When a review publishes `COMMENT` on its
+  own check while CI on that head is `pending` or `none`, Wardby records it.
+  When a CI check suite (not Wardby's own) completes on that head and no CI
+  there is still running, Wardby runs the same reviewer again on the same
+  head. It does this at most once per head commit, only while the pull
+  request is open and its head has not moved, and only for reviewers whose
+  repository access is still authorized. It needs the App's **Check suite**
+  event. CI that reports only commit statuses does not send check suite
+  events, so it never triggers a re-review; use **Re-run** on the review
+  check.
 - `repo_read_file` / `repo_list_files` — read a file or list a directory at
   a ref.
 - `repo_publish_review` — publish inline comments, a summary, and the check
