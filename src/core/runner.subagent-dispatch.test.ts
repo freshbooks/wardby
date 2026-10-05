@@ -153,8 +153,12 @@ function fakeDb(
         return { count: 1 };
       }) as any,
       findMany: (async ({ where }: any) => {
-        // Like the real relation: a coding run carries its CodingRun row (its reservation).
-        const all = [...runs.values()].map((r) => ({ ...r, codingRun: codingRuns.get(r.id) ?? null }));
+        // Like the real relations: a run carries its CodingRun row (its reservation) and its agent's budgetUsd.
+        const all = [...runs.values()].map((r) => ({
+          ...r,
+          codingRun: codingRuns.get(r.id) ?? null,
+          agent: { budgetUsd: agents.find((a) => a.id === r.agentId)?.budgetUsd ?? 0 },
+        }));
         if (where.agentId) {
           return all.filter((r) => where.agentId.in.includes(r.agentId) && r.startedAt >= where.startedAt.gte);
         }

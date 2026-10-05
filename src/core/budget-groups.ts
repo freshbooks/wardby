@@ -309,60 +309,42 @@ interface TreeSpendDetail extends RunTreeSpend {
 
 interface TreeRow {
   id: string;
-  agentId: string;
   parentRunId: string | null;
   status: string;
   costUsd: unknown;
   startedAt: Date;
   heartbeatAt: Date | null;
+  agent: { budgetUsd: unknown };
   codingRun: { budgetReservedUsd: unknown; timeoutSec: number } | null;
 }
 
 /**
- * The unspent holds of the tree's in-flight branches beside the asking run:
- * children of a run on its ancestor chain that are not themselves on it
- * (siblings of the asking run or of an ancestor). Sequential delegation never
- * has one; parallel delegations do, and without this each concurrent child
- * would claim the same remainder. A branch holds its reservation (a coding
- * run's CodingRun.budgetReservedUsd, a native run's agent budgetUsd) minus
- * its whole subtree's cost, so a grandchild's spend is counted once. Only a
- * live branch holds (isHoldLive): one that finished counts its real spend
- * only, so the tree's remainder rises when a sibling finishes. With `self`,
- * only branches that started before it count (first come, first served, as
- * in computeGroupSpend).
+ * The unspent holds of the tree's in-flight runs beside the asking run: every
+ * live run (isHoldLive) not on its ancestor chain -- siblings of the asking
+ * run or of an ancestor, and everything below them. Sequential delegation
+ * never has one; parallel delegations do, and without this each concurrent
+ * child would claim the same remainder. Each run holds its own reservation (a
+ * coding run's CodingRun.budgetReservedUsd, a native run's agent budgetUsd)
+ * minus its own cost: a native branch's budgetUsd bounds only its own model
+ * spend, so a coding grandchild under it holds its reservation separately. A
+ * finished run holds nothing and counts its real spend only, so the tree's
+ * remainder rises when a sibling finishes. With `self`, only runs that
+ * started before it count (first come, first served, as in computeGroupSpend).
  */
-async function siblingHoldsUsd(
-  db: Pick<BudgetGroupsDb, "agent">,
-  rows: readonly TreeRow[],
-  parentRunId: string,
-  now: Date,
-  self: RunOrder | undefined,
-): Promise<number> {
+function siblingHoldsUsd(rows: readonly TreeRow[], parentRunId: string, now: Date, self: RunOrder | undefined): number {
   const byId = new Map(rows.map((r) => [r.id, r]));
   const ancestors = new Set<string>();
   for (let id: string | null = parentRunId; id && !ancestors.has(id); id = byId.get(id)?.parentRunId ?? null) {
     ancestors.add(id);
   }
-  const children = new Map<string, TreeRow[]>();
-  for (const r of rows) {
-    if (r.parentRunId) children.set(r.parentRunId, [...(children.get(r.parentRunId) ?? []), r]);
-  }
-  const subtreeCost = (id: string, seen = new Set<string>()): number => {
-    if (seen.has(id)) return 0;
-    seen.add(id);
-    const own = Number(byId.get(id)?.costUsd ?? 0);
-    return own + (children.get(id) ?? []).reduce((sum, c) => sum + subtreeCost(c.id, seen), 0);
-  };
   const queueTimeoutSec = loadCodingConcurrencyConfig().queueTimeoutSec;
   let total = 0;
   for (const r of rows) {
-    if (!r.parentRunId || !ancestors.has(r.parentRunId) || ancestors.has(r.id)) continue;
+    if (ancestors.has(r.id)) continue;
     if (self && (r.id === self.id || !isOrderedBefore(r, self))) continue;
     if (!isHoldLive(r, now, queueTimeoutSec)) continue;
-    const reservation = r.codingRun
-      ? Number(r.codingRun.budgetReservedUsd)
-      : Number((await db.agent.findUniqueOrThrow({ where: { id: r.agentId }, select: { budgetUsd: true } })).budgetUsd);
-    total += Math.max(0, reservation - subtreeCost(r.id));
+    const reservation = r.codingRun ? Number(r.codingRun.budgetReservedUsd) : Number(r.agent.budgetUsd);
+    total += Math.max(0, reservation - Number(r.costUsd));
   }
   return total;
 }
@@ -379,17 +361,17 @@ async function runTreeSpend(
     where: { id: { in: treeRunIds } },
     select: {
       id: true,
-      agentId: true,
       parentRunId: true,
       status: true,
       costUsd: true,
       startedAt: true,
       heartbeatAt: true,
+      agent: { select: { budgetUsd: true } },
       codingRun: { select: { budgetReservedUsd: true, timeoutSec: true } },
     },
   });
   const spentUsd = rows.reduce((sum, r) => sum + Number(r.costUsd), 0);
-  const heldUsd = await siblingHoldsUsd(db, rows, parentRunId, now, self);
+  const heldUsd = siblingHoldsUsd(rows, parentRunId, now, self);
 
   const rootAgent = await db.agent.findUniqueOrThrow({
     where: { id: root.agentId },
