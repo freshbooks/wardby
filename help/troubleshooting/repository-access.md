@@ -25,3 +25,8 @@ and re-run the work later.
 
 Read [Repository access refused](../errors/repo-access.md) for the safe
 remediation sequence.
+
+The same authorization check gates an [automatic review fix
+round](../review-fix-rounds.md): a `review_fix` link that fails it simply
+skips starting that round, with no comment on the pull request, until
+access is restored.

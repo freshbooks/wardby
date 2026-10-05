@@ -28,6 +28,10 @@ example, another wardby deployment sharing the same GitHub App opened it), the
 App replies that it cannot continue the pull request instead of starting a
 run. Ask the deployment that opened it, or change the branch by hand.
 
+A repository can also be linked so wardby fixes its own review's findings on
+such a pull request automatically, up to a round cap — see
+[Automatic review fix rounds](review-fix-rounds.md).
+
 Wardby skips pull requests whose head is in a fork. It also ignores mentions
 from bots and people without write access. Repository links require the
 agent owner's linked GitHub access, or an explicitly recorded administrator

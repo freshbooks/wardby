@@ -170,6 +170,72 @@ PR description:
   agent can reach only the tools and access you would give that outsider's
   text.
 
+## Automatic review fix rounds
+
+Linking an agent with the `review_fix` trigger (`access: "write"`, at most
+one per repository) lets wardby fix its own review's findings automatically,
+without waiting for a human to ask. `reviewFixMaxRounds` (an integer from 1
+to 10, default 2) caps how many rounds a single pull request gets before
+wardby stops; re-linking without it resets the cap back to the default.
+
+A round starts when wardby's own review check on a pull request finishes as
+`CHANGES_REQUESTED`, and all of the following still hold:
+
+- the pull request is still **open**;
+- its head is **not in a fork**;
+- its head is still the **exact commit the check reviewed** (a later push
+  skips the round, since a fresh review is coming for that new head anyway);
+- the pull request was **opened by a wardby coding run of this deployment**
+  (the same marker the mention flow uses to recognize its own PRs, above);
+  and
+- the repository's `review_fix` link is still authorized, and the pull
+  request is under its round cap.
+
+No human comment or mention starts a round: it runs entirely on the
+`review_fix` link's own authorization, the same way a `pull_request` check
+does. What the agent actually changes is up to its own instructions and
+budget — wardby only decides **whether** a round may start. The task handed
+to the agent includes the same continuation hint a mention follow-up gets
+(so it keeps working on the same branch) and the review itself (capped at
+20,000 characters), asking it to fix every CRITICAL/MAJOR finding and
+MUST_FIX recommendation and leave everything else alone.
+
+Rounds are counted with labels on the pull request, so the count stays
+visible and resettable by hand:
+
+- `wardby-autofix-<N>` is added **before** each round's run starts (so a
+  round whose run is then declined still counts against the cap); `<N>` is
+  one more than the highest round label already on the pull request.
+- `wardby-autofix-limit` is added once the cap is reached, together with one
+  comment saying so.
+- `wardby-autofix-off` opts a pull request out of automatic fix rounds
+  entirely; add it by hand to stop wardby from touching a PR.
+
+To let a pull request past a cap it already hit, remove its
+`wardby-autofix-<N>` labels and `wardby-autofix-limit`, then push again or
+re-run the check.
+
+Each round posts a status comment, "🔁 Fix round N of M: working on it.",
+and edits it in place with the outcome once the round's run ends — the same
+convention a mention run's status comment follows. A pull request opened by
+a different wardby deployment (sharing the same GitHub App) gets one
+refusal comment and `wardby-autofix-limit` instead of a round, since this
+deployment has no record of the run that opened it and can't continue its
+branch.
+
+Clicking **Re-run** on the review check counts as a round in its own right:
+if the re-run also requests changes, it starts (or completes) a fix round
+the same way a push would.
+
+If a repository already forwards wardby's reviews to a webhook through a
+hand-written CI workflow to fix them automatically, replace that workflow
+with `review_fix`: link the trigger, then delete the workflow and its
+webhook so one review doesn't start two fix rounds at once.
+
+This trigger needs the App's **Issues: Read and write** permission (see
+[Registering the GitHub App](#registering-the-github-app)) — the labels
+above are written through the Issues API.
+
 ## Fork pull requests are skipped
 
 A pull request whose head is in a fork never starts a review, on a push or on
@@ -300,6 +366,11 @@ with:
   only for the resolve call itself. An App that also opens coding pull
   requests already has it.
 
+  **Issues: Read and write** is also what lets wardby add and remove the
+  `wardby-autofix-*` labels used by [automatic review fix
+  rounds](#automatic-review-fix-rounds): GitHub serves pull-request labels
+  through the Issues API.
+
 If you change these permissions on an App that is already installed, every
 installation must explicitly accept the new permission set before the App's
 webhooks resume working for it.
@@ -408,14 +479,28 @@ branch (see [Drift runs on merge](knowledge.md#drift-runs-on-merge)):
 }
 ```
 
+**A review-fix agent**, which wardby starts automatically to fix its own
+review's findings (see [Automatic review fix rounds](#automatic-review-fix-rounds)):
+
+```json
+{
+  "agentId": "<agent-id>",
+  "repository": "owner/name",
+  "access": "write",
+  "triggers": ["review_fix"],
+  "reviewFixMaxRounds": 2
+}
+```
+
 The `push` trigger is for native agents only and takes no `checkName`. Unlike
 `mention`, several agents may hold it on one repository, but one watcher per
 repository is the recommended shape. Only pushes to the default branch start a
 run; tags, other branches, and branch deletions are ignored.
 
 Only one agent per repository may hold the `mention` trigger, and only one
-link per repository may use a given `checkName` (whatever its triggers; the
-database enforces it); linking a second agent the same way returns a 409
+agent per repository may hold the `review_fix` trigger; only one link per
+repository may use a given `checkName` (whatever its triggers; the database
+enforces all three); linking a second agent the same way returns a 409
 conflict. A `checkName` is only allowed together with the `pull_request`
 trigger, which requires one. (The migration that introduced these rules
 cleared the `checkName` of every link without the `pull_request` trigger: if
@@ -431,7 +516,7 @@ The errors you may get while linking:
 | 400    | `owner_required`: the agent has no owner. Or a malformed request (e.g. `checkName` without `pull_request`).       |
 | 403    | Your GitHub account is not linked (`link_host_account`), or its access to the repository is below what is needed. |
 | 403    | `adminOverride` from a caller without the `admin` role.                                                           |
-| 409    | Another agent already holds the `mention` trigger or this `checkName` on the repository.                          |
+| 409    | Another agent already holds the `mention` or `review_fix` trigger, or this `checkName`, on the repository.        |
 | 503    | GitHub could not be asked (e.g. the App isn't installed on the repository). Nothing was changed.                  |
 
 ## The `repo_*` tools
