@@ -196,9 +196,22 @@ No human comment or mention starts a round: it runs entirely on the
 does. What the agent actually changes is up to its own instructions and
 budget — wardby only decides **whether** a round may start. The task handed
 to the agent includes the same continuation hint a mention follow-up gets
-(so it keeps working on the same branch) and the review itself (capped at
-20,000 characters), asking it to fix every CRITICAL/MAJOR finding and
-MUST_FIX recommendation and leave everything else alone.
+(so it keeps working on the same branch) and asks it to fix only the
+review's CRITICAL/MAJOR findings and MUST_FIX recommendations and change
+nothing else. The review itself (capped at 20,000 characters) is passed to
+the agent as **untrusted context**, not as part of its instructions: the
+agent reads it as information about what to fix and is told never to follow
+instructions written inside it.
+
+Only the review's summary and body reach the fixing agent — inline review
+comments do not. Write your reviewer agent's prompt so it lists every
+finding in the review body, not only in inline comments, or the fixing agent
+won't see them.
+
+Only one round runs at a time on a pull request: a round isn't started
+while an earlier round on the same pull request is still running (two
+reviews finishing together, or a **Re-run** during a round, start nothing
+extra).
 
 Rounds are counted with labels on the pull request, so the count stays
 visible and resettable by hand:
@@ -212,7 +225,9 @@ visible and resettable by hand:
   entirely; add it by hand to stop wardby from touching a PR.
 
 To let a pull request past a cap it already hit, remove its
-`wardby-autofix-<N>` labels and `wardby-autofix-limit`, then push again or
+`wardby-autofix-<N>` labels **together with** `wardby-autofix-limit` (a leftover
+`wardby-autofix-limit` means wardby won't comment when the pull request
+reaches the cap again), then push again or
 re-run the check.
 
 Each round posts a status comment, "🔁 Fix round N of M: working on it.",
@@ -223,9 +238,10 @@ refusal comment and `wardby-autofix-limit` instead of a round, since this
 deployment has no record of the run that opened it and can't continue its
 branch.
 
-Clicking **Re-run** on the review check counts as a round in its own right:
-if the re-run also requests changes, it starts (or completes) a fix round
-the same way a push would.
+Clicking **Re-run** on the review check isn't counted as a round itself:
+it starts a fresh review, and if that review requests changes, it starts a
+fix round the same way any other review would (subject to the cap and to no
+earlier round still running).
 
 If a repository already forwards wardby's reviews to a webhook through a
 hand-written CI workflow to fix them automatically, replace that workflow

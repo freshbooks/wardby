@@ -19,10 +19,20 @@ A round starts when wardby's own review check on a pull request comes back
 `CHANGES_REQUESTED` and the pull request is still open, not from a fork,
 still at the commit that was reviewed, and was opened by a wardby coding run
 of this same deployment. No human comment is involved — it runs on the
-`review_fix` link's own authorization. The agent gets the review and fixes
-the CRITICAL/MAJOR findings and MUST_FIX recommendations; what it actually
-changes, and how much budget it uses, is still up to the agent's own
-instructions.
+`review_fix` link's own authorization. The agent is asked to fix only the
+CRITICAL/MAJOR findings and MUST_FIX recommendations and change nothing
+else; what it actually changes, and how much budget it uses, is still up to
+the agent's own instructions.
+
+The review is passed to the agent as untrusted context — information about
+what to fix, never instructions to follow. Only the review's summary and
+body reach the agent, not its inline comments, so write your reviewer's
+prompt to list every finding in the review body.
+
+A round isn't started while an earlier round on the same pull request is
+still running. Clicking **Re-run** on the review check isn't counted as a
+round itself; if the re-run's review requests changes, that starts a round
+like any other review.
 
 Rounds are tracked with labels on the pull request:
 
@@ -33,8 +43,10 @@ Rounds are tracked with labels on the pull request:
 - `wardby-autofix-off` — add this by hand to opt a pull request out
   entirely.
 
-Remove the round labels and `wardby-autofix-limit` to let a capped pull
-request have more rounds. A pull request opened by a different wardby
+To let a capped pull request have more rounds, remove the round labels
+together with `wardby-autofix-limit` (a leftover
+`wardby-autofix-limit` means there's no comment when the cap is reached
+again). A pull request opened by a different wardby
 deployment gets one refusal comment and `wardby-autofix-limit` instead of a
 round, since this deployment can't continue a branch it has no record of
 opening.
