@@ -21,7 +21,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
 const PROVIDERS = ["github"] as const;
-const TRIGGERS = ["pull_request", "mention", "push"] as const;
+const TRIGGERS = ["pull_request", "mention", "push", "review_fix"] as const;
 const CHECK_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._/()-]{0,99}$/;
 
 type LinkArgs = {
@@ -31,6 +31,7 @@ type LinkArgs = {
   access: "read" | "write";
   triggers?: Array<(typeof TRIGGERS)[number]>;
   checkName?: string;
+  reviewFixMaxRounds?: number;
   adminOverride?: boolean;
 };
 
@@ -60,6 +61,9 @@ async function assertNoConflicts(
   if (args.triggers.includes("mention") && others.some((o) => o.triggers.includes("mention"))) {
     throw new McpError(409, `Another agent already handles @-mentions on ${args.repository}.`);
   }
+  if (args.triggers.includes("review_fix") && others.some((o) => o.triggers.includes("review_fix"))) {
+    throw new McpError(409, `Another agent already handles automatic review fixes on ${args.repository}.`);
+  }
   // Against every other link, whatever its triggers: a check name identifies
   // one agent's verdict on the repository (also a unique index).
   if (args.checkName !== null && others.some((o) => o.checkName === args.checkName)) {
@@ -77,11 +81,15 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
     scope: "agents:write",
     description:
       "Links a native agent you own to a repository on a code-review host, with its access, event triggers, and checkName. " +
-      "Triggers: pull_request (review each PR push), mention (answer @mentions), push (start on merges to the default branch). " +
+      "Triggers: pull_request (review each PR push), mention (answer @mentions), push (start on merges to the default branch), " +
+      "review_fix (automatic review fix rounds). The review_fix trigger makes this agent the one wardby starts, automatically " +
+      "and without a human comment, when wardby's own review check requests changes on a pull request a wardby coding run " +
+      "opened (capped by reviewFixMaxRounds, default 2). " +
       "Your linked GitHub account (link_host_account) must have write access to the repository for a write link, or read for a " +
       "read link; a wardby admin may instead approve it with adminOverride. checkName is only allowed (and required) with the " +
       "pull_request trigger, and is unique per repository. Re-linking an already-linked repository replaces its access, " +
-      "triggers, and checkName (an omitted field is cleared, not kept) and re-checks access — always send the full desired state.",
+      "triggers, checkName, and reviewFixMaxRounds (an omitted field is cleared, not kept) and re-checks access — always send " +
+      "the full desired state.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -92,6 +100,13 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         access: { type: "string", enum: ["read", "write"] },
         triggers: { type: "array", items: { type: "string", enum: [...TRIGGERS] }, uniqueItems: true },
         checkName: { type: "string", minLength: 1, maxLength: 100 },
+        reviewFixMaxRounds: {
+          type: "integer",
+          minimum: 1,
+          maximum: 10,
+          description:
+            "Only with the review_fix trigger: automatic fix rounds per pull request before wardby stops (default 2).",
+        },
         adminOverride: {
           type: "boolean",
           description:
@@ -134,6 +149,16 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         );
       }
       if (checkName !== null && !CHECK_NAME.test(checkName)) throw new McpError(400, "invalid checkName");
+      const reviewFixMaxRounds = args.reviewFixMaxRounds ?? null;
+      if (reviewFixMaxRounds !== null && !triggers.includes("review_fix")) {
+        throw new McpError(400, "reviewFixMaxRounds needs the review_fix trigger.");
+      }
+      if (
+        reviewFixMaxRounds !== null &&
+        (!Number.isInteger(reviewFixMaxRounds) || reviewFixMaxRounds < 1 || reviewFixMaxRounds > 10)
+      ) {
+        throw new McpError(400, "reviewFixMaxRounds must be an integer from 1 to 10.");
+      }
 
       // The host call happens before, and outside, the serializable transaction.
       const authorization = await authorizeRepositoryForSet(ctx, {
@@ -148,7 +173,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         link = await ctx.db.$transaction(
           async (tx) => {
             await assertNoConflicts(tx, { agentId: args.agentId, provider, repository, triggers, checkName });
-            const fields = { access: args.access, triggers, checkName, ...authorization };
+            const fields = { access: args.access, triggers, checkName, reviewFixMaxRounds, ...authorization };
             return tx.agentRepository.upsert({
               where: { agentId_provider_repository: { agentId: args.agentId, provider, repository } },
               create: { agentId: args.agentId, provider, repository, ...fields },
