@@ -4,7 +4,7 @@
  * the narrowest permission set that call needs (GitHubAppClient.withScopedToken),
  * and revokes it afterwards. See docs/private/2026-09-25-code-review-host-design.md §5.1.
  */
-import type { GitHubAppClient } from "../vcs/github.js";
+import { MAX_PULL_REQUEST_BODY_CHARS, upsertRelatedSection, type GitHubAppClient } from "../vcs/github.js";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
 import { partitionComments } from "./diff-lines.js";
 import { appMarkerRunId } from "./github-events.js";
@@ -49,6 +49,8 @@ const COMMENT_WRITE = { issues: "write", pull_requests: "write" } as const;
 const REVIEW_WRITE = { pull_requests: "write", checks: "write" } as const;
 /** Always implicitly granted to an installation token; enough for the collaborator-permission endpoint. */
 const METADATA_READ = { metadata: "read" } as const;
+/** Editing a pull request's description: nothing else. */
+const PR_WRITE = { pull_requests: "write" } as const;
 const GITHUB_USER_ID = /^[1-9]\d{0,19}$/;
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 /** Highest first: user.permissions booleans, which (unlike the legacy field) keep maintain and triage apart. */
@@ -271,7 +273,13 @@ export class GitHubReviewHost implements CodeReviewHost {
             .filter((name) => name !== "")
         : [];
       const markerRunId = appMarkerRunId(pr, slug);
-      return { ...this.head(repository, pr), labels, ...(markerRunId ? { markerRunId } : {}) };
+      return {
+        ...this.head(repository, pr),
+        labels,
+        merged: pr.merged === true,
+        draft: pr.draft === true,
+        ...(markerRunId ? { markerRunId } : {}),
+      };
     });
   }
 
@@ -282,6 +290,26 @@ export class GitHubReviewHost implements CodeReviewHost {
         { method: "POST", body: JSON.stringify({ labels: [label] }) },
         [200],
       );
+    });
+  }
+
+  async replaceRelatedSection(
+    repository: string,
+    prNumber: number,
+    input: { expectedMarkerRunId: string; block: string },
+  ): Promise<"updated" | "unchanged" | "skipped"> {
+    const { slug } = await this.client.appIdentity();
+    const base = repoPath(repository);
+    return this.withToken(repository, PR_WRITE, async (get) => {
+      const pr = record(await (await get(`${base}/pulls/${prNumber}`)).json());
+      // Re-checked on the body actually being edited: only the App's own PR for this run.
+      if (pr.state !== "open" || appMarkerRunId(pr, slug) !== input.expectedMarkerRunId) return "skipped";
+      const body = typeof pr.body === "string" ? pr.body : "";
+      const next = upsertRelatedSection(body, input.block);
+      if (next === null || next.length > MAX_PULL_REQUEST_BODY_CHARS) return "skipped";
+      if (next === body) return "unchanged";
+      await get(`${base}/pulls/${prNumber}`, { method: "PATCH", body: JSON.stringify({ body: next }) }, [200]);
+      return "updated";
     });
   }
 

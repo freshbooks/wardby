@@ -1,6 +1,6 @@
 // src/providers/review-host/github.test.ts
 import { describe, expect, it, vi } from "vitest";
-import type { GitHubAppClient } from "../vcs/github.js";
+import { RELATED_SECTION_END, RELATED_SECTION_START, type GitHubAppClient } from "../vcs/github.js";
 import { GitHubReviewHost } from "./github.js";
 import { BY_APP, fakeGitHub, json, OLD_SHA, PATCH, PR, REPO, SHA } from "./github.test-support.js";
 import { reviewMarker } from "./review-format.js";
@@ -147,6 +147,8 @@ describe("GitHubReviewHost reads", () => {
       state: "open",
       labels: ["wardby-autofix-1"],
       markerRunId: "run_1",
+      merged: false,
+      draft: true,
     });
   });
 
@@ -163,6 +165,8 @@ describe("GitHubReviewHost reads", () => {
       isFork: false,
       state: "open",
       labels: [],
+      merged: false,
+      draft: true,
     });
   });
 
@@ -729,5 +733,56 @@ describe("GitHubReviewHost.repositoryPermission", () => {
     await expect(host.repositoryPermission(REPO, { id: "abc", login: "octo" })).rejects.toThrow();
     await expect(host.repositoryPermission(REPO, { id: "42", login: "../../x" })).rejects.toThrow();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("GitHubReviewHost.replaceRelatedSection", () => {
+  const block = `${RELATED_SECTION_START}\nlist\n${RELATED_SECTION_END}`;
+  const appPr = (body: string, extra: Record<string, unknown> = {}) => ({
+    ...PR,
+    user: { type: "Bot", login: "wardby[bot]" },
+    body,
+    ...extra,
+  });
+
+  it("patches the body with a pull_requests-write token only, inserting the section after the marker", async () => {
+    const { client, calls, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(appPr("<!-- wardby:run_1 -->\n\nSummary"));
+      if (method === "PATCH" && path === `${BASE}/pulls/7`) return json({});
+      return undefined;
+    });
+    await expect(
+      new GitHubReviewHost(client).replaceRelatedSection(REPO, 7, { expectedMarkerRunId: "run_1", block }),
+    ).resolves.toBe("updated");
+    expect(grants).toEqual([{ pull_requests: "write" }]);
+    expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({
+      body: `<!-- wardby:run_1 -->\n\n${block}\n\nSummary`,
+    });
+  });
+
+  it("makes no write when the section is already current", async () => {
+    const { client, calls } = fakeGitHub(({ method, path }) =>
+      method === "GET" && path === `${BASE}/pulls/7` ? json(appPr(`<!-- wardby:run_1 -->\n\n${block}`)) : undefined,
+    );
+    await expect(
+      new GitHubReviewHost(client).replaceRelatedSection(REPO, 7, { expectedMarkerRunId: "run_1", block }),
+    ).resolves.toBe("unchanged");
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
+  it.each([
+    ["not authored by the App", { user: { type: "User", login: "chfields" } }, "<!-- wardby:run_1 -->"],
+    ["another run's marker", {}, "<!-- wardby:run_2 -->"],
+    ["closed", { state: "closed" }, "<!-- wardby:run_1 -->"],
+    ["malformed markers", {}, `<!-- wardby:run_1 -->\n\n${RELATED_SECTION_START}`],
+    ["too long", {}, `<!-- wardby:run_1 -->\n\n${"x".repeat(65_536)}`],
+  ])("skips a PR that is %s", async (_label, extra, body) => {
+    const { client, calls } = fakeGitHub(({ method, path }) =>
+      method === "GET" && path === `${BASE}/pulls/7` ? json(appPr(body, extra)) : undefined,
+    );
+    await expect(
+      new GitHubReviewHost(client).replaceRelatedSection(REPO, 7, { expectedMarkerRunId: "run_1", block }),
+    ).resolves.toBe("skipped");
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
   });
 });

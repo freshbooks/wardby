@@ -74,6 +74,10 @@ export interface PullRequestOrigin extends PullRequestHead {
   markerRunId?: string;
   /** The PR's label names; empty on a host without labels. */
   labels: string[];
+  /** True once merged; absent on hosts that can't say. */
+  merged?: boolean;
+  /** True while a draft; absent on hosts that can't say. */
+  draft?: boolean;
 }
 
 export type FileReadResult =
@@ -228,6 +232,18 @@ export interface CodeReviewHost {
   pullRequestOrigin?(repository: string, prNumber: number): Promise<PullRequestOrigin>;
   /** Adds a label to a pull request (created if missing). Absent on hosts without labels. */
   addLabel?(repository: string, prNumber: number, label: string): Promise<void>;
+  /**
+   * Replaces (or inserts) wardby's marked Related pull requests section in an
+   * open pull request's description — only on a PR the App itself authored
+   * whose run marker is `expectedMarkerRunId`. "skipped" covers every refusal
+   * (not the App's, another run's, closed, malformed markers, too long).
+   * Absent on hosts that can't edit descriptions.
+   */
+  replaceRelatedSection?(
+    repository: string,
+    prNumber: number,
+    input: { expectedMarkerRunId: string; block: string },
+  ): Promise<"updated" | "unchanged" | "skipped">;
   readFile(
     repository: string,
     path: string,
