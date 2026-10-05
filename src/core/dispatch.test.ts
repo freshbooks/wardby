@@ -203,6 +203,27 @@ describe("dispatchRun", () => {
     expect(start).toHaveBeenCalledWith(result?.run.id);
   });
 
+  it("calls onPersisted once with the committed run, before the executor starts it", async () => {
+    const state = fakeDb(nativeAgent());
+    const events: string[] = [];
+    const onPersisted = vi.fn((run: { id: string }) => {
+      expect(state.transactionActive()).toBe(false);
+      events.push(`persisted:${run.id}`);
+    });
+    const start = vi.fn(async (runId: string) => {
+      events.push(`start:${runId}`);
+    });
+    const result = await dispatchRun({
+      db: state.db,
+      executor: { start, async stop() {} },
+      agentId: "agent_1",
+      awaitExecution: true,
+      onPersisted,
+    });
+    expect(onPersisted).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([`persisted:${result?.run.id}`, `start:${result?.run.id}`]);
+  });
+
   it("persists triggeredById on the run, and null when the caller gives none", async () => {
     const executor: Executor = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
     const state = fakeDb(nativeAgent());

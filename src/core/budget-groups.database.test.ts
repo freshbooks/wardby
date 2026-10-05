@@ -308,4 +308,46 @@ describe.skipIf(!process.env.DATABASE_URL)("budget groups (database)", () => {
       data: { status: "cancelled", finishedAt: new Date() },
     });
   });
+
+  it("parallel delegations: concurrent coding children of one parent never reserve more than the tree has left", async () => {
+    const parentAgent = await nativeAgent("par-parent", 10, null);
+    const children = await Promise.all([0, 1, 2, 3].map((i) => codingAgent(`par-child-${i}`, 4, null)));
+    const parent = await db.run.create({ data: { agentId: parentAgent, status: "running", costUsd: 0 } });
+
+    // Ungrouped agents take no BudgetGroup lock: the Serializable persist transaction's
+    // retry is what keeps these four from each reading the same remainder. A barrier on
+    // the first four persist attempts (after each has read the tree's budget) holds them
+    // all open together, so they overlap for certain and at least one must retry.
+    let persistAttempts = 0;
+    let releaseBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => (releaseBarrier = resolve));
+    const afterPersist = async () => {
+      persistAttempts += 1;
+      if (persistAttempts === children.length) releaseBarrier();
+      if (persistAttempts <= children.length) {
+        await Promise.race([barrier, new Promise((resolve) => setTimeout(resolve, 3000))]);
+      }
+    };
+    const results = await Promise.all(
+      children.map((agentId) =>
+        dispatchRun({ db, executor, agentId, trigger: "subagent", parentRunId: parent.id, afterPersist }),
+      ),
+    );
+    expect(persistAttempts).toBeGreaterThan(children.length);
+    const reserved = (await Promise.all(results.map((r) => reservedUsd(r!.run.id)))).map((v) => v ?? 0);
+    expect(reserved.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(10 + 1e-6);
+    expect([...reserved].sort((a, b) => a - b)).toEqual([0, 2, 4, 4]);
+    const statuses = await db.run.findMany({
+      where: { id: { in: results.map((r) => r!.run.id) } },
+      select: { status: true, error: true },
+    });
+    expect(statuses.filter((s) => s.status === "refused").map((s) => s.error)).toEqual([
+      expect.stringMatching(/^run_tree_exhausted\b/),
+    ]);
+
+    await db.run.updateMany({
+      where: { id: { in: [parent.id, ...results.map((r) => r!.run.id)] } },
+      data: { status: "cancelled", finishedAt: new Date() },
+    });
+  });
 });

@@ -66,6 +66,11 @@ const MAX_BUDGET_USD = 1_000_000;
 /** Upper bound on Agent.maxDelegationsPerRun: a lead fanning out to one builder per repository. */
 const MAX_DELEGATIONS_PER_RUN = 20;
 
+const PARALLEL_DELEGATIONS_DESCRIPTION =
+  "Native agents with sub-agents: when true, the delegate_to_* calls the agent makes in one model turn run at the same time " +
+  "instead of one after another (other tool calls still run in order). The run tree still shares one budget, so later " +
+  "sub-agents get what earlier ones leave. Coding sub-agents still queue for CODING_MAX_CONCURRENT slots. Default false.";
+
 const agentFields = {
   name: z.string().trim().min(1).max(MAX_AGENT_NAME_CHARS),
   systemPrompt: z.string().min(1).max(MAX_SYSTEM_PROMPT_CHARS),
@@ -73,6 +78,7 @@ const agentFields = {
   budgetUsd: z.number().finite().positive().max(MAX_BUDGET_USD),
   maxTurns: z.number().int().min(1).max(100),
   maxDelegationsPerRun: z.number().int().min(1).max(MAX_DELEGATIONS_PER_RUN),
+  parallelDelegations: z.boolean(),
   schedule: z.string().trim().min(1).max(256),
   timezone: z.string().trim().min(1).max(128),
   scheduleEnabled: z.boolean(),
@@ -112,6 +118,7 @@ const CreateAgentSchema = z
     budgetUsd: agentFields.budgetUsd,
     maxTurns: agentFields.maxTurns.optional(),
     maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
+    parallelDelegations: agentFields.parallelDelegations.optional(),
     schedule: agentFields.schedule.optional(),
     timezone: agentFields.timezone.optional(),
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
@@ -170,6 +177,7 @@ const UpdateAgentSchema = z
     budgetUsd: agentFields.budgetUsd.optional(),
     maxTurns: agentFields.maxTurns.optional(),
     maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
+    parallelDelegations: agentFields.parallelDelegations.optional(),
     schedule: agentFields.schedule.nullable().optional(),
     timezone: agentFields.timezone.optional(),
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
@@ -389,8 +397,10 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           minimum: 1,
           maximum: MAX_DELEGATIONS_PER_RUN,
           description:
-            "Native agents with sub-agents: how many delegate_to_* calls one run may make, each to a different sub-agent (they run one after another). Default 1: route to exactly one.",
+            "Native agents with sub-agents: how many delegate_to_* calls one run may make, each to a different sub-agent " +
+            "(one after another, or together with parallelDelegations). Default 1: route to exactly one.",
         },
+        parallelDelegations: { type: "boolean", description: PARALLEL_DELEGATIONS_DESCRIPTION },
         schedule: { type: "string" },
         timezone: { type: "string" },
         scheduleEnabled: { type: "boolean" },
@@ -472,8 +482,10 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           minimum: 1,
           maximum: MAX_DELEGATIONS_PER_RUN,
           description:
-            "Native agents with sub-agents: how many delegate_to_* calls one run may make, each to a different sub-agent (they run one after another). Default 1: route to exactly one.",
+            "Native agents with sub-agents: how many delegate_to_* calls one run may make, each to a different sub-agent " +
+            "(one after another, or together with parallelDelegations). Default 1: route to exactly one.",
         },
+        parallelDelegations: { type: "boolean", description: PARALLEL_DELEGATIONS_DESCRIPTION },
         schedule: { type: ["string", "null"] },
         timezone: { type: "string" },
         scheduleEnabled: { type: "boolean" },

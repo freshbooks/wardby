@@ -43,6 +43,8 @@ model Agent {
   maxTurns Int         @default(10)
   /// Sub-agent delegations one run may make (delegate_to_*), each to a different sub-agent. 1 = route to exactly one.
   maxDelegationsPerRun Int @default(1)
+  /// Native leads: the delegate_to_* calls of one model turn run at the same time. False = one after another.
+  parallelDelegations Boolean @default(false)
 
   // Phase 4: ownership. Null = owner-less, a transition state only: access
   // then comes from ResourceGrant rows alone (the migration gives everyone

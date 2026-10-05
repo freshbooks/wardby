@@ -372,15 +372,50 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
 
 - Each `delegate_to_<name>` call still goes to a different sub-agent; a second
   call to the same one in the same run is refused with `already_dispatched`.
-- The calls run one after another, in the order the lead makes them, so
-  delegate the repositories that own the data first.
+  A delegation waiting for budget (see below) also holds its place against
+  `maxDelegationsPerRun`: a call beyond the limit is refused with
+  `already_dispatched` and a message naming both counts, e.g. "This run
+  reached its limit of 6 delegations: 4 made and 2 waiting for budget."
+- By default the calls run one after another, in the order the lead makes
+  them. To run them at the same time, also set `parallelDelegations`:
+
+  ```json
+  { "id": "<lead agent id>", "maxDelegationsPerRun": 6, "parallelDelegations": true }
+  ```
+
+  Only the **consecutive** `delegate_to_*` calls of one model turn start
+  together: `[delegate_a, delegate_b]` starts both at once, but
+  `[delegate_a, jira_comment, delegate_b]` runs `delegate_a`, then the
+  `jira_comment` call, then `delegate_b` one at a time — nothing is
+  reordered, and a non-delegation call between two delegations splits them
+  into separate steps. The lead gets every call's result, in the same order
+  the calls were made, before its next turn. Tell the lead to make all of
+  its independent delegations consecutively, in one turn, with no other
+  tool call between them. A prompt that asks for delegations "in dependency
+  order", one per turn, still runs them one after another. Use
+  `parallelDelegations` only when every builder's task already carries the
+  whole cross-repository contract, so no builder needs another's output.
+
+- With `parallelDelegations`, builders compete for coding slots: runs beyond
+  `CODING_MAX_CONCURRENT` (or beyond a Kubernetes quota set with
+  `KUBERNETES_RESOURCE_QUOTA`) wait in the queue and start as others finish.
+  A builder that waits longer than `CODING_QUEUE_TIMEOUT_SEC` fails with
+  `coding_queue_timeout`, and the lead sees that in its result.
 - Each coding sub-agent's result tells the lead its `status`, its summary
   (`finalText`), cost and tokens, and, when it opened or pushed to a pull
   request, `pullRequest` (`outcome` `opened` or `updated`, `repository`,
   `number`, `url`) taken from Wardby's own record of the run. A lead prompt can
   ask the agent to report those links.
-- The whole run tree shares one budget: give the lead a `budgetUsd` that covers
-  every builder it may start, plus its own planning.
+- The whole run tree shares one budget: give the lead a `budgetUsd` that
+  covers every builder it may start, plus its own planning. Builders started
+  together each reserve their own `budgetUsd` up front, so the ones admitted
+  last get what the earlier ones leave. A builder admitted after the tree's
+  budget is spent waits for a still-running sibling to finish and free its
+  reservation, then retries — up to its own normal wait bound, so the total
+  wait can run to roughly twice that bound before it gives up. With no
+  sibling still running, it is refused immediately with `run_tree_exhausted`.
+  The check behind that wait is an estimate, so a retry can still end in the
+  same refusal. Size the lead for the sum of its builders' budgets.
 - Each builder works only in its own repository and can't see the others, so
   the lead's task to each one must carry everything that crosses a repository
   boundary (routes, field names and types, error codes), word for word the same.
@@ -424,6 +459,23 @@ own review; and fix rounds stay capped and run one at a time per pull
 request. A continuation whose pull request has since been merged or closed
 fails with category `continuation_closed` and pushes nothing — see
 [Continuation's pull request is no longer open](../help/errors/continuation-closed.md).
+
+#### Limits
+
+- Cancelling the lead run does not stop a native sub-agent that is already
+  running; it keeps running to completion. A coding sub-agent is stopped.
+- If Wardby restarts mid-batch, the batch's delegation calls replay and each
+  one already dispatched reports `already_dispatched`, so the lead does not
+  get those sub-agents' results. A native sub-agent that was running stops
+  with the restart and is marked `lost`, as is a coding sub-agent whose
+  replica crashed. Check the run tree with `get_run` and re-trigger the lead.
+- The lead's own remaining (unspent) budget is not reserved against its
+  children's dispatch, so give the lead's `budgetUsd` headroom beyond the
+  plain sum of its builders' budgets, not just that sum exactly.
+- With nested fan-out — a native sub-agent that itself has
+  `parallelDelegations` and delegates further — two branches dispatching at
+  the same time can briefly both see the same remaining run-tree budget and
+  both be admitted against it.
 
 ### Together with Recipe A
 

@@ -7,7 +7,7 @@
  * the budget guardrail must stay above whichever engine is running.
  */
 
-import type { Engine, EngineResult, EngineRunContext, EngineStatus } from "../providers/engine/types.js";
+import type { Engine, EngineResult, EngineRunContext, EngineStatus, StepRunner } from "../providers/engine/types.js";
 import { runStepInline } from "../providers/engine/types.js";
 import type { LlmMessage, LlmToolDef, LlmUsage } from "../providers/index.js";
 import { applyPreflightSafetyMargin, checkTokenCalibration, estimateInputCost, isOverBudget } from "./budget.js";
@@ -172,15 +172,13 @@ export class NativeEngine implements Engine {
       messages.push(assistantMessage);
 
       if (turn.toolCalls.length > 0) {
+        const results = await this.runToolCalls(ctx, step, turns, turn.toolCalls);
         for (const [index, toolCall] of turn.toolCalls.entries()) {
-          const resultJson = await step(`turn:${turns}:tool:${index}`, () =>
-            ctx.runSandboxTool(toolCall.name, toolCall.argsJson),
-          );
           messages.push({
             role: "tool",
             toolCallId: toolCall.id,
             name: toolCall.name,
-            content: wrapUntrustedToolOutput(resultJson),
+            content: wrapUntrustedToolOutput(results[index]),
           });
         }
         continue;
@@ -246,6 +244,60 @@ export class NativeEngine implements Engine {
 
   private finish(status: EngineStatus, finalText: string, turns: number, usage: Usage, error?: string): EngineResult {
     return { status, finalText, turns, usage, ...(error ? { error } : {}) };
+  }
+
+  /**
+   * One turn's tool calls, results in call order. The calls are split into
+   * runs of consecutive calls that `ctx.runsConcurrently` accepts; each such
+   * run of two or more is one concurrent batch, and every other call
+   * (including a lone accepted one) runs alone. Groups run strictly in call
+   * order and nothing is reordered: `[a, x, b]` runs a, then x, then b.
+   * Without `runsConcurrently` every call runs alone, exactly as before.
+   *
+   * Durability (DBOS): a step's id is assigned when the step starts, so every
+   * step here is started in an order fixed by the turn's recorded tool calls
+   * alone, never by timing. A batch's steps are started in one synchronous
+   * pass in call order and awaited with allSettled, not Promise.all, so a
+   * rejection never leaves sibling steps running unawaited (DBOS guidance);
+   * once all have settled, the first rejection by call order is rethrown.
+   */
+  private async runToolCalls(
+    ctx: EngineRunContext,
+    step: StepRunner,
+    turn: number,
+    toolCalls: TurnResult["toolCalls"],
+  ): Promise<string[]> {
+    const runCall = (index: number): Promise<string> =>
+      step(`turn:${turn}:tool:${index}`, () => ctx.runSandboxTool(toolCalls[index].name, toolCalls[index].argsJson));
+    const concurrent = ctx.runsConcurrently;
+    const results: string[] = new Array<string>(toolCalls.length);
+
+    let index = 0;
+    while (index < toolCalls.length) {
+      let end = index;
+      if (concurrent) {
+        while (end < toolCalls.length && concurrent(toolCalls[end].name)) end += 1;
+      }
+      if (end - index < 2) {
+        results[index] = await runCall(index);
+        index += 1;
+        continue;
+      }
+
+      const batch = Array.from({ length: end - index }, (_, offset) => index + offset);
+      engineLog.info({ turn, toolCallIds: batch.map((i) => toolCalls[i].id) }, "running tool calls concurrently");
+      const settled = await Promise.allSettled(batch.map((i) => runCall(i)));
+      const rejections = settled.filter((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+      for (const extra of rejections.slice(1)) {
+        engineLog.warn({ turn, err: extra.reason }, "concurrent tool call also failed");
+      }
+      if (rejections.length > 0) throw rejections[0].reason;
+      settled.forEach((outcome, position) => {
+        results[batch[position]] = (outcome as PromiseFulfilledResult<string>).value;
+      });
+      index = end;
+    }
+    return results;
   }
 
   /**

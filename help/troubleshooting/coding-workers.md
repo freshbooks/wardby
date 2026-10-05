@@ -42,6 +42,9 @@ waiting after `CODING_QUEUE_TIMEOUT_SEC` fails with `coding_queue_timeout`:
 raise the quota, lower the run pods' size, or lower `CODING_MAX_CONCURRENT` so
 fewer runs compete.
 
+A lead agent with `parallelDelegations` starts several coding runs together;
+expect some of them to queue when the lead fans out wider than the free slots.
+
 ## Service refusals and failures
 
 A repository can declare services such as PostgreSQL in `.wardby/services.yaml`

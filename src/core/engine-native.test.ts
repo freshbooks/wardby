@@ -569,3 +569,190 @@ describe("NativeEngine", () => {
     expect(replayed).toEqual(first);
   });
 });
+
+describe("NativeEngine concurrent tool calls (runsConcurrently)", () => {
+  const calls = (...names: string[]): LlmStreamEvent[] => [
+    ...names.map((name, i) => ({ type: "tool_call" as const, id: `c${i}`, name, argsJson: "{}" })),
+    { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.001 } },
+  ];
+  const final: LlmStreamEvent[] = [
+    { type: "text", delta: "ok" },
+    { type: "done", stopReason: "stop", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.001 } },
+  ];
+  const isDelegation = (name: string) => name.startsWith("d_");
+  const delays: Record<string, number> = { d_a: 30, d_b: 10, d_c: 30, d_d: 10 };
+
+  /** A tool runner whose d_* calls finish in reverse start order, recording every start and end. */
+  function trackingTools() {
+    const events: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const run = vi.fn(async (name: string) => {
+      events.push(`${name}:start`);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, delays[name] ?? 0));
+      inFlight -= 1;
+      events.push(`${name}:end`);
+      return JSON.stringify({ from: name });
+    });
+    return { events, run, max: () => maxInFlight };
+  }
+
+  it("runs consecutive delegations of one turn together, other calls in order, and returns results in call order", async () => {
+    const llm = scriptedLlm(
+      [calls("r_1", "d_a", "d_b", "r_2"), final],
+      () => 0.001,
+      () => 10,
+    );
+    const tools = trackingTools();
+    await new NativeEngine().run(makeContext({ llm, runSandboxTool: tools.run, runsConcurrently: isDelegation }));
+
+    expect(tools.max()).toBe(2);
+    expect(tools.events.indexOf("r_1:end")).toBeLessThan(tools.events.indexOf("d_a:start"));
+    expect(tools.events.indexOf("d_b:start")).toBeLessThan(tools.events.indexOf("d_a:end"));
+    expect(tools.events.indexOf("d_a:end")).toBeLessThan(tools.events.indexOf("r_2:start"));
+
+    const toolMessages = llm.calls[1].messages.filter((m) => m.role === "tool");
+    expect(toolMessages.map((m) => m.toolCallId)).toEqual(["c0", "c1", "c2", "c3"]);
+    expect(toolMessages.map((m) => m.name)).toEqual(["r_1", "d_a", "d_b", "r_2"]);
+    expect(toolMessages[1].content).toContain('{"from":"d_a"}');
+    expect(toolMessages[2].content).toContain('{"from":"d_b"}');
+  });
+
+  it("never reorders: delegations split by another call each run alone, in call order", async () => {
+    const llm = scriptedLlm(
+      [calls("d_a", "r_1", "d_b"), final],
+      () => 0.001,
+      () => 10,
+    );
+    const tools = trackingTools();
+    const stepNames: string[] = [];
+    await new NativeEngine().run(
+      makeContext({
+        llm,
+        runSandboxTool: tools.run,
+        runsConcurrently: isDelegation,
+        step: recordingStepRunner(new Map(), stepNames),
+      }),
+    );
+    expect(tools.max()).toBe(1);
+    expect(tools.events).toEqual(["d_a:start", "d_a:end", "r_1:start", "r_1:end", "d_b:start", "d_b:end"]);
+    expect(stepNames.filter((n) => n.startsWith("turn:1:tool:"))).toEqual([
+      "turn:1:tool:0",
+      "turn:1:tool:1",
+      "turn:1:tool:2",
+    ]);
+  });
+
+  it("runs each contiguous run of delegations as its own batch, with the call between them in order", async () => {
+    const llm = scriptedLlm(
+      [calls("d_a", "d_b", "r_1", "d_c", "d_d"), final],
+      () => 0.001,
+      () => 10,
+    );
+    const tools = trackingTools();
+    const stepNames: string[] = [];
+    await new NativeEngine().run(
+      makeContext({
+        llm,
+        runSandboxTool: tools.run,
+        runsConcurrently: isDelegation,
+        step: recordingStepRunner(new Map(), stepNames),
+      }),
+    );
+    const at = (event: string) => tools.events.indexOf(event);
+    expect(tools.max()).toBe(2);
+    expect(at("d_b:start")).toBeLessThan(at("d_a:end"));
+    expect(at("d_a:end")).toBeLessThan(at("r_1:start"));
+    expect(at("d_b:end")).toBeLessThan(at("r_1:start"));
+    expect(at("r_1:end")).toBeLessThan(at("d_c:start"));
+    expect(at("d_d:start")).toBeLessThan(at("d_c:end"));
+    expect(stepNames.filter((n) => n.startsWith("turn:1:tool:"))).toEqual([
+      "turn:1:tool:0",
+      "turn:1:tool:1",
+      "turn:1:tool:2",
+      "turn:1:tool:3",
+      "turn:1:tool:4",
+    ]);
+    const toolMessages = llm.calls[1].messages.filter((m) => m.role === "tool");
+    expect(toolMessages.map((m) => m.toolCallId)).toEqual(["c0", "c1", "c2", "c3", "c4"]);
+    expect(toolMessages.map((m) => m.name)).toEqual(["d_a", "d_b", "r_1", "d_c", "d_d"]);
+    expect(toolMessages[3].content).toContain('{"from":"d_c"}');
+  });
+
+  it("runs a lone delegation, and every call without runsConcurrently, one after another as before", async () => {
+    for (const ctx of [{ runsConcurrently: isDelegation, turn: calls("d_a", "r_1") }, { turn: calls("d_a", "d_b") }]) {
+      const llm = scriptedLlm(
+        [ctx.turn, final],
+        () => 0.001,
+        () => 10,
+      );
+      const tools = trackingTools();
+      await new NativeEngine().run(
+        makeContext({
+          llm,
+          runSandboxTool: tools.run,
+          ...(ctx.runsConcurrently ? { runsConcurrently: ctx.runsConcurrently } : {}),
+        }),
+      );
+      expect(tools.max()).toBe(1);
+    }
+  });
+
+  it("waits for every delegation to settle, then rethrows the first rejection by call order", async () => {
+    const llm = scriptedLlm(
+      [calls("d_a", "d_b", "d_c"), final],
+      () => 0.001,
+      () => 10,
+    );
+    let slowFinished = false;
+    const run = vi.fn(async (name: string) => {
+      if (name === "d_c") throw new Error("late boom");
+      if (name === "d_b") {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        throw new Error("boom");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      slowFinished = true;
+      return "{}";
+    });
+    await expect(
+      new NativeEngine().run(makeContext({ llm, runSandboxTool: run, runsConcurrently: isDelegation })),
+    ).rejects.toThrow(/^boom$/);
+    expect(slowFinished).toBe(true);
+  });
+
+  it("replays a recorded concurrent batch without running any tool again", async () => {
+    const record = new Map<string, unknown>();
+    const first = trackingTools();
+    await new NativeEngine().run(
+      makeContext({
+        llm: scriptedLlm(
+          [calls("d_a", "d_b"), final],
+          () => 0.001,
+          () => 10,
+        ),
+        runSandboxTool: first.run,
+        runsConcurrently: isDelegation,
+        step: recordingStepRunner(record, []),
+      }),
+    );
+    expect(first.run).toHaveBeenCalledTimes(2);
+    const replay = trackingTools();
+    const replayLlm = scriptedLlm(
+      [calls("d_a", "d_b"), final],
+      () => 0.001,
+      () => 10,
+    );
+    await new NativeEngine().run(
+      makeContext({
+        llm: replayLlm,
+        runSandboxTool: replay.run,
+        runsConcurrently: isDelegation,
+        step: recordingStepRunner(record, []),
+      }),
+    );
+    expect(replay.run).not.toHaveBeenCalled();
+  });
+});
