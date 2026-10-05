@@ -29,12 +29,13 @@ exact base branch and the run's hidden marker still in its description:
   the pull request's description (wardby relies on it to find its own PR;
   nothing else identifies it).
 
-Most runs catch this before cloning, so **the run's own status is usually
-`refused`**, not `failed` — it never spent anything. A run that pushes a
-second commit before anyone merges or closes the PR underneath it catches
-this right before that push instead, and that one does end `failed`,
-already having worked. Either way the category (`get_run`'s
-`codingRun.failureCategory`) is `continuation_closed`.
+When the pull request was merged or closed **before the run started**, the
+check before cloning catches it: the run's status is `refused`, and nothing
+was spent beyond setup. When it was merged or closed **while the run was
+working**, the check right before the push catches it instead: that run ends
+`failed`, having already done its work, and that work is not pushed. Either
+way the category (`get_run`'s `codingRun.failureCategory`) is
+`continuation_closed`.
 
 This is a safety check, not a flaky one: a transient GitHub failure while
 checking (a timeout, a rate limit, a 5xx) is retried once, after a short

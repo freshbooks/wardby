@@ -40,6 +40,12 @@ included, plus that run tree's own siblings.
 - Only open pull requests that Wardby's own GitHub App opened are edited;
   merged or closed ones are listed but never changed, and a pull request
   from a different Wardby deployment sharing the same App is never touched.
+- **Repository names are visible across the set.** The section (and the
+  follow-up hints below) lists every pull request in the set by repository
+  name and number, so a request that spans repositories of different
+  visibility can show a private repository's name in a public repository's
+  pull request. If you mix public and private repositories, keep such work in
+  separate requests: separate Jira issues, or separate lead agents.
 
 Reviewers see the section in the pull request description, so a reviewer
 agent can tell that a field, route, or schema a change relies on is added by

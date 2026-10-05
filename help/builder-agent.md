@@ -40,6 +40,10 @@ Reply with one short line saying what you started, or what you need.
 The router's final reply is posted where the mention was, so never instruct it
 to include secrets or internal details.
 
+When a lead fans out to builders in several repositories, or a follow-up's
+task lists open sibling pull requests with their `continuePriorRun` values,
+see [Related pull requests across repositories](related-pull-requests.md).
+
 ## Builder prompt
 
 Use for the builder coding agent.

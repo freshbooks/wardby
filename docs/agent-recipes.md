@@ -390,6 +390,12 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   open one is rewritten with the full list. Text you add inside the section is
   replaced; the rest of the description is not touched. Only pull requests the
   App opened and that are still open are edited.
+- The section, and the follow-up hints below, list every pull request in the
+  set by repository name and number. A request that spans repositories of
+  different visibility can therefore show a private repository's name in a
+  public repository's pull request: if you mix public and private
+  repositories, keep that work in separate requests (separate Jira issues, or
+  separate lead agents).
 
 #### Follow-ups across the set
 

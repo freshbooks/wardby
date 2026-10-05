@@ -142,18 +142,19 @@ PR description:
   same GitHub App opened the PR), no run starts: the App replies that this
   deployment cannot continue the PR, so ask the deployment that opened it.
   If a router agent passes a `continuePriorRun` id that this deployment
-  cannot continue — including one naming a run opened by a different
-  owner's agent, which is refused even when the delegating and continuing
-  agents share an owner (see
-  [Nothing crosses owners without a grant](security-deployment.md)) — the
-  delegation returns a `continuation_refused` tool error to the agent
+  cannot continue — a continuation is also refused when the run it names
+  was opened by another owner's agent, even if the lead and the continuing
+  sub-agent share an owner (see
+  [Nothing crosses owners without a grant](security-deployment.md#sharing-agents))
+  — the delegation returns a `continuation_refused` tool error to the agent
   instead of failing its run.
 - A continuation never pushes to a pull request that is no longer open.
   Wardby asks GitHub whether the pull request is still open before cloning,
-  and again right before it pushes; a run that finds it already merged or
-  closed stops instead (usually refused before cloning, since no work was
-  done yet; failed if it had already pushed a prior commit), category
-  `continuation_closed` either way, and nothing is pushed. A transient
+  and again right before it pushes. A pull request merged or closed before
+  the run starts is caught before cloning: the run is refused, having spent
+  nothing beyond setup. One merged or closed while the run was working is
+  caught right before the push: that run ends failed and its work is not
+  pushed. The category is `continuation_closed` either way. A transient
   GitHub failure while checking (a timeout, rate limit, or 5xx) is retried
   once, after a short wait, and failing that, the run proceeds rather than
   being stopped on an unconfirmed answer — see
