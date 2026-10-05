@@ -164,7 +164,9 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
 sub-agent; the calls run one after another; the run tree shares the lead's
 budget, so size `budgetUsd` for every builder it may start. Put the full
 cross-repository contract in each builder's task, since each builder sees only
-its own repository.
+its own repository. Each builder's result includes `pullRequest` (`outcome`,
+`repository`, `number`, `url`) from Wardby's own record when it opened or
+pushed to one, so the lead can report the links.
 
 ## Step 3: confirm
 

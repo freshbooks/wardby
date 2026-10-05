@@ -374,6 +374,11 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   call to the same one in the same run is refused with `already_dispatched`.
 - The calls run one after another, in the order the lead makes them, so
   delegate the repositories that own the data first.
+- Each coding sub-agent's result tells the lead its `status`, its summary
+  (`finalText`), cost and tokens, and, when it opened or pushed to a pull
+  request, `pullRequest` (`outcome` `opened` or `updated`, `repository`,
+  `number`, `url`) taken from Wardby's own record of the run. A lead prompt can
+  ask the agent to report those links.
 - The whole run tree shares one budget: give the lead a `budgetUsd` that covers
   every builder it may start, plus its own planning.
 - Each builder works only in its own repository and can't see the others, so

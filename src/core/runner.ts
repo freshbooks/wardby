@@ -57,7 +57,7 @@ import { closeOpenHostCheck } from "./review-host-checks.js";
 import { serviceRefusalSentence } from "../coding/services/wording.js";
 import { CONTINUATION_CLOSED_SENTENCE, isContinuationClosedError } from "../coding/continuation-wording.js";
 import { RUN_TASK_TAG, splitTaskOverride, wrapUntrusted } from "./untrusted-content.js";
-import { completeHostStatus } from "./host-status.js";
+import { completeHostStatus, pullRequestOutcome } from "./host-status.js";
 import {
   ISSUE_TRACKER_TOOL_DEFS,
   ISSUE_TRACKER_TOOL_NAMES,
@@ -314,14 +314,17 @@ export interface WaitForCodingChildOptions {
  * over its services carries the host sentence (never the raw Run.error), so
  * the parent can pass it on — for a mention, that is the requester.
  */
-export function codingChildResult(run: {
-  status: string;
-  finalText: string | null;
-  costUsd: unknown;
-  tokensIn: number;
-  tokensOut: number;
-  error: string | null;
-}): string {
+export function codingChildResult(
+  run: {
+    status: string;
+    finalText: string | null;
+    costUsd: unknown;
+    tokensIn: number;
+    tokensOut: number;
+    error: string | null;
+  },
+  codingResult?: unknown,
+): string {
   // Checked before the "refused" branch: a continuation whose PR closed
   // before the run ever spent anything is stored as "refused" (a preflight
   // refusal, container.ts), not "failed" -- but it is the same
@@ -339,7 +342,25 @@ export function codingChildResult(run: {
     tokensIn: run.tokensIn,
     tokensOut: run.tokensOut,
     ...(refusal ? { refusal } : {}),
+    ...pullRequestOf(codingResult),
   });
+}
+
+/**
+ * The pull request the coding sub-run opened or pushed to, from wardby's own
+ * stored result (never the sub-agent's text), so the parent can cite it.
+ */
+function pullRequestOf(codingResult: unknown): { pullRequest?: Record<string, unknown> } {
+  const pr = pullRequestOutcome(codingResult);
+  if (!pr) return {};
+  return {
+    pullRequest: {
+      outcome: pr.outcome === "pull_request_opened" ? "opened" : "updated",
+      repository: pr.repository,
+      number: pr.pullRequestNumber,
+      ...(pr.pullRequestUrl ? { url: pr.pullRequestUrl } : {}),
+    },
+  };
 }
 
 /**
@@ -918,7 +939,13 @@ async function executeTrackedRun(
               message: "This run was cancelled while waiting for the coding sub-agent; the sub-agent was stopped.",
             });
           }
-          return codingChildResult(waited.run);
+          const stored = await db.codingRun
+            .findUnique({ where: { runId: childRunId }, select: { result: true } })
+            .catch((err: unknown) => {
+              runnerLog.warn({ err, childRunId }, "could not read the coding sub-run's result");
+              return null;
+            });
+          return codingChildResult(waited.run, stored?.result);
         }
 
         const taskOverride = args.datastoreRef
