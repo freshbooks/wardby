@@ -439,9 +439,9 @@ linking stays disabled there.
 First link your GitHub account (`link_host_account`, above). Then use the
 `link_repository` tool (agents:write) on a native agent you own. Calling it
 again for an already-linked repository replaces that link's `access`,
-`triggers`, and `checkName` — omitted fields are cleared, not kept — and
-checks your access again, so always send the full desired state. Two common
-shapes:
+`triggers`, `checkName`, and `reviewFixMaxRounds` — omitted fields are
+cleared, not kept — and checks your access again, so always send the full
+desired state. Two common shapes:
 
 **A reviewer**, which starts a check on every PR push:
 
@@ -500,14 +500,15 @@ run; tags, other branches, and branch deletions are ignored.
 Only one agent per repository may hold the `mention` trigger, and only one
 agent per repository may hold the `review_fix` trigger; only one link per
 repository may use a given `checkName` (whatever its triggers; the database
-enforces all three); linking a second agent the same way returns a 409
-conflict. A `checkName` is only allowed together with the `pull_request`
-trigger, which requires one. (The migration that introduced these rules
-cleared the `checkName` of every link without the `pull_request` trigger: if
-a branch-protection required check relied on such a name, it no longer
-reports.) `access: "read"` may be used without event triggers to let the
-agent's `repo_*` tools read a repository on demand without ever being
-dispatched by a webhook.
+enforces it). The one-`mention`-agent and one-`review_fix`-agent rules above
+are enforced by `link_repository` itself. Violating any of the three returns
+a 409 conflict. A `checkName` is only allowed together with the
+`pull_request` trigger, which requires one. (The migration that introduced
+these rules cleared the `checkName` of every link without the
+`pull_request` trigger: if a branch-protection required check relied on
+such a name, it no longer reports.) `access: "read"` may be used without
+event triggers to let the agent's `repo_*` tools read a repository on
+demand without ever being dispatched by a webhook.
 
 The errors you may get while linking:
 
