@@ -1043,13 +1043,33 @@ describe("ContainerExecutor", () => {
       ]);
     });
 
-    it("classifies a continuation of a no-longer-open PR as continuation_closed", async () => {
+    it("classifies a continuation of a no-longer-open PR as continuation_closed, refused before any spend", async () => {
       const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
       created.vcs.prepareWorkspace = async () => {
         throw new Error(CONTINUATION_CLOSED_ERROR);
       };
       await created.executor.start("run-1");
-      expect(created.store.terminations.at(-1)).toMatchObject({ audit: { failureCategory: "continuation_closed" } });
+      // No session was created yet and no job was launched, so this is a
+      // preflight refusal (status "refused"), not "failed" -- the category
+      // must still be recognised through the PreflightError wrapper.
+      expect(created.store.run.status).toBe("refused");
+      expect(created.store.terminations.at(-1)).toMatchObject({
+        status: "refused",
+        audit: { failureCategory: "continuation_closed" },
+      });
+    });
+
+    it("leaves a prepare-time github_* failure's category exactly as before (not reclassified by the continuation_closed cause-chain check)", async () => {
+      const created = await harness();
+      created.vcs.prepareWorkspace = async () => {
+        throw new Error("github_api_unavailable", { cause: new Error("fetch failed") });
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("refused");
+      expect(created.store.terminations.at(-1)).toMatchObject({
+        status: "refused",
+        audit: { failureCategory: "workspace" },
+      });
     });
 
     it("reports budget exhaustion over a protected-path failure when the session has both", async () => {

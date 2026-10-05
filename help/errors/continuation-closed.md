@@ -13,33 +13,61 @@ A coding run started with `continuePriorRun` (a mention follow-up, a Jira
 issue-event task, or a review fix round) reuses the branch and pull request
 the named run originally opened. Before cloning, and again right before it
 pushes, wardby asks GitHub whether that pull request is still open. A run
-that failed with category `continuation_closed` found a definite answer that
+that stopped with category `continuation_closed` got a definite answer that
 it is not: the pull request was merged or closed, or GitHub no longer lists
 an open pull request carrying that run's marker for the branch. Nothing from
 the run was pushed either way, so the pull request (and anyone who merged or
 closed it) is unaffected.
 
+Two things besides an actual merge or close can also make the check come back
+"no longer found," since it looks for an **open** pull request with that
+exact base branch and the run's hidden marker still in its description:
+
+- the pull request's base branch was retargeted to something other than the
+  one the run recorded;
+- the hidden `<!-- wardby:<run-id> -->` marker was removed or edited out of
+  the pull request's description (wardby relies on it to find its own PR;
+  nothing else identifies it).
+
+Most runs catch this before cloning, so **the run's own status is usually
+`refused`**, not `failed` — it never spent anything. A run that pushes a
+second commit before anyone merges or closes the PR underneath it catches
+this right before that push instead, and that one does end `failed`,
+already having worked. Either way the category (`get_run`'s
+`codingRun.failureCategory`) is `continuation_closed`.
+
 This is a safety check, not a flaky one: a transient GitHub failure while
-checking (a timeout, a rate limit, a 5xx) is retried once and, if it still
-fails, wardby proceeds as though the pull request were still open rather
-than failing the run on an unconfirmed answer — it only ever refuses on a
-definite "merged", "closed", or "no longer found" answer.
+checking (a timeout, a rate limit, a 5xx) is retried once, after a short
+wait, and if it still fails, wardby proceeds as though the pull request were
+still open rather than stopping the run on an unconfirmed answer — it only
+ever refuses on a definite "merged", "closed", or "no longer found" answer.
 
-What the requester sees:
+## What the requester sees
 
-- A mention follow-up or Jira issue-event task gets back: "The pull request
-  this run was asked to continue is no longer open (merged or closed), so
-  nothing was pushed. If the change is still needed, delegate again without
-  continuePriorRun: it becomes a new pull request from the default branch."
-- A parent agent that delegated the continuation sees the same sentence as
-  its sub-run's `refusal`, never the raw error code.
-- An @-mention's status comment reads: "A sub-run was asked to continue a
-  pull request that is no longer open (merged or closed); nothing was
-  pushed."
+**(a) A parent agent that delegated the continuation** (a router that called
+`continuePriorRun`, a Jira or mention follow-up) gets this back as its
+sub-run's `refusal`, never the raw error code:
 
-What to do: if the change is still needed, ask again without
-`continuePriorRun` (or without naming the closed pull request). The new run
-opens a fresh pull request from the repository's default branch.
+> The pull request this run was asked to continue is no longer open (merged
+> or closed), so nothing was pushed. If the change is still needed, delegate
+> again without continuePriorRun: it becomes a new pull request from the
+> default branch.
+
+**(b) A person watching the request** — the @-mention's status comment, or
+the Jira issue comment for an issue-event task — sees a line about the
+sub-run instead, without the error code:
+
+> A sub-run was asked to continue a pull request that is no longer open
+> (merged or closed); nothing was pushed.
+
+## What to do
+
+If the change is still needed, ask again without `continuePriorRun` (or
+without naming the closed pull request). The new run opens a fresh pull
+request from the repository's default branch. If the check is wrongly
+finding nothing when the pull request is in fact open, check that its base
+branch still matches what wardby recorded and that the `<!-- wardby:... -->`
+marker is still in its description, unedited.
 
 Related: [Run GitHub code-review agents](../code-review-agents.md),
 [Automatic review fix rounds](../review-fix-rounds.md).

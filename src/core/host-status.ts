@@ -177,8 +177,11 @@ export function outcomeBody(
     // No path reaches this comment (see coding/protected-path-wording.ts), only the category.
     const protectedPathOf = (c: FailedChild): boolean =>
       c.status === "failed" && c.failureCategory === PROTECTED_PATH_CATEGORY;
+    // A continuation whose PR closed before the sub-run ever spent anything
+    // is stored as "refused" (a preflight refusal), not "failed" -- the
+    // category is the same either way, so both statuses are recognised here.
     const continuationClosedOf = (c: FailedChild): boolean =>
-      c.status === "failed" && c.failureCategory === CONTINUATION_CLOSED_CATEGORY;
+      (c.status === "failed" || c.status === "refused") && c.failureCategory === CONTINUATION_CLOSED_CATEGORY;
     const providerClasses = new Set(
       failedChildren.map(providerClassOf).filter((c): c is ProviderFailureClass => c !== null),
     );

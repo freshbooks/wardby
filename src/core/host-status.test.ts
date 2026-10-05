@@ -266,6 +266,17 @@ describe("outcomeBody", () => {
     expect(body).not.toContain("did not succeed");
   });
 
+  it('says the same thing when the sub-run\'s PR closed before it spent anything (status "refused")', () => {
+    const body = outcomeBody(
+      run("succeeded"),
+      REPO,
+      [],
+      [{ id: "c1", status: "refused", failureCategory: "continuation_closed" }],
+    );
+    expect(body).toContain(CONTINUATION_CLOSED_HOST_LINE);
+    expect(body).not.toContain("did not succeed");
+  });
+
   it("still reports a sub-run refused for budget by its status", () => {
     const body = outcomeBody(
       run("succeeded"),

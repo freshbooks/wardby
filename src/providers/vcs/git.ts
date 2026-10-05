@@ -209,7 +209,12 @@ export interface GitVcsProviderOptions {
   maxDiffBytes?: number;
   /** Test-only transport override; production composition always uses github.com. */
   cloneUrlForRepository?: (repository: string) => string;
+  /** Test-only delay override for assertContinuationOpen's single retry wait. */
+  sleep?: (milliseconds: number) => Promise<void>;
 }
+
+/** How long assertContinuationOpen waits before its single retry on a transient open-PR check failure. */
+const CONTINUATION_OPEN_RETRY_DELAY_MS = 1_000;
 
 /** Validates one protectedPaths entry; a leading "!" makes it an exception (see protectedPathMatcher). */
 function validateProtectedPath(value: string): string {
@@ -282,6 +287,7 @@ export class GitVcsProvider implements VcsProvider {
   private readonly maxChangedFiles: number;
   private readonly maxDiffBytes: number;
   private readonly cloneUrlForRepository: (repository: string) => string;
+  private readonly sleep: (milliseconds: number) => Promise<void>;
 
   constructor(private readonly options: GitVcsProviderOptions) {
     this.rootDir = resolve(options.rootDir);
@@ -299,6 +305,8 @@ export class GitVcsProvider implements VcsProvider {
     }
     this.cloneUrlForRepository =
       options.cloneUrlForRepository ?? ((repository) => `https://github.com/${repository}.git`);
+    this.sleep =
+      options.sleep ?? ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
   }
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
@@ -843,6 +851,7 @@ export class GitVcsProvider implements VcsProvider {
     try {
       open = await this.options.github.findOpenPullRequest(request);
     } catch {
+      await this.sleep(CONTINUATION_OPEN_RETRY_DELAY_MS);
       try {
         open = await this.options.github.findOpenPullRequest(request);
       } catch (error) {

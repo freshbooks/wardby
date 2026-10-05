@@ -51,4 +51,19 @@ describe("codingChildResult", () => {
     expect(out.refusal).toBe(CONTINUATION_CLOSED_SENTENCE);
     expect(JSON.stringify(out)).not.toContain("coding_diag_1");
   });
+
+  it('gives the same sentence when the PR closed before any spend, even though that sub-run is "refused"', () => {
+    const out = JSON.parse(
+      codingChildResult({
+        status: "refused",
+        finalText: null,
+        costUsd: 0,
+        tokensIn: 0,
+        tokensOut: 0,
+        error: "coding_failure_continuation_closed:coding_diag_2",
+      }),
+    );
+    expect(out).toMatchObject({ status: "refused", refusal: CONTINUATION_CLOSED_SENTENCE });
+    expect(JSON.stringify(out)).not.toContain("coding_diag_2");
+  });
 });

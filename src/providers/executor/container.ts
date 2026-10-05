@@ -1576,23 +1576,36 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   ["git_", "workspace"],
 ];
 
-function failureCategory(error: unknown): string {
-  // Walk the cause chain: a prepare-time failure (no session, no job handle
-  // yet) is re-thrown as a PreflightError whose own message is
-  // `safeError(error)` -- a sanitized wrapper that no longer starts with the
-  // original error's prefix (see the `!spendEnabled && !handle` branch
-  // above). The real, un-wrapped error survives on `cause`, so a prefix this
-  // table names (e.g. CONTINUATION_CLOSED_ERROR) is still matched exactly
-  // there, rather than falling through to the generic substring heuristics
-  // below for every prepare-time failure.
+/**
+ * Whether `error` or something in its `cause` chain (bounded depth, in case a
+ * cycle somehow formed) is -- or wraps -- an error whose own message starts
+ * with `prefix`.
+ */
+function causeChainStartsWith(error: unknown, prefix: string): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 5 && current; depth += 1) {
     const raw = current instanceof Error ? current.message : typeof current === "string" ? current : "";
-    for (const [prefix, category] of CATEGORY_BY_PREFIX) {
-      if (raw.startsWith(prefix)) return category;
-    }
+    if (raw.startsWith(prefix)) return true;
     current = current instanceof Error ? current.cause : undefined;
   }
+  return false;
+}
+
+function failureCategory(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  for (const [prefix, category] of CATEGORY_BY_PREFIX) {
+    if (raw.startsWith(prefix)) return category;
+  }
+  // A continuation whose pull request is no longer open can fail before a
+  // session or job exists (assertContinuationOpen, called at the top of
+  // prepareWorkspace) -- that failure is re-thrown as a PreflightError whose
+  // own message is `safeError(error)`, a sanitized wrapper that no longer
+  // starts with CONTINUATION_CLOSED_ERROR (see the `!spendEnabled && !handle`
+  // branch above). The real, un-wrapped error survives on `cause`. Only this
+  // one category is looked up through the cause chain this way -- every
+  // other prefix above keeps matching only the top-level message, exactly as
+  // before, so no other prepare-time failure's category changes here.
+  if (causeChainStartsWith(error, CONTINUATION_CLOSED_ERROR)) return CONTINUATION_CLOSED_CATEGORY;
   const message = safeError(error);
   if (message.includes("preflight") || message.includes("ownership") || message.includes("image")) return "preflight";
   if (message.includes("budget")) return "budget";

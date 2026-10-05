@@ -185,7 +185,17 @@ async function harness(overrides: Partial<ConstructorParameters<typeof GitVcsPro
   roots.push(rootDir);
   const github = new FakeGitHub();
   const git = new ScriptedGitRunner();
-  const provider = new GitVcsProvider({ rootDir, github, git, ...overrides });
+  const sleeps: number[] = [];
+  const provider = new GitVcsProvider({
+    rootDir,
+    github,
+    git,
+    // No-op by default: a test asserting the real retry delay overrides this.
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+    ...overrides,
+  });
   const input: VcsPrepareInput = {
     runId: "run-1",
     repository: REPOSITORY,
@@ -193,7 +203,7 @@ async function harness(overrides: Partial<ConstructorParameters<typeof GitVcsPro
     headRef: "wardby/run-run-1",
     protectedPaths: [".github/workflows/**", "CODEOWNERS"],
   };
-  return { rootDir, github, git, provider, input };
+  return { rootDir, github, git, provider, input, sleeps };
 }
 
 afterEach(async () => {
@@ -492,13 +502,14 @@ describe("GitVcsProvider", () => {
       expect(github.openPullRequestCalls).toHaveLength(0);
     });
 
-    it("retries once on a transient open-PR check failure, then proceeds as if it were still open", async () => {
-      const { provider, github } = await harness();
+    it("retries once on a transient open-PR check failure, after a short wait, then proceeds as if it were still open", async () => {
+      const { provider, github, sleeps } = await harness();
       github.openPullRequestFailuresRemaining = 1;
       await expect(provider.prepareWorkspace(continuationInput())).resolves.toMatchObject({
         headRef: "wardby/run-run-1",
       });
       expect(github.openPullRequestCalls).toHaveLength(2);
+      expect(sleeps).toEqual([1_000]);
     });
 
     it("proceeds, with a warning, when the open-PR check fails twice in a row -- never failing the run on an unconfirmed answer", async () => {
@@ -511,6 +522,17 @@ describe("GitVcsProvider", () => {
       expect(github.openPullRequestCalls).toHaveLength(2);
       expect(warn).toHaveBeenCalled();
       warn.mockRestore();
+    });
+
+    it("retries once on a transient open-PR check failure at the pre-push check too, then proceeds", async () => {
+      const { provider, github, sleeps } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      github.openPullRequestFailuresRemaining = 1;
+      await expect(provider.finalizeChanges(prepared)).resolves.toMatchObject({ outcome: "pull_request_updated" });
+      // One call during prepare (succeeded first try), two more at the pre-push check (fail then succeed).
+      expect(github.openPullRequestCalls).toHaveLength(3);
+      expect(sleeps).toEqual([1_000]);
     });
 
     it("recovers a continuation workspace deterministically without minting another token", async () => {

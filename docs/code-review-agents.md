@@ -147,10 +147,12 @@ PR description:
 - A continuation never pushes to a pull request that is no longer open.
   Wardby asks GitHub whether the pull request is still open before cloning,
   and again right before it pushes; a run that finds it already merged or
-  closed fails with category `continuation_closed` instead, and nothing is
-  pushed. A transient GitHub failure while checking (a timeout, rate limit,
-  or 5xx) is retried once and, failing that, the run proceeds rather than
-  being failed on an unconfirmed answer — see
+  closed stops instead (usually refused before cloning, since no work was
+  done yet; failed if it had already pushed a prior commit), category
+  `continuation_closed` either way, and nothing is pushed. A transient
+  GitHub failure while checking (a timeout, rate limit, or 5xx) is retried
+  once, after a short wait, and failing that, the run proceeds rather than
+  being stopped on an unconfirmed answer — see
   [Continuation's pull request is no longer open](../help/errors/continuation-closed.md).
 - The header reads `[GitHub issue #<n>]` on an issue. For a mention inside an
   inline review thread, the `Requested by` line ends with

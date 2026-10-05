@@ -322,12 +322,16 @@ export function codingChildResult(run: {
   tokensOut: number;
   error: string | null;
 }): string {
-  const refusal =
-    run.status === "refused"
+  // Checked before the "refused" branch: a continuation whose PR closed
+  // before the run ever spent anything is stored as "refused" (a preflight
+  // refusal, container.ts), not "failed" -- but it is the same
+  // continuation_closed category either way, and gets the same sentence
+  // regardless of which status it landed on.
+  const refusal = isContinuationClosedError(run.error)
+    ? CONTINUATION_CLOSED_SENTENCE
+    : run.status === "refused"
       ? serviceRefusalSentence(run.error)
-      : run.status === "failed" && isContinuationClosedError(run.error)
-        ? CONTINUATION_CLOSED_SENTENCE
-        : null;
+      : null;
   return JSON.stringify({
     status: run.status,
     finalText: run.finalText,
