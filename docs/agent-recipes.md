@@ -48,7 +48,7 @@ These recipes go beyond the quickstart. Check each item.
    [GKE](getting-started-gke.md). Scheduled and manually triggered runs need no
    webhook.
 5. **App events.** Tick the events each trigger needs in the App's settings:
-   Pull request and Check run for reviews; Issue comment, Pull request review
+   Pull request, Check run, and Check suite for reviews; Issue comment, Pull request review
    comment, and Issues for mentions; and **Push** for the merge watcher. Each is
    its own checkbox
    ([registering the App](code-review-agents.md#registering-the-github-app)).

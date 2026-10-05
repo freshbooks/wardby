@@ -48,8 +48,16 @@ and a note. CI is the authority on whether the head builds and passes its
 tests. The **Tests** list in a Wardby pull request's description was run in
 Wardby's coding sandbox, which may have had an incomplete install (see the
 **Dependency install incomplete** warning). Checks still running are reported
-as pending; a review that started before CI finished is not repeated when CI
-completes — use **Re-run** on the review check.
+as pending.
+
+If a review publishes only a comment while CI on the head is still running (or
+has not reported yet), Wardby runs that review again once CI on the same head
+has finished, so it can approve or request changes against the real result.
+This happens at most once per head commit for each reviewer, only while the pull request is open
+and still at that commit, and needs the App's **Check suite** event. CI that
+reports only commit statuses (no check suites) does not trigger it, nor does a
+commit status still pending when the last check suite finishes; use **Re-run**
+on the review check instead.
 
 Commit statuses need the App's **Commit statuses: Read** permission; without
 it only check runs are shown.

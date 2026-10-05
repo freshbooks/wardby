@@ -257,6 +257,8 @@ export interface CodeReviewHost {
     opts: { sinceSha?: string; maxPatchChars: number; agentMarker: string },
   ): Promise<PullRequestView>;
   pullRequestHead(repository: string, prNumber: number): Promise<PullRequestHead>;
+  /** CI on one commit, excluding wardby's own checks. Never throws. Hosts that can't say leave it out. */
+  readCi?(repository: string, headSha: string): Promise<CiView>;
   /** Head, labels, and (on an App-authored PR) the run marker. Hosts that can't say leave it out. */
   pullRequestOrigin?(repository: string, prNumber: number): Promise<PullRequestOrigin>;
   /** Adds a label to a pull request (created if missing). Absent on hosts without labels. */
@@ -355,6 +357,14 @@ export type HostEvent =
       repository: string;
       prNumber: number;
       merged: boolean;
+    }
+  | {
+      /** A CI check suite (not wardby's own) finished on a commit some open pull requests point at. */
+      kind: "ci_completed";
+      provider: ReviewHostProvider;
+      repository: string;
+      headSha: string;
+      prNumbers: number[];
     }
   | {
       kind: "check_rerun";

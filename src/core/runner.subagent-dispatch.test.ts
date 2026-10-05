@@ -1311,7 +1311,8 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       });
 
       it("returns the refusal once its own wait bound passes with the sibling still running", async () => {
-        vi.useFakeTimers();
+        // Midday UTC: the test advances about an hour, which must not cross into a new budget day.
+        vi.useFakeTimers({ now: new Date("2026-10-05T12:00:00Z") });
         try {
           // order (ungrouped) never finishes; bff's group is spent by another member, so bff waits on order.
           const stuck = (db: RunnerDb) => ({

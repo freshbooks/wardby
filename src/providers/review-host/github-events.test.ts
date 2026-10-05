@@ -94,6 +94,24 @@ describe("normalizeGitHubEvent", () => {
     expect(normalizeGitHubEvent("check_run", check(1), APP)).toBeNull();
   });
 
+  it("maps a finished CI check suite, never wardby's own", () => {
+    const suite = (appId: number, action = "completed", pull_requests: unknown[] = [{ number: 7 }, { number: 7 }]) => ({
+      action,
+      repository,
+      check_suite: { head_sha: SHA, app: { id: appId }, pull_requests },
+    });
+    expect(normalizeGitHubEvent("check_suite", suite(15368), APP)).toEqual({
+      kind: "ci_completed",
+      provider: "github",
+      repository: "chfields/knock-knock-jokes",
+      headSha: SHA,
+      prNumbers: [7],
+    });
+    expect(normalizeGitHubEvent("check_suite", suite(777), APP)).toBeNull();
+    expect(normalizeGitHubEvent("check_suite", suite(15368, "requested"), APP)).toBeNull();
+    expect(normalizeGitHubEvent("check_suite", suite(15368, "completed", []), APP)).toBeNull();
+  });
+
   it("maps mentions from trusted humans only", () => {
     const comment = (body: string, association = "OWNER", type = "User") => ({
       action: "created",

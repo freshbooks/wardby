@@ -13,6 +13,7 @@ import type { LoadedTool } from "../providers/engine/types.js";
 import {
   REVIEW_HOST_PROVIDERS,
   ReviewHostError,
+  type CiView,
   type ReviewHostProvider,
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
@@ -27,6 +28,8 @@ const log = logger.child({ module: "review-host-tools" });
 export interface PublishedReview {
   verdict: "APPROVE" | "CHANGES_REQUESTED" | "COMMENT";
   body: string;
+  /** A COMMENT published while CI on the head was still running or had not reported. */
+  ciPending?: boolean;
 }
 
 /** Cap on the review text kept on the check row and handed to a fix round. */
@@ -398,9 +401,20 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           ...(a.resolveThreadIds?.length ? { resolveThreadIds: a.resolveThreadIds } : {}),
         });
         if (ownsCheck) {
+          // A COMMENT while CI is unfinished is often only "waiting for CI":
+          // recorded so CI finishing on this head re-runs the review once.
+          let ci: CiView | null = null;
+          if (a.verdict === "COMMENT" && host.readCi) {
+            // The review is already published: a CI read failure must not turn this into an error result.
+            ci = await host.readCi(link.repository, a.headSha).catch((err: unknown) => {
+              log.warn({ err, agentId: ctx.agentId }, "could not read CI after publishing a comment review");
+              return null;
+            });
+          }
           await markCompleted(ctx, {
             verdict: a.verdict,
             body: `${a.summary}\n\n${a.body}`.slice(0, MAX_REVIEW_BODY_CHARS),
+            ...(ci ? { ciPending: ci.state === "pending" || ci.state === "none" } : {}),
           });
         }
         return JSON.stringify(result);

@@ -13,6 +13,8 @@ const SAFE_SHA = /^[0-9a-f]{40}$/;
 const PUSH_MAX_COMMITS = 2048;
 const SAFE_BRANCH = /^[A-Za-z0-9._/-]{1,100}$/;
 const PUSH_MAX_PATHS = 1000;
+/** Pull requests one CI completion may re-review; a commit is rarely the head of more. */
+const MAX_CI_PRS = 10;
 /** Mirrors the runId shape validated in providers/vcs (github.ts, git.ts). */
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** The hidden marker a coding run writes at the top of every PR it opens (providers/vcs/github.ts); legacy prefix too. */
@@ -144,6 +146,19 @@ export function normalizeGitHubEvent(
     const headRepo = obj(head?.repo)?.full_name;
     const isFork = typeof headRepo !== "string" || headRepo.toLowerCase() !== repository;
     return { kind: "pr_updated", provider: "github", repository, prNumber, headSha, isFork };
+  }
+
+  if (eventName === "check_suite") {
+    if (p.action !== "completed") return null;
+    const suite = obj(p.check_suite);
+    // wardby's own review check finishing is not CI.
+    if (int(obj(suite?.app)?.id) === app.id) return null;
+    const headSha = suite?.head_sha;
+    if (typeof headSha !== "string" || !SAFE_SHA.test(headSha)) return null;
+    const prs = Array.isArray(suite?.pull_requests) ? suite.pull_requests : [];
+    const prNumbers = [...new Set(prs.map((pr) => int(obj(pr)?.number)).filter((n): n is number => n !== null))];
+    if (prNumbers.length === 0) return null;
+    return { kind: "ci_completed", provider: "github", repository, headSha, prNumbers: prNumbers.slice(0, MAX_CI_PRS) };
   }
 
   if (eventName === "check_run") {
