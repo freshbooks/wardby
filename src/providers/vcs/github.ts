@@ -120,6 +120,17 @@ const SAFE_FILE_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 export interface GitHubRepositoryAccess {
   withRepositoryToken<T>(repository: string, action: (token: string) => Promise<T>): Promise<T>;
   createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult>;
+  /**
+   * The root run's marked pull request if it is still open (draft or ready),
+   * else null (merged, closed, or gone). Optional: without it, continuations
+   * are not checked.
+   */
+  findOpenPullRequest?(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+  }): Promise<PullRequestResult | null>;
   /** Creates the status comment if none exists yet for this run, else updates it. */
   upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void>;
   /** Updates the status comment if one already exists for this run; a no-op otherwise (never creates). */
@@ -813,6 +824,27 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       if (raced) return raced;
       throw safeApiError(response);
     });
+  }
+
+  /**
+   * The root run's marked pull request if GitHub's `state=open` list still
+   * contains it (draft or ready for review), else null -- merged, closed, or
+   * gone. Used by git.ts's revision-in-place continuation to refuse a push to
+   * a pull request that is no longer open.
+   */
+  async findOpenPullRequest(input: {
+    runId: string;
+    repository: string;
+    baseRef: string;
+    headRef: string;
+  }): Promise<PullRequestResult | null> {
+    const repository = normalizeGitHubRepository(input.repository);
+    const baseRef = normalizeGitRef(input.baseRef);
+    const headRef = normalizeGitRef(input.headRef);
+    if (!SAFE_RUN_ID.test(input.runId)) throw new Error("github_pull_request_input_invalid");
+    return this.withRepositoryToken(repository, (token) =>
+      this.findPullRequest(token, { runId: input.runId, repository, baseRef, headRef, acceptReadyForReview: true }),
+    );
   }
 
   private async appJwt(): Promise<string> {

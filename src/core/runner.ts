@@ -55,6 +55,7 @@ import {
 } from "./review-host-tools.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
 import { serviceRefusalSentence } from "../coding/services/wording.js";
+import { CONTINUATION_CLOSED_SENTENCE, isContinuationClosedError } from "../coding/continuation-wording.js";
 import { RUN_TASK_TAG, splitTaskOverride, wrapUntrusted } from "./untrusted-content.js";
 import { completeHostStatus } from "./host-status.js";
 import {
@@ -321,7 +322,12 @@ export function codingChildResult(run: {
   tokensOut: number;
   error: string | null;
 }): string {
-  const refusal = run.status === "refused" ? serviceRefusalSentence(run.error) : null;
+  const refusal =
+    run.status === "refused"
+      ? serviceRefusalSentence(run.error)
+      : run.status === "failed" && isContinuationClosedError(run.error)
+        ? CONTINUATION_CLOSED_SENTENCE
+        : null;
   return JSON.stringify({
     status: run.status,
     finalText: run.finalText,

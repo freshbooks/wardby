@@ -26,7 +26,10 @@ A mention on a pull request that a wardby coding run opened continues that
 run's branch. If this deployment has no record of the run that opened it (for
 example, another wardby deployment sharing the same GitHub App opened it), the
 App replies that it cannot continue the pull request instead of starting a
-run. Ask the deployment that opened it, or change the branch by hand.
+run. Ask the deployment that opened it, or change the branch by hand. A
+continuation also never pushes to a pull request that has since been merged
+or closed — see
+[Continuation's pull request is no longer open](errors/continuation-closed.md).
 
 A repository can also be linked so wardby fixes its own review's findings on
 such a pull request automatically, up to a round cap — see

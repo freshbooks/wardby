@@ -19,6 +19,7 @@ import {
   protectedPathFromError,
   protectedPathSentence,
 } from "../../coding/protected-path-wording.js";
+import { CONTINUATION_CLOSED_CATEGORY, CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { budgetSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
 import type { IssueTrackerRegistry } from "../issue-tracker/types.js";
@@ -1569,14 +1570,28 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   // Checked before the generic "vcs_" fallback: the collected diff touched a
   // path this agent may not edit, not a generic workspace/git failure.
   ["vcs_protected_path:", PROTECTED_PATH_CATEGORY],
+  // A continuation whose pull request was merged or closed: nothing pushed (coding/continuation-wording.ts).
+  [CONTINUATION_CLOSED_ERROR, CONTINUATION_CLOSED_CATEGORY],
   ["vcs_", "workspace"],
   ["git_", "workspace"],
 ];
 
 function failureCategory(error: unknown): string {
-  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  for (const [prefix, category] of CATEGORY_BY_PREFIX) {
-    if (raw.startsWith(prefix)) return category;
+  // Walk the cause chain: a prepare-time failure (no session, no job handle
+  // yet) is re-thrown as a PreflightError whose own message is
+  // `safeError(error)` -- a sanitized wrapper that no longer starts with the
+  // original error's prefix (see the `!spendEnabled && !handle` branch
+  // above). The real, un-wrapped error survives on `cause`, so a prefix this
+  // table names (e.g. CONTINUATION_CLOSED_ERROR) is still matched exactly
+  // there, rather than falling through to the generic substring heuristics
+  // below for every prepare-time failure.
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current; depth += 1) {
+    const raw = current instanceof Error ? current.message : typeof current === "string" ? current : "";
+    for (const [prefix, category] of CATEGORY_BY_PREFIX) {
+      if (raw.startsWith(prefix)) return category;
+    }
+    current = current instanceof Error ? current.cause : undefined;
   }
   const message = safeError(error);
   if (message.includes("preflight") || message.includes("ownership") || message.includes("image")) return "preflight";

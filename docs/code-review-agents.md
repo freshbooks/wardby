@@ -144,6 +144,14 @@ PR description:
   If a router agent passes a `continuePriorRun` id that this deployment
   cannot continue, the delegation returns a `continuation_refused` tool
   error to the agent instead of failing its run.
+- A continuation never pushes to a pull request that is no longer open.
+  Wardby asks GitHub whether the pull request is still open before cloning,
+  and again right before it pushes; a run that finds it already merged or
+  closed fails with category `continuation_closed` instead, and nothing is
+  pushed. A transient GitHub failure while checking (a timeout, rate limit,
+  or 5xx) is retried once and, failing that, the run proceeds rather than
+  being failed on an unconfirmed answer — see
+  [Continuation's pull request is no longer open](../help/errors/continuation-closed.md).
 - The header reads `[GitHub issue #<n>]` on an issue. For a mention inside an
   inline review thread, the `Requested by` line ends with
   `(in review thread <id>)`.

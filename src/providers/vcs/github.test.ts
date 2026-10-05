@@ -132,6 +132,52 @@ describe("GitHubAppClient", () => {
     expect(methods.filter((method) => method === "POST /repos/openai/example/pulls")).toHaveLength(0);
   });
 
+  it("findOpenPullRequest finds the root run's open marked PR, and returns null once it is merged or closed", async () => {
+    let lookups = 0;
+    const methods: string[] = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      methods.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) return tokenResponse();
+      if (url.includes("/pulls?")) {
+        lookups += 1;
+        // GitHub's `state=open` list no longer contains a merged/closed PR: answer [] the second time.
+        return lookups === 1
+          ? json([
+              {
+                number: 42,
+                html_url: "https://github.com/openai/example/pull/42",
+                body: "<!-- wardby:run-1 -->",
+                draft: true,
+              },
+            ])
+          : json([]);
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+
+    await expect(
+      client.findOpenPullRequest({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+      }),
+    ).resolves.toEqual({ number: 42, url: "https://github.com/openai/example/pull/42" });
+    await expect(
+      client.findOpenPullRequest({
+        runId: "run-1",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-run-1",
+      }),
+    ).resolves.toBeNull();
+    expect(methods.filter((method) => method === "POST /repos/openai/example/pulls")).toHaveLength(0);
+  });
+
   it("creates only a draft PR with fixed metadata and recovers a duplicate-create race", async () => {
     let lookups = 0;
     let createBody: Record<string, unknown> | undefined;

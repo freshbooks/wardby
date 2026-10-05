@@ -17,6 +17,7 @@ import {
   serviceUnreadySentence,
 } from "../coding/services/wording.js";
 import { PROTECTED_PATH_CATEGORY, PROTECTED_PATH_HOST_LINE } from "../coding/protected-path-wording.js";
+import { CONTINUATION_CLOSED_CATEGORY, CONTINUATION_CLOSED_HOST_LINE } from "../coding/continuation-wording.js";
 import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
@@ -176,17 +177,21 @@ export function outcomeBody(
     // No path reaches this comment (see coding/protected-path-wording.ts), only the category.
     const protectedPathOf = (c: FailedChild): boolean =>
       c.status === "failed" && c.failureCategory === PROTECTED_PATH_CATEGORY;
+    const continuationClosedOf = (c: FailedChild): boolean =>
+      c.status === "failed" && c.failureCategory === CONTINUATION_CLOSED_CATEGORY;
     const providerClasses = new Set(
       failedChildren.map(providerClassOf).filter((c): c is ProviderFailureClass => c !== null),
     );
     const serviceSentences = new Set(failedChildren.map(serviceSentenceOf).filter((s): s is string => s !== null));
     const protectedPathFailed = failedChildren.some(protectedPathOf);
+    const continuationClosedFailed = failedChildren.some(continuationClosedOf);
     const other = failedChildren.filter(
       (c) =>
         c.status !== "budget_exhausted" &&
         providerClassOf(c) === null &&
         serviceSentenceOf(c) === null &&
-        !protectedPathOf(c),
+        !protectedPathOf(c) &&
+        !continuationClosedOf(c),
     );
     const lines: string[] = [];
     if (outOfBudget.length > 0) {
@@ -201,6 +206,7 @@ export function outcomeBody(
       lines.push(`A sub-run could not start: ${sentence}`);
     }
     if (protectedPathFailed) lines.push(PROTECTED_PATH_HOST_LINE);
+    if (continuationClosedFailed) lines.push(CONTINUATION_CLOSED_HOST_LINE);
     if (other.length > 0) {
       lines.push(`A sub-run did not succeed: ${other.map((c) => `\`${c.id}\` (\`${c.status}\`)`).join(", ")}.`);
     }

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCodingRunObserver } from "../../coding/observability.js";
+import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
@@ -1040,6 +1041,15 @@ describe("ContainerExecutor", () => {
             "its changes include `CODEOWNERS`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change.",
         },
       ]);
+    });
+
+    it("classifies a continuation of a no-longer-open PR as continuation_closed", async () => {
+      const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      created.vcs.prepareWorkspace = async () => {
+        throw new Error(CONTINUATION_CLOSED_ERROR);
+      };
+      await created.executor.start("run-1");
+      expect(created.store.terminations.at(-1)).toMatchObject({ audit: { failureCategory: "continuation_closed" } });
     });
 
     it("reports budget exhaustion over a protected-path failure when the session has both", async () => {

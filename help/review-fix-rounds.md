@@ -51,6 +51,11 @@ deployment gets one refusal comment and `wardby-autofix-limit` instead of a
 round, since this deployment can't continue a branch it has no record of
 opening.
 
+A round's run also double-checks with GitHub that the pull request is still
+open right before it pushes; one merged or closed in the time the round was
+working fails with no push made — see
+[Continuation's pull request is no longer open](errors/continuation-closed.md).
+
 If a repository already forwards reviews to a webhook through a
 hand-written CI workflow to fix them automatically, turn on `review_fix` and
 then remove that workflow and its webhook, so a review doesn't trigger two
