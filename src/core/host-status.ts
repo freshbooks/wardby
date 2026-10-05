@@ -90,7 +90,7 @@ export function mentionStatusRow(
   };
 }
 
-function pullRequestOutcome(result: unknown): PullRequestOutcome | null {
+export function pullRequestOutcome(result: unknown): PullRequestOutcome | null {
   if (!result || typeof result !== "object") return null;
   const r = result as Record<string, unknown>;
   if (r.outcome !== "pull_request_opened" && r.outcome !== "pull_request_updated") return null;
