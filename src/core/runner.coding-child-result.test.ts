@@ -17,6 +17,47 @@ describe("codingChildResult", () => {
     });
   });
 
+  it("cites the pull request from wardby's stored result, not the sub-agent's text", () => {
+    const result = JSON.parse(
+      codingChildResult(
+        { ...base, status: "succeeded", finalText: "Done.", error: null },
+        {
+          outcome: "pull_request_opened",
+          repository: "acme/api",
+          pullRequestNumber: 7,
+          pullRequestUrl: "https://github.com/acme/api/pull/7",
+        },
+      ),
+    );
+    expect(result.pullRequest).toEqual({
+      outcome: "opened",
+      repository: "acme/api",
+      number: 7,
+      url: "https://github.com/acme/api/pull/7",
+    });
+    expect(
+      JSON.parse(
+        codingChildResult(
+          { ...base, status: "succeeded", finalText: null, error: null },
+          { outcome: "pull_request_updated", repository: "acme/api", pullRequestNumber: 7 },
+        ),
+      ).pullRequest,
+    ).toEqual({ outcome: "updated", repository: "acme/api", number: 7 });
+  });
+
+  it("adds no pull request when the sub-run opened none or its result is malformed", () => {
+    for (const stored of [
+      undefined,
+      null,
+      { outcome: "no_changes" },
+      { outcome: "pull_request_opened", pullRequestNumber: -1 },
+    ]) {
+      expect(
+        JSON.parse(codingChildResult({ ...base, status: "succeeded", finalText: null, error: null }, stored)),
+      ).not.toHaveProperty("pullRequest");
+    }
+  });
+
   it("gives the router the host sentence of a service refusal, never the raw error", () => {
     const result = JSON.parse(
       codingChildResult({
