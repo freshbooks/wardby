@@ -117,12 +117,14 @@ const runnerLog = logger.child({ module: "runner" });
  * so no user tool can be created under a name this dispatch would shadow.
  */
 function delegateToolDef(boundName: string, parallel: boolean): LoadedTool {
+  // With the flag off the description stays byte-identical to before, so
+  // existing leads keep their cached tool definitions.
   const timing = parallel
-    ? "Blocks until it finishes. Several delegate_to_* calls made in the same turn run at the same time, so make them together when their tasks don't need each other's results."
-    : "Runs synchronously and blocks until it finishes.";
+    ? "Blocks until it finishes. Several delegate_to_* calls made in the same turn run at the same time, so make them together when their tasks don't need each other's results. Its spend"
+    : "Runs synchronously and blocks until it finishes; its spend";
   return {
     name: `${DELEGATE_TOOL_PREFIX}${boundName}`,
-    description: `Delegates a task to your "${boundName}" sub-agent. ${timing} Its spend counts against your own run's shared budget scope. If the sub-agent belongs to another owner it runs only its own instructions: pass an empty task.`,
+    description: `Delegates a task to your "${boundName}" sub-agent. ${timing} counts against your own run's shared budget scope. If the sub-agent belongs to another owner it runs only its own instructions: pass an empty task.`,
     jsonSchema: {
       type: "object",
       properties: {

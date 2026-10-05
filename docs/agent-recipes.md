@@ -465,8 +465,10 @@ fails with category `continuation_closed` and pushes nothing — see
 - Cancelling the lead run does not stop a native sub-agent that is already
   running; it keeps running to completion. A coding sub-agent is stopped.
 - If Wardby restarts mid-batch, the batch's delegation calls replay and each
-  one already dispatched reports `already_dispatched`; the sub-agent runs
-  themselves are unaffected and keep going.
+  one already dispatched reports `already_dispatched`, so the lead does not
+  get those sub-agents' results. A native sub-agent that was running stops
+  with the restart and is marked `lost`, as is a coding sub-agent whose
+  replica crashed. Check the run tree with `get_run` and re-trigger the lead.
 - The lead's own remaining (unspent) budget is not reserved against its
   children's dispatch, so give the lead's `budgetUsd` headroom beyond the
   plain sum of its builders' budgets, not just that sum exactly.

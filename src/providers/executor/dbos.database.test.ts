@@ -390,6 +390,10 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
 
     let inFlight = 0;
     let maxInFlight = 0;
+    // Two-party barrier: each child holds its turn open until both have
+    // entered stream(), so the overlap doesn't depend on timing.
+    let releaseBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => (releaseBarrier = resolve));
     let leadTurn = 0;
     const leadScripts: LlmStreamEvent[][] = [
       [
@@ -406,7 +410,8 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
         if (String(req.messages[0].content).startsWith("CHILD")) {
           inFlight += 1;
           maxInFlight = Math.max(maxInFlight, inFlight);
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          if (inFlight === 2) releaseBarrier();
+          await Promise.race([barrier, new Promise((resolve) => setTimeout(resolve, 10_000))]);
           inFlight -= 1;
           for (const event of finalAnswer("child done")) yield event;
           return;

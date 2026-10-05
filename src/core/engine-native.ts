@@ -287,8 +287,11 @@ export class NativeEngine implements Engine {
       const batch = Array.from({ length: end - index }, (_, offset) => index + offset);
       engineLog.info({ turn, toolCallIds: batch.map((i) => toolCalls[i].id) }, "running tool calls concurrently");
       const settled = await Promise.allSettled(batch.map((i) => runCall(i)));
-      const rejected = settled.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
-      if (rejected) throw rejected.reason;
+      const rejections = settled.filter((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+      for (const extra of rejections.slice(1)) {
+        engineLog.warn({ turn, err: extra.reason }, "concurrent tool call also failed");
+      }
+      if (rejections.length > 0) throw rejections[0].reason;
       settled.forEach((outcome, position) => {
         results[batch[position]] = (outcome as PromiseFulfilledResult<string>).value;
       });
