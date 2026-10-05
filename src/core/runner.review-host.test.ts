@@ -8,6 +8,9 @@ import { RoutingLlmProvider, type CatalogLlmAdapter } from "../providers/llm/rou
 import { NativeEngine } from "./engine-native.js";
 import { executeRun, type RunnerDb } from "./runner.js";
 
+vi.mock("./review-fix.js", () => ({ startReviewFixAfterReview: vi.fn(async () => undefined) }));
+import { startReviewFixAfterReview } from "./review-fix.js";
+
 // End-to-end coverage of the repo_* built-ins inside a real NativeEngine run
 // loop (scripted LLM, fake DB): offered only to linked agents when a review
 // host is composed in, the run's control-plane check is injected into
@@ -306,5 +309,25 @@ describe("repo_* built-ins re-check repository authorization at every call", () 
     await executeRun("run1", { ...providers(llm), reviewHosts: { github: host } }, db);
     expect(host.publishReview).not.toHaveBeenCalled();
     (db as any).agentRepository.findUnique = original;
+  });
+});
+
+describe("the reviewer run's finalizer starts a review-fix round", () => {
+  it("hands a finished run to the review-fix starter once, when review hosts and an executor are wired", async () => {
+    const host = fakeHost();
+    const { db, llm } = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [text("done")] });
+    const executor = { start: vi.fn(), stop: vi.fn() } as never;
+    const run = await executeRun("run1", { ...providers(llm), reviewHosts: { github: host }, executor }, db);
+    expect(run.status).toBe("succeeded");
+    expect(startReviewFixAfterReview).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(startReviewFixAfterReview).mock.calls[0][0]).toBe(run.id);
+  });
+
+  it("does not start fix rounds without an executor", async () => {
+    vi.mocked(startReviewFixAfterReview).mockClear();
+    const host = fakeHost();
+    const { db, llm } = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [text("done")] });
+    await executeRun("run1", { ...providers(llm), reviewHosts: { github: host } }, db);
+    expect(startReviewFixAfterReview).not.toHaveBeenCalled();
   });
 });
