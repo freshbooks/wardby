@@ -273,6 +273,36 @@ describe("updateRelatedPullRequests", () => {
       "acme/app#4",
     ]);
   });
+
+  // Decision 9 (parallel delegations): a lead's concurrent batch admits several coding children at
+  // once, so each child's own PR-opened result is written with the batch still in flight — every
+  // sibling PR's creation-time Related section lists only the siblings opened before it. The
+  // lead-end refresh must still land the full set on every one of them, regardless of what each
+  // one saw when it was opened.
+  it("parallel delegations: PRs opened at the same moment (each saw a partial list) all get the full set at lead end", async () => {
+    const same = [
+      row("p1", opened("acme/order-service", 7), 1),
+      row("p2", opened("acme/bff", 8), 1),
+      row("p3", opened("acme/app", 9), 1),
+    ];
+    const h = host({
+      "acme/order-service#7": { state: "open", markerRunId: "p1" },
+      "acme/bff#8": { state: "open", markerRunId: "p2" },
+      "acme/app#9": { state: "open", markerRunId: "p3" },
+    });
+    await updateRelatedPullRequests(
+      finalizerDb([same], { p1: "acme/order-service", p2: "acme/bff", p3: "acme/app" }),
+      { id: "lead" },
+      { github: h },
+      undefined,
+    );
+    expect(h.replaceRelatedSection).toHaveBeenCalledTimes(3);
+    for (const [, , input] of h.replaceRelatedSection.mock.calls) {
+      for (const n of [7, 8, 9]) {
+        expect(input.block.includes(`#${n}`) || input.block.includes("**This pull request**")).toBe(true);
+      }
+    }
+  });
 });
 
 // A request without a tracked issue: lead opens A#1 and B#2; a mention on A#1 starts follow-up F,

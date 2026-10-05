@@ -2,9 +2,13 @@
  * The pull requests that came from the same request as a run: every pull
  * request opened by a coding run in the same top-level run tree (a lead that
  * fanned out to several repositories), plus any recorded for the same tracker
- * issue (IssuePullRequest). Control-plane rows only. Ordered by when each
- * pull request's coding run was dispatched — the lead's delegation order,
- * since a native run's tool calls run one after another. Continuations join
+ * issue (IssuePullRequest). Control-plane rows only.
+ * Ordered by when each pull request's coding run was dispatched: the lead's
+ * delegation order (for a lead with parallelDelegations, the order its
+ * concurrent delegations were admitted, ties broken by repository#number).
+ * A PR opened while siblings were still running lists only the PRs opened
+ * before it; updateRelatedPullRequests rewrites every open PR of the set
+ * with the full list when the lead run ends. Continuations join
  * the set in both directions: a follow-up that continued one of the set's
  * pull requests brings the original request's tree, and the original request
  * brings every later follow-up tree that continued one of its pull requests.
