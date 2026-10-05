@@ -153,7 +153,8 @@ function fakeDb(
         return { count: 1 };
       }) as any,
       findMany: (async ({ where }: any) => {
-        const all = [...runs.values()];
+        // Like the real relation: a coding run carries its CodingRun row (its reservation).
+        const all = [...runs.values()].map((r) => ({ ...r, codingRun: codingRuns.get(r.id) ?? null }));
         if (where.agentId) {
           return all.filter((r) => where.agentId.in.includes(r.agentId) && r.startedAt >= where.startedAt.gte);
         }
@@ -1430,6 +1431,31 @@ describe("delegate_to_<boundName> dispatch tool", () => {
           ["bff", "succeeded"],
         ]);
         expect((executor as ReturnType<typeof overlappingExecutor>).state.max).toBe(1);
+      });
+
+      it("waits for the sibling holding the run tree's budget, then is admitted with what it left", async () => {
+        // No budget group: the lead's own $3 is the tree's cap. Its first turn costs $0.01, order reserves
+        // the remaining $2.99 (its own $20 is looser), so bff finds nothing left while order runs.
+        const db = fakeDb(
+          [{ ...lead(true), budgetUsd: 3 }, coder("order", { budgetUsd: 20 }), coder("bff", { budgetUsd: 20 })],
+          edges,
+        );
+        const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+        const executor = overlappingExecutor(db);
+        const llm = scriptedLlm([oneTurn(["order", "bff"]), finalAnswer("reported")]);
+        await executeRun(parentRun.id, providers(llm, executor), db);
+        const children = (await db.run.findMany({
+          where: { parentRunId: { in: [parentRun.id] } },
+        })) as unknown as (FakeRun & { codingRun: { budgetReservedUsd: number } | null })[];
+        expect(children.map((c) => [c.agentId, c.status])).toEqual([
+          ["order", "succeeded"],
+          ["bff", "succeeded"],
+        ]);
+        expect(executor.state.max).toBe(1);
+        // order spent $0.01 of its hold; bff gets the rest, never order's hold a second time.
+        const [order, bff] = children.map((c) => Number(c.codingRun?.budgetReservedUsd));
+        expect(order).toBeCloseTo(2.99, 6);
+        expect(bff).toBeCloseTo(2.98, 6);
       });
 
       it("waits for a native sibling's hold too", async () => {

@@ -564,6 +564,166 @@ describe("computeRunTreeSpend", () => {
   });
 });
 
+describe("run tree: in-flight sibling holds (parallel delegations)", () => {
+  const agents = [
+    { id: "root-agent", budgetGroupId: null, budgetUsd: 20 },
+    { id: "native-a", budgetGroupId: null, budgetUsd: 6 },
+    { id: "native-b", budgetGroupId: null, budgetUsd: 15 },
+    { id: "coder", budgetGroupId: null, budgetUsd: 8 },
+  ];
+  const root = {
+    id: "run-root",
+    agentId: "root-agent",
+    costUsd: 2,
+    startedAt: TODAY_START,
+    status: "running",
+    parentRunId: null,
+  };
+
+  it("an in-flight coding sibling's unspent reservation is held against the next child", async () => {
+    const db = fakeDb(
+      [],
+      [
+        root,
+        {
+          id: "run-c",
+          agentId: "coder",
+          costUsd: 1,
+          startedAt: TODAY_START,
+          status: "pending",
+          parentRunId: "run-root",
+          codingRun: { budgetReservedUsd: 8 },
+        },
+      ],
+      agents,
+    );
+    // $20 − ($2 + $1) spent − ($8 − $1) held = $10.
+    expect((await computeRunTreeSpend(db, "run-root", NOW)).remainingUsd).toBe(10);
+  });
+
+  it("native siblings: first come, first served by startedAt", async () => {
+    const db = fakeDb(
+      [],
+      [
+        root,
+        {
+          id: "run-a",
+          agentId: "native-a",
+          costUsd: 0,
+          startedAt: TODAY_START,
+          status: "running",
+          parentRunId: "run-root",
+        },
+        { id: "run-b", agentId: "native-b", costUsd: 0, startedAt: LATER, status: "running", parentRunId: "run-root" },
+      ],
+      agents,
+    );
+    const later = await effectiveBudgetForRun(db, agents[2] as never, NOW, "run-root", {
+      self: { id: "run-b", startedAt: LATER },
+    });
+    // $20 − $2 − a's $6 hold = $12, under b's own $15.
+    expect(later.effectiveBudgetUsd).toBe(12);
+    const earlier = await effectiveBudgetForRun(db, agents[1] as never, NOW, "run-root", {
+      self: { id: "run-a", startedAt: TODAY_START },
+    });
+    // b started after a: not counted against a. a gets its own $6.
+    expect(earlier.effectiveBudgetUsd).toBe(6);
+  });
+
+  it("never counts the asking run's own ancestors, and nets a sibling branch's whole subtree cost once", async () => {
+    const db = fakeDb(
+      [],
+      [
+        root,
+        {
+          id: "run-n",
+          agentId: "native-a",
+          costUsd: 1,
+          startedAt: TODAY_START,
+          status: "running",
+          parentRunId: "run-root",
+        },
+        {
+          id: "run-s",
+          agentId: "native-a",
+          costUsd: 1,
+          startedAt: TODAY_START,
+          status: "running",
+          parentRunId: "run-root",
+        },
+        {
+          id: "run-g",
+          agentId: "coder",
+          costUsd: 2,
+          startedAt: TODAY_START,
+          status: "running",
+          parentRunId: "run-s",
+          codingRun: { budgetReservedUsd: 3 },
+        },
+      ],
+      agents,
+    );
+    // Asking for a grandchild of run-n: run-n is an ancestor (no hold); run-s holds $6 − ($1 + $2) = $3;
+    // run-g sits under run-s, so its own hold is inside run-s's. Spent: 2 + 1 + 1 + 2 = 6. $20 − 6 − 3 = $11.
+    expect((await computeRunTreeSpend(db, "run-n", NOW)).remainingUsd).toBe(11);
+  });
+
+  it("a finished or stale sibling holds nothing", async () => {
+    const db = fakeDb(
+      [],
+      [
+        root,
+        {
+          id: "run-done",
+          agentId: "coder",
+          costUsd: 3,
+          startedAt: TODAY_START,
+          status: "succeeded",
+          parentRunId: "run-root",
+          codingRun: { budgetReservedUsd: 8 },
+        },
+        {
+          id: "run-stale",
+          agentId: "native-a",
+          costUsd: 0,
+          startedAt: TODAY_START,
+          heartbeatAt: TODAY_START,
+          status: "running",
+          parentRunId: "run-root",
+        },
+      ],
+      agents,
+    );
+    expect((await computeRunTreeSpend(db, "run-root", NOW)).remainingUsd).toBe(15);
+  });
+
+  it("a second child is exhausted while the first holds the tree, and admitted once it finishes under its hold", async () => {
+    const tight = [{ id: "root-agent", budgetGroupId: null, budgetUsd: 10 }, ...agents.slice(1)];
+    const first = {
+      id: "run-first",
+      agentId: "coder",
+      costUsd: 0.5,
+      startedAt: TODAY_START,
+      status: "running",
+      parentRunId: "run-root",
+      codingRun: { budgetReservedUsd: 8 },
+    };
+    // $10 − $2 root spend − first's $8 reservation (its $0.50 counted once): nothing left for the second.
+    const during = await effectiveBudgetForRun(fakeDb([], [root, first], tight), tight[3] as never, NOW, "run-root");
+    expect(during.effectiveBudgetUsd).toBe(0);
+    expect(during.exhaustedBy).toBe("run-tree");
+    // The first finished having spent $0.50 of its $8: only that spend counts now.
+    const after = await effectiveBudgetForRun(
+      fakeDb([], [root, { ...first, status: "succeeded" }], tight),
+      tight[3] as never,
+      NOW,
+      "run-root",
+    );
+    expect(after.effectiveBudgetUsd).toBe(7.5);
+    expect(after.exhaustedBy).toBeUndefined();
+  });
+});
+
 describe("effectiveBudgetForRun with parentRunId (sub-agent dispatch)", () => {
   it("composes the run-tree ceiling with the dispatched child's own budgetUsd — the tighter one wins", async () => {
     const db = fakeDb(
