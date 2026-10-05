@@ -308,4 +308,40 @@ describe("open siblings (stored state only)", () => {
       { repository: "acme/app", number: 4, openedByRunId: "c4" },
     ]);
   });
+
+  it("never leaks a different card's pull request, even from the same run tree", async () => {
+    const { db: fake } = db(
+      [
+        [
+          row("c4", opened("acme/app", 4), 40, { issueKey: "PROJ-13" }),
+          // Same tree, tagged for an unrelated card: must never join PROJ-13's hints.
+          row("c9", opened("acme/other", 1), 41, { issueKey: "PROJ-99" }),
+        ],
+      ],
+      [{ repository: "acme/app", number: 4, createdAt: at(40), openedByRunId: "c4", state: "open" }],
+    );
+    (fake.issuePullRequest.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ openedByRunId: "c4" }]); // the seed lookup
+    expect(await openSiblingsForIssue(fake, { provider: "jira", key: "PROJ-13" })).toEqual([
+      { repository: "acme/app", number: 4, openedByRunId: "c4" },
+    ]);
+  });
+
+  it("scopes the issue join to exactly the event's issue key, not every issue key the tree carries", async () => {
+    const { db: fake } = db(
+      [
+        [
+          row("c4", opened("acme/app", 4), 40, { issueKey: "PROJ-13" }),
+          row("c9", { outcome: "no_changes" }, 41, { issueKey: "PROJ-99" }),
+        ],
+      ],
+      [{ repository: "acme/app", number: 4, createdAt: at(40), openedByRunId: "c4", state: "open" }],
+    );
+    (fake.issuePullRequest.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ openedByRunId: "c4" }]); // the seed lookup
+    await openSiblingsForIssue(fake, { provider: "jira", key: "PROJ-13" });
+    expect(fake.issuePullRequest.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ OR: [{ issueProvider: "jira", issueKey: "PROJ-13" }] }),
+      }),
+    );
+  });
 });

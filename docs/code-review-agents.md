@@ -142,8 +142,12 @@ PR description:
   same GitHub App opened the PR), no run starts: the App replies that this
   deployment cannot continue the PR, so ask the deployment that opened it.
   If a router agent passes a `continuePriorRun` id that this deployment
-  cannot continue, the delegation returns a `continuation_refused` tool
-  error to the agent instead of failing its run.
+  cannot continue — including one naming a run opened by a different
+  owner's agent, which is refused even when the delegating and continuing
+  agents share an owner (see
+  [Nothing crosses owners without a grant](security-deployment.md)) — the
+  delegation returns a `continuation_refused` tool error to the agent
+  instead of failing its run.
 - A continuation never pushes to a pull request that is no longer open.
   Wardby asks GitHub whether the pull request is still open before cloning,
   and again right before it pushes; a run that finds it already merged or

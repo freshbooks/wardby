@@ -88,6 +88,15 @@ function safeRepository(value: string): string | undefined {
 export async function collectRelatedPullRequests(
   db: RelatedPullRequestsDb,
   runId: string,
+  /**
+   * Scopes the issue join (and any tree row explicitly tagged for a
+   * different issue) to exactly this issue, instead of every issue key the
+   * tree's coding runs happen to carry. Used by openSiblingsForIssue so a
+   * tree that touches two cards never leaks the other card's pull requests
+   * into this one's continuation hints; omitted by every other caller, which
+   * keeps today's "every issue the tree touched" behavior (Decision 2).
+   */
+  onlyIssueKey?: { provider: string; key: string },
 ): Promise<RelatedPullRequestGroup> {
   const rows = await treeCodingRuns(db, [runId]);
   const seen = new Set(rows.map((r) => r.runId));
@@ -124,6 +133,10 @@ export async function collectRelatedPullRequests(
     }
     const pr = pullRequestOutcome(r.result);
     if (pr?.outcome !== "pull_request_opened") continue;
+    // A tree row explicitly tagged for a different card never joins this one's set.
+    if (onlyIssueKey && r.issueKey && (r.issueProvider !== onlyIssueKey.provider || r.issueKey !== onlyIssueKey.key)) {
+      continue;
+    }
     const repository = safeRepository(pr.repository);
     if (repository && !byKey.has(keyOf(repository, pr.pullRequestNumber))) {
       byKey.set(keyOf(repository, pr.pullRequestNumber), {
@@ -134,11 +147,14 @@ export async function collectRelatedPullRequests(
       });
     }
   }
-  if (issues.size > 0) {
+  const issueFilter = onlyIssueKey
+    ? new Map([[`${onlyIssueKey.provider}\0${onlyIssueKey.key}`, onlyIssueKey]])
+    : issues;
+  if (issueFilter.size > 0) {
     const recorded = await db.issuePullRequest.findMany({
       where: {
         codeProvider: CODING_CODE_PROVIDER,
-        OR: [...issues.values()].map((i) => ({ issueProvider: i.provider, issueKey: i.key })),
+        OR: [...issueFilter.values()].map((i) => ({ issueProvider: i.provider, issueKey: i.key })),
       },
       select: { repository: true, number: true, createdAt: true, openedByRunId: true, state: true },
       orderBy: { createdAt: "asc" },
@@ -337,8 +353,10 @@ export async function openSiblings(
 
 /**
  * Open pull requests of a whole card: seeded from the newest pull request
- * recorded for the issue (any agent), whose tree's coding runs carry the
- * issue key, so the collector joins every row recorded for it. Never throws.
+ * recorded for the issue (any agent), then the collector is scoped to this
+ * issue alone (never "every issue the tree touched") so a tree that happens
+ * to also carry another card's coding runs can't leak that card's pull
+ * requests into this one's hints. Never throws.
  */
 export async function openSiblingsForIssue(
   db: RelatedPullRequestsDb,
@@ -353,7 +371,7 @@ export async function openSiblingsForIssue(
     });
     const seed = newest[0]?.openedByRunId;
     if (!seed || !SAFE_RUN_ID.test(seed)) return [];
-    return openSiblingsOf(await collectRelatedPullRequests(db, seed));
+    return openSiblingsOf(await collectRelatedPullRequests(db, seed, issue));
   } catch (err) {
     log.warn({ err, issueKey: issue.key }, "could not list the issue's open pull requests; continuing without hints");
     return [];

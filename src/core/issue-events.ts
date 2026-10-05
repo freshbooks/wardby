@@ -151,6 +151,10 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
   let item: Promise<ResolvedWorkItem> | undefined;
   const workItem = () =>
     (item ??= resolveWorkItem(deps.db, deps.trackers, event.provider, event.issueKey, RESPONSE_PATH_SNAPSHOT_BUDGET));
+  // Likewise the card's open siblings: one lookup per event (every matched
+  // link gets the same whole-card hints), not one per link.
+  let siblings: Promise<OpenSibling[]> | undefined;
+  const openPrs = () => (siblings ??= openSiblingsForIssue(deps.db, { provider: event.provider, key: event.issueKey }));
   for (const link of links) {
     if (link.access !== "write" || !link.agent.ownerId || link.agent.kind !== "native") continue;
     const matched = matchedKinds(event, link, bot);
@@ -165,7 +169,6 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
       }
       if (!ok) continue;
     }
-    const openPrs = await openSiblingsForIssue(deps.db, { provider: event.provider, key: event.issueKey });
     try {
       const dispatched = await dispatchRun({
         db: deps.db,
@@ -174,7 +177,7 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
         agentId: link.agentId,
         trigger: "host_event",
         attribution: { source: "issue_event", item: await workItem() },
-        taskOverride: issueTaskText(event, matched, tracker.issueUrl(event.issueKey), link, openPrs),
+        taskOverride: issueTaskText(event, matched, tracker.issueUrl(event.issueKey), link, await openPrs()),
         afterPersist: async (tx, run) => {
           await tx.runIssueStatus.create({ data: issueStatusRow(event, run.id, link.commentVisibilityRole) });
         },

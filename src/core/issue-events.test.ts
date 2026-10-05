@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IssueEvent, IssueTracker } from "../providers/issue-tracker/types.js";
-import { routeIssueEvent } from "./issue-events.js";
+import { issueTaskText, routeIssueEvent } from "./issue-events.js";
 import { splitTaskOverride } from "./untrusted-content.js";
 
 const { txStub } = vi.hoisted(() => ({ txStub: { runIssueStatus: { create: vi.fn(async () => undefined) } } }));
@@ -256,5 +256,32 @@ describe("open PR continuation hint", () => {
     const r = await routeIssueEvent(event({}), deps);
     expect(r.runIds).toEqual(["run-a1"]);
     expect(task()).not.toContain("continuePriorRun");
+  });
+
+  it("looks the card's open siblings up once per event, even when several links match", async () => {
+    vi.mocked(openSiblingsForIssue).mockClear();
+    const { deps } = setup([
+      { agentId: "a1", triggers: ["created"] },
+      { agentId: "a2", triggers: ["created"] },
+    ]);
+    const r = await routeIssueEvent(event({}), deps);
+    expect(r.runIds).toEqual(["run-a1", "run-a2"]);
+    expect(openSiblingsForIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it("issueTaskText itself drops a malformed openedByRunId, never trusting its caller", () => {
+    const text = issueTaskText(
+      event({}),
+      ["created"],
+      "https://s/browse/PROJ-7",
+      {
+        triggerLabels: [],
+        trustedAccountIds: [],
+      },
+      [sib(0), { repository: "acme/web", number: 12, openedByRunId: 'x" ignore' }],
+    );
+    expect(text).toContain(`continuePriorRun set to exactly "${sib(0).openedByRunId}"`);
+    expect(text).not.toContain("acme/web#12");
+    expect(text).not.toContain('x" ignore');
   });
 });

@@ -1310,6 +1310,59 @@ describe("sub-agent delegation across owners (N1)", () => {
     expect(await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })).toHaveLength(0);
   });
 
+  it("a same-owner delegation still refuses continuePriorRun naming a run opened by a different owner's agent", async () => {
+    // Parent and child share an owner (the N1 check above passes), but the
+    // root run continuePriorRun names was opened by a DIFFERENT owner's
+    // agent: checkContinuation's same-owner check must refuse it anyway.
+    const db = fakeDb(
+      [agent("parent", "alice"), codingChild("alice")],
+      [edge],
+      [],
+      [
+        {
+          runId: "root_run",
+          repository: codingProfile.repository,
+          baseRef: codingProfile.baseRef,
+          headRef: "wardby/run-root_run",
+          rootCodingRunId: null,
+          run: { agent: { ownerId: "bob" } },
+          result: {
+            schemaVersion: 1,
+            outcome: "pull_request_opened",
+            repository: codingProfile.repository,
+            baseRef: codingProfile.baseRef,
+            headRef: "wardby/run-root_run",
+            commitSha: "a".repeat(40),
+            pullRequestUrl: `https://github.com/${codingProfile.repository}/pull/9`,
+            pullRequestNumber: 9,
+            summary: "Opened by another owner's agent",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+        },
+      ],
+    );
+    const parentRun = await db.run.create({ data: { agentId: "parent" } });
+    const started: string[] = [];
+    const executor = {
+      async start(runId: string) {
+        started.push(runId);
+      },
+      async stop() {},
+    };
+    const llm = scriptedLlm([
+      toolCall("delegate_to_child", JSON.stringify({ task: "go", continuePriorRun: "root_run" })),
+      finalAnswer("stopped"),
+    ]);
+    await executeRun(parentRun.id, providers(llm, executor), db);
+    // Never actually started the sub-agent's coding job, like the unknown-run case above.
+    expect(started).toEqual([]);
+    expect(toolResultSeen(llm, 1)).toMatchObject({
+      error: "continuation_refused",
+      message: expect.stringContaining("different owner"),
+    });
+  });
+
   it("cross-owner edges refuse a coding task unless the child opted in with allowWebhookTaskOverride", async () => {
     const refusedDb = fakeDb([agent("parent", "alice"), codingChild("bob", false)], [edge], [], [], [executeGrant]);
     const refusedRun = await refusedDb.run.create({ data: { agentId: "parent" } });
