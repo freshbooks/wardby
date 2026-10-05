@@ -1287,6 +1287,11 @@ describe("routeHostEvent: CI finished", () => {
     for (const [rows, state, head] of [
       [[row()], "pending", SHA],
       [[row(), row({ runId: "r2", ciRereviewAt: new Date() })], "passing", SHA],
+      [
+        [row({ run: { agentId: "a1" } }), row({ runId: "r2", ciRereviewAt: new Date(), run: { agentId: "a1" } })],
+        "passing",
+        SHA,
+      ],
       [[row()], "passing", "f".repeat(40)],
       [[row({ verdict: "APPROVE" })], "passing", SHA],
       [[row({ ciPendingAtReview: false })], "passing", SHA],
@@ -1302,5 +1307,26 @@ describe("routeHostEvent: CI finished", () => {
     updateMany.mockResolvedValueOnce({ count: 0 });
     await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: [], followUps: [] });
     expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  it("re-runs a second reviewer on a head where another reviewer was already re-run", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = host();
+    h.readCi = vi.fn(
+      async () =>
+        ({ headSha: SHA, state: "passing", checks: [], truncated: false, statusesUnavailable: false }) as never,
+    );
+    const d = deps(
+      [
+        { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" },
+        { agentId: "a2", triggers: ["pull_request"], checkName: "security" },
+      ],
+      h,
+    );
+    Object.assign((d.db as unknown as { runHostCheck: object }).runHostCheck, {
+      findMany: vi.fn(async () => [row({ ciRereviewAt: new Date() }), row({ runId: "r2", run: { agentId: "a2" } })]),
+      updateMany: vi.fn(async () => ({ count: 1 })),
+    });
+    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a2"], followUps: [] });
   });
 });

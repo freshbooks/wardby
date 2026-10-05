@@ -583,12 +583,14 @@ internal marker to the model:
   own check while CI on that head is `pending` or `none`, Wardby records it.
   When a CI check suite (not Wardby's own) completes on that head and no CI
   there is still running, Wardby runs the same reviewer again on the same
-  head. It does this at most once per head commit, only while the pull
+  head. It does this at most once per head commit and reviewer, only while the pull
   request is open and its head has not moved, and only for reviewers whose
   repository access is still authorized. It needs the App's **Check suite**
   event. CI that reports only commit statuses does not send check suite
-  events, so it never triggers a re-review; use **Re-run** on the review
-  check.
+  events, so it never triggers a re-review; and when CI mixes check suites
+  with commit statuses, a status still pending as the last suite finishes
+  means no re-review happens. Use **Re-run** on the review check in both
+  cases.
 - `repo_read_file` / `repo_list_files` — read a file or list a directory at
   a ref.
 - `repo_publish_review` — publish inline comments, a summary, and the check

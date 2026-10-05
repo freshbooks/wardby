@@ -575,16 +575,26 @@ async function rereviewAfterCi(
         run: { select: { agentId: true } },
       },
     });
-    if (onHead.some((r) => r.ciRereviewAt !== null)) return [];
-    const waiting = onHead.filter((r) => r.verdict === "COMMENT" && r.ciPendingAtReview === true);
+    // Once per head and reviewer: an agent already re-run here is never re-run again on it.
+    const rerun = new Set(onHead.filter((r) => r.ciRereviewAt !== null).map((r) => r.run.agentId));
+    const waiting = onHead.filter(
+      (r) => r.verdict === "COMMENT" && r.ciPendingAtReview === true && !rerun.has(r.run.agentId),
+    );
     if (waiting.length === 0) return [];
     const head = await host.pullRequestHead(event.repository, prNumber);
     if (head.isFork || head.state !== "open" || head.headSha !== event.headSha) return [];
     const ci = await host.readCi(event.repository, event.headSha);
     if (ci.state === "pending" || ci.state === "none" || ci.state === "unavailable") return [];
+    // Only reviewers still authorized are claimed, so a denied one keeps its chance for later.
+    const allowed = await authorizedLinks(
+      deps,
+      event,
+      reviewerLinks.filter((l) => waiting.some((r) => r.run.agentId === l.agentId)),
+    );
+    const allowedIds = new Set(allowed.map((l) => l.agentId));
     // Claimed per row, so concurrent completions re-run each review only once.
     const agentIds = new Set<string>();
-    for (const row of waiting) {
+    for (const row of waiting.filter((r) => allowedIds.has(r.run.agentId))) {
       const claimed = await deps.db.runHostCheck.updateMany({
         where: { runId: row.runId, ciRereviewAt: null },
         data: { ciRereviewAt: new Date() },
@@ -592,13 +602,7 @@ async function rereviewAfterCi(
       if (claimed.count > 0) agentIds.add(row.run.agentId);
     }
     if (agentIds.size === 0) return [];
-    const targets = reviewTargets(
-      await authorizedLinks(
-        deps,
-        event,
-        reviewerLinks.filter((l) => agentIds.has(l.agentId)),
-      ),
-    );
+    const targets = reviewTargets(allowed.filter((l) => agentIds.has(l.agentId)));
     log.info(
       { repository: event.repository, prNumber, headSha: event.headSha, ci: ci.state },
       "CI finished: re-running the review",

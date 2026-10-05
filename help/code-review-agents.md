@@ -53,10 +53,11 @@ as pending.
 If a review publishes only a comment while CI on the head is still running (or
 has not reported yet), Wardby runs that review again once CI on the same head
 has finished, so it can approve or request changes against the real result.
-This happens at most once per head commit, only while the pull request is open
+This happens at most once per head commit for each reviewer, only while the pull request is open
 and still at that commit, and needs the App's **Check suite** event. CI that
-reports only commit statuses (no check suites) does not trigger it; use
-**Re-run** on the review check instead.
+reports only commit statuses (no check suites) does not trigger it, nor does a
+commit status still pending when the last check suite finishes; use **Re-run**
+on the review check instead.
 
 Commit statuses need the App's **Commit statuses: Read** permission; without
 it only check runs are shown.
