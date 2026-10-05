@@ -39,7 +39,16 @@ describe("createDelegationSiblings", () => {
     await expect(waited).resolves.toBe(false);
   });
 
-  it("does not wake a waiter that registered after the finish", async () => {
+  it("wakes at once for a finish since the given count, even one before the wait began", async () => {
+    const siblings = createDelegationSiblings();
+    const finish = siblings.start();
+    const since = siblings.finishes;
+    finish();
+    expect(siblings.finishes).toBe(since + 1);
+    await expect(siblings.nextFinish(60_000, since)).resolves.toBe(true);
+  });
+
+  it("does not count a finish before the wait when no count is given", async () => {
     vi.useFakeTimers();
     const siblings = createDelegationSiblings();
     siblings.start()();

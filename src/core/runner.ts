@@ -799,7 +799,14 @@ async function executeTrackedRun(
               message: `This run already delegated to "${boundName}"; a run delegates to each sub-agent at most once.`,
             });
           }
-          if (priorDispatches.length + waitingDelegations.size >= limit) {
+          if (priorDispatches.length < limit && priorDispatches.length + waitingDelegations.size >= limit) {
+            // Only a waiting delegation (parallelDelegations) holds the remaining place.
+            return JSON.stringify({
+              error: "already_dispatched",
+              message: `This run reached its limit of ${limit} delegations: ${priorDispatches.length} made and ${waitingDelegations.size} waiting for budget.`,
+            });
+          }
+          if (priorDispatches.length >= limit) {
             return JSON.stringify({
               error: "already_dispatched",
               message:
@@ -894,7 +901,10 @@ async function executeTrackedRun(
             const { queueTimeoutSec } = loadCodingConcurrencyConfig();
             const runTimeoutSec = childAgent.kind === "coding" ? (childAgent.codingProfile?.timeoutSec ?? 0) : 0;
             const deadline = Date.now() + (queueTimeoutSec + runTimeoutSec + CODING_CHILD_WAIT_GRACE_SEC) * 1000;
+            let waited = false;
             while (delegationSiblings.inFlight > 0) {
+              // Taken before the budget read, so a sibling that finishes during it still wakes this wait.
+              const finishes = delegationSiblings.finishes;
               const { exhaustedBy } = await effectiveBudgetForRun(db, childAgent, new Date(), runId);
               const remainingMs = deadline - Date.now();
               if (!exhaustedBy || remainingMs <= 0) break;
@@ -903,12 +913,28 @@ async function executeTrackedRun(
                 "delegation waiting for a sibling to free budget",
               );
               waitingDelegations.add(edge.childAgentId);
+              waited = true;
               release();
               try {
-                await delegationSiblings.nextFinish(remainingMs);
+                await delegationSiblings.nextFinish(remainingMs, finishes);
               } finally {
                 release = await delegationGate.acquire();
                 waitingDelegations.delete(edge.childAgentId);
+              }
+            }
+            // The parent may have been stopped while this delegation waited: start nothing for it.
+            if (waited) {
+              const parent = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
+              const parentEnded = !parent || !DRIVABLE.includes(parent.status as (typeof DRIVABLE)[number]);
+              if (
+                parentEnded ||
+                (await db.task.findFirst({ where: { runId, status: "cancelled" }, select: { id: true } })) !== null
+              ) {
+                return JSON.stringify({
+                  error: "parent_cancelled",
+                  message:
+                    "This run was cancelled while the sub-agent waited for budget; no sub-agent run was started.",
+                });
               }
             }
           }

@@ -9,18 +9,27 @@
 export interface DelegationSiblings {
   /** Children started and not yet finished. */
   readonly inFlight: number;
+  /** How many children have finished so far: pass it to nextFinish to not miss a finish in between. */
+  readonly finishes: number;
   /** Counts one child as running. Returns its finish, which is idempotent. */
   start(): () => void;
-  /** Resolves true when a child finishes after this call, or false after timeoutMs. */
-  nextFinish(timeoutMs: number): Promise<boolean>;
+  /**
+   * Resolves true once a child finishes after `sinceFinishes` was read (at once if one already
+   * has), or after this call when it is omitted; false after timeoutMs.
+   */
+  nextFinish(timeoutMs: number, sinceFinishes?: number): Promise<boolean>;
 }
 
 export function createDelegationSiblings(): DelegationSiblings {
   let inFlight = 0;
+  let finishes = 0;
   const waiters = new Set<() => void>();
   return {
     get inFlight() {
       return inFlight;
+    },
+    get finishes() {
+      return finishes;
     },
     start() {
       inFlight += 1;
@@ -29,10 +38,12 @@ export function createDelegationSiblings(): DelegationSiblings {
         if (finished) return;
         finished = true;
         inFlight -= 1;
+        finishes += 1;
         for (const wake of [...waiters]) wake();
       };
     },
-    nextFinish(timeoutMs) {
+    nextFinish(timeoutMs, sinceFinishes = finishes) {
+      if (finishes > sinceFinishes) return Promise.resolve(true);
       return new Promise<boolean>((resolve) => {
         const settle = (woken: boolean) => {
           clearTimeout(timer);

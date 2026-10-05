@@ -1243,15 +1243,18 @@ describe("delegate_to_<boundName> dispatch tool", () => {
         dailyBudgetUsd: number;
         names: string[];
         executor?: (db: RunnerDb) => { start(runId: string): Promise<void>; stop(runId: string): Promise<void> };
+        limit?: number;
+        wrapDb?: (db: any) => void;
       }) {
         const db = fakeDb(
-          [lead(options.parallel), ...options.agents],
+          [lead(options.parallel, options.limit), ...options.agents],
           edges,
           options.priorRuns ?? [],
           [],
           [],
           [group(options.dailyBudgetUsd)],
         );
+        options.wrapDb?.(db);
         const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
         const executor = options.executor ? options.executor(db) : overlappingExecutor(db);
         const llm = scriptedLlm([oneTurn(options.names), finalAnswer("reported")]);
@@ -1344,6 +1347,74 @@ describe("delegate_to_<boundName> dispatch tool", () => {
         } finally {
           vi.useRealTimers();
         }
+      });
+
+      it("retries at once when the sibling finishes while its budget read is still in progress", async () => {
+        const started = Date.now();
+        const { children, toolMessages } = await runGrouped({
+          parallel: true,
+          agents: [coder("order", { budgetGroupId: "g-wmd" }), coder("bff", { budgetGroupId: "g-wmd" })],
+          dailyBudgetUsd: 3,
+          names: ["order", "bff"],
+          wrapDb: (db) => {
+            // The group-spend read returns what it saw, but only after order has finished meanwhile.
+            const findMany = db.run.findMany;
+            db.run.findMany = async (args: any) => {
+              const rows = await findMany(args);
+              if (args.where.agentId && rows.some((r: FakeRun) => r.agentId === "order" && r.status === "pending")) {
+                await new Promise((resolve) => setTimeout(resolve, 100));
+              }
+              return rows;
+            };
+          },
+        });
+        expect(Date.now() - started).toBeLessThan(2_000);
+        expect(children.map((c) => [c.agentId, c.status])).toEqual([
+          ["order", "succeeded"],
+          ["bff", "succeeded"],
+        ]);
+        expect(toolMessages[1]).toContain('"status":"succeeded"');
+      });
+
+      it("names a place held by a delegation waiting for budget when it refuses one over the limit", async () => {
+        const { children, toolMessages } = await runGrouped({
+          parallel: true,
+          agents: [coder("order", { budgetGroupId: "g-wmd" }), coder("bff", { budgetGroupId: "g-wmd" }), coder("app")],
+          dailyBudgetUsd: 3,
+          names: ["order", "bff", "app"],
+          limit: 2,
+        });
+        expect(children.map((c) => [c.agentId, c.status])).toEqual([
+          ["order", "succeeded"],
+          ["bff", "succeeded"],
+        ]);
+        expect(toolMessages[2]).toContain("already_dispatched");
+        expect(toolMessages[2]).toContain("1 made and 1 waiting for budget");
+      });
+
+      it("starts nothing when the parent run was cancelled while the delegation waited", async () => {
+        const cancellingExecutor = (db: RunnerDb) => ({
+          async start(runId: string) {
+            const child = await (db as any).run.findUnique({ where: { id: runId } });
+            await (db as any).run.update({ where: { id: child.parentRunId }, data: { status: "cancelled" } });
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            await (db as any).run.update({
+              where: { id: runId },
+              data: { status: "succeeded", finalText: "done", costUsd: 0.01, finishedAt: new Date() },
+            });
+          },
+          async stop() {},
+        });
+        const { children, toolMessages } = await runGrouped({
+          parallel: true,
+          agents: [coder("order", { budgetGroupId: "g-wmd" }), coder("bff", { budgetGroupId: "g-wmd" })],
+          dailyBudgetUsd: 3,
+          names: ["order", "bff"],
+          executor: cancellingExecutor,
+        });
+        expect(children.map((c) => c.agentId)).toEqual(["order"]);
+        expect(toolMessages[1]).toContain("parent_cancelled");
+        expect(toolMessages[1]).toContain("no sub-agent run was started");
       });
 
       it("does not wait when the agent has not opted in", async () => {
