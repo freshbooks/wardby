@@ -10,6 +10,8 @@ import { executeRun, type RunnerDb } from "./runner.js";
 
 vi.mock("./review-fix.js", () => ({ startReviewFixAfterReview: vi.fn(async () => undefined) }));
 import { startReviewFixAfterReview } from "./review-fix.js";
+vi.mock("./related-pull-requests.js", () => ({ updateRelatedPullRequests: vi.fn(async () => undefined) }));
+import { updateRelatedPullRequests } from "./related-pull-requests.js";
 
 // End-to-end coverage of the repo_* built-ins inside a real NativeEngine run
 // loop (scripted LLM, fake DB): offered only to linked agents when a review
@@ -329,5 +331,16 @@ describe("the reviewer run's finalizer starts a review-fix round", () => {
     const { db, llm } = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [text("done")] });
     await executeRun("run1", { ...providers(llm), reviewHosts: { github: host } }, db);
     expect(startReviewFixAfterReview).not.toHaveBeenCalled();
+  });
+
+  it("hands the finished run to the related pull requests writer once, with the review hosts", async () => {
+    vi.mocked(updateRelatedPullRequests).mockClear();
+    const host = fakeHost();
+    const { db, llm } = harness({ links: [LINK], runHostCheck: OPEN_CHECK, script: [text("done")] });
+    const run = await executeRun("run1", { ...providers(llm), reviewHosts: { github: host } }, db);
+    expect(updateRelatedPullRequests).toHaveBeenCalledTimes(1);
+    const [, finished, hosts] = vi.mocked(updateRelatedPullRequests).mock.calls[0];
+    expect(finished.id).toBe(run.id);
+    expect(hosts).toEqual({ github: host });
   });
 });

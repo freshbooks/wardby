@@ -68,6 +68,7 @@ import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
 import { fileSelfDefect } from "./self-defects.js";
 import { startReviewFixAfterReview } from "./review-fix.js";
+import { updateRelatedPullRequests } from "./related-pull-requests.js";
 import { recordNativeModelUsage } from "./model-usage.js";
 import { pinNativeRunPricing } from "./run-pricing.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
@@ -1029,6 +1030,8 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    // After the issue status, so IssuePullRequest rows for this run exist. Bounded and never throws.
+    if (claimed) await updateRelatedPullRequests(db, finished, reviewHosts, issueTrackers);
     if (claimed && providers.executor && reviewHosts && repoAccess) {
       await startReviewFixAfterReview(runId, {
         db,
@@ -1056,6 +1059,8 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    // After the issue status, so IssuePullRequest rows for this run exist. Bounded and never throws.
+    if (claimed) await updateRelatedPullRequests(db, finished, reviewHosts, issueTrackers);
     if (claimed && providers.executor && reviewHosts && repoAccess) {
       await startReviewFixAfterReview(runId, {
         db,

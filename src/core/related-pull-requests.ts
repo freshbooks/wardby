@@ -6,10 +6,20 @@
  * pull request's coding run was dispatched — the lead's delegation order,
  * since a native run's tool calls run one after another.
  */
-import { Prisma, type PrismaClient } from "#prisma";
+import { Prisma, type PrismaClient, type Run } from "#prisma";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
-import { ISSUE_KEY } from "../providers/issue-tracker/types.js";
+import {
+  ISSUE_KEY,
+  ISSUE_TRACKER_NAMES,
+  type IssueTrackerProvider,
+  type IssueTrackerRegistry,
+} from "../providers/issue-tracker/types.js";
+import type { ReviewHostRegistry } from "../providers/review-host/types.js";
+import { renderRelatedSection, type RelatedPullRequestState } from "../providers/vcs/github.js";
 import { pullRequestOutcome } from "./host-status.js";
+import { logger } from "./logger.js";
+
+const log = logger.child({ module: "related-pull-requests" });
 
 /** Most pull requests a group holds; the description shows fewer (MAX_RELATED_PULL_REQUESTS). */
 export const MAX_RELATED_GROUP = 50;
@@ -162,4 +172,113 @@ export async function collectRelatedPullRequests(
     )
     .slice(0, MAX_RELATED_GROUP);
   return { pullRequests, ...(issue ? { issue } : {}) };
+}
+
+interface LivePullRequest {
+  repository: string;
+  number: number;
+  state?: RelatedPullRequestState;
+  /** Set only when the PR is the App's own and its marker run is one this deployment recorded here. */
+  markerRunId?: string;
+}
+
+function issueFor(
+  group: RelatedPullRequestGroup,
+  trackers: IssueTrackerRegistry | undefined,
+): { key: string; url?: string; trackerName?: string } | undefined {
+  if (!group.issue) return undefined;
+  const provider = group.issue.provider as IssueTrackerProvider;
+  let url: string | undefined;
+  try {
+    url = trackers?.[provider]?.issueUrl(group.issue.key);
+  } catch {
+    url = undefined;
+  }
+  const trackerName = Object.hasOwn(ISSUE_TRACKER_NAMES, provider) ? ISSUE_TRACKER_NAMES[provider] : undefined;
+  return { key: group.issue.key, ...(url ? { url } : {}), ...(trackerName ? { trackerName } : {}) };
+}
+
+/**
+ * After a native run ends, rewrites the Related pull requests section on
+ * every open pull request of its request (control-plane rows only). Best
+ * effort: never throws, and never removes a section (a set of one writes
+ * nothing). Only PRs the App authored, whose marker names a coding run this
+ * deployment recorded in that repository, are edited.
+ */
+export async function updateRelatedPullRequests(
+  db: RelatedPullRequestsDb,
+  run: Pick<Run, "id">,
+  hosts: ReviewHostRegistry | undefined,
+  trackers: IssueTrackerRegistry | undefined,
+): Promise<void> {
+  const host = hosts?.[CODING_CODE_PROVIDER as keyof ReviewHostRegistry];
+  if (!host?.replaceRelatedSection || !host.pullRequestOrigin) return;
+  try {
+    // A run that delegated nothing has no request set of its own.
+    if (!(await db.run.findFirst({ where: { parentRunId: run.id }, select: { id: true } }))) return;
+    const group = await collectRelatedPullRequests(db, run.id);
+    if (group.pullRequests.length < 2) return;
+
+    const live: LivePullRequest[] = [];
+    for (const pr of group.pullRequests) {
+      try {
+        const origin = await host.pullRequestOrigin(pr.repository, pr.number);
+        const state: RelatedPullRequestState = origin.merged
+          ? "merged"
+          : origin.state !== "open"
+            ? "closed"
+            : origin.draft
+              ? "draft"
+              : "open";
+        let markerRunId: string | undefined;
+        if (origin.markerRunId) {
+          const opener = await db.codingRun.findUnique({
+            where: { runId: origin.markerRunId },
+            select: { repository: true },
+          });
+          if (opener && opener.repository.toLowerCase() === pr.repository) markerRunId = origin.markerRunId;
+        }
+        live.push({ repository: pr.repository, number: pr.number, state, ...(markerRunId ? { markerRunId } : {}) });
+      } catch (err) {
+        log.warn(
+          { err, runId: run.id, repository: pr.repository, number: pr.number },
+          "could not read a related pull request",
+        );
+        // The stored state (issue-recorded PRs) is better than none; never edited without a live read.
+        live.push({ repository: pr.repository, number: pr.number, ...(pr.state ? { state: pr.state } : {}) });
+      }
+    }
+
+    const issue = issueFor(group, trackers);
+    for (const target of live) {
+      if (!target.markerRunId || (target.state !== "open" && target.state !== "draft")) continue;
+      const block = renderRelatedSection({
+        entries: live.map((pr) => ({
+          repository: pr.repository,
+          number: pr.number,
+          ...(pr.state ? { state: pr.state } : {}),
+          ...(pr === target ? { self: true } : {}),
+        })),
+        ...(issue ? { issue } : {}),
+      });
+      if (!block) continue;
+      try {
+        const outcome = await host.replaceRelatedSection(target.repository, target.number, {
+          expectedMarkerRunId: target.markerRunId,
+          block,
+        });
+        log.info(
+          { runId: run.id, repository: target.repository, number: target.number, outcome },
+          "related pull requests section",
+        );
+      } catch (err) {
+        log.warn(
+          { err, runId: run.id, repository: target.repository, number: target.number },
+          "could not update a related pull requests section",
+        );
+      }
+    }
+  } catch (err) {
+    log.warn({ err, runId: run.id }, "could not update related pull requests");
+  }
 }
