@@ -89,6 +89,25 @@ describe("handleReviewHostTool", () => {
     });
   });
 
+  it("adds the CI view with its note to repo_pr_read output", async () => {
+    const c = ctx();
+    vi.mocked(c.hosts.github!.readPullRequest).mockResolvedValue({
+      number: 7,
+      headSha: SHA,
+      body: "<!-- wardby:r -->",
+      ci: { headSha: SHA, state: "none", checks: [], truncated: false, statusesUnavailable: false },
+    } as never);
+    const out = JSON.parse(
+      await handleReviewHostTool(
+        "repo_pr_read",
+        JSON.stringify({ repository: "chfields/knock-knock-jokes", prNumber: 7 }),
+        c,
+      ),
+    );
+    expect(out.ci).toMatchObject({ state: "none", sandboxInstallIncomplete: false });
+    expect(out.ci.note).toMatch(/^No CI checks/);
+  });
+
   it("publishes with the run's check id, and records the check completed", async () => {
     const c = ctx({
       runCheck: { provider: "github", repository: WRITE.repository, checkId: "11", headSha: SHA, prNumber: 7 },

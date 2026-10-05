@@ -17,6 +17,7 @@ import {
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
 import { normalizeGitHubRepository } from "../coding/protocol.js";
+import { ciForAgent } from "./ci-context.js";
 import { logger } from "./logger.js";
 import { describeDenial, type RepoAccessDecision } from "./repo-access.js";
 
@@ -141,7 +142,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_pr_read",
     description:
-      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), lastReviewedSha — the head you last reviewed on this PR, if any — and openThreads: your own unresolved inline review threads (id, path, line, outdated, body). Pass sinceSha (usually lastReviewedSha) to get only what changed since then; if baseMergedSince is true, the base branch was merged in meanwhile and each file shows the PR's full diff against the base, limited to files that changed since sinceSha.",
+      "Reads a pull request: title, body, author, state, refs, headSha, isFork, each changed file's unified-diff patch (patches share a character budget; truncated ones are flagged), lastReviewedSha — the head you last reviewed on this PR, if any — and openThreads: your own unresolved inline review threads (id, path, line, outdated, body). Pass sinceSha (usually lastReviewedSha) to get only what changed since then; if baseMergedSince is true, the base branch was merged in meanwhile and each file shows the PR's full diff against the base, limited to files that changed since sinceSha. It also returns ci: the CI check runs and commit statuses on headSha (wardby's own checks excluded), an overall state (passing, failing, pending, inconclusive, none, unavailable), sandboxInstallIncomplete, and a note. CI is the authority on whether this head builds and passes its tests: the description's Tests list comes from Wardby's coding sandbox, which may have had an incomplete install. Where they disagree, follow CI and say so; report pending checks as pending.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -332,13 +333,12 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
     switch (name) {
       case "repo_pr_read": {
         const a = PrReadArgs.parse(parsed);
-        return JSON.stringify(
-          await host.readPullRequest(link.repository, a.prNumber, {
-            sinceSha: a.sinceSha,
-            maxPatchChars: a.maxPatchChars ?? DEFAULT_PATCH_CHARS,
-            agentMarker: ctx.agentId,
-          }),
-        );
+        const view = await host.readPullRequest(link.repository, a.prNumber, {
+          sinceSha: a.sinceSha,
+          maxPatchChars: a.maxPatchChars ?? DEFAULT_PATCH_CHARS,
+          agentMarker: ctx.agentId,
+        });
+        return JSON.stringify({ ...view, ci: ciForAgent(view) });
       }
       case "repo_read_file": {
         const a = ReadFileArgs.parse(parsed);
