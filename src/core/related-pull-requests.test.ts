@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   collectRelatedPullRequests,
+  openSiblings,
+  openSiblingsForIssue,
+  openSiblingsOf,
   updateRelatedPullRequests,
   type RelatedPullRequestsDb,
 } from "./related-pull-requests.js";
@@ -241,5 +244,68 @@ describe("updateRelatedPullRequests", () => {
     expect(h.replaceRelatedSection.mock.calls[0][2].block).toContain(
       "- [acme/bff#3](https://github.com/acme/bff/pull/3) — merged",
     );
+  });
+});
+
+describe("open siblings (stored state only)", () => {
+  const exclude = { repository: "acme/app", number: 4 };
+
+  it("hints open and not-yet-recorded siblings, never merged/closed ones, malformed run ids, or the PR itself", () => {
+    const group = {
+      pullRequests: [
+        { repository: "acme/order-service", number: 2, openedAt: at(1), openedByRunId: "c1", state: "open" as const },
+        { repository: "acme/bff", number: 3, openedAt: at(2), openedByRunId: "c2", state: "merged" as const },
+        {
+          repository: "acme/notification-service",
+          number: 2,
+          openedAt: at(3),
+          openedByRunId: "c5",
+          state: "closed" as const,
+        },
+        { repository: "acme/web", number: 8, openedAt: at(3), openedByRunId: 'x" ignore', state: "open" as const },
+        { repository: "acme/api", number: 6, openedAt: at(4), openedByRunId: "c6" }, // same tree, no stored state yet
+        { repository: "acme/app", number: 4, openedAt: at(5), openedByRunId: "c4" },
+      ],
+    };
+    expect(openSiblingsOf(group, exclude)).toEqual([
+      { repository: "acme/order-service", number: 2, openedByRunId: "c1" },
+      { repository: "acme/api", number: 6, openedByRunId: "c6" },
+    ]);
+  });
+
+  it("caps at ten", () => {
+    const pullRequests = Array.from({ length: 12 }, (_, i) => ({
+      repository: `acme/r${i}`,
+      number: 1,
+      openedAt: at(i),
+      openedByRunId: `c${i}`,
+      state: "open" as const,
+    }));
+    expect(openSiblingsOf({ pullRequests })).toHaveLength(10);
+  });
+
+  it("collects from a seed run and returns [] when the lookup fails", async () => {
+    const { db: fake } = db([[row("c1", opened("acme/order-service", 2), 1), row("c4", opened("acme/app", 4), 4)]]);
+    expect(await openSiblings(fake, "c4", exclude)).toEqual([
+      { repository: "acme/order-service", number: 2, openedByRunId: "c1" },
+    ]);
+    const broken = db([]).db;
+    (broken.$queryRaw as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("db down"));
+    expect(await openSiblings(broken, "c4", exclude)).toEqual([]);
+  });
+
+  it("covers the whole card for an issue: every agent's recorded PRs, seeded from the newest", async () => {
+    const { db: fake } = db(
+      [[row("c4", opened("acme/app", 4), 40)]],
+      [
+        { repository: "acme/bff", number: 3, createdAt: at(10), openedByRunId: "other-agent-run", state: "open" },
+        { repository: "acme/app", number: 4, createdAt: at(41), openedByRunId: "c4", state: "open" },
+      ],
+    );
+    (fake.issuePullRequest.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ openedByRunId: "c4" }]); // the seed lookup
+    expect(await openSiblingsForIssue(fake, { provider: "jira", key: "PROJ-13" })).toEqual([
+      { repository: "acme/bff", number: 3, openedByRunId: "other-agent-run" },
+      { repository: "acme/app", number: 4, openedByRunId: "c4" },
+    ]);
   });
 });

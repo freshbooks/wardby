@@ -282,3 +282,80 @@ export async function updateRelatedPullRequests(
     log.warn({ err, runId: run.id }, "could not update related pull requests");
   }
 }
+
+/** Most open siblings hinted in one task. */
+export const MAX_SIBLING_HINTS = 10;
+const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+/** Closes every sibling-hint block (mention and Jira alike). */
+export const SIBLING_GUIDANCE =
+  "Continue the pull request you were asked about, and a listed open one only when the change requires it. " +
+  "Never open a new pull request in a repository that already has an open pull request listed here. Merged or " +
+  "closed pull requests are not listed: a change there needs a new pull request.";
+
+export interface OpenSibling {
+  repository: string;
+  number: number;
+  openedByRunId: string;
+}
+
+/**
+ * The group's pull requests a follow-up may continue: stored state "open", or
+ * no stored state yet (a same-tree sibling not recorded for an issue), minus
+ * `exclude` and malformed run ids. Stored state only: no host call. A hint for
+ * a PR that has closed since is refused by the continuation itself (git.ts).
+ */
+export function openSiblingsOf(
+  group: RelatedPullRequestGroup,
+  exclude?: { repository: string; number: number },
+): OpenSibling[] {
+  const excluded = exclude ? `${safeRepository(exclude.repository) ?? ""}#${exclude.number}` : "";
+  return group.pullRequests
+    .filter(
+      (pr) =>
+        (pr.state === undefined || pr.state === "open") &&
+        `${pr.repository}#${pr.number}` !== excluded &&
+        SAFE_RUN_ID.test(pr.openedByRunId),
+    )
+    .slice(0, MAX_SIBLING_HINTS)
+    .map((pr) => ({ repository: pr.repository, number: pr.number, openedByRunId: pr.openedByRunId }));
+}
+
+/** Open siblings of the request `seedRunId` belongs to. Never throws. */
+export async function openSiblings(
+  db: RelatedPullRequestsDb,
+  seedRunId: string,
+  exclude: { repository: string; number: number },
+): Promise<OpenSibling[]> {
+  try {
+    return openSiblingsOf(await collectRelatedPullRequests(db, seedRunId), exclude);
+  } catch (err) {
+    log.warn({ err, seedRunId }, "could not list open sibling pull requests; continuing without hints");
+    return [];
+  }
+}
+
+/**
+ * Open pull requests of a whole card: seeded from the newest pull request
+ * recorded for the issue (any agent), whose tree's coding runs carry the
+ * issue key, so the collector joins every row recorded for it. Never throws.
+ */
+export async function openSiblingsForIssue(
+  db: RelatedPullRequestsDb,
+  issue: { provider: string; key: string },
+): Promise<OpenSibling[]> {
+  try {
+    const newest = await db.issuePullRequest.findMany({
+      where: { issueProvider: issue.provider, issueKey: issue.key, codeProvider: CODING_CODE_PROVIDER },
+      orderBy: { createdAt: "desc" },
+      take: 1,
+      select: { openedByRunId: true },
+    });
+    const seed = newest[0]?.openedByRunId;
+    if (!seed || !SAFE_RUN_ID.test(seed)) return [];
+    return openSiblingsOf(await collectRelatedPullRequests(db, seed));
+  } catch (err) {
+    log.warn({ err, issueKey: issue.key }, "could not list the issue's open pull requests; continuing without hints");
+    return [];
+  }
+}
