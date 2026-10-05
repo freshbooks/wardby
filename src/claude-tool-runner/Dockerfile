@@ -5,7 +5,11 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # The tool runner every Claude Code run uses; the two targets below add only their toolchain.
 FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS base
-RUN npm install --global --omit=dev npm@12.0.2 \
+# perl-base: the pinned base image ships an older build; take Debian's security fixes.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade perl-base \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
 WORKDIR /opt/wardby/claude-tool-runner
