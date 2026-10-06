@@ -9,7 +9,7 @@ import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { CodeReviewHost, HostEvent, ReviewHostRegistry } from "../providers/review-host/types.js";
-import { linkedPullRequestAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./attribution.js";
+import { linkedPullRequestAttribution, openingRunAttribution, RESPONSE_PATH_SNAPSHOT_BUDGET } from "./attribution.js";
 import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
@@ -501,12 +501,29 @@ async function startReviews(
   // skips this commit: taken at the first actual dispatch.
   let attribution: ReturnType<typeof linkedPullRequestAttribution> | undefined;
   const linkedAttribution = () =>
-    (attribution ??= linkedPullRequestAttribution(
-      deps.db,
-      deps.issueTrackers,
-      { codeProvider: host.provider, repository, number: prNumber },
-      RESPONSE_PATH_SNAPSHOT_BUDGET,
-    ));
+    (attribution ??= (async () => {
+      const linked = await linkedPullRequestAttribution(
+        deps.db,
+        deps.issueTrackers,
+        { codeProvider: host.provider, repository, number: prNumber },
+        RESPONSE_PATH_SNAPSHOT_BUDGET,
+      );
+      if (linked || !host.pullRequestOrigin) return linked;
+      // Not linked to an issue yet (the lead run that opened it may still be
+      // running): attribute to the issue of the run whose marker the PR carries.
+      try {
+        const origin = await host.pullRequestOrigin(repository, prNumber);
+        return origin.markerRunId
+          ? await openingRunAttribution(deps.db, deps.issueTrackers, origin.markerRunId, RESPONSE_PATH_SNAPSHOT_BUDGET)
+          : undefined;
+      } catch (err) {
+        log.warn(
+          { err, repository, prNumber },
+          "could not read the pull request's opening run; the review is unattributed",
+        );
+        return undefined;
+      }
+    })());
   for (const target of targets) {
     if (skipReviewedCommits && (await alreadyReviewed(deps, repository, prNumber, headSha, target.agentId))) {
       log.info(

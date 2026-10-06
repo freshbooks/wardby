@@ -554,7 +554,11 @@ what agent work on a card, an epic, or a project cost.
 A run is attributed when:
 
 - a Jira event on an issue started it;
-- it reviews or answers a mention on a pull request wardby opened for an issue;
+- it reviews or answers a mention on a pull request wardby opened for an issue.
+  A review that starts before the pull request is linked to the issue (the link
+  is recorded when the agent that delegated the work finishes) is attributed to
+  the issue of the coding run that opened the pull request, read from the
+  marker on a pull request the GitHub App authored;
 - `trigger_agent` named an `issue`, or a webhook call's JSON body named a
   `wardbyIssue` (both `{ "provider": "jira", "key": "PROJ-123" }`), in a
   project the agent is linked to. Keys are matched without regard to case or
