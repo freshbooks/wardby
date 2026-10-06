@@ -27,6 +27,7 @@ interface FakeRepositoryRow {
   triggers: string[];
   checkName: string | null;
   reviewFixMaxRounds?: number | null;
+  waitForCi?: boolean;
   createdAt: Date;
   authorizedVia?: string | null;
   authorizedById?: string | null;
@@ -450,6 +451,75 @@ describe("repository tools", () => {
     });
     expect(result.isError).toBeTruthy();
     expect(errorText(result as never)).toContain("Event triggers need write access.");
+    await client.close();
+  });
+
+  it("links a waitForCi agent, and rejects it without the pull_request trigger", async () => {
+    const { mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const ok = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/example",
+        access: "write",
+        triggers: ["pull_request"],
+        checkName: "wardby review",
+        waitForCi: true,
+      },
+    });
+    expect(ok.isError).toBeFalsy();
+    const parsed = parseText(ok as never) as { link: Record<string, unknown> };
+    expect(parsed.link).toMatchObject({ waitForCi: true });
+
+    const listed = await client.callTool({ name: "list_repositories", arguments: { agentId: "a1" } });
+    const { repositories } = parseText(listed as never) as { repositories: Record<string, unknown>[] };
+    expect(repositories[0]).toMatchObject({ waitForCi: true });
+
+    const noTrigger = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/other",
+        access: "write",
+        triggers: ["mention"],
+        waitForCi: true,
+      },
+    });
+    expect(noTrigger.isError).toBeTruthy();
+    expect(errorText(noTrigger as never)).toContain("waitForCi needs the pull_request trigger");
+    await client.close();
+  });
+
+  it("defaults waitForCi to false and clears it when re-linking without it", async () => {
+    const { mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const first = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/example",
+        access: "write",
+        triggers: ["pull_request"],
+        checkName: "wardby review",
+        waitForCi: true,
+      },
+    });
+    expect((parseText(first as never) as { link: Record<string, unknown> }).link).toMatchObject({ waitForCi: true });
+
+    const relinked = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/example",
+        access: "write",
+        triggers: ["pull_request"],
+        checkName: "wardby review",
+      },
+    });
+    expect((parseText(relinked as never) as { link: Record<string, unknown> }).link).toMatchObject({
+      waitForCi: false,
+    });
     await client.close();
   });
 

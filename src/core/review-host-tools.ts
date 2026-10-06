@@ -40,6 +40,8 @@ export interface RepositoryLink {
   repository: string;
   access: "read" | "write";
   checkName: string | null;
+  /** Hold the review on a pushed head until that head's own CI finishes, instead of racing it. */
+  waitForCi: boolean;
 }
 
 export interface RunHostCheckRef {

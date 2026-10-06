@@ -8,8 +8,15 @@ const WRITE: RepositoryLink = {
   repository: "chfields/knock-knock-jokes",
   access: "write",
   checkName: "wardby review",
+  waitForCi: false,
 };
-const READ: RepositoryLink = { provider: "github", repository: "chfields/other", access: "read", checkName: null };
+const READ: RepositoryLink = {
+  provider: "github",
+  repository: "chfields/other",
+  access: "read",
+  checkName: null,
+  waitForCi: false,
+};
 
 function fakeHost(): CodeReviewHost {
   return {

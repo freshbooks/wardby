@@ -32,6 +32,7 @@ type LinkArgs = {
   triggers?: Array<(typeof TRIGGERS)[number]>;
   checkName?: string;
   reviewFixMaxRounds?: number;
+  waitForCi?: boolean;
   adminOverride?: boolean;
 };
 
@@ -87,9 +88,11 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       "opened (capped by reviewFixMaxRounds, default 2). " +
       "Your linked GitHub account (link_host_account) must have write access to the repository for a write link, or read for a " +
       "read link; a wardby admin may instead approve it with adminOverride. checkName is only allowed (and required) with the " +
-      "pull_request trigger, and is unique per repository. Re-linking an already-linked repository replaces its access, " +
-      "triggers, checkName, and reviewFixMaxRounds (an omitted field is cleared, not kept) and re-checks access — always send " +
-      "the full desired state.",
+      "pull_request trigger, and is unique per repository. waitForCi (only with the pull_request trigger) holds this agent's " +
+      "review on a pushed head until that head's own CI finishes, instead of racing it; APPROVE is refused while CI on the " +
+      "head is failing or still running. Re-linking an already-linked repository replaces its access, triggers, checkName, " +
+      "reviewFixMaxRounds, and waitForCi (an omitted field is cleared, not kept) and re-checks access — always send the full " +
+      "desired state.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -106,6 +109,12 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
           maximum: 10,
           description:
             "Only with the review_fix trigger: automatic fix rounds per pull request before wardby stops (default 2).",
+        },
+        waitForCi: {
+          type: "boolean",
+          description:
+            "Only with the pull_request trigger: hold this agent's review on a pushed head until that head's own CI " +
+            "finishes, instead of racing it (default false).",
         },
         adminOverride: {
           type: "boolean",
@@ -159,6 +168,10 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       ) {
         throw new McpError(400, "reviewFixMaxRounds must be an integer from 1 to 10.");
       }
+      const waitForCi = args.waitForCi ?? false;
+      if (waitForCi && !triggers.includes("pull_request")) {
+        throw new McpError(400, "waitForCi needs the pull_request trigger.");
+      }
 
       // The host call happens before, and outside, the serializable transaction.
       const authorization = await authorizeRepositoryForSet(ctx, {
@@ -173,7 +186,14 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         link = await ctx.db.$transaction(
           async (tx) => {
             await assertNoConflicts(tx, { agentId: args.agentId, provider, repository, triggers, checkName });
-            const fields = { access: args.access, triggers, checkName, reviewFixMaxRounds, ...authorization };
+            const fields = {
+              access: args.access,
+              triggers,
+              checkName,
+              reviewFixMaxRounds,
+              waitForCi,
+              ...authorization,
+            };
             return tx.agentRepository.upsert({
               where: { agentId_provider_repository: { agentId: args.agentId, provider, repository } },
               create: { agentId: args.agentId, provider, repository, ...fields },
