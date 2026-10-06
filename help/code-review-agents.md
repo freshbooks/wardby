@@ -3,7 +3,7 @@ id: code-review-agents
 title: Run GitHub code-review agents
 summary: Link a read-only review agent to a repository for pull-request checks and trusted mention workflows.
 audience: operator
-tags: [github, code-review, pull-requests, webhooks, ci, checks]
+tags: [github, code-review, pull-requests, webhooks, ci, checks, waitForCi]
 appliesTo: >=0.2.1
 ---
 
@@ -61,6 +61,41 @@ on the review check instead.
 
 Commit statuses need the App's **Commit statuses: Read** permission; without
 it only check runs are shown.
+
+## Review after CI (`waitForCi`)
+
+A `pull_request` link can set `waitForCi: true` so this reviewer reviews a
+pushed head only after that head's own CI has finished, instead of racing
+it. The gate below keeps it from approving while CI on that head is known
+to be failing or still running; see the gate's own exceptions for when CI
+can't be read or this run doesn't own the check.
+
+On a push, Wardby reads CI on the new head before starting a `waitForCi`
+reviewer. If CI is still pending, or nothing has reported yet, the review is
+held rather than started; it starts once CI finishes (the same **Check
+suite** event used for the re-review above), or — if CI never finishes —
+after 15 minutes anyway. CI that reports only commit statuses (no check
+suites), or a status still pending when the last check suite finishes,
+never releases a held review early; it starts only at that 15-minute
+fallback. The 15-minute fallback, and the 24-hour drop below, only run
+where Wardby's scheduler process runs (`wardby scheduler`, or `wardby
+serve` with the scheduler enabled); on an instance running only `wardby
+mcp`, a held review starts only once a **Check suite** event arrives, so
+with status-only CI it can wait indefinitely. A review still held after 24
+hours is dropped. This is decided per pull request, never across a set of
+related pull requests.
+
+While CI on the head is failing or still running, `repo_publish_review`
+refuses an approve verdict on a `waitForCi` reviewer's own check, returning
+a tool error instead of publishing anything:
+
+- `ci_failing` — CI is failing; request changes (or comment) instead.
+- `ci_pending` — CI is still running; comment instead. The re-review above
+  then runs the review again once a CI check suite finishes.
+
+Requesting changes or commenting is never affected by this gate. When CI
+cannot be read at all, the gate is skipped and the review proceeds as it
+would without `waitForCi`.
 
 Add this to a reviewer's system prompt:
 

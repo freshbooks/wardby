@@ -536,6 +536,7 @@ async function executeTrackedRun(
           repository: l.repository,
           access: l.access === "write" ? "write" : "read",
           checkName: l.checkName,
+          waitForCi: l.waitForCi,
         }))
       : [];
     // Likewise only when a Jira site is configured.

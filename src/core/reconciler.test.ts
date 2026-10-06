@@ -5,6 +5,8 @@ import type { IssueTracker } from "../providers/issue-tracker/types.js";
 
 vi.mock("./pull-request-state-sync.js", () => ({ syncOpenPullRequestStates: vi.fn(async () => 0) }));
 import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
+vi.mock("./host-events.js", () => ({ startDeferredReviews: vi.fn(async () => []) }));
+import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
 
 interface FakeRun {
@@ -727,5 +729,20 @@ describe("reconcileOnce pull-request state sync", () => {
     await reconcileOnce(db, now, undefined, undefined, hosts, trackers);
 
     expect(syncOpenPullRequestStates).toHaveBeenCalledWith(expect.anything(), hosts, trackers, now);
+  });
+});
+
+describe("reconcileOnce deferred reviews", () => {
+  it("runs the deferred-review sweep with the pass's clock when host-event deps are given", async () => {
+    vi.mocked(startDeferredReviews).mockClear();
+    const deferred = { hosts: {} } as unknown as ReviewStartDeps;
+    await reconcileOnce(fakeDb([]), NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, undefined, deferred);
+    expect(startDeferredReviews).toHaveBeenCalledWith(deferred, NOW);
+  });
+
+  it("skips the sweep without host-event deps", async () => {
+    vi.mocked(startDeferredReviews).mockClear();
+    await reconcileOnce(fakeDb([]), NOW, HEARTBEAT_TIMEOUT_MS);
+    expect(startDeferredReviews).not.toHaveBeenCalled();
   });
 });

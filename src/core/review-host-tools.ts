@@ -10,6 +10,7 @@
  */
 import { z } from "zod";
 import type { LoadedTool } from "../providers/engine/types.js";
+import { FAILING_CONCLUSIONS } from "../providers/review-host/ci.js";
 import {
   REVIEW_HOST_PROVIDERS,
   ReviewHostError,
@@ -40,6 +41,8 @@ export interface RepositoryLink {
   repository: string;
   access: "read" | "write";
   checkName: string | null;
+  /** Hold the review on a pushed head until that head's own CI finishes, instead of racing it. */
+  waitForCi: boolean;
 }
 
 export interface RunHostCheckRef {
@@ -189,7 +192,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_publish_review",
     description:
-      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Pass resolveThreadIds with the ids of your openThreads that this head fixes; only your own open threads on this PR are resolved, and the result lists resolvedThreadIds and skippedThreadIds. Returns published:false with reason stale_head if the PR moved on; then stop.",
+      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Pass resolveThreadIds with the ids of your openThreads that this head fixes; only your own open threads on this PR are resolved, and the result lists resolvedThreadIds and skippedThreadIds. Returns published:false with reason stale_head if the PR moved on; then stop. On a link configured with waitForCi, nothing is published and an APPROVE is refused with a tool error — ci_failing while CI on this head is failing, ci_pending while it is still running — publish CHANGES_REQUESTED or COMMENT instead.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -282,6 +285,16 @@ export function resolveLink(
 
 function error(code: string, message: string = code): string {
   return JSON.stringify({ error: code, message });
+}
+
+/** Cap on failing check names named in the ci_failing tool error. */
+const MAX_FAILING_NAMED = 5;
+
+function failingCheckNames(ci: CiView): string[] {
+  return ci.checks
+    .filter((c) => c.status === "completed" && FAILING_CONCLUSIONS.has(c.conclusion ?? ""))
+    .slice(0, MAX_FAILING_NAMED)
+    .map((c) => c.name);
 }
 
 /** Bookkeeping only: a failure to record the check completed is logged and never changes the tool result. */
@@ -386,6 +399,36 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
             await markCompleted(ctx);
           } catch (err) {
             log.warn({ err, agentId: ctx.agentId }, "could not supersede the run's check");
+          }
+        }
+        // An APPROVE on a waitForCi link's own check gates on CI, read
+        // *before* publishing: CI failing or still pending refuses the
+        // APPROVE outright, and nothing is published or completed. A read
+        // failure (readCi absent, or it throws) is treated as "no
+        // information" — the call proceeds as if waitForCi were off. This
+        // must stay scoped to the gate: reading CI before publish for every
+        // link (including one without waitForCi) would change behaviour for
+        // those links and widen the race with the COMMENT read below.
+        const wantsGate = ownsCheck && link.waitForCi && a.verdict === "APPROVE";
+        if (wantsGate && host.readCi) {
+          const gateCi = await host.readCi(link.repository, a.headSha).catch((err: unknown) => {
+            log.warn({ err, agentId: ctx.agentId }, "could not read CI around publishing a review");
+            return null;
+          });
+          if (gateCi) {
+            if (gateCi.state === "failing") {
+              const names = failingCheckNames(gateCi);
+              return error(
+                "ci_failing",
+                `CI is failing on this head${names.length ? ` (${names.join(", ")})` : ""}; APPROVE is not allowed — request changes for the CI failure instead.`,
+              );
+            }
+            if (gateCi.state === "pending") {
+              return error(
+                "ci_pending",
+                "CI is still running on this head; APPROVE is not allowed yet. Publish COMMENT — the review runs again when a CI check suite finishes.",
+              );
+            }
           }
         }
         const result = await host.publishReview(link.repository, {

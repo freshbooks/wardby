@@ -379,8 +379,9 @@ with:
   below) — generate it with `openssl rand -hex 32` or similar; the ingress
   endpoint answers 404 until this is set.
 - **Subscribe to events**: Pull request, Issue comment, Pull request review
-  comment, Check run, Check suite (re-runs a review that was waiting for CI,
-  once CI finishes), Issues (needed for mentions in a newly opened or
+  comment, Check run, Check suite (re-runs a review that was waiting for CI
+  once CI finishes, and starts a `waitForCi` reviewer's held review once CI
+  finishes), Issues (needed for mentions in a newly opened or
   edited issue; without it only comment mentions are seen), and Push (needed
   for the `push` trigger, which starts merge-watcher agents; it is its own
   checkbox, separate from the others, and must be ticked explicitly).
@@ -481,9 +482,9 @@ linking stays disabled there.
 First link your GitHub account (`link_host_account`, above). Then use the
 `link_repository` tool (agents:write) on a native agent you own. Calling it
 again for an already-linked repository replaces that link's `access`,
-`triggers`, `checkName`, and `reviewFixMaxRounds` — omitted fields are
-cleared, not kept — and checks your access again, so always send the full
-desired state. Two common shapes:
+`triggers`, `checkName`, `reviewFixMaxRounds`, and `waitForCi` — omitted
+fields are cleared, not kept — and checks your access again, so always send
+the full desired state. Two common shapes:
 
 **A reviewer**, which starts a check on every PR push:
 
@@ -496,6 +497,10 @@ desired state. Two common shapes:
   "checkName": "wardby review"
 }
 ```
+
+Add `"waitForCi": true` to a `pull_request` link to hold the reviewer's
+review of a pushed head until that head's own CI finishes, instead of racing
+it — see [Review after CI (`waitForCi`)](#review-after-ci-waitforci) below.
 
 **A responder**, which only answers `@<app-slug>` mentions that are not a
 review command:
@@ -562,6 +567,86 @@ The errors you may get while linking:
 | 409    | Another agent already holds the `mention` or `review_fix` trigger, or this `checkName`, on the repository.        |
 | 503    | GitHub could not be asked (e.g. the App isn't installed on the repository). Nothing was changed.                  |
 
+### Review after CI (`waitForCi`)
+
+`waitForCi` (boolean, default `false`, only on a `pull_request` link — 400
+otherwise) holds a reviewer's review of a pushed head until that head's own
+CI has finished, instead of racing it. "CI" means exactly what
+`repo_pr_read`'s `ci` field means: the repository's own check runs and
+commit statuses on the pull request's head commit, excluding every check
+wardby itself reports. It is decided per pull request — a `waitForCi`
+reviewer never waits on, or looks at, any other pull request's CI.
+
+**The flow.** On a push to the pull request (opened, a new commit,
+reopened, or marked ready for review), wardby reads CI on the new head
+before starting a `waitForCi` reviewer:
+
+- CI already `passing`, `failing`, `inconclusive`, or `unavailable` starts
+  the review immediately, exactly as without `waitForCi`.
+- CI `pending`, or nothing reported yet (`none` — normal right after the
+  pull request opens, before checks have registered), holds the review
+  instead of starting it. Wardby re-reads CI once more right after holding
+  it, in case it finished in the moment in between, and starts the review
+  then if so.
+- When a check suite completes on that head (the same **Check suite** event
+  used by [re-review when CI finishes](#the-repo_-tools) below — no extra App
+  configuration needed), wardby reads CI again for every review it is
+  holding on that head. If CI has finished, the held review starts; if
+  something is still pending, a later completion decides. CI that reports
+  only commit statuses (no check suites) never triggers this early release,
+  nor does a commit status still pending when the last check suite finishes
+  — a review held for either reason only starts at the fallback below.
+
+**Fallback: 15 minutes.** A review wardby is still holding 15 minutes after
+it was deferred starts anyway, without waiting further for CI — the
+APPROVE gate below still applies, so a verdict chosen while CI is still
+pending will usually come out as `COMMENT`. CI that never reports, or runs
+unusually long, cannot hold a review forever because of this fallback.
+Both the fallback and the 24-hour drop below run only where wardby's
+reconciliation sweep runs: the `wardby scheduler` process, or `wardby
+serve` with the scheduler started in the same process. An instance running
+only `wardby mcp`, with no scheduler, never applies either on its own — a
+review held there starts only once a **Check suite** event arrives, or once
+an instance that does run the sweep reaches it; with status-only CI (or no
+scheduler at all) such a review can wait indefinitely. A held review is
+dropped without starting if it is still waiting after 24 hours, or if the
+pull request's head has since moved on or the pull request closed (a newer
+push, if any, is held and decided on its own terms).
+
+**The APPROVE gate.** For a reviewer linked with `waitForCi`,
+`repo_publish_review` refuses an `APPROVE` verdict on the pull request its
+run owns the check for while CI on that head is not clearly passing:
+
+| Tool error   | When                            | What to do instead                                                           |
+| ------------ | ------------------------------- | ---------------------------------------------------------------------------- |
+| `ci_failing` | CI on the head is failing       | Publish `CHANGES_REQUESTED` (or `COMMENT`) describing the CI failure instead |
+| `ci_pending` | CI on the head is still running | Publish `COMMENT`; the review runs again once a CI check suite finishes      |
+
+Nothing is published when either error is returned — no inline comments, no
+summary, no check — so the model's next call is free to choose a different
+verdict. `CHANGES_REQUESTED` and `COMMENT` verdicts are never affected by
+this gate, on any link, and it never applies to a link without `waitForCi`.
+When CI cannot be read at all (the host has no CI reader, or reading it
+fails), the gate is skipped and the call proceeds as if `waitForCi` were
+off: a read failure fails toward letting a human-reviewable result through,
+not toward silently blocking an approval.
+
+**Interaction with re-review-when-CI-finishes.** The existing behaviour of
+re-running a review that published only `COMMENT` while CI was pending, once
+CI on that head finishes (see [re-review when CI finishes](#the-repo_-tools)
+below), keeps working the same way regardless of `waitForCi`. A `waitForCi`
+reviewer that the APPROVE gate above pushed into publishing `COMMENT`
+because CI was pending is re-run by that same mechanism once CI finishes,
+exactly like a reviewer without `waitForCi` that chose `COMMENT` for its own
+reasons. Both mechanisms may react to the same CI completion, but each only
+acts on the state it owns — a review still held and not yet started, versus
+one already published as `COMMENT` — so one reviewer is never run twice on
+the same head because of it.
+
+Turning `waitForCi` off (re-linking without it, or with it set to `false`)
+only changes how future pushes are handled; it never retroactively starts or
+drops a review already being held.
+
 ## The `repo_*` tools
 
 A linked agent gets these built-in tools automatically — they are not
@@ -610,20 +695,22 @@ internal marker to the model:
 Every call names the `repository` explicitly; it must resolve to one of the
 agent's links. Failures are always a JSON result, never a thrown error:
 
-| `error` code                    | Meaning                                                                                                                                                |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `invalid_arguments_json`        | The tool call's arguments were not valid JSON.                                                                                                         |
-| `invalid_arguments`             | Arguments failed schema validation (missing/malformed field).                                                                                          |
-| `repository_not_linked`         | `repository` does not match one of this agent's links, or matches more than one and needs a `host/owner/name` prefix to disambiguate.                  |
-| `write_access_required`         | A write tool (`repo_publish_review`, `repo_comment`) was called on a read-only link.                                                                   |
-| `repository_access_denied`      | The link is no longer authorized: the agent has no owner, the owner's GitHub account is unlinked or lost access, or it could not be checked.           |
-| `repository_access_unavailable` | GitHub could not be reached (or rate-limited wardby) while re-checking access, even after one retry; the call was refused for safety. Try again later. |
-| `host_not_configured`           | No host provider is configured for this link on this deployment.                                                                                       |
-| `unknown_tool`                  | Not a recognized `repo_*` tool name.                                                                                                                   |
-| `host_not_installed`            | The GitHub App is not installed on this repository.                                                                                                    |
-| `host_permission_missing`       | The App installation is missing a required permission.                                                                                                 |
-| `host_invalid_response`         | The host returned something the client could not parse.                                                                                                |
-| `host_api_error`                | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                                  |
+| `error` code                    | Meaning                                                                                                                                                                           |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invalid_arguments_json`        | The tool call's arguments were not valid JSON.                                                                                                                                    |
+| `invalid_arguments`             | Arguments failed schema validation (missing/malformed field).                                                                                                                     |
+| `repository_not_linked`         | `repository` does not match one of this agent's links, or matches more than one and needs a `host/owner/name` prefix to disambiguate.                                             |
+| `write_access_required`         | A write tool (`repo_publish_review`, `repo_comment`) was called on a read-only link.                                                                                              |
+| `repository_access_denied`      | The link is no longer authorized: the agent has no owner, the owner's GitHub account is unlinked or lost access, or it could not be checked.                                      |
+| `repository_access_unavailable` | GitHub could not be reached (or rate-limited wardby) while re-checking access, even after one retry; the call was refused for safety. Try again later.                            |
+| `host_not_configured`           | No host provider is configured for this link on this deployment.                                                                                                                  |
+| `unknown_tool`                  | Not a recognized `repo_*` tool name.                                                                                                                                              |
+| `host_not_installed`            | The GitHub App is not installed on this repository.                                                                                                                               |
+| `host_permission_missing`       | The App installation is missing a required permission.                                                                                                                            |
+| `host_invalid_response`         | The host returned something the client could not parse.                                                                                                                           |
+| `host_api_error`                | The request to GitHub failed (body-free: `github_api_error:<status>[:<request-id>]`).                                                                                             |
+| `ci_failing`                    | `repo_publish_review` called with verdict `APPROVE`, on a `waitForCi` link's own check, while CI on the head is failing. See [Review after CI](#review-after-ci-waitforci) above. |
+| `ci_pending`                    | Same, but CI on the head is still running.                                                                                                                                        |
 
 `repo_publish_review` also returns
 `{ "published": false, "reason": "stale_head", ... }` instead of an error when
