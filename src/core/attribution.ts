@@ -230,6 +230,40 @@ export async function linkedPullRequestAttribution(
   return { source: "linked_pr", item: await resolveWorkItem(db, trackers, issue.provider, issue.key, opts) };
 }
 
+/**
+ * Attribution for a run on a pull request a wardby coding run opened, taken
+ * from that run's own issue. Covers a review that starts before the pull
+ * request is linked to its issue: the link is recorded when the lead run that
+ * delegated the work finishes, and a review can start earlier. The run id must
+ * come from the marker on an App-authored pull request
+ * (CodeReviewHost.pullRequestOrigin), never from pull request text. Undefined
+ * when that run is not this deployment's or has no issue.
+ */
+export async function openingRunAttribution(
+  db: Pick<PrismaClient, "codingRun" | "workItem">,
+  trackers: IssueTrackerRegistry | undefined,
+  openingRunId: string,
+  opts?: { timeoutMs?: number; retryOn429?: boolean },
+): Promise<AttributionIntent | undefined> {
+  try {
+    const row = await db.codingRun.findUnique({
+      where: { runId: openingRunId },
+      select: {
+        issueProvider: true,
+        issueKey: true,
+        rootCodingRun: { select: { issueProvider: true, issueKey: true } },
+      },
+    });
+    const provider = row?.issueProvider ?? row?.rootCodingRun?.issueProvider;
+    const key = row?.issueKey ?? row?.rootCodingRun?.issueKey;
+    if (!provider || !key) return undefined;
+    return { source: "linked_pr", item: await resolveWorkItem(db, trackers, provider, key, opts) };
+  } catch (err) {
+    log.warn({ err, openingRunId }, "opening run lookup failed; the run is unattributed");
+    return undefined;
+  }
+}
+
 /** A refusal whose message is safe to return to the caller. */
 export class AttributionError extends Error {
   constructor(message: string) {

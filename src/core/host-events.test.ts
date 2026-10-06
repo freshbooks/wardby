@@ -690,6 +690,65 @@ describe("routeHostEvent linked-PR attribution", () => {
     expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toBeUndefined();
   });
 
+  it("a review of a PR not linked yet is attributed to the issue of the run whose marker it carries", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = host();
+    h.pullRequestOrigin = vi.fn(async () => ({
+      headSha: SHA,
+      isFork: false,
+      state: "open",
+      labels: [],
+      markerRunId: "run_open",
+    }));
+    const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }], h);
+    const codingRunLookup = vi.fn(async () => ({ issueProvider: "jira", issueKey: "PAY-9", rootCodingRun: null }));
+    (d.db as unknown as Record<string, unknown>).codingRun = { findUnique: codingRunLookup };
+    await routeHostEvent(pr, d);
+    expect(codingRunLookup).toHaveBeenCalledWith(expect.objectContaining({ where: { runId: "run_open" } }));
+    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toMatchObject({
+      source: "linked_pr",
+      item: { provider: "jira", key: "PAY-9" },
+    });
+  });
+
+  it("falls back to the continued run's root issue, and stays unattributed without a marker or an issue", async () => {
+    const h = host();
+    let origin: { markerRunId?: string } = { markerRunId: "run_cont" };
+    h.pullRequestOrigin = vi.fn(async () => ({ headSha: SHA, isFork: false, state: "open", labels: [], ...origin }));
+    const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }], h);
+    const codingRunLookup = vi.fn(async (): Promise<unknown> => ({
+      issueProvider: null,
+      issueKey: null,
+      rootCodingRun: { issueProvider: "jira", issueKey: "PAY-3" },
+    }));
+    (d.db as unknown as Record<string, unknown>).codingRun = { findUnique: codingRunLookup };
+
+    vi.mocked(dispatchRun).mockClear();
+    await routeHostEvent(pr, d);
+    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toMatchObject({ item: { key: "PAY-3" } });
+
+    vi.mocked(dispatchRun).mockClear();
+    origin = {};
+    await routeHostEvent(pr, d);
+    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toBeUndefined();
+
+    vi.mocked(dispatchRun).mockClear();
+    origin = { markerRunId: "run_none" };
+    codingRunLookup.mockResolvedValueOnce(null);
+    await routeHostEvent(pr, d);
+    expect(vi.mocked(dispatchRun).mock.calls[0][0].attribution).toBeUndefined();
+  });
+
+  it("a linked PR never consults the marker", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const h = host();
+    h.pullRequestOrigin = vi.fn();
+    const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }], h);
+    d.linkedIssue.mockResolvedValue(LINK);
+    await routeHostEvent(pr, d);
+    expect(h.pullRequestOrigin).not.toHaveBeenCalled();
+  });
+
   it("an @wardby mention on a linked PR is attributed", async () => {
     vi.mocked(dispatchRun).mockClear();
     const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
