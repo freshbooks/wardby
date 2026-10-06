@@ -196,6 +196,11 @@ describe("handleReviewHostTool", () => {
       );
       expect(c.markRunCheckCompleted).toHaveBeenCalledWith({ verdict: "COMMENT", body: "s\n\nb", ciPending: pending });
       expect(h.readCi).toHaveBeenCalledWith(WRITE.repository, SHA);
+      // #210's ordering: on a link without waitForCi, CI is read only after
+      // the review is published, never before (restores main's behaviour).
+      expect(vi.mocked(h.publishReview).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(h.readCi).mock.invocationCallOrder[0],
+      );
     }
   });
 
@@ -456,6 +461,19 @@ describe("handleReviewHostTool waitForCi publish gate", () => {
     expect(h.publishReview).toHaveBeenCalledOnce();
     expect(c.markRunCheckCompleted).toHaveBeenCalledWith({ verdict: "APPROVE", body: "s\n\nb" });
   });
+
+  it.each(["none", "inconclusive", "unavailable"] as const)(
+    "publishes an APPROVE when CI state is %s (not a clear pass, but not failing or pending)",
+    async (state) => {
+      const h = fakeHost();
+      h.readCi = vi.fn(async () => ciView(state));
+      const c = ctx({ links: [WAIT], hosts: { github: h }, runCheck });
+      const result = JSON.parse(await handleReviewHostTool("repo_publish_review", publish("APPROVE"), c));
+      expect(result).toMatchObject({ published: true });
+      expect(h.publishReview).toHaveBeenCalledOnce();
+      expect(c.markRunCheckCompleted).toHaveBeenCalledWith({ verdict: "APPROVE", body: "s\n\nb" });
+    },
+  );
 
   it("does not gate COMMENT or CHANGES_REQUESTED verdicts, even with CI failing", async () => {
     for (const verdict of ["COMMENT", "CHANGES_REQUESTED"] as const) {

@@ -1,7 +1,7 @@
 -- Additive: a repository link can hold its review until that head's own CI
 -- finishes (AgentRepository.waitForCi), and DeferredReview records a review
 -- held that way until the ci_completed event or the reconciler's fallback
--- sweep starts it. See docs/private/2026-10-06-review-after-ci-plan.md.
+-- sweep starts it.
 
 -- AlterTable
 ALTER TABLE "AgentRepository" ADD COLUMN "waitForCi" BOOLEAN NOT NULL DEFAULT false;

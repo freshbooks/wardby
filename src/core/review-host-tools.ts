@@ -192,7 +192,7 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
   {
     name: "repo_publish_review",
     description:
-      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Pass resolveThreadIds with the ids of your openThreads that this head fixes; only your own open threads on this PR are resolved, and the result lists resolvedThreadIds and skippedThreadIds. Returns published:false with reason stale_head if the PR moved on; then stop.",
+      "Publishes your review of one pull request head, in one call: inline comments on diff lines (a ```suggestion block in a comment body becomes a one-click fix; comments on lines outside the diff move to the summary automatically), one summary comment that is edited in place on later reviews, and — only on the pull request this run was started for, by an agent linked with a check name — the check conclusion (APPROVE = success, CHANGES_REQUESTED = failure, COMMENT = neutral). Pass resolveThreadIds with the ids of your openThreads that this head fixes; only your own open threads on this PR are resolved, and the result lists resolvedThreadIds and skippedThreadIds. Returns published:false with reason stale_head if the PR moved on; then stop. On a link configured with waitForCi, nothing is published and an APPROVE is refused with a tool error — ci_failing while CI on this head is failing, ci_pending while it is still running — publish CHANGES_REQUESTED or COMMENT instead.",
     jsonSchema: {
       type: "object",
       properties: {
@@ -401,35 +401,34 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
             log.warn({ err, agentId: ctx.agentId }, "could not supersede the run's check");
           }
         }
-        // A COMMENT while CI is unfinished is often only "waiting for CI":
-        // recorded below so CI finishing on this head re-runs the review
-        // once. An APPROVE on a waitForCi link's own check reuses the same
-        // read, but gates on it here, before publishing: CI failing or
-        // still pending refuses the APPROVE outright, and nothing is
-        // published or completed. Either way a read failure (readCi absent,
-        // or it throws) is treated as "no information" — the call proceeds
-        // as if waitForCi were off.
-        const wantsGate = link.waitForCi && a.verdict === "APPROVE";
-        let ci: CiView | null = null;
-        if (ownsCheck && host.readCi && (a.verdict === "COMMENT" || wantsGate)) {
-          ci = await host.readCi(link.repository, a.headSha).catch((err: unknown) => {
+        // An APPROVE on a waitForCi link's own check gates on CI, read
+        // *before* publishing: CI failing or still pending refuses the
+        // APPROVE outright, and nothing is published or completed. A read
+        // failure (readCi absent, or it throws) is treated as "no
+        // information" — the call proceeds as if waitForCi were off. This
+        // must stay scoped to the gate: reading CI before publish for every
+        // link (including one without waitForCi) would change behaviour for
+        // those links and widen the race with the COMMENT read below.
+        const wantsGate = ownsCheck && link.waitForCi && a.verdict === "APPROVE";
+        if (wantsGate && host.readCi) {
+          const gateCi = await host.readCi(link.repository, a.headSha).catch((err: unknown) => {
             log.warn({ err, agentId: ctx.agentId }, "could not read CI around publishing a review");
             return null;
           });
-        }
-        if (wantsGate && ci) {
-          if (ci.state === "failing") {
-            const names = failingCheckNames(ci);
-            return error(
-              "ci_failing",
-              `CI is failing on this head${names.length ? ` (${names.join(", ")})` : ""}; APPROVE is not allowed — request changes for the CI failure instead.`,
-            );
-          }
-          if (ci.state === "pending") {
-            return error(
-              "ci_pending",
-              "CI is still running on this head; APPROVE is not allowed yet. Publish COMMENT — the review runs again when CI finishes.",
-            );
+          if (gateCi) {
+            if (gateCi.state === "failing") {
+              const names = failingCheckNames(gateCi);
+              return error(
+                "ci_failing",
+                `CI is failing on this head${names.length ? ` (${names.join(", ")})` : ""}; APPROVE is not allowed — request changes for the CI failure instead.`,
+              );
+            }
+            if (gateCi.state === "pending") {
+              return error(
+                "ci_pending",
+                "CI is still running on this head; APPROVE is not allowed yet. Publish COMMENT — the review runs again when a CI check suite finishes.",
+              );
+            }
           }
         }
         const result = await host.publishReview(link.repository, {
@@ -445,10 +444,20 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           ...(a.resolveThreadIds?.length ? { resolveThreadIds: a.resolveThreadIds } : {}),
         });
         if (ownsCheck) {
+          // A COMMENT while CI is unfinished is often only "waiting for CI":
+          // recorded so CI finishing on this head re-runs the review once.
+          let ci: CiView | null = null;
+          if (a.verdict === "COMMENT" && host.readCi) {
+            // The review is already published: a CI read failure must not turn this into an error result.
+            ci = await host.readCi(link.repository, a.headSha).catch((err: unknown) => {
+              log.warn({ err, agentId: ctx.agentId }, "could not read CI after publishing a comment review");
+              return null;
+            });
+          }
           await markCompleted(ctx, {
             verdict: a.verdict,
             body: `${a.summary}\n\n${a.body}`.slice(0, MAX_REVIEW_BODY_CHARS),
-            ...(a.verdict === "COMMENT" && ci ? { ciPending: ci.state === "pending" || ci.state === "none" } : {}),
+            ...(ci ? { ciPending: ci.state === "pending" || ci.state === "none" } : {}),
           });
         }
         return JSON.stringify(result);

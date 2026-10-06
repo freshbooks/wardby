@@ -592,20 +592,26 @@ before starting a `waitForCi` reviewer:
   used by [re-review when CI finishes](#the-repo_-tools) below — no extra App
   configuration needed), wardby reads CI again for every review it is
   holding on that head. If CI has finished, the held review starts; if
-  something is still pending, a later completion decides.
+  something is still pending, a later completion decides. CI that reports
+  only commit statuses (no check suites) never triggers this early release,
+  nor does a commit status still pending when the last check suite finishes
+  — a review held for either reason only starts at the fallback below.
 
 **Fallback: 15 minutes.** A review wardby is still holding 15 minutes after
-it was deferred starts anyway, as if `waitForCi` were off — CI that never
-reports, or runs unusually long, cannot hold a review forever. This fallback
-runs only where wardby's reconciliation sweep runs: the `wardby scheduler`
-process, or `wardby serve` with the scheduler started in the same process.
-An instance running only `wardby mcp`, with no scheduler, never applies the
-15-minute fallback on its own — a review held there starts only once a
-**Check suite** event arrives, or once an instance that does run the sweep
-reaches it. A held review is dropped without starting if it is still
-waiting after 24 hours, or if the pull request's head has since moved on or
-the pull request closed (a newer push, if any, is held and decided on its
-own terms).
+it was deferred starts anyway, without waiting further for CI — the
+APPROVE gate below still applies, so a verdict chosen while CI is still
+pending will usually come out as `COMMENT`. CI that never reports, or runs
+unusually long, cannot hold a review forever because of this fallback.
+Both the fallback and the 24-hour drop below run only where wardby's
+reconciliation sweep runs: the `wardby scheduler` process, or `wardby
+serve` with the scheduler started in the same process. An instance running
+only `wardby mcp`, with no scheduler, never applies either on its own — a
+review held there starts only once a **Check suite** event arrives, or once
+an instance that does run the sweep reaches it; with status-only CI (or no
+scheduler at all) such a review can wait indefinitely. A held review is
+dropped without starting if it is still waiting after 24 hours, or if the
+pull request's head has since moved on or the pull request closed (a newer
+push, if any, is held and decided on its own terms).
 
 **The APPROVE gate.** For a reviewer linked with `waitForCi`,
 `repo_publish_review` refuses an `APPROVE` verdict on the pull request its
@@ -614,7 +620,7 @@ run owns the check for while CI on that head is not clearly passing:
 | Tool error   | When                            | What to do instead                                                           |
 | ------------ | ------------------------------- | ---------------------------------------------------------------------------- |
 | `ci_failing` | CI on the head is failing       | Publish `CHANGES_REQUESTED` (or `COMMENT`) describing the CI failure instead |
-| `ci_pending` | CI on the head is still running | Publish `COMMENT`; the review runs again once CI finishes                    |
+| `ci_pending` | CI on the head is still running | Publish `COMMENT`; the review runs again once a CI check suite finishes      |
 
 Nothing is published when either error is returned — no inline comments, no
 summary, no check — so the model's next call is free to choose a different
