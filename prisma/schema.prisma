@@ -56,6 +56,7 @@ model Agent {
   datastores   AgentDatastore[]
   webhooks     Webhook[]
   repositories AgentRepository[]
+  deferredReviews DeferredReview[]
   issueProjects AgentIssueProject[]
 
   /// Self-defects opt-in: the Jira project and issue type wardby files the agent's own failures into. Both or neither.
@@ -1075,6 +1076,11 @@ model AgentRepository {
   /// Only with the "review_fix" trigger: how many automatic fix rounds a
   /// pull request gets before wardby stops. Null = the default (2).
   reviewFixMaxRounds Int?
+  /// Only with the "pull_request" trigger: holds this agent's review on a
+  /// pushed head until that head's own CI finishes (see DeferredReview),
+  /// instead of racing it. Default off: existing links review immediately,
+  /// exactly as today.
+  waitForCi  Boolean  @default(false)
   createdAt  DateTime @default(now())
 
   /// How this link was authorized: "host_permission" (the agent owner's
@@ -1089,6 +1095,31 @@ model AgentRepository {
   @@unique([agentId, provider, repository])
   @@unique([provider, repository, checkName])
   @@index([provider, repository])
+}
+
+/// A pull-request review deferred because its head's CI was still pending
+/// (or had not reported) when the triggering push event arrived
+/// (AgentRepository.waitForCi). Started either when that head's CI finishes
+/// (the ci_completed host event) or by the reconciler's fallback sweep after
+/// DEFERRED_REVIEW_MAX_WAIT_MS. Idempotent per
+/// (provider, repository, prNumber, headSha, agentId): re-deferring the same
+/// head for the same agent is a no-op, not a duplicate row.
+model DeferredReview {
+  id         String   @id @default(cuid())
+  provider   String
+  repository String
+  prNumber   Int
+  headSha    String
+  agentId    String
+  agent      Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// The agent's check name at defer time, so the delayed review starts
+  /// against the same check even if the link's checkName changes later.
+  checkName  String
+  createdAt  DateTime @default(now())
+
+  @@unique([provider, repository, prNumber, headSha, agentId])
+  @@index([provider, repository, headSha])
+  @@index([createdAt])
 }
 
 /// The host check a run owns, so the review tool can complete it and the

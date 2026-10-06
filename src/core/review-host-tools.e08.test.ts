@@ -27,7 +27,7 @@ function github(prNumber: number, fork = false) {
 function ctx(host: GitHubReviewHost, runCheck: ReviewToolContext["runCheck"]): ReviewToolContext {
   return {
     agentId: "agent1",
-    links: [{ provider: "github", repository: REPO, access: "write", checkName: "wardby review" }],
+    links: [{ provider: "github", repository: REPO, access: "write", checkName: "wardby review", waitForCi: false }],
     hosts: { github: host },
     runCheck,
     markRunCheckCompleted: vi.fn(async () => undefined),

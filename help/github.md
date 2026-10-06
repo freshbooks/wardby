@@ -35,12 +35,13 @@ Link a native agent to a repository with `link_repository`. Each trigger needs
 its GitHub App event ticked in the App's event settings; every event is a
 separate checkbox.
 
-| Trigger        | Starts a run when                                                                                                   | App event to subscribe                                                                 |
-| -------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `pull_request` | A pull request is opened or pushed to; a re-run of the review check; CI finishing after a review that waited for it | Pull request, Check run (re-runs of the review check), Check suite (CI finishing)      |
-| `mention`      | Someone with write access `@`-mentions the App                                                                      | Issue comment, Issues, Pull request review comment (mentions in inline review threads) |
-| `push`         | A commit lands on the repository's default branch                                                                   | Push                                                                                   |
-| `review_fix`   | Wardby's own review check requests changes on a PR it opened                                                        | Same events as `pull_request` (it reacts to that check's own verdict, no extra event)  |
+| Trigger                         | Starts a run when                                                                                                                                                            | App event to subscribe                                                                 |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `pull_request`                  | A pull request is opened or pushed to; a re-run of the review check; CI finishing after a review that waited for it                                                          | Pull request, Check run (re-runs of the review check), Check suite (CI finishing)      |
+| `pull_request` with `waitForCi` | Same, but the review of a pushed head is held until that head's own CI finishes (or 15 minutes pass), and an approve verdict is refused while CI is failing or still running | Same events as `pull_request`                                                          |
+| `mention`                       | Someone with write access `@`-mentions the App                                                                                                                               | Issue comment, Issues, Pull request review comment (mentions in inline review threads) |
+| `push`                          | A commit lands on the repository's default branch                                                                                                                            | Push                                                                                   |
+| `review_fix`                    | Wardby's own review check requests changes on a PR it opened                                                                                                                 | Same events as `pull_request` (it reacts to that check's own verdict, no extra event)  |
 
 The `push` trigger starts a merge-watcher agent; only default-branch pushes
 count (tags, other branches, and deletions are ignored). See
@@ -49,5 +50,9 @@ count (tags, other branches, and deletions are ignored). See
 The `review_fix` trigger lets Wardby fix its own review's findings
 automatically, up to a round cap, on pull requests its own coding runs
 opened. See [Automatic review fix rounds](review-fix-rounds.md).
+
+`waitForCi` holds a reviewer's review until that pull request's own CI
+finishes, and gates its ability to approve on CI passing. See
+[Review after CI (`waitForCi`)](code-review-agents.md#review-after-ci-waitforci).
 
 For Jira Cloud instead of GitHub, see [Run Jira agents](jira.md).

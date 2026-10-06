@@ -34,6 +34,10 @@
  * of those paths instead of patching each. Mention status comments, and the
  * status comments of runs started by Jira issue events, get the same sweep:
  * it also catches a run that ended before its comment was posted.
+ *
+ * Given host-event deps, each pass also starts reviews deferred until CI
+ * finished (waitForCi links) whose CI has not finished in time, and drops
+ * deferred reviews that are too old (host-events.ts startDeferredReviews).
  */
 
 import type { Prisma, PrismaClient } from "#prisma";
@@ -48,6 +52,7 @@ import { completeHostStatus } from "./host-status.js";
 import { closeOrphanedIssueStatuses } from "./issue-status.js";
 import { fileSelfDefect } from "./self-defects.js";
 import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
+import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
 /** A pass waits this long per self-defect, then moves on; the filing finishes (or logs) in the background. */
@@ -156,6 +161,8 @@ export async function reconcileOnce(
   executor?: Executor,
   reviewHosts?: ReviewHostRegistry,
   issueTrackers?: IssueTrackerRegistry,
+  /** What starting a deferred review needs; absent = no deferred-review sweep. */
+  deferredReviews?: ReviewStartDeps,
 ): Promise<number> {
   const cutoff = new Date(now.getTime() - heartbeatTimeoutMs);
   const stale = {
@@ -270,6 +277,8 @@ export async function reconcileOnce(
   await closeOrphanedIssueStatuses(db, issueTrackers, now);
   // Settle stored pull requests whose merge/close webhook was missed; bounded per pass, never throws.
   await syncOpenPullRequestStates(db, reviewHosts, issueTrackers, now);
+  // Start reviews whose head's CI never finished (waitForCi links); bounded per pass, never throws.
+  if (deferredReviews) await startDeferredReviews(deferredReviews, now);
   return lost;
 }
 
@@ -282,6 +291,8 @@ export interface ReconcilerOptions {
   reviewHosts?: ReviewHostRegistry;
   /** Trackers used to complete issue status comments orphaned the same way; none configured = no sweep. */
   issueTrackers?: IssueTrackerRegistry;
+  /** Host-event deps for starting deferred reviews (waitForCi) whose CI never finished; absent = no sweep. */
+  deferredReviews?: ReviewStartDeps;
 }
 
 export interface ReconcilerHandle {
@@ -301,6 +312,7 @@ export function startReconciler(options: ReconcilerOptions = {}): ReconcilerHand
       options.executor,
       options.reviewHosts,
       options.issueTrackers,
+      options.deferredReviews,
     ).catch((err) => {
       reconcilerLog.error({ err }, "reconcile pass failed");
     });
