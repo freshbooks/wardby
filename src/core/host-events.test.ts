@@ -1435,7 +1435,7 @@ describe("review after CI (waitForCi)", () => {
       await expect(routeHostEvent(pr, failing.d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
     });
 
-    it("leaves a reviewer without waitForCi unchanged, and reads CI only once per event", async () => {
+    it("leaves a reviewer without waitForCi unchanged, and reads CI once per event (plus one re-read after deferring)", async () => {
       const { d, h, store } = setup({
         ci: "pending",
         links: [
@@ -1445,8 +1445,54 @@ describe("review after CI (waitForCi)", () => {
         ],
       });
       await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: ["run-a3"], followUps: [] });
-      expect(h.readCi).toHaveBeenCalledTimes(1);
+      expect(h.readCi).toHaveBeenCalledTimes(2);
       expect(store.createMany.mock.calls[0][0].data.map((r: { agentId: string }) => r.agentId)).toEqual(["a1", "a2"]);
+    });
+
+    it("starts the review exactly once when CI finished between the read and the deferral", async () => {
+      const { d, h, store } = setup({ ci: "pending", rows: [deferred()] });
+      vi.mocked(h.readCi!)
+        .mockResolvedValueOnce({
+          headSha: SHA,
+          state: "pending",
+          checks: [],
+          truncated: false,
+          statusesUnavailable: false,
+        })
+        .mockResolvedValueOnce({
+          headSha: SHA,
+          state: "passing",
+          checks: [],
+          truncated: false,
+          statusesUnavailable: false,
+        });
+      await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+      expect(store.createMany).toHaveBeenCalledTimes(1);
+      expect(store.findMany).toHaveBeenCalledWith({
+        where: { provider: "github", repository: REPO, prNumber: 7, headSha: SHA, agentId: { in: ["a1"] } },
+        select: { id: true, agentId: true, checkName: true },
+      });
+      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      expect(dispatchRun).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves the rows for the sweep when the re-read finds CI still pending or fails", async () => {
+      const pending = setup({ ci: "pending", rows: [deferred()] });
+      await expect(routeHostEvent(pr, pending.d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(pending.store.findMany).not.toHaveBeenCalled();
+      const failing = setup({ ci: "pending", rows: [deferred()] });
+      vi.mocked(failing.h.readCi!)
+        .mockResolvedValueOnce({
+          headSha: SHA,
+          state: "pending",
+          checks: [],
+          truncated: false,
+          statusesUnavailable: false,
+        })
+        .mockRejectedValueOnce(new Error("boom"));
+      await expect(routeHostEvent(pr, failing.d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(failing.store.deleteMany).not.toHaveBeenCalled();
+      expect(dispatchRun).not.toHaveBeenCalled();
     });
 
     it("never reads CI when no reviewer waits for it", async () => {
@@ -1538,7 +1584,7 @@ describe("review after CI (waitForCi)", () => {
           provider: { in: ["github"] },
           createdAt: { lte: new Date(NOW.getTime() - DEFERRED_REVIEW_MAX_WAIT_MS) },
         },
-        orderBy: { createdAt: "desc" },
+        orderBy: { createdAt: "asc" },
         take: DEFERRED_REVIEW_BATCH,
       });
       expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
@@ -1597,6 +1643,15 @@ describe("review after CI (waitForCi)", () => {
       expect(store.findMany).not.toHaveBeenCalled();
       store.deleteMany.mockRejectedValueOnce(new Error("db down"));
       await expect(startDeferredReviews(d, NOW)).resolves.toEqual([]);
+    });
+
+    it("logs and returns nothing when a claimed review cannot be started", async () => {
+      const { d, store } = setup({ rows: [deferred()] });
+      d.reviewLookup.mockRejectedValueOnce(new Error("db down"));
+      await expect(startDeferredReviews(d, NOW)).resolves.toEqual([]);
+      // The row was claimed before the failure: at most once, never retried.
+      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      expect(dispatchRun).not.toHaveBeenCalled();
     });
 
     it("keeps going after one head fails", async () => {

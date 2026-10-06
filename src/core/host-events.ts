@@ -682,25 +682,28 @@ type PullRequestKey = Pick<HostEvent, "provider" | "repository"> & { prNumber: n
  * pr_updated for reviewers linked with waitForCi: reads CI on the head once.
  * While it is pending (or nothing has reported yet), records one
  * DeferredReview row per reviewer and starts nothing; ci_completed, or the
- * reconciler sweep after DEFERRED_REVIEW_MAX_WAIT_MS, starts it later. Returns
- * the links to start now: all of them when CI has already finished, and when
- * CI cannot be read or the deferral cannot be recorded (as without waitForCi).
+ * reconciler sweep after DEFERRED_REVIEW_MAX_WAIT_MS, starts it later; CI is
+ * read once more after recording, in case it finished in between. Returns the
+ * links to start now (all of them when CI has already finished, cannot be
+ * read, or the deferral cannot be recorded: as without waitForCi) and the runs
+ * the re-read started.
  */
 async function deferUntilCi(
   deps: ReviewStartDeps,
   host: CodeReviewHost,
   key: PullRequestKey,
   links: LinkRow[],
-): Promise<LinkRow[]> {
-  if (links.length === 0 || !host.readCi) return links;
+): Promise<{ startNow: LinkRow[]; runIds: string[] }> {
+  const now = { startNow: links, runIds: [] };
+  if (links.length === 0 || !host.readCi) return now;
   let state: string;
   try {
     state = (await host.readCi(key.repository, key.headSha)).state;
   } catch (err) {
     log.warn({ err, repository: key.repository, prNumber: key.prNumber }, "could not read CI; reviewing now");
-    return links;
+    return now;
   }
-  if (!CI_NOT_FINISHED_ON_PUSH.has(state)) return links;
+  if (!CI_NOT_FINISHED_ON_PUSH.has(state)) return now;
   try {
     // Idempotent per head and reviewer: a repeated delivery or a second push event for the same head adds nothing.
     await deps.db.deferredReview.createMany({
@@ -719,7 +722,7 @@ async function deferUntilCi(
       { err, repository: key.repository, prNumber: key.prNumber },
       "could not record the deferred review; reviewing now",
     );
-    return links;
+    return now;
   }
   log.info(
     {
@@ -731,7 +734,33 @@ async function deferUntilCi(
     },
     "review deferred until CI finishes",
   );
-  return [];
+  // CI may have finished between the read above and the insert, with its
+  // ci_completed delivery finding no row yet: read once more and, if it has,
+  // start now (claimed by delete, so a racing delivery starts it once). A
+  // failure leaves the rows for the sweep.
+  const runIds: string[] = [];
+  try {
+    const again = (await host.readCi(key.repository, key.headSha)).state;
+    if (!CI_NOT_FINISHED_ON_PUSH.has(again)) {
+      const rows = await deps.db.deferredReview.findMany({
+        where: {
+          provider: key.provider,
+          repository: key.repository,
+          prNumber: key.prNumber,
+          headSha: key.headSha,
+          agentId: { in: links.map((l) => l.agentId) },
+        },
+        select: { id: true, agentId: true, checkName: true },
+      });
+      if (rows.length > 0) runIds.push(...(await startDeferred(deps, host, key, rows, links, "ci", "CI finished")));
+    }
+  } catch (err) {
+    log.warn(
+      { err, repository: key.repository, prNumber: key.prNumber },
+      "could not re-read CI after deferring; the sweep starts the review",
+    );
+  }
+  return { startNow: [], runIds };
 }
 
 type DeferredRow = { id: string; agentId: string; checkName: string };
@@ -781,7 +810,16 @@ async function startDeferred(
   }
   if (targets.length === 0) return [];
   log.info({ ...where, agentIds: targets.map((t) => t.agentId), reason }, "starting the deferred review");
-  return await startReviews(deps, host, key.repository, key.prNumber, key.headSha, targets, true);
+  try {
+    return await startReviews(deps, host, key.repository, key.prNumber, key.headSha, targets, true);
+  } catch (err) {
+    // The rows are already claimed (at most once): make the lost start visible.
+    log.warn(
+      { err, ...where, agentIds: targets.map((t) => t.agentId) },
+      "claimed deferred reviews could not be started",
+    );
+    return [];
+  }
 }
 
 /**
@@ -818,7 +856,7 @@ async function startDeferredAfterCi(
  * The reconciler's fallback for deferred reviews: drops rows older than
  * DEFERRED_REVIEW_MAX_AGE_MS, and starts (regardless of CI) those waiting
  * longer than DEFERRED_REVIEW_MAX_WAIT_MS, at most DEFERRED_REVIEW_BATCH per
- * pass, newest first. Covers CI that never reported, ran very long, or whose
+ * pass, oldest first. Covers CI that never reported, ran very long, or whose
  * completion webhook was missed. Never throws; returns the runs started.
  */
 export async function startDeferredReviews(deps: ReviewStartDeps, now: Date = new Date()): Promise<string[]> {
@@ -844,7 +882,7 @@ export async function startDeferredReviews(deps: ReviewStartDeps, now: Date = ne
         agentId: true,
         checkName: true,
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: { createdAt: "asc" },
       take: DEFERRED_REVIEW_BATCH,
     });
     const groups = new Map<string, typeof due>();
@@ -980,20 +1018,21 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const allowed = await authorizedLinks(deps, event, reviewerLinks);
       if (allowed.length === 0) return none;
       // Reviewers linked with waitForCi review this head only once its CI finished.
-      const startNow = new Set(
-        await deferUntilCi(
-          deps,
-          host,
-          event,
-          allowed.filter((l) => l.waitForCi),
-        ),
+      const deferral = await deferUntilCi(
+        deps,
+        host,
+        event,
+        allowed.filter((l) => l.waitForCi),
       );
+      const startNow = new Set(deferral.startNow);
       const reviewers = reviewTargets(allowed.filter((l) => !l.waitForCi || startNow.has(l)));
-      if (reviewers.length === 0) return none;
-      return {
-        runIds: await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers, true),
-        followUps: [],
-      };
+      const runIds = [...deferral.runIds];
+      if (reviewers.length > 0) {
+        runIds.push(
+          ...(await startReviews(deps, host, event.repository, event.prNumber, event.headSha, reviewers, true)),
+        );
+      }
+      return { runIds, followUps: [] };
     }
     case "ci_completed": {
       if (reviewerLinks.length === 0) return none;
