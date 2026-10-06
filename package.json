@@ -95,7 +95,7 @@
     "@anthropic-ai/sdk": "^0.124.0",
     "@dbos-inc/dbos-sdk": "4.27.6",
     "@kubernetes/client-node": "^2.0.0",
-    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/client": "^2.3.1",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "@prisma/adapter-pg": "7.10.0",
