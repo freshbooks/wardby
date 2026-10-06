@@ -50,7 +50,23 @@ type PullRequestRow = Prisma.IssuePullRequestGetPayload<object>;
 
 const iso = (date: Date | null): string | null => (date ? date.toISOString() : null);
 
-function triggerFor(row: RunRow): RunTriggerInfo {
+/** Site origin per issue-tracker provider (e.g. `{ jira: "https://your-site.atlassian.net" }`), for links. */
+export type IssueSites = Readonly<Record<string, string>>;
+
+/** The tracker's page for an issue (and, with a comment id, that comment); null without a known site. */
+export function issueUrl(
+  sites: IssueSites,
+  provider: string,
+  issueKey: string,
+  commentId?: string | null,
+): string | null {
+  const site = sites[provider];
+  if (!site || provider !== "jira") return null;
+  const page = `${site}/browse/${encodeURIComponent(issueKey)}`;
+  return commentId ? `${page}?focusedCommentId=${encodeURIComponent(commentId)}` : page;
+}
+
+function triggerFor(row: RunRow, sites: IssueSites): RunTriggerInfo {
   switch (row.trigger) {
     case "scheduled":
       return { kind: "scheduled", schedule: row.agent.schedule };
@@ -62,7 +78,12 @@ function triggerFor(row: RunRow): RunTriggerInfo {
       return { kind: "manual" };
     case "host_event":
       if (row.issueStatus) {
-        return { kind: "issue", provider: row.issueStatus.provider, issueKey: row.issueStatus.issueKey };
+        return {
+          kind: "issue",
+          provider: row.issueStatus.provider,
+          issueKey: row.issueStatus.issueKey,
+          url: issueUrl(sites, row.issueStatus.provider, row.issueStatus.issueKey),
+        };
       }
       if (row.hostStatus) {
         return {
@@ -86,7 +107,7 @@ function triggerFor(row: RunRow): RunTriggerInfo {
   }
 }
 
-function outcomesFor(row: RunRow, pullRequests: readonly PullRequestRow[]): Outcome[] {
+function outcomesFor(row: RunRow, pullRequests: readonly PullRequestRow[], sites: IssueSites): Outcome[] {
   const outcomes: Outcome[] = pullRequests.map((pr) => ({
     kind: "pull_request",
     provider: pr.codeProvider,
@@ -126,6 +147,7 @@ function outcomesFor(row: RunRow, pullRequests: readonly PullRequestRow[]): Outc
       kind: "issue_comment",
       provider: row.issueStatus.provider,
       issueKey: row.issueStatus.issueKey,
+      url: issueUrl(sites, row.issueStatus.provider, row.issueStatus.issueKey, row.issueStatus.commentId),
       at: (row.issueStatus.completedAt ?? row.issueStatus.createdAt).toISOString(),
     });
   }
@@ -143,7 +165,7 @@ function outcomesFor(row: RunRow, pullRequests: readonly PullRequestRow[]): Outc
 }
 
 /** The one row -> GraphRun mapping (also used by run detail). `pullRequests` are the IssuePullRequest rows this run opened. */
-export function toGraphRun(row: RunRow, pullRequests: readonly PullRequestRow[]): GraphRun {
+export function toGraphRun(row: RunRow, pullRequests: readonly PullRequestRow[], sites: IssueSites = {}): GraphRun {
   return {
     id: row.id,
     parentRunId: row.parentRunId,
@@ -153,7 +175,7 @@ export function toGraphRun(row: RunRow, pullRequests: readonly PullRequestRow[])
     model: row.codingRun?.model ?? row.agent.model,
     codingProvider: row.codingRun?.provider ?? null,
     status: row.status,
-    trigger: triggerFor(row),
+    trigger: triggerFor(row, sites),
     turns: row.turns,
     tokensIn: row.tokensIn,
     tokensOut: row.tokensOut,
@@ -162,7 +184,7 @@ export function toGraphRun(row: RunRow, pullRequests: readonly PullRequestRow[])
     startedAt: row.startedAt.toISOString(),
     finishedAt: iso(row.finishedAt),
     heartbeatAt: iso(row.heartbeatAt),
-    outcomes: outcomesFor(row, pullRequests),
+    outcomes: outcomesFor(row, pullRequests, sites),
     declaredServices: declaredServices(row.codingRun?.services),
     services: row.serviceStatuses.map((s) => ({
       name: s.name,
@@ -176,7 +198,7 @@ export function toGraphRun(row: RunRow, pullRequests: readonly PullRequestRow[])
   };
 }
 
-async function mapRows(db: PrismaClient, rows: readonly RunRow[]): Promise<GraphRun[]> {
+async function mapRows(db: PrismaClient, rows: readonly RunRow[], sites: IssueSites): Promise<GraphRun[]> {
   if (rows.length === 0) return [];
   const pullRequests = await db.issuePullRequest.findMany({
     where: { openedByRunId: { in: rows.map((r) => r.id) } },
@@ -184,19 +206,23 @@ async function mapRows(db: PrismaClient, rows: readonly RunRow[]): Promise<Graph
   });
   const byRun = new Map<string, PullRequestRow[]>();
   for (const pr of pullRequests) byRun.set(pr.openedByRunId, [...(byRun.get(pr.openedByRunId) ?? []), pr]);
-  return rows.map((row) => toGraphRun(row, byRun.get(row.id) ?? []));
+  return rows.map((row) => toGraphRun(row, byRun.get(row.id) ?? [], sites));
 }
 
 /** Loads the given runs as GraphRuns (shared with run detail); unknown ids are skipped. */
-export async function loadGraphRuns(db: PrismaClient, runIds: readonly string[]): Promise<GraphRun[]> {
+export async function loadGraphRuns(
+  db: PrismaClient,
+  runIds: readonly string[],
+  sites: IssueSites = {},
+): Promise<GraphRun[]> {
   if (runIds.length === 0) return [];
   const rows = await db.run.findMany({ where: { id: { in: [...runIds] } }, include: runInclude });
-  return mapRows(db, rows);
+  return mapRows(db, rows, sites);
 }
 
 export async function loadGraph(
   db: PrismaClient,
-  options: { since: Date; limit: number; now?: Date },
+  options: { since: Date; limit: number; now?: Date; issueSites?: IssueSites },
 ): Promise<GraphSnapshot> {
   const now = options.now ?? new Date();
   // Window rule: started inside the window, or still in flight (a long run started earlier stays visible).
@@ -226,7 +252,7 @@ export async function loadGraph(
 
   const dayStart = periodStart("day", now);
   const [runs, today, groups] = await Promise.all([
-    mapRows(db, rows),
+    mapRows(db, rows, options.issueSites ?? {}),
     db.run.aggregate({ where: { startedAt: { gte: dayStart } }, _sum: { costUsd: true } }),
     db.budgetGroup.findMany({
       where: { dailyBudgetUsd: { not: null } },

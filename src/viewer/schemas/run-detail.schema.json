@@ -161,12 +161,19 @@
                 },
                 "issueKey": {
                   "type": "string"
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
                 "kind",
                 "provider",
-                "issueKey"
+                "issueKey",
+                "url"
               ],
               "additionalProperties": false
             },
@@ -307,6 +314,12 @@
                   "issueKey": {
                     "type": "string"
                   },
+                  "url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "at": {
                     "type": [
                       "string",
@@ -318,6 +331,7 @@
                   "kind",
                   "provider",
                   "issueKey",
+                  "url",
                   "at"
                 ],
                 "additionalProperties": false

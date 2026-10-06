@@ -73,7 +73,7 @@ describe("prKey", () => {
 describe("chainLinks", () => {
   it("links a review to the PR its builder opened", () => {
     const runs = [
-      run("deliver", { startedAt: t(0), trigger: { kind: "issue", provider: "github", issueKey: "o/r#5" } }),
+      run("deliver", { startedAt: t(0), trigger: { kind: "issue", provider: "github", issueKey: "o/r#5", url: null } }),
       run("build", { parentRunId: "deliver", startedAt: t(1), outcomes: [pr(6)] }),
       run("rev", { startedAt: t(5), trigger: review(6), outcomes: [check(6, false)] }),
     ];

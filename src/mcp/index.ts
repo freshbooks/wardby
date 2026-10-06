@@ -398,6 +398,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
         authenticate: (authorization) =>
           authenticate({ authorization }, { authProvider, db: prisma, providers, canonicalUri: canonicalHref }),
         canonicalUri: canonicalHref,
+        issueSites: jiraConfig ? { jira: jiraConfig.siteUrl } : {},
       })
     : undefined;
   const http = await startHttpServer({
