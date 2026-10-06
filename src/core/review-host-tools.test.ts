@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ReviewHostError, type CodeReviewHost } from "../providers/review-host/types.js";
+import { ReviewHostError, type CiView, type CodeReviewHost } from "../providers/review-host/types.js";
 import { handleReviewHostTool, resolveLink, type RepositoryLink, type ReviewToolContext } from "./review-host-tools.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -371,6 +371,131 @@ describe("handleReviewHostTool", () => {
         ),
       ),
     ).toMatchObject({ error: "host_not_configured" });
+  });
+});
+
+describe("handleReviewHostTool waitForCi publish gate", () => {
+  const WAIT: RepositoryLink = { ...WRITE, waitForCi: true };
+  const runCheck = {
+    provider: "github" as const,
+    repository: WAIT.repository,
+    checkId: "11",
+    headSha: SHA,
+    prNumber: 7,
+  };
+  const publish = (verdict: "APPROVE" | "CHANGES_REQUESTED" | "COMMENT") =>
+    JSON.stringify({
+      repository: WAIT.repository,
+      prNumber: 7,
+      headSha: SHA,
+      verdict,
+      summary: "s",
+      body: "b",
+    });
+  const ciView = (state: CiView["state"], checks: CiView["checks"] = []): CiView => ({
+    headSha: SHA,
+    state,
+    checks,
+    truncated: false,
+    statusesUnavailable: false,
+  });
+
+  it("refuses an APPROVE when CI is failing, naming the failing checks, without publishing or completing", async () => {
+    const h = fakeHost();
+    h.readCi = vi.fn(async () =>
+      ciView("failing", [
+        { name: "build", kind: "check_run", status: "completed", conclusion: "failure", app: "github-actions" },
+        { name: "lint", kind: "check_run", status: "completed", conclusion: "success", app: "github-actions" },
+      ]),
+    );
+    const c = ctx({ links: [WAIT], hosts: { github: h }, runCheck });
+    const result = JSON.parse(await handleReviewHostTool("repo_publish_review", publish("APPROVE"), c));
+    expect(result).toMatchObject({ error: "ci_failing" });
+    expect(result.message).toContain("build");
+    expect(result.message).not.toContain("lint");
+    expect(h.publishReview).not.toHaveBeenCalled();
+    expect(c.markRunCheckCompleted).not.toHaveBeenCalled();
+  });
+
+  it("caps the failing checks named in the ci_failing message at 5", async () => {
+    const h = fakeHost();
+    const failing = Array.from({ length: 7 }, (_, i) => ({
+      name: `check-${i}`,
+      kind: "check_run" as const,
+      status: "completed" as const,
+      conclusion: "failure",
+      app: "github-actions",
+    }));
+    h.readCi = vi.fn(async () => ciView("failing", failing));
+    const c = ctx({ links: [WAIT], hosts: { github: h }, runCheck });
+    const result = JSON.parse(await handleReviewHostTool("repo_publish_review", publish("APPROVE"), c));
+    expect(result.error).toBe("ci_failing");
+    for (let i = 0; i < 5; i++) expect(result.message).toContain(`check-${i}`);
+    expect(result.message).not.toContain("check-5");
+    expect(result.message).not.toContain("check-6");
+  });
+
+  it("refuses an APPROVE when CI is still pending, without publishing or completing", async () => {
+    const h = fakeHost();
+    h.readCi = vi.fn(async () => ciView("pending"));
+    const c = ctx({ links: [WAIT], hosts: { github: h }, runCheck });
+    const result = JSON.parse(await handleReviewHostTool("repo_publish_review", publish("APPROVE"), c));
+    expect(result).toMatchObject({ error: "ci_pending" });
+    expect(h.publishReview).not.toHaveBeenCalled();
+    expect(c.markRunCheckCompleted).not.toHaveBeenCalled();
+  });
+
+  it("publishes an APPROVE when CI is passing", async () => {
+    const h = fakeHost();
+    h.readCi = vi.fn(async () =>
+      ciView("passing", [{ name: "build", kind: "check_run", status: "completed", conclusion: "success", app: null }]),
+    );
+    const c = ctx({ links: [WAIT], hosts: { github: h }, runCheck });
+    const result = JSON.parse(await handleReviewHostTool("repo_publish_review", publish("APPROVE"), c));
+    expect(result).toMatchObject({ published: true });
+    expect(h.publishReview).toHaveBeenCalledOnce();
+    expect(c.markRunCheckCompleted).toHaveBeenCalledWith({ verdict: "APPROVE", body: "s\n\nb" });
+  });
+
+  it("does not gate COMMENT or CHANGES_REQUESTED verdicts, even with CI failing", async () => {
+    for (const verdict of ["COMMENT", "CHANGES_REQUESTED"] as const) {
+      const h = fakeHost();
+      h.readCi = vi.fn(async () =>
+        ciView("failing", [
+          { name: "build", kind: "check_run", status: "completed", conclusion: "failure", app: null },
+        ]),
+      );
+      const c = ctx({ links: [WAIT], hosts: { github: h }, runCheck });
+      const result = JSON.parse(await handleReviewHostTool("repo_publish_review", publish(verdict), c));
+      expect(result).toMatchObject({ published: true });
+      expect(h.publishReview).toHaveBeenCalledOnce();
+      expect(c.markRunCheckCompleted).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("does not gate an APPROVE on a link without waitForCi, even when CI is failing", async () => {
+    const h = fakeHost();
+    h.readCi = vi.fn(async () =>
+      ciView("failing", [{ name: "build", kind: "check_run", status: "completed", conclusion: "failure", app: null }]),
+    );
+    const c = ctx({ links: [WRITE], hosts: { github: h }, runCheck });
+    const result = JSON.parse(await handleReviewHostTool("repo_publish_review", publish("APPROVE"), c));
+    expect(result).toMatchObject({ published: true });
+    expect(h.publishReview).toHaveBeenCalledOnce();
+    expect(h.readCi).not.toHaveBeenCalled();
+    expect(c.markRunCheckCompleted).toHaveBeenCalledOnce();
+  });
+
+  it("publishes the APPROVE when readCi throws, treating it as no gate", async () => {
+    const h = fakeHost();
+    h.readCi = vi.fn(async () => {
+      throw new Error("transient");
+    });
+    const c = ctx({ links: [WAIT], hosts: { github: h }, runCheck });
+    const result = JSON.parse(await handleReviewHostTool("repo_publish_review", publish("APPROVE"), c));
+    expect(result).toMatchObject({ published: true });
+    expect(h.publishReview).toHaveBeenCalledOnce();
+    expect(c.markRunCheckCompleted).toHaveBeenCalledWith({ verdict: "APPROVE", body: "s\n\nb" });
   });
 });
 

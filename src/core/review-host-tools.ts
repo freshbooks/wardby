@@ -10,6 +10,7 @@
  */
 import { z } from "zod";
 import type { LoadedTool } from "../providers/engine/types.js";
+import { FAILING_CONCLUSIONS } from "../providers/review-host/ci.js";
 import {
   REVIEW_HOST_PROVIDERS,
   ReviewHostError,
@@ -286,6 +287,16 @@ function error(code: string, message: string = code): string {
   return JSON.stringify({ error: code, message });
 }
 
+/** Cap on failing check names named in the ci_failing tool error. */
+const MAX_FAILING_NAMED = 5;
+
+function failingCheckNames(ci: CiView): string[] {
+  return ci.checks
+    .filter((c) => c.status === "completed" && FAILING_CONCLUSIONS.has(c.conclusion ?? ""))
+    .slice(0, MAX_FAILING_NAMED)
+    .map((c) => c.name);
+}
+
 /** Bookkeeping only: a failure to record the check completed is logged and never changes the tool result. */
 async function markCompleted(ctx: ReviewToolContext, review?: PublishedReview): Promise<void> {
   try {
@@ -390,6 +401,37 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
             log.warn({ err, agentId: ctx.agentId }, "could not supersede the run's check");
           }
         }
+        // A COMMENT while CI is unfinished is often only "waiting for CI":
+        // recorded below so CI finishing on this head re-runs the review
+        // once. An APPROVE on a waitForCi link's own check reuses the same
+        // read, but gates on it here, before publishing: CI failing or
+        // still pending refuses the APPROVE outright, and nothing is
+        // published or completed. Either way a read failure (readCi absent,
+        // or it throws) is treated as "no information" — the call proceeds
+        // as if waitForCi were off.
+        const wantsGate = link.waitForCi && a.verdict === "APPROVE";
+        let ci: CiView | null = null;
+        if (ownsCheck && host.readCi && (a.verdict === "COMMENT" || wantsGate)) {
+          ci = await host.readCi(link.repository, a.headSha).catch((err: unknown) => {
+            log.warn({ err, agentId: ctx.agentId }, "could not read CI around publishing a review");
+            return null;
+          });
+        }
+        if (wantsGate && ci) {
+          if (ci.state === "failing") {
+            const names = failingCheckNames(ci);
+            return error(
+              "ci_failing",
+              `CI is failing on this head${names.length ? ` (${names.join(", ")})` : ""}; APPROVE is not allowed — request changes for the CI failure instead.`,
+            );
+          }
+          if (ci.state === "pending") {
+            return error(
+              "ci_pending",
+              "CI is still running on this head; APPROVE is not allowed yet. Publish COMMENT — the review runs again when CI finishes.",
+            );
+          }
+        }
         const result = await host.publishReview(link.repository, {
           prNumber: a.prNumber,
           headSha: a.headSha,
@@ -403,20 +445,10 @@ export async function handleReviewHostTool(name: string, argsJson: string, ctx: 
           ...(a.resolveThreadIds?.length ? { resolveThreadIds: a.resolveThreadIds } : {}),
         });
         if (ownsCheck) {
-          // A COMMENT while CI is unfinished is often only "waiting for CI":
-          // recorded so CI finishing on this head re-runs the review once.
-          let ci: CiView | null = null;
-          if (a.verdict === "COMMENT" && host.readCi) {
-            // The review is already published: a CI read failure must not turn this into an error result.
-            ci = await host.readCi(link.repository, a.headSha).catch((err: unknown) => {
-              log.warn({ err, agentId: ctx.agentId }, "could not read CI after publishing a comment review");
-              return null;
-            });
-          }
           await markCompleted(ctx, {
             verdict: a.verdict,
             body: `${a.summary}\n\n${a.body}`.slice(0, MAX_REVIEW_BODY_CHARS),
-            ...(ci ? { ciPending: ci.state === "pending" || ci.state === "none" } : {}),
+            ...(a.verdict === "COMMENT" && ci ? { ciPending: ci.state === "pending" || ci.state === "none" } : {}),
           });
         }
         return JSON.stringify(result);
