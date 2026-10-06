@@ -183,6 +183,20 @@ describe("TriggerNode / OutcomeNode", () => {
     expect(screen.getByText(/check · completed ·/)).toHaveTextContent(`check · completed · ${hhmm(at)}`);
   });
 
+  it("lets a chain edge leave an outcome box", () => {
+    const outcome: Outcome = {
+      kind: "check",
+      provider: "github",
+      repository: "o/r",
+      number: 1,
+      completed: true,
+      at: null,
+    };
+    const { container } = wrap(<OutcomeNode {...props({ kind: "outcome", outcome })} />);
+    expect(container.querySelector(".react-flow__handle.source")).not.toBeNull();
+    expect(container.querySelector(".react-flow__handle.target")).not.toBeNull();
+  });
+
   it("gives a check outcome its kind on the second line and no link off GitHub", () => {
     const outcome: Outcome = {
       kind: "check",

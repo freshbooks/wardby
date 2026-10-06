@@ -2,6 +2,7 @@
 // objects compatible with React Flow's Node/Edge so this stays testable.
 import type { GraphRun, Outcome } from "../api/types";
 import { matchesFilters, type Filters } from "../state/filters";
+import { chainLinks, type ChainLabel } from "./chain";
 import { triggerLabel } from "./labels";
 
 export { triggerLabel };
@@ -13,7 +14,8 @@ export type FlowNodeData =
 
 export interface FlowGraph {
   nodes: { id: string; type: FlowNodeData["kind"]; data: FlowNodeData }[];
-  edges: { id: string; source: string; target: string; animated: boolean }[];
+  /** `label` marks a link between runs about the same pull request (see chain.ts). */
+  edges: { id: string; source: string; target: string; animated: boolean; label?: ChainLabel }[];
 }
 
 const isLive = (r: GraphRun) => r.status === "pending" || r.status === "running";
@@ -72,7 +74,18 @@ export function buildGraph(runs: readonly GraphRun[], filters: Filters, selected
     }
   };
 
+  // Runs about the same pull request join one chain; a linked root's own trigger box is dropped.
+  const chain = chainLinks(
+    kept,
+    roots.map((r) => r.id),
+  );
+  const linked = new Set(chain.map((l) => l.toRunId));
+
   for (const root of roots) {
+    if (linked.has(root.id)) {
+      emitRun(root);
+      continue;
+    }
     const tid = `t:${root.id}`;
     graph.nodes.push({
       id: tid,
@@ -81,6 +94,16 @@ export function buildGraph(runs: readonly GraphRun[], filters: Filters, selected
     });
     link(tid, `r:${root.id}`, isLive(root));
     emitRun(root);
+  }
+  for (const l of chain) {
+    const target = `r:${l.toRunId}`;
+    graph.edges.push({
+      id: `${l.from}~>${l.label}~>${target}`,
+      source: l.from,
+      target,
+      animated: isLive(byId.get(l.toRunId)!),
+      label: l.label,
+    });
   }
   return graph;
 }

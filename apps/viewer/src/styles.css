@@ -950,3 +950,17 @@ button:disabled {
 .bottombar .cost {
   cursor: help;
 }
+
+/* Links between runs about the same pull request (review, mention, fix). */
+.react-flow__edge.chain-edge path {
+  stroke-dasharray: 4 3;
+}
+
+.react-flow__edge.chain-edge .react-flow__edge-text {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.react-flow__edge.chain-edge .react-flow__edge-textbg {
+  fill: var(--bg);
+}

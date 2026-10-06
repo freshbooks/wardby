@@ -139,7 +139,9 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
 
   const edges = useMemo<Edge[]>(() => {
     const ids = new Set(nodes.map((n) => n.id));
-    return graph.edges.filter((e) => ids.has(e.source) && ids.has(e.target));
+    return graph.edges
+      .filter((e) => ids.has(e.source) && ids.has(e.target))
+      .map((e) => (e.label ? { ...e, className: "chain-edge" } : e));
   }, [graph, nodes]);
 
   if (positions === null && graph.nodes.length > 0) return <p className="muted">Laying out…</p>;

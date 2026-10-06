@@ -71,6 +71,8 @@ function OutcomeNodeImpl({ data }: NodeProps) {
           </>
         )}
       </span>
+      {/* A pull request's review, mention or fix chains on from here (graph/chain.ts). */}
+      <Handle type="source" position={Position.Right} className="flow-handle" isConnectable={false} />
     </div>
   );
 }
