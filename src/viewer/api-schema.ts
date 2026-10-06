@@ -31,7 +31,8 @@ export const RunTriggerSchema = z.discriminatedUnion("kind", [
     number: z.number().int().nullable(),
     event: z.enum(["review", "mention"]),
   }),
-  z.object({ kind: z.literal("issue"), provider: z.string(), issueKey: z.string() }),
+  /** `url`: the issue's page on the tracker, or null when the server has no site configured for it. */
+  z.object({ kind: z.literal("issue"), provider: z.string(), issueKey: z.string(), url: z.string().nullable() }),
   z.object({ kind: z.literal("host_event") }),
 ]);
 
@@ -55,7 +56,14 @@ export const OutcomeSchema = z.discriminatedUnion("kind", [
     number: z.number().int(),
     at: OutcomeAtSchema,
   }),
-  z.object({ kind: z.literal("issue_comment"), provider: z.string(), issueKey: z.string(), at: OutcomeAtSchema }),
+  /** `url` opens the issue at wardby's comment, or null when the server has no site configured for it. */
+  z.object({
+    kind: z.literal("issue_comment"),
+    provider: z.string(),
+    issueKey: z.string(),
+    url: z.string().nullable(),
+    at: OutcomeAtSchema,
+  }),
   z.object({
     kind: z.literal("check"),
     provider: z.string(),

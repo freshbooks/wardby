@@ -151,10 +151,29 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
       },
     ]);
     expect(by(ids.R2).services).toMatchObject([{ name: "postgres", state: "ready" }]);
-    expect(by(ids.R4).trigger).toEqual({ kind: "issue", provider: "jira", issueKey: "WMD-42" });
+    // No Jira site configured: no links.
+    expect(by(ids.R4).trigger).toEqual({ kind: "issue", provider: "jira", issueKey: "WMD-42", url: null });
     expect(by(ids.R4).outcomes).toEqual([
-      { kind: "issue_comment", provider: "jira", issueKey: "WMD-42", at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/) },
+      {
+        kind: "issue_comment",
+        provider: "jira",
+        issueKey: "WMD-42",
+        url: null,
+        at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+      },
     ]);
+  });
+
+  it("links a Jira trigger and wardby's comment when the site is configured", async () => {
+    const snap = await loadGraph(db, {
+      since: ago(60 * MIN),
+      limit: 500,
+      now,
+      issueSites: { jira: "https://your-site.atlassian.net" },
+    });
+    const r4 = snap.runs.find((r) => r.id === ids.R4)!;
+    expect(r4.trigger).toMatchObject({ url: "https://your-site.atlassian.net/browse/WMD-42" });
+    expect(r4.outcomes[0]).toMatchObject({ url: "https://your-site.atlassian.net/browse/WMD-42?focusedCommentId=c1" });
   });
 
   it("caps the window but never its ancestors", async () => {

@@ -37,7 +37,7 @@ const runs: GraphRun[] = [
     startedAt: "2026-01-02T00:00:00.000Z",
     agentId: "agent-2",
     agentName: "Coder",
-    trigger: { kind: "issue", provider: "jira", issueKey: "WAR-7" },
+    trigger: { kind: "issue", provider: "jira", issueKey: "WAR-7", url: null },
     outcomes: [
       {
         kind: "pull_request",
@@ -48,7 +48,7 @@ const runs: GraphRun[] = [
         state: "open",
         at: null,
       },
-      { kind: "issue_comment", provider: "jira", issueKey: "WAR-7", at: null },
+      { kind: "issue_comment", provider: "jira", issueKey: "WAR-7", url: null, at: null },
     ],
   }),
   makeRun("c", {
@@ -136,7 +136,7 @@ describe("buildGraph", () => {
       [
         makeRun("p", {
           status: "pending",
-          outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "K-1", at: null }],
+          outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "K-1", url: null, at: null }],
         }),
         makeRun("q", { parentRunId: "p", status: "running" }),
         makeRun("s", { parentRunId: "p", status: "succeeded", startedAt: "2026-01-01T00:00:01.000Z" }),

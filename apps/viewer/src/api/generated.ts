@@ -39,6 +39,7 @@ export interface GraphSnapshot {
           kind: "issue";
           provider: string;
           issueKey: string;
+          url: string | null;
         }
       | {
           kind: "host_event";
@@ -72,6 +73,7 @@ export interface GraphSnapshot {
           kind: "issue_comment";
           provider: string;
           issueKey: string;
+          url: string | null;
           at: string | null;
         }
       | {
@@ -142,6 +144,7 @@ export interface RunDetail {
         kind: "issue";
         provider: string;
         issueKey: string;
+        url: string | null;
       }
     | {
         kind: "host_event";
@@ -175,6 +178,7 @@ export interface RunDetail {
         kind: "issue_comment";
         provider: string;
         issueKey: string;
+        url: string | null;
         at: string | null;
       }
     | {
