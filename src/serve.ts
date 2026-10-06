@@ -20,6 +20,7 @@ import { loadCodingConcurrencyConfig, loadMcpConfig } from "./config/providers.j
 import { drainCodingQueue } from "./core/coding-queue.js";
 import { prisma } from "./core/db.js";
 import { startReconciler } from "./core/reconciler.js";
+import { createRepoAccessGate } from "./core/repo-access.js";
 import { startScheduler } from "./core/scheduler.js";
 import type { McpProviders } from "./mcp/context.js";
 import { buildMcpProviders, startMcp } from "./mcp/index.js";
@@ -52,10 +53,22 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   const concurrency = loadCodingConcurrencyConfig();
   const providers = options.providers ?? buildMcpProviders().providers;
   const mcp = await startMcp({ providers, schedulerAttached: true });
+  const reviewHosts = providers.reviewHosts;
   const reconciler = startReconciler({
     executor: providers.executor,
-    reviewHosts: providers.reviewHosts,
+    reviewHosts,
     issueTrackers: providers.issueTrackers,
+    ...(reviewHosts
+      ? {
+          deferredReviews: {
+            db: prisma,
+            executor: providers.executor,
+            hosts: reviewHosts,
+            repoAccess: providers.repoAccess ?? createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
+            ...(providers.issueTrackers ? { issueTrackers: providers.issueTrackers } : {}),
+          },
+        }
+      : {}),
   });
   const selfDefects = { db: prisma, issueTrackers: providers.issueTrackers };
   const scheduler = startScheduler({

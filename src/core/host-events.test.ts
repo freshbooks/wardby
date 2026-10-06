@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { RepoAccessDecision, RepoAccessGate } from "./repo-access.js";
-import { isReviewCommand, routeHostEvent, type HostEvent } from "./host-events.js";
+import {
+  DEFERRED_REVIEW_BATCH,
+  DEFERRED_REVIEW_MAX_AGE_MS,
+  DEFERRED_REVIEW_MAX_WAIT_MS,
+  isReviewCommand,
+  routeHostEvent,
+  startDeferredReviews,
+  type HostEvent,
+} from "./host-events.js";
 import { splitTaskOverride } from "./untrusted-content.js";
 import { spanHash } from "../knowledge/span-hash.js";
 
@@ -68,7 +76,7 @@ function gate(
 }
 
 function deps(
-  links: Array<{ agentId: string; triggers: string[]; checkName: string | null }>,
+  links: Array<{ agentId: string; triggers: string[]; checkName: string | null; waitForCi?: boolean }>,
   h = host(),
   repoAccess = gate(),
   reviewed: { runId: string } | null = null,
@@ -111,6 +119,11 @@ function deps(
         updateMany: vi.fn(async () => ({ count: 1 })),
       },
       runHostCheck: { findFirst: reviewLookup },
+      deferredReview: {
+        findMany: vi.fn(async () => []),
+        createMany: vi.fn(async () => ({ count: 0 })),
+        deleteMany: vi.fn(async () => ({ count: 1 })),
+      },
       run: {
         findUnique: vi.fn(async () => ({ id: "run", status: "running", finalText: null })),
         findMany: runFindMany,
@@ -1328,5 +1341,270 @@ describe("routeHostEvent: CI finished", () => {
       updateMany: vi.fn(async () => ({ count: 1 })),
     });
     await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a2"], followUps: [] });
+  });
+});
+
+describe("review after CI (waitForCi)", () => {
+  const ciEvent: HostEvent = {
+    kind: "ci_completed",
+    provider: "github",
+    repository: REPO,
+    headSha: SHA,
+    prNumbers: [7],
+  };
+  const waiting = { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review", waitForCi: true };
+  const deferred = (over: Record<string, unknown> = {}) => ({
+    id: "d1",
+    provider: "github",
+    repository: REPO,
+    prNumber: 7,
+    headSha: SHA,
+    agentId: "a1",
+    checkName: "wardby review",
+    ...over,
+  });
+  type Store = {
+    findMany: ReturnType<typeof vi.fn>;
+    createMany: ReturnType<typeof vi.fn>;
+    deleteMany: ReturnType<typeof vi.fn>;
+  };
+  function setup(
+    opts: {
+      ci?: string;
+      links?: Parameters<typeof deps>[0];
+      rows?: unknown[];
+      head?: { headSha: string; isFork: boolean; state: string };
+      readCi?: boolean;
+      repoAccess?: ReturnType<typeof gate>;
+    } = {},
+  ) {
+    vi.mocked(dispatchRun).mockClear();
+    const h = host();
+    if (opts.readCi !== false) {
+      h.readCi = vi.fn(
+        async () =>
+          ({
+            headSha: SHA,
+            state: opts.ci ?? "pending",
+            checks: [],
+            truncated: false,
+            statusesUnavailable: false,
+          }) as never,
+      );
+    }
+    h.pullRequestHead = vi.fn(async () => opts.head ?? { headSha: SHA, isFork: false, state: "open" });
+    const d = deps(opts.links ?? [waiting], h, opts.repoAccess);
+    const db = d.db as unknown as { deferredReview: Store; runHostCheck: Record<string, unknown> };
+    db.deferredReview.findMany.mockResolvedValue(opts.rows ?? []);
+    // ci_completed also runs the earlier re-review logic; give it no rows.
+    db.runHostCheck.findMany = vi.fn(async () => []);
+    return { d, h, store: db.deferredReview };
+  }
+
+  describe("on push", () => {
+    it.each(["pending", "none"])("defers the review while CI is %s, recording one row per reviewer", async (ci) => {
+      const { d, store } = setup({ ci });
+      await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(store.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            provider: "github",
+            repository: REPO,
+            prNumber: 7,
+            headSha: SHA,
+            agentId: "a1",
+            checkName: "wardby review",
+          },
+        ],
+        skipDuplicates: true,
+      });
+    });
+
+    it.each(["passing", "failing", "inconclusive", "unavailable"])("reviews immediately when CI is %s", async (ci) => {
+      const { d, store } = setup({ ci });
+      await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+      expect(store.createMany).not.toHaveBeenCalled();
+    });
+
+    it("reviews immediately when the host cannot read CI, or the deferral cannot be recorded", async () => {
+      const noCi = setup({ readCi: false });
+      await expect(routeHostEvent(pr, noCi.d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+      const failing = setup({ ci: "pending" });
+      failing.store.createMany.mockRejectedValueOnce(new Error("db down"));
+      await expect(routeHostEvent(pr, failing.d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+    });
+
+    it("leaves a reviewer without waitForCi unchanged, and reads CI only once per event", async () => {
+      const { d, h, store } = setup({
+        ci: "pending",
+        links: [
+          waiting,
+          { agentId: "a2", triggers: ["pull_request"], checkName: "security", waitForCi: true },
+          { agentId: "a3", triggers: ["pull_request"], checkName: "style" },
+        ],
+      });
+      await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: ["run-a3"], followUps: [] });
+      expect(h.readCi).toHaveBeenCalledTimes(1);
+      expect(store.createMany.mock.calls[0][0].data.map((r: { agentId: string }) => r.agentId)).toEqual(["a1", "a2"]);
+    });
+
+    it("never reads CI when no reviewer waits for it", async () => {
+      const { d, h } = setup({ links: [{ agentId: "a3", triggers: ["pull_request"], checkName: "style" }] });
+      await expect(routeHostEvent(pr, d)).resolves.toEqual({ runIds: ["run-a3"], followUps: [] });
+      expect(h.readCi).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("when CI finishes", () => {
+    it("claims each deferred row and starts its review once, skipping already-reviewed commits", async () => {
+      const { d, store } = setup({ ci: "passing", rows: [deferred()] });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+      expect(store.findMany).toHaveBeenCalledWith({
+        where: { provider: "github", repository: REPO, prNumber: 7, headSha: SHA },
+        select: { id: true, agentId: true, checkName: true },
+      });
+      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      expect(d.reviewLookup).toHaveBeenCalled();
+    });
+
+    it("starts the review against the check name recorded at defer time", async () => {
+      const { d, h } = setup({ ci: "failing", rows: [deferred({ checkName: "old name" })] });
+      await routeHostEvent(ciEvent, d);
+      expect(h.startCheck).toHaveBeenCalledWith(REPO, { headSha: SHA, name: "old name" });
+    });
+
+    it("keeps waiting while CI on the head is still pending", async () => {
+      const { d, store } = setup({ ci: "pending", rows: [deferred()] });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(store.deleteMany).not.toHaveBeenCalled();
+      expect(dispatchRun).not.toHaveBeenCalled();
+    });
+
+    it("does nothing (and reads no CI) when nothing was deferred on the head", async () => {
+      const { d, h } = setup({ ci: "passing" });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(h.readCi).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a newer head", { headSha: "f".repeat(40), isFork: false, state: "open" }],
+      ["a closed pull request", { headSha: SHA, isFork: false, state: "closed" }],
+      ["a fork", { headSha: SHA, isFork: true, state: "open" }],
+    ])("drops the rows and starts nothing for %s", async (_label, head) => {
+      const { d, store } = setup({ ci: "passing", rows: [deferred(), deferred({ id: "d2", agentId: "a2" })], head });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ["d1", "d2"] } } });
+      expect(dispatchRun).not.toHaveBeenCalled();
+    });
+
+    it("starts nothing when a concurrent delivery already claimed the row", async () => {
+      const { d, store } = setup({ ci: "passing", rows: [deferred()] });
+      store.deleteMany.mockResolvedValueOnce({ count: 0 });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(dispatchRun).not.toHaveBeenCalled();
+    });
+
+    it("leaves an unauthorized reviewer's row unclaimed for the sweep", async () => {
+      const { d, store } = setup({
+        ci: "passing",
+        rows: [deferred()],
+        repoAccess: gate({ use: () => ({ ok: false, reason: "not_authorized" }) }),
+      });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(store.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it("never throws when the host fails", async () => {
+      const { d, h } = setup({ ci: "passing", rows: [deferred()] });
+      h.pullRequestHead = vi.fn(async () => {
+        throw new Error("boom");
+      });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+    });
+  });
+
+  describe("fallback sweep", () => {
+    const NOW = new Date("2026-10-06T12:00:00.000Z");
+
+    it("drops rows older than 24 h, then starts reviews waiting longer than the max wait", async () => {
+      const { d, store } = setup({ rows: [deferred()] });
+      await expect(startDeferredReviews(d, NOW)).resolves.toEqual(["run-a1"]);
+      expect(store.deleteMany.mock.calls[0][0]).toEqual({
+        where: { createdAt: { lt: new Date(NOW.getTime() - DEFERRED_REVIEW_MAX_AGE_MS) } },
+      });
+      expect(store.findMany.mock.calls[0][0]).toMatchObject({
+        where: {
+          provider: { in: ["github"] },
+          createdAt: { lte: new Date(NOW.getTime() - DEFERRED_REVIEW_MAX_WAIT_MS) },
+        },
+        orderBy: { createdAt: "desc" },
+        take: DEFERRED_REVIEW_BATCH,
+      });
+      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      expect(DEFERRED_REVIEW_MAX_WAIT_MS).toBe(15 * 60_000);
+      expect(DEFERRED_REVIEW_BATCH).toBe(50);
+    });
+
+    it("does not consult CI: the wait is over", async () => {
+      const { d, h } = setup({ ci: "pending", rows: [deferred()] });
+      await expect(startDeferredReviews(d, NOW)).resolves.toEqual(["run-a1"]);
+      expect(h.readCi).not.toHaveBeenCalled();
+    });
+
+    it("groups rows by head: one head check per pull request head", async () => {
+      const { d, h } = setup({
+        links: [waiting, { agentId: "a2", triggers: ["pull_request"], checkName: "security", waitForCi: true }],
+        rows: [deferred(), deferred({ id: "d2", agentId: "a2", checkName: "security" })],
+      });
+      await expect(startDeferredReviews(d, NOW)).resolves.toEqual(["run-a1", "run-a2"]);
+      expect(h.pullRequestHead).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["moved", { headSha: "f".repeat(40), isFork: false, state: "open" }],
+      ["closed", { headSha: SHA, isFork: false, state: "closed" }],
+    ])("drops rows whose pull request %s", async (_label, head) => {
+      const { d, store } = setup({ rows: [deferred()], head });
+      await expect(startDeferredReviews(d, NOW)).resolves.toEqual([]);
+      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ["d1"] } } });
+      expect(dispatchRun).not.toHaveBeenCalled();
+    });
+
+    it("claims and drops the row of a reviewer no longer linked or authorized", async () => {
+      const unlinked = setup({ links: [], rows: [deferred()] });
+      await expect(startDeferredReviews(unlinked.d, NOW)).resolves.toEqual([]);
+      expect(unlinked.store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      const denied = setup({
+        rows: [deferred()],
+        repoAccess: gate({ use: () => ({ ok: false, reason: "not_authorized" }) }),
+      });
+      await expect(startDeferredReviews(denied.d, NOW)).resolves.toEqual([]);
+      expect(denied.store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      expect(dispatchRun).not.toHaveBeenCalled();
+    });
+
+    it("starts nothing for a row another instance already claimed", async () => {
+      const { d, store } = setup({ rows: [deferred()] });
+      store.deleteMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 0 });
+      await expect(startDeferredReviews(d, NOW)).resolves.toEqual([]);
+      expect(dispatchRun).not.toHaveBeenCalled();
+    });
+
+    it("skips rows for a provider with no configured host, and never throws", async () => {
+      const { d, store } = setup({ rows: [deferred()] });
+      await expect(startDeferredReviews({ ...d, hosts: {} }, NOW)).resolves.toEqual([]);
+      expect(store.findMany).not.toHaveBeenCalled();
+      store.deleteMany.mockRejectedValueOnce(new Error("db down"));
+      await expect(startDeferredReviews(d, NOW)).resolves.toEqual([]);
+    });
+
+    it("keeps going after one head fails", async () => {
+      const { d, h } = setup({
+        rows: [deferred({ prNumber: 8 }), deferred({ id: "d2" })],
+      });
+      vi.mocked(h.pullRequestHead).mockRejectedValueOnce(new Error("boom"));
+      await expect(startDeferredReviews(d, NOW)).resolves.toEqual(["run-a1"]);
+    });
   });
 });
