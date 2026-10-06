@@ -3,7 +3,7 @@ id: code-review-agents
 title: Run GitHub code-review agents
 summary: Link a read-only review agent to a repository for pull-request checks and trusted mention workflows.
 audience: operator
-tags: [github, code-review, pull-requests, webhooks, ci, checks]
+tags: [github, code-review, pull-requests, webhooks, ci, checks, waitForCi]
 appliesTo: >=0.2.1
 ---
 
@@ -61,6 +61,35 @@ on the review check instead.
 
 Commit statuses need the App's **Commit statuses: Read** permission; without
 it only check runs are shown.
+
+## Review after CI (`waitForCi`)
+
+A `pull_request` link can set `waitForCi: true` so this reviewer reviews a
+pushed head only after that head's own CI has finished, instead of racing
+it, and can never approve a head whose CI is failing or still running.
+
+On a push, Wardby reads CI on the new head before starting a `waitForCi`
+reviewer. If CI is still pending, or nothing has reported yet, the review is
+held rather than started; it starts once CI finishes (the same **Check
+suite** event used for the re-review above), or — if CI never finishes —
+after 15 minutes anyway. The 15-minute fallback only runs where Wardby's
+scheduler process runs (`wardby scheduler`, or `wardby serve` with the
+scheduler enabled); on an instance running only `wardby mcp`, a held review
+starts only once a **Check suite** event arrives. A review still held after
+24 hours is dropped. This is decided per pull request, never across a set of
+related pull requests.
+
+While CI on the head is failing or still running, `repo_publish_review`
+refuses an approve verdict on a `waitForCi` reviewer's own check, returning
+a tool error instead of publishing anything:
+
+- `ci_failing` — CI is failing; request changes (or comment) instead.
+- `ci_pending` — CI is still running; comment instead. The re-review above
+  then runs the review again once CI finishes.
+
+Requesting changes or commenting is never affected by this gate. When CI
+cannot be read at all, the gate is skipped and the review proceeds as it
+would without `waitForCi`.
 
 Add this to a reviewer's system prompt:
 
