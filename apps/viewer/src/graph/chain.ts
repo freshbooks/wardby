@@ -76,7 +76,17 @@ export function chainLinks(runs: readonly GraphRun[], roots: readonly string[]):
     if (!cur || byStart(byId.get(e.runId)!, byId.get(cur.runId)!) < 0) anchors.set(e.key, e);
   }
 
-  // Candidate roots per key; a root belongs to the key whose anchor is earliest.
+  // A root's boxes for each PR key, indexed once (the graph is rebuilt on every click).
+  const byKeyRoot = new Map<string, Map<string, Entry[]>>();
+  for (const e of entries) {
+    const root = rootOf.get(e.runId)!;
+    const perRoot = byKeyRoot.get(e.key) ?? new Map<string, Entry[]>();
+    perRoot.set(root, [...(perRoot.get(root) ?? []), e]);
+    byKeyRoot.set(e.key, perRoot);
+  }
+
+  // Candidate roots per key, claimed by the key whose anchor is earliest. A root that
+  // started before a key's anchor can't follow it, so it stays free for another key.
   const candidates = new Map<string, { root: GraphRun; label: ChainLabel }[]>();
   const claimed = new Set<string>();
   const keysByAnchorAge = [...anchors.keys()].sort((a, b) =>
@@ -84,18 +94,16 @@ export function chainLinks(runs: readonly GraphRun[], roots: readonly string[]):
   );
   for (const key of keysByAnchorAge) {
     const anchorRoot = rootOf.get(anchors.get(key)!.runId);
+    const anchorStart = startOf(anchors.get(key)!.runId);
+    const perRoot = byKeyRoot.get(key)!;
     const list: { root: GraphRun; label: ChainLabel }[] = [];
     for (const id of roots) {
       const root = byId.get(id);
-      if (!root || id === anchorRoot || claimed.has(id)) continue;
+      if (!root || id === anchorRoot || claimed.has(id) || root.startedAt < anchorStart) continue;
       const t = root.trigger;
       let label: ChainLabel | null = null;
       if (t.kind === "code_host" && prKey(t.provider, t.repository, t.number) === key) label = t.event;
-      else if (
-        t.kind === "webhook" &&
-        entries.some((e) => e.key === key && e.kind === "pull_request" && rootOf.get(e.runId) === id)
-      )
-        label = "fix";
+      else if (t.kind === "webhook" && perRoot.get(id)?.some((e) => e.kind === "pull_request")) label = "fix";
       if (label) {
         list.push({ root, label });
         claimed.add(id);
@@ -107,21 +115,30 @@ export function chainLinks(runs: readonly GraphRun[], roots: readonly string[]):
     );
   }
 
+  // Each root has at most one incoming link; a link that would lead back to its own
+  // source (possible only when trees start at the same instant) is skipped.
+  const incoming = new Map<string, string>();
+  const reachesBack = (fromRoot: string, toRoot: string) => {
+    for (let cur: string | undefined = fromRoot; cur; cur = incoming.get(cur)) if (cur === toRoot) return true;
+    return false;
+  };
+
   const links: ChainLink[] = [];
   for (const key of keysByAnchorAge) {
     const anchor = anchors.get(key)!;
+    const perRoot = byKeyRoot.get(key)!;
     let prev = anchor.nodeId;
-    let prevStart = startOf(anchor.runId);
+    let prevRoot = rootOf.get(anchor.runId)!;
     for (const { root, label } of candidates.get(key) ?? []) {
-      if (root.startedAt < prevStart) continue;
+      if (reachesBack(prevRoot, root.id)) continue;
       links.push({ from: prev, toRunId: root.id, label });
+      incoming.set(root.id, prevRoot);
       // The step ends at its tree's latest box for this PR (by run start, then box kind).
-      const last = entries
-        .filter((e) => e.key === key && rootOf.get(e.runId) === root.id)
+      const last = [...(perRoot.get(root.id) ?? [])]
         .sort((a, b) => byStart(byId.get(a.runId)!, byId.get(b.runId)!) || KIND_RANK[a.kind] - KIND_RANK[b.kind])
         .at(-1);
       prev = last ? last.nodeId : `r:${root.id}`;
-      prevStart = root.startedAt;
+      prevRoot = root.id;
     }
   }
   return links;

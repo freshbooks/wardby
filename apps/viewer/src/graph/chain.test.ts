@@ -151,4 +151,45 @@ describe("chainLinks", () => {
       { from: "r:rev1", toRunId: "rev2", label: "review" },
     ]);
   });
+
+  it("gives a root about two PRs to the one opened first", () => {
+    const runs = [
+      run("open6", { startedAt: t(0), outcomes: [pr(6)] }),
+      run("open7", { startedAt: t(1), outcomes: [pr(7)] }),
+      run("fix", { startedAt: t(3), trigger: webhook }),
+      run("fixbuild", { parentRunId: "fix", startedAt: t(4), outcomes: [pr(7), pr(6)] }),
+    ];
+    expect(chainLinks(runs, ["open6", "open7", "fix"])).toEqual([{ from: "o:open6:0", toRunId: "fix", label: "fix" }]);
+  });
+
+  it("never claims a root that started before the PR was opened", () => {
+    const runs = [
+      run("rev", { startedAt: t(0), trigger: review(6) }),
+      run("build", { startedAt: t(5), outcomes: [pr(6)] }),
+    ];
+    expect(chainLinks(runs, ["rev", "build"])).toEqual([]);
+  });
+
+  it("continues from a check rather than a comment or the PR box in the same run", () => {
+    const comment: Outcome = { kind: "code_host_comment", provider: "github", repository: "o/r", number: 6, at: null };
+    const runs = [
+      run("build", { startedAt: t(0), outcomes: [pr(6)] }),
+      run("rev1", { startedAt: t(2), trigger: review(6), outcomes: [comment, check(6)] }),
+      run("rev2", { startedAt: t(4), trigger: review(6) }),
+    ];
+    expect(chainLinks(runs, ["build", "rev1", "rev2"])[1]).toEqual({
+      from: "o:rev1:1",
+      toRunId: "rev2",
+      label: "review",
+    });
+  });
+
+  it("never links back to its own source when trees start at the same instant", () => {
+    const runs = [
+      run("a", { startedAt: t(0), trigger: review(7), outcomes: [pr(6)] }),
+      run("b", { startedAt: t(0), trigger: review(6), outcomes: [pr(7)] }),
+    ];
+    const links = chainLinks(runs, ["a", "b"]);
+    expect(links).toHaveLength(1);
+  });
 });
