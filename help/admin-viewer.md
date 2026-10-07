@@ -36,5 +36,11 @@ your server's canonical URI, sign in with an `admin` user in the browser, and it
 shows the live graph. Its README covers setup, and what an external identity
 provider client needs when the server runs in delegating mode.
 
+The Infrastructure tab shows the Kubernetes pods where your deployment runs
+coding jobs, read-only. It uses your kubeconfig (switchable per server) and
+requires a minimal read-only Kubernetes role. See the Infrastructure view
+section of the [viewer README](../apps/viewer/README.md#infrastructure-view) for
+setup.
+
 For parameters, status codes, frame formats and schemas, follow
 [`docs/viewer-api.md`](../docs/viewer-api.md).

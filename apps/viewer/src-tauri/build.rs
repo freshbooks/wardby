@@ -13,6 +13,12 @@ fn main() {
             "disconnect",
             "fetch_graph",
             "fetch_run",
+            "fetch_infra",
+            "kube_contexts",
+            "set_kube_context",
+            "kube_connect",
+            "kube_disconnect",
+            "kube_pod_events",
             "open_url",
         ]),
     ))

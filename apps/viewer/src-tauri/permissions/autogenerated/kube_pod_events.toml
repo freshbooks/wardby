@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-kube-pod-events"
+description = "Enables the kube_pod_events command without any pre-configured scope."
+commands.allow = ["kube_pod_events"]
+
+[[permission]]
+identifier = "deny-kube-pod-events"
+description = "Denies the kube_pod_events command without any pre-configured scope."
+commands.deny = ["kube_pod_events"]

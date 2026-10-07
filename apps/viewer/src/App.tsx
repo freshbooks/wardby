@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAppError, listServers, removeServer, signOut, type AppError, type ServerSummary } from "./api/client";
 import { BottomBar } from "./chrome/BottomBar";
 import { ConfirmDialog } from "./chrome/ConfirmDialog";
@@ -7,7 +7,9 @@ import { ErrorLine } from "./chrome/ErrorLine";
 import { ServerDialog } from "./chrome/ServerDialog";
 import { ServerMenu } from "./chrome/ServerMenu";
 import { SignInGate } from "./chrome/SignInGate";
-import { TopBar } from "./chrome/TopBar";
+import { TopBar, type InfraBar, type Tab } from "./chrome/TopBar";
+import { InfraScreen } from "./infra/InfraScreen";
+import { runSha } from "./infra/runSha";
 import { windowSpend } from "./format/spend";
 import { FlowCanvas } from "./graph/FlowCanvas";
 import type { RunFocus } from "./graph/selection";
@@ -26,6 +28,8 @@ interface DashboardProps {
   onSignOut: () => void;
   onRemoveServer: () => void;
   onChecked: (servers: ServerSummary[] | null, ok: boolean) => void;
+  /** Reload the server list (after a server's saved settings changed). */
+  onServersChanged: () => void;
 }
 
 function Dashboard({
@@ -36,12 +40,18 @@ function Dashboard({
   onSignOut,
   onRemoveServer,
   onChecked,
+  onServersChanged,
 }: DashboardProps) {
   const [filters, setFilters] = useState<Filters>(initialFilters);
+  const [tab, setTab] = useState<Tab>("runs");
+  // Bumped by Retry to restart the cluster watch.
+  const [infraEpoch, setInfraEpoch] = useState(0);
   // The canvas highlights this run and the detail panel shows it.
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const viewer = useViewer(server.url, { since: filters.window, limit: GRAPH_LIMIT });
   const { model } = viewer;
+  // A run whose pod the Infrastructure tab should select (by the run's sha).
+  const [pendingRunSha, setPendingRunSha] = useState<string | null>(null);
   const selectedRun = selectedRunId ? model.runs.get(selectedRunId) : undefined;
 
   // A clicked trigger or outcome: highlighted in the panel of the run it belongs to.
@@ -56,6 +66,33 @@ function Dashboard({
   const selectPanel = useCallback((id: string | null) => {
     setFocus(null);
     setSelectedRunId(id);
+  }, []);
+
+  const tabRef = useRef(tab);
+  useEffect(() => {
+    tabRef.current = tab;
+  });
+  const changeTab = useCallback((next: Tab) => {
+    if (next !== "infra") setPendingRunSha(null);
+    setTab(next);
+  }, []);
+  const openPod = useCallback((runId: string) => {
+    setTab("infra");
+    void runSha(runId).then((sha) => {
+      // Skip when the user already left the tab before the hash resolved.
+      if (tabRef.current === "infra") setPendingRunSha(sha);
+    });
+  }, []);
+  const clearPendingRunSha = useCallback(() => setPendingRunSha(null), []);
+  // Pod -> run beyond the window: widen to 7d (the caller waits for the reload).
+  const windowRef = useRef(filters.window);
+  useEffect(() => {
+    windowRef.current = filters.window;
+  });
+  const widenWindow = useCallback(() => {
+    if (windowRef.current === "7d") return false;
+    setFilters((f) => changeFilters(f, { ...f, window: "7d" }));
+    return true;
   }, []);
 
   const runs = useMemo(() => [...model.runs.values()], [model.runs]);
@@ -86,26 +123,57 @@ function Dashboard({
   }, [timelineRuns, view.timeRange]);
   const setRange = useCallback((timeRange: Filters["timeRange"]) => setFilters((f) => ({ ...f, timeRange })), []);
 
+  const topBar = (infra?: InfraBar) => (
+    <TopBar
+      tab={tab}
+      onTabChange={changeTab}
+      infra={infra}
+      servers={servers}
+      selectedUrl={server.url}
+      onSelectServer={onSelectServer}
+      onAddServer={onAddServer}
+      onSignOut={onSignOut}
+      onRemoveServer={onRemoveServer}
+      live={model.live}
+      reconnecting={viewer.reconnecting}
+      filters={view}
+      onFiltersChange={(next) => setFilters((prev) => changeFilters(prev, next))}
+      agents={agents}
+      spend={model.spend}
+      windowSpendUsd={totalSpend}
+      windowSpendTruncated={model.truncated}
+      rangeRunCount={rangeRunCount}
+      onClearRange={() => setRange(null)}
+    />
+  );
+
+  if (tab === "infra") {
+    return (
+      <div className="app">
+        <InfraScreen
+          key={infraEpoch}
+          server={server}
+          runs={runs}
+          onContextSaved={onServersChanged}
+          topBar={topBar}
+          onOpenRun={(id) => {
+            changeTab("runs");
+            selectPanel(id);
+          }}
+          onRetry={() => setInfraEpoch((n) => n + 1)}
+          pendingRunSha={pendingRunSha}
+          onPendingRunSha={clearPendingRunSha}
+          widenWindow={widenWindow}
+          loadedWindow={viewer.loadedSince}
+          loadError={viewer.error !== null}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
-      <TopBar
-        servers={servers}
-        selectedUrl={server.url}
-        onSelectServer={onSelectServer}
-        onAddServer={onAddServer}
-        onSignOut={onSignOut}
-        onRemoveServer={onRemoveServer}
-        live={model.live}
-        reconnecting={viewer.reconnecting}
-        filters={view}
-        onFiltersChange={(next) => setFilters((prev) => changeFilters(prev, next))}
-        agents={agents}
-        spend={model.spend}
-        windowSpendUsd={totalSpend}
-        windowSpendTruncated={model.truncated}
-        rangeRunCount={rangeRunCount}
-        onClearRange={() => setRange(null)}
-      />
+      {topBar()}
       <main className="main">
         {viewer.needsSignIn ? (
           <SignInGate
@@ -152,6 +220,7 @@ function Dashboard({
                     runs={model.runs}
                     focus={focus}
                     onSelect={selectPanel}
+                    onOpenPod={openPod}
                   />
                 )}
               </div>
@@ -337,6 +406,7 @@ export function App() {
           onSignOut={() => void doSignOut(selected.url)}
           onRemoveServer={() => setRemoving(selected)}
           onChecked={onChecked}
+          onServersChanged={() => void refresh()}
         />
       </ErrorBoundary>
       {actionError && (

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-kube-context"
+description = "Enables the set_kube_context command without any pre-configured scope."
+commands.allow = ["set_kube_context"]
+
+[[permission]]
+identifier = "deny-set-kube-context"
+description = "Denies the set_kube_context command without any pre-configured scope."
+commands.deny = ["set_kube_context"]
