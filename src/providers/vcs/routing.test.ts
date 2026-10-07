@@ -109,6 +109,31 @@ describe("buildVcsProvider", () => {
     });
   });
 
+  it("warns at startup, naming both options, when neither GitHub App credentials nor roots are configured", () => {
+    const warn = vi.fn();
+    buildVcsProvider({ vcs: "github" }, {}, {}, { warn });
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = String(warn.mock.calls[0][0]);
+    expect(message).toContain("GITHUB_APP_ID");
+    expect(message).toContain("GITHUB_APP_PRIVATE_KEY");
+    expect(message).toContain("LOCAL_REPO_ROOTS");
+  });
+
+  it("does not warn when either GitHub App credentials or roots are configured", () => {
+    const warn = vi.fn();
+    buildVcsProvider({ vcs: "github" }, {}, { LOCAL_REPO_ROOTS: "/tmp" }, { warn });
+    buildVcsProvider({ vcs: "github" }, { appId: "1", privateKey: "k" }, {}, { warn });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("makes vcs_github_not_configured actionable, keeping the code prefix", async () => {
+    const provider = buildVcsProvider({ vcs: "github" }, {}, {}, { warn: () => {} });
+    const error = await provider.prepareWorkspace(prepare("owner/repo")).catch((e: unknown) => e);
+    expect((error as Error).message).toBe(
+      "vcs_github_not_configured: set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY to run coding agents on GitHub repositories",
+    );
+  });
+
   it("still rejects an unsupported VCS_PROVIDER", () => {
     expect(() => buildVcsProvider({ vcs: "gitlab" as never }, {}, {})).toThrow("not supported");
   });

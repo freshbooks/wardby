@@ -1606,7 +1606,11 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   ["vcs_protected_path:", PROTECTED_PATH_CATEGORY],
   // A continuation whose pull request was merged or closed: nothing pushed (coding/continuation-wording.ts).
   [CONTINUATION_CLOSED_ERROR, CONTINUATION_CLOSED_CATEGORY],
+  // A GitHub repository on a server with no GitHub App: configuration, like an unsupported service.
+  ["vcs_github_not_configured", "preflight"],
   ["vcs_", "workspace"],
+  // Local repositories (LocalRepoError codes): the same family as the vcs_ errors.
+  ["local_", "workspace"],
   ["git_", "workspace"],
 ];
 

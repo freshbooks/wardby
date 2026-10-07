@@ -472,7 +472,10 @@ a coding run's model is still available and how it is priced at dispatch; see
 
 The GitHub adapter requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`; the
 App installation is checked while preparing the workspace, before the
-billable proxy session is created. Upstream keys remain behind
+billable proxy session is created. The server still starts without them (so it
+can serve local repositories alone), but a run on a GitHub repository then fails
+with `vcs_github_not_configured`, and with neither these nor `LOCAL_REPO_ROOTS`
+set the server logs a startup warning naming both. Upstream keys remain behind
 `CODING_OPENAI_CREDENTIAL_REF` and `CODING_ANTHROPIC_CREDENTIAL_REF` and are
 never written to the database, input
 artifact, Docker arguments, or Git workspace.

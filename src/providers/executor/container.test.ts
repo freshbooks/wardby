@@ -1853,6 +1853,13 @@ describe("failure diagnostics", () => {
     ["git_push_failed", "workspace"],
     ["vcs_protected_path:CODEOWNERS", "protected_path"],
     ["vcs_protected_path_invalid", "workspace"],
+    ["local_branch_conflict: the branch moved in the local repository since the run started", "workspace"],
+    ["local_repo_not_allowed: repository is outside the configured local roots", "workspace"],
+    ["local_ref_not_found: branch wardby/run-1 does not exist in the local repository", "workspace"],
+    [
+      "vcs_github_not_configured: set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY to run coding agents on GitHub repositories",
+      "preflight",
+    ],
   ])("categorizes a post-push %s failure by its prefix, as %s", async (message, category) => {
     // A GitHub API failure after the push used to be reported as
     // "workspace": the category substring-matched "git" in "github_".

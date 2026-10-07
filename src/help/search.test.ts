@@ -180,6 +180,7 @@ describe("local repositories help", () => {
       "local_ref_invalid",
       "local_path_invalid",
       "local_branch_conflict",
+      "vcs_github_not_configured",
     ]) {
       const id = `errors/${code.replaceAll("_", "-")}`;
       const results = searchHelp(catalog, code);

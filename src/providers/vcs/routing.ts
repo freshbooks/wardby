@@ -10,6 +10,10 @@ import type {
   VcsProvider,
 } from "./types.js";
 
+/** Keeps the `vcs_github_not_configured` code prefix that error matching and categorization key on. */
+export const VCS_GITHUB_NOT_CONFIGURED_ERROR =
+  "vcs_github_not_configured: set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY to run coding agents on GitHub repositories";
+
 export interface RoutingVcsOptions {
   /** Null when no GitHub App is configured. */
   github: VcsProvider | null;
@@ -37,7 +41,7 @@ export class RoutingVcsProvider implements VcsProvider {
       }
       return this.options.local;
     }
-    if (!this.options.github) throw new Error("vcs_github_not_configured");
+    if (!this.options.github) throw new Error(VCS_GITHUB_NOT_CONFIGURED_ERROR);
     return this.options.github;
   }
 
