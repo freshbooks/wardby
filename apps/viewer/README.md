@@ -76,6 +76,66 @@ enter its client id when adding the server. The client must:
   match everything except the port);
 - be allowed to request the `admin:view` scope for the Wardby resource.
 
+## Infrastructure view
+
+The Infrastructure tab shows the Kubernetes pods where this Wardby deployment
+runs coding jobs: the control plane, proxy, worker pods, databases, secrets
+management, and network policies. It reads from your kubeconfig, using the
+current context by default and allowing you to switch contexts per server. The
+view is read-only.
+
+The app extends `PATH` for `exec` credential plugins with Homebrew's bin
+directory and the Google Cloud SDK's bin directories, so it can find
+`gke-gcloud-auth-plugin` (for GKE) and the AWS CLI (for EKS) without you
+configuring `PATH` manually. If your kubeconfig uses other plugins, ensure they
+are on your system's `PATH`.
+
+To grant the viewer read-only Kubernetes access, create a `Role` and
+`RoleBinding`. The following YAML is sufficient:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: wardby-viewer, namespace: wardby-coding }
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, serviceaccounts, events]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies, ingresses]
+    verbs: [get, list, watch]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gateways, httproutes]
+    verbs: [get, list, watch]
+  - apiGroups: [external-secrets.io]
+    resources: [secretstores, externalsecrets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: wardby-viewer, namespace: wardby-coding }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: wardby-viewer }
+subjects:
+  - kind: User
+    name: <you>
+    apiGroup: rbac.authorization.k8s.io
+```
+
+Replace `wardby-coding` with the namespace where your coding runs execute, and
+`<you>` with the identity under which you access Kubernetes (usually your
+`kubernetes.io/username` from `kubectl auth whoami`).
+
+The Role deliberately omits `secrets`, because Kubernetes RBAC cannot restrict
+access to individual Secret names; Secret names appear as hidden in the
+Infrastructure tab. If you prefer broader access, GKE IAM roles like
+`roles/container.viewer` also work but grant additional permissions.
+
 ## Appearance
 
 The viewer follows the system's light or dark appearance by default. To choose
