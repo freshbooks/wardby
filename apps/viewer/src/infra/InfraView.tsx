@@ -1,15 +1,21 @@
 import { useMemo } from "react";
-import { describe } from "./adapter";
+import type { AppError } from "../api/client";
+import type { InfraModel } from "./adapter";
 import { InfraMap } from "./InfraMap";
 import { InfraPanel } from "./InfraPanel";
 import { InfraTable } from "./InfraTable";
-import type { ClusterError } from "./types";
+import { CLUSTER_KINDS, isClusterError, type ClusterError } from "./types";
 import type { UseCluster } from "./useCluster";
 
 export type InfraMode = "map" | "table";
 
-function errorText(error: ClusterError | { kind: string; message?: string }, namespace: string): string {
-  const e = error as ClusterError;
+function errorText(error: AppError | ClusterError, namespace: string): string {
+  if (!isClusterError(error)) {
+    // From the wardby server (fetching its infrastructure facts), not the cluster.
+    const e = error as AppError;
+    return e.kind === "forbidden" ? `This wardby server refused to share its infrastructure: ${e.message}` : e.message;
+  }
+  const e = error;
   switch (e.kind) {
     case "no_kubeconfig":
       return "No kubeconfig found (~/.kube/config or $KUBECONFIG).";
@@ -24,14 +30,27 @@ function errorText(error: ClusterError | { kind: string; message?: string }, nam
     case "context_not_found":
       return `Kube context ${e.context} was not found in your kubeconfig.`;
     default:
-      return ("message" in e ? e.message : null) ?? "Something went wrong reading the cluster.";
+      return e.message || "Something went wrong reading the cluster.";
   }
+}
+
+/** Errors on kinds that don't block the view, once per distinct message. */
+function notices(cluster: UseCluster["cluster"], blocking: unknown, namespace: string): string[] {
+  const out = new Set<string>();
+  for (const kind of CLUSTER_KINDS) {
+    const e = cluster.kindErrors[kind];
+    if (!e || e === blocking) continue;
+    // The map shows forbidden Secrets as "Secret names hidden (no access)".
+    if (kind === "secret" && e.kind === "forbidden") continue;
+    out.add(errorText(e, namespace));
+  }
+  return [...out];
 }
 
 interface Props {
   cluster: UseCluster;
-  /** The selected server; where an out-of-cluster control plane lives. */
-  serverUrl?: string;
+  /** The described cluster (computed once by the screen); null until there is one. */
+  model: InfraModel | null;
   mode: InfraMode;
   selectedPod: string | null;
   onSelectPod: (pod: string | null) => void;
@@ -39,12 +58,8 @@ interface Props {
   onRetry: () => void;
 }
 
-export function InfraView({ cluster: c, serverUrl, mode, selectedPod, onSelectPod, onOpenRun, onRetry }: Props) {
+export function InfraView({ cluster: c, model, mode, selectedPod, onSelectPod, onOpenRun, onRetry }: Props) {
   const { info, cluster, context } = c;
-  const model = useMemo(
-    () => (info?.kubernetes ? describe(cluster, info, { serverUrl, context }) : null),
-    [cluster, info, serverUrl, context],
-  );
   const jobFinishedAt = useMemo(
     () => new Map([...cluster.objects.job.values()].map((j) => [j.name, j.finishedAt])),
     [cluster.objects.job],
@@ -52,7 +67,9 @@ export function InfraView({ cluster: c, serverUrl, mode, selectedPod, onSelectPo
 
   if (c.loading) return <p className="muted">Loading…</p>;
   const namespace = info?.kubernetes?.namespace ?? "";
-  const error = c.error ?? cluster.kindErrors.pod ?? (cluster.connected ? null : cluster.error);
+  // A pod error blocks only until the first pod list; after it the last known pods stay visible.
+  const podError = cluster.podsSynced ? null : cluster.kindErrors.pod;
+  const error = c.error ?? podError ?? (cluster.connected ? null : cluster.error);
   if (error) {
     return (
       <div className="infra-message">
@@ -70,7 +87,18 @@ export function InfraView({ cluster: c, serverUrl, mode, selectedPod, onSelectPo
       <p className="muted">This deployment runs coding jobs with Docker / locally, so there is no cluster to show.</p>
     );
   }
-  if (!model || !context) return <p className="muted">Loading…</p>;
+  if (!context) {
+    return (
+      <p className="muted">
+        {c.contexts?.contexts.length === 0
+          ? "Your kubeconfig has no contexts."
+          : "Choose a kube context for this server."}
+      </p>
+    );
+  }
+  if (!model) return <p className="muted">Loading…</p>;
+
+  const notes = notices(cluster, error, namespace);
 
   const pods = [...model.groups.alwaysOn, ...model.groups.codingRuns, ...model.groups.jobs];
   const pod = pods.find((p) => p.name === selectedPod);
@@ -79,6 +107,18 @@ export function InfraView({ cluster: c, serverUrl, mode, selectedPod, onSelectPo
   return (
     <div className="workspace infra-workspace">
       <div className="infra-main">
+        {notes.length > 0 && (
+          <div className="infra-notices" role="status">
+            {notes.map((n) => (
+              <p key={n} className="error">
+                {n}
+              </p>
+            ))}
+            <button type="button" onClick={onRetry}>
+              Retry
+            </button>
+          </div>
+        )}
         {mode === "map" ? (
           <InfraMap
             model={model}
@@ -101,7 +141,6 @@ export function InfraView({ cluster: c, serverUrl, mode, selectedPod, onSelectPo
       {pod && (
         <InfraPanel
           pod={pod}
-          egressRules={model.isolation.egressRules}
           context={context}
           namespace={namespace}
           onOpenRun={onOpenRun}

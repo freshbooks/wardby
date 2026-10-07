@@ -7,8 +7,6 @@ import type { InfraEvent } from "./types";
 
 interface Props {
   pod: PodView;
-  /** Egress rules shown for coding-run pods. */
-  egressRules: string[];
   context: string;
   namespace: string;
   onOpenRun: (runSha: string) => void;
@@ -17,7 +15,7 @@ interface Props {
 
 type Events = { pod: string; events: InfraEvent[] | null };
 
-export function InfraPanel({ pod, egressRules, context, namespace, onOpenRun, onClose }: Props) {
+export function InfraPanel({ pod, context, namespace, onOpenRun, onClose }: Props) {
   const [loaded, setLoaded] = useState<Events | null>(null);
 
   useEffect(() => {
@@ -59,7 +57,7 @@ export function InfraPanel({ pod, egressRules, context, namespace, onOpenRun, on
         )}
       </p>
       <dl className="infra-facts">
-        {pod.group === "coding_run" && pod.runtime && (
+        {(pod.sandboxed || runPod) && pod.runtime && (
           <>
             <dt>Runtime</dt>
             <dd>{pod.runtime}</dd>
@@ -78,11 +76,11 @@ export function InfraPanel({ pod, egressRules, context, namespace, onOpenRun, on
           </>
         )}
       </dl>
-      {runPod && egressRules.length > 0 && (
+      {pod.egress.length > 0 && (
         <section className="panel-section">
           <h3>EGRESS</h3>
           <ul className="panel-list">
-            {egressRules.map((r) => (
+            {pod.egress.map((r) => (
               <li key={r}>{r}</li>
             ))}
           </ul>

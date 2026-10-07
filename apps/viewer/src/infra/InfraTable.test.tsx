@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { describe as describeCluster } from "./adapter";
-import { gkeCluster, gkeInfo, kindCluster, kindInfo, RUN_SHA } from "./fixtures";
+import { clusterOf, container, gkeCluster, gkeInfo, kindCluster, kindInfo, pod, RUN_SHA } from "./fixtures";
 import { InfraTable } from "./InfraTable";
 
 const model = describeCluster(gkeCluster, gkeInfo);
@@ -35,6 +35,22 @@ describe("InfraTable", () => {
     const row = screen.getByRole("button", { name: /wardby-run-abc123/ });
     expect(within(row).getByText(/gVisor/)).toBeInTheDocument();
     expect(within(row).getByText("agent")).toBeInTheDocument();
+  });
+
+  it("shows the runtime of a sandboxed pod outside the coding runs", () => {
+    const sandboxed = clusterOf({
+      pod: [
+        pod("wardby-coding-proxy-7c9d-fghij", {
+          owner: { kind: "ReplicaSet", name: "wardby-coding-proxy-7c9d" },
+          runtimeClass: "gvisor",
+          containers: [container({ name: "proxy" })],
+        }),
+      ],
+    });
+    render(
+      <InfraTable model={describeCluster(sandboxed, gkeInfo)} selected={null} onSelect={vi.fn()} onOpenRun={vi.fn()} />,
+    );
+    expect(within(screen.getByRole("button", { name: /coding-proxy/ })).getByText(/gVisor/)).toBeInTheDocument();
   });
 
   it("opens the run from a coding-run row without selecting the pod", () => {

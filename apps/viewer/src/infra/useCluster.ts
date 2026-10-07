@@ -1,7 +1,7 @@
 // Infra data flow: read the server's infra facts first, then (only for a Kubernetes
 // launcher) subscribe to cluster frames BEFORE asking Rust to start the watch, so no
 // frame is missed. Frames are filtered by server; a context change reconnects.
-import { useCallback, useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
   fetchInfra,
   isAppError,
@@ -36,6 +36,13 @@ export interface UseCluster {
   cluster: ClusterState;
   loading: boolean;
   error: AppError | ClusterError | null;
+  /** Saving the chosen context for the server failed (it still applies until the tab closes). */
+  contextError: string | null;
+}
+
+export interface UseClusterOptions {
+  /** The chosen context was saved for the server: reload the server list so it sticks. */
+  onContextSaved?: () => void;
 }
 
 function toError(e: unknown): AppError | ClusterError {
@@ -47,11 +54,16 @@ type Action = ClusterFrame | { type: "reset" };
 const reducer = (s: ClusterState, a: Action): ClusterState =>
   a.type === "reset" ? initialCluster : reduceCluster(s, a);
 
-export function useCluster(server: ServerSummary): UseCluster {
+export function useCluster(server: ServerSummary, { onContextSaved }: UseClusterOptions = {}): UseCluster {
   const url = server.url;
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [override, setOverride] = useState<{ url: string; context: string } | null>(null);
-  const [connectError, setConnectError] = useState<{ key: string; error: ClusterError } | null>(null);
+  const [saveError, setSaveError] = useState<{ url: string; message: string } | null>(null);
+  const [connectError, setConnectError] = useState<{ key: string; error: AppError | ClusterError } | null>(null);
+  const onSaved = useRef(onContextSaved);
+  useEffect(() => {
+    onSaved.current = onContextSaved;
+  }, [onContextSaved]);
   const [cluster, dispatch] = useReducer(reducer, initialCluster);
 
   // Keyed by server so a server switch never shows the previous one's facts.
@@ -110,7 +122,7 @@ export function useCluster(server: ServerSummary): UseCluster {
         await kubeConnect(url, context, namespace);
         if (!cancelled) setConnectError(null);
       } catch (e) {
-        if (!cancelled) setConnectError({ key, error: toError(e) as ClusterError });
+        if (!cancelled) setConnectError({ key, error: toError(e) });
       }
     })();
     return () => {
@@ -123,12 +135,20 @@ export function useCluster(server: ServerSummary): UseCluster {
   const setContext = useCallback(
     (c: string) => {
       setOverride({ url, context: c });
-      void setKubeContext(url, c).catch(() => {});
+      setSaveError(null);
+      setKubeContext(url, c).then(
+        () => onSaved.current?.(),
+        (e: unknown) => {
+          const message = isAppError(e) ? e.message : e instanceof Error ? e.message : String(e);
+          setSaveError({ url, message });
+        },
+      );
     },
     [url],
   );
 
   const key = `${url}\n${context}\n${namespace}`;
   const error = mine?.error ?? (connectError?.key === key ? connectError.error : null);
-  return { info, contexts, context, setContext, cluster, loading: !ready, error };
+  const contextError = saveError?.url === url ? saveError.message : null;
+  return { info, contexts, context, setContext, cluster, loading: !ready, error, contextError };
 }

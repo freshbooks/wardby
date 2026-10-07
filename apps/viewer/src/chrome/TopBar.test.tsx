@@ -182,4 +182,32 @@ describe("TopBar tabs", () => {
     );
     expect(screen.getByText("c · Kubernetes · ns w · ○ disconnected")).toBeInTheDocument();
   });
+
+  it("offers a placeholder when no context is chosen, so the first context can be picked", () => {
+    const onContextChange = vi.fn();
+    render(
+      <TopBar
+        {...props}
+        tab="infra"
+        onTabChange={vi.fn()}
+        infra={{
+          mode: "table",
+          onModeChange: vi.fn(),
+          context: null,
+          contexts: ["ctx-a", "ctx-b"],
+          onContextChange,
+          platformLabel: "Kubernetes",
+          namespace: "w",
+          watching: false,
+        }}
+      />,
+    );
+    const picker = screen.getByLabelText("Kube context") as HTMLSelectElement;
+    expect(picker.value).toBe("");
+    const placeholder = screen.getByRole("option", { name: "Choose a context…" }) as HTMLOptionElement;
+    expect(placeholder.selected).toBe(true);
+    expect(placeholder.disabled).toBe(true);
+    fireEvent.change(picker, { target: { value: "ctx-a" } });
+    expect(onContextChange).toHaveBeenCalledWith("ctx-a");
+  });
 });

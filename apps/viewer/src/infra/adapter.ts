@@ -35,6 +35,8 @@ export interface PodView {
   identity: string | null;
   containers: InfraContainer[];
   runSha: string | null;
+  /** Egress rules of the NetworkPolicies that select this pod. */
+  egress: string[];
   requests: { cpuMillis: number; memoryMiB: number };
   startedAt: string | null;
 }
@@ -49,7 +51,8 @@ export interface InfraModel {
   groups: { alwaysOn: PodView[]; codingRuns: PodView[]; jobs: PodView[] };
   isolation: { egressRules: string[]; sandbox: string | null };
   dataStores: DataStoreView[];
-  secrets: { source: string | null; names: string[] | null };
+  /** `names` is null when they can't be read; `forbidden` says that is for lack of access. */
+  secrets: { source: string | null; names: string[] | null; forbidden: boolean };
   totals: { pods: number; codingRuns: number; readyContainers: number; cpuMillis: number; memoryMiB: number };
 }
 
@@ -223,6 +226,8 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
   const k8s = info.kubernetes;
   const componentLabel = k8s?.componentLabel ?? {};
   const sas = cluster.objects.service_account;
+  const policies = values(cluster, "network_policy");
+  const unique = (rules: string[]) => [...new Set(rules)];
 
   const view = (p: InfraPod, group: PodView["group"], title: string): PodView => {
     const sa = p.serviceAccount ? (sas.get(p.serviceAccount) ?? { name: p.serviceAccount, identity: {} }) : null;
@@ -239,6 +244,7 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
       identity: rules.identity(sa),
       containers: p.containers,
       runSha: group === "coding_run" && k8s ? (p.labels[k8s.runLabel] ?? null) : null,
+      egress: unique(policies.filter((np) => matches(np.podSelector, p.labels)).flatMap((np) => np.egress)),
       requests: {
         cpuMillis: main.reduce((s, c) => s + parseCpu(c.requests.cpu), 0),
         memoryMiB: Math.round(main.reduce((s, c) => s + parseMemory(c.requests.memory), 0)),
@@ -272,12 +278,16 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
     ...values(cluster, "service").flatMap((s) => (s.edge ? [s.edge] : [])),
   ];
 
-  const egressRules = values(cluster, "network_policy")
-    .filter((np) => matches(componentLabel, np.podSelector as Record<string, string>))
-    .flatMap((np) => np.egress);
+  // The server writes one policy per run, so the same rules repeat across them.
+  const egressRules = unique(
+    policies
+      .filter((np) => matches(componentLabel, np.podSelector as Record<string, string>))
+      .flatMap((np) => np.egress),
+  );
 
   const stores = values(cluster, "secret_store");
-  const forbidden = cluster.kindErrors.secret !== undefined; // any error: names unknown
+  const secretError = cluster.kindErrors.secret;
+  const forbidden = secretError?.kind === "forbidden";
   const all = [...alwaysOn, ...codingRuns, ...jobs];
 
   return {
@@ -292,7 +302,8 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
     dataStores: [rules.database(alwaysOn)],
     secrets: {
       source: rules.secrets(stores),
-      names: forbidden ? null : values(cluster, "secret").map((s) => s.name),
+      names: secretError ? null : values(cluster, "secret").map((s) => s.name),
+      forbidden,
     },
     totals: {
       pods: all.length,

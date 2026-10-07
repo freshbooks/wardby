@@ -994,6 +994,19 @@ button:disabled {
   justify-items: start;
 }
 
+/* Errors on single kinds, shown above the data that could be read. */
+.infra-notices {
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+}
+
+.infra-notices p {
+  margin: 0;
+}
+
 .infra-head,
 .infra-row {
   display: grid;

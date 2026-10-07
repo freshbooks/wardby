@@ -92,6 +92,23 @@ describe("useCluster", () => {
     expect(result.current.context).toBe("other");
   });
 
+  it("reports a saved choice so the server list reloads, and a failed save as contextError", async () => {
+    const onContextSaved = vi.fn();
+    const { result } = renderHook(() => useCluster(server(), { onContextSaved }));
+    await settle();
+    act(() => result.current.setContext("other"));
+    await settle();
+    expect(onContextSaved).toHaveBeenCalledTimes(1);
+    expect(result.current.contextError).toBeNull();
+
+    vi.mocked(client.setKubeContext).mockRejectedValueOnce({ kind: "storage", message: "disk full" });
+    act(() => result.current.setContext("cur"));
+    await settle();
+    expect(onContextSaved).toHaveBeenCalledTimes(1);
+    expect(result.current.contextError).toBe("disk full");
+    expect(result.current.context).toBe("cur");
+  });
+
   it("disconnects and unsubscribes on unmount", async () => {
     const { unmount } = renderHook(() => useCluster(server()));
     await settle();

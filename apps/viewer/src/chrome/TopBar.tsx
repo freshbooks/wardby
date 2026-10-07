@@ -134,6 +134,11 @@ export function TopBar(props: Props) {
                 value={infra.context ?? ""}
                 onChange={(e) => infra.onContextChange(e.target.value)}
               >
+                {!infra.context && (
+                  <option value="" disabled>
+                    Choose a context…
+                  </option>
+                )}
                 {infra.context && !infra.contexts.includes(infra.context) && (
                   <option value={infra.context}>{infra.context}</option>
                 )}

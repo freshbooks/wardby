@@ -43,7 +43,7 @@ function Row({
         </span>
         <span className={`infra-cell status ${statusKind(pod)}`} role="cell">
           {pod.status}
-          {pod.group === "coding_run" && pod.sandboxed && pod.runtime && (
+          {(pod.sandboxed || pod.group === "coding_run") && pod.runtime && (
             <span className="muted"> · {pod.runtime}</span>
           )}
         </span>

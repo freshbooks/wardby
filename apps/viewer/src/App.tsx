@@ -28,6 +28,8 @@ interface DashboardProps {
   onSignOut: () => void;
   onRemoveServer: () => void;
   onChecked: (servers: ServerSummary[] | null, ok: boolean) => void;
+  /** Reload the server list (after a server's saved settings changed). */
+  onServersChanged: () => void;
 }
 
 function Dashboard({
@@ -38,6 +40,7 @@ function Dashboard({
   onSignOut,
   onRemoveServer,
   onChecked,
+  onServersChanged,
 }: DashboardProps) {
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [tab, setTab] = useState<Tab>("runs");
@@ -151,6 +154,7 @@ function Dashboard({
           key={infraEpoch}
           server={server}
           runs={runs}
+          onContextSaved={onServersChanged}
           topBar={topBar}
           onOpenRun={(id) => {
             changeTab("runs");
@@ -402,6 +406,7 @@ export function App() {
           onSignOut={() => void doSignOut(selected.url)}
           onRemoveServer={() => setRemoving(selected)}
           onChecked={onChecked}
+          onServersChanged={() => void refresh()}
         />
       </ErrorBoundary>
       {actionError && (

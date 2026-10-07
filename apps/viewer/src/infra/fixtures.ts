@@ -179,3 +179,30 @@ export const kindCluster: ClusterState = clusterOf({
     },
   ],
 });
+
+export const RUN_SHA_2 = "fedcba9876543210fedcba9876543210fedcba98";
+const PROXY_RULE = "pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP";
+
+// The server creates one NetworkPolicy per run, selecting that run's pod by its run label.
+const runPolicy = (sha: string, egress: string[]) => ({
+  name: `wardby-run-${sha.slice(0, 8)}`,
+  podSelector: { ...labels.component, "wardby.io/run-sha256": sha },
+  policyTypes: ["Egress"],
+  egress,
+});
+
+export const twoRunsCluster: ClusterState = clusterOf({
+  pod: [
+    pod("wardby-run-one", {
+      labels: { ...labels.component, "wardby.io/run-sha256": RUN_SHA },
+      runtimeClass: "gvisor",
+      containers: [container({ name: "agent" })],
+    }),
+    pod("wardby-run-two", {
+      labels: { ...labels.component, "wardby.io/run-sha256": RUN_SHA_2 },
+      runtimeClass: "gvisor",
+      containers: [container({ name: "agent" })],
+    }),
+  ],
+  network_policy: [runPolicy(RUN_SHA, [PROXY_RULE]), runPolicy(RUN_SHA_2, [PROXY_RULE, "cidr 10.0.0.0/8 :443/TCP"])],
+});

@@ -10,6 +10,7 @@ import {
   kindCluster,
   kindInfo,
   pod,
+  twoRunsCluster,
 } from "./fixtures";
 
 suite("describe", () => {
@@ -61,8 +62,40 @@ suite("describe", () => {
       ...gkeCluster,
       kindErrors: { secret: { kind: "forbidden", resource: "secrets" } },
     } as typeof gkeCluster;
-    expect(describe(c, gkeInfo).secrets.names).toBeNull();
-    expect(describe(gkeCluster, gkeInfo).secrets.names).toEqual(["wardby-db", "wardby-oauth"]);
+    expect(describe(c, gkeInfo).secrets).toMatchObject({ names: null, forbidden: true });
+    expect(describe(gkeCluster, gkeInfo).secrets).toMatchObject({
+      names: ["wardby-db", "wardby-oauth"],
+      forbidden: false,
+    });
+  });
+
+  it("does not call another secrets error 'no access'", () => {
+    const c = {
+      ...gkeCluster,
+      kindErrors: { secret: { kind: "unreachable", message: "connection refused" } },
+    } as typeof gkeCluster;
+    expect(describe(c, gkeInfo).secrets).toMatchObject({ names: null, forbidden: false });
+  });
+
+  it("lists each egress rule once across per-run NetworkPolicies", () => {
+    const m = describe(twoRunsCluster, gkeInfo);
+    expect(m.isolation.egressRules).toEqual([
+      "pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP",
+      "cidr 10.0.0.0/8 :443/TCP",
+    ]);
+  });
+
+  it("gives each pod only the egress of the policies that select it", () => {
+    const [one, two] = describe(twoRunsCluster, gkeInfo).groups.codingRuns;
+    expect(one.egress).toEqual(["pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP"]);
+    expect(two.egress).toEqual([
+      "pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP",
+      "cidr 10.0.0.0/8 :443/TCP",
+    ]);
+    // A shared component-wide policy selects every run pod; another app's policy selects none.
+    const shared = describe(gkeCluster, gkeInfo);
+    expect(shared.groups.codingRuns[0].egress).toEqual(["pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP"]);
+    expect(shared.groups.alwaysOn[0].egress).toEqual([]);
   });
 
   it("omits pods outside wardby's footprint", () => {

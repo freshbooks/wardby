@@ -39,24 +39,28 @@ export type ClusterError =
   | { kind: "unreachable"; message: string }
   | { kind: "other"; message: string };
 
-const CLUSTER_ERROR_KINDS = new Set([
-  "no_kubeconfig",
-  "context_not_found",
-  "auth_plugin",
-  "forbidden",
-  "namespace_not_found",
-  "unreachable",
-  "other",
-]);
+/** Each ClusterError kind and the string field it must carry (if any). */
+const CLUSTER_ERROR_FIELDS: Record<ClusterError["kind"], string | null> = {
+  no_kubeconfig: null,
+  context_not_found: "context",
+  auth_plugin: "message",
+  forbidden: "resource",
+  namespace_not_found: "namespace",
+  unreachable: "message",
+  other: "message",
+};
 
-/** True for the `{ kind, ... }` objects the cluster commands reject with. */
+/**
+ * True for the `{ kind, ... }` objects the cluster commands reject with. A wardby
+ * server `AppError` can share a kind name ("forbidden"), so the kind's own field
+ * must be present too (an AppError forbidden has no `resource`).
+ */
 export function isClusterError(e: unknown): e is ClusterError {
-  return (
-    typeof e === "object" &&
-    e !== null &&
-    typeof (e as { kind?: unknown }).kind === "string" &&
-    CLUSTER_ERROR_KINDS.has((e as { kind: string }).kind)
-  );
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  if (typeof kind !== "string" || !Object.hasOwn(CLUSTER_ERROR_FIELDS, kind)) return false;
+  const field = CLUSTER_ERROR_FIELDS[kind as ClusterError["kind"]];
+  return field === null || typeof (e as Record<string, unknown>)[field] === "string";
 }
 
 export interface Resources {

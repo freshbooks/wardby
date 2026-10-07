@@ -22,6 +22,7 @@ const live = (over: Partial<UseCluster> = {}): UseCluster => ({
   cluster: gkeCluster,
   loading: false,
   error: null,
+  contextError: null,
   ...over,
 });
 

@@ -133,7 +133,7 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
           </>
         ) : (
           <>
-            <div className="map-card map-static map-flow">
+            <div className="map-card map-static">
               <span className="map-title">
                 {`Control plane · outside the cluster${model.controlPlane.location ? ` · ${model.controlPlane.location}` : ""}`}
               </span>
@@ -215,7 +215,9 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
           <div className="map-card map-static">
             <span className="map-title">
               {secrets.names === null
-                ? "Secret names hidden (no access)"
+                ? secrets.forbidden
+                  ? "Secret names hidden (no access)"
+                  : "Secret names unavailable (see the error above)"
                 : `${secrets.source ?? "Secrets"} → ${secrets.names.length} Secrets`}
             </span>
           </div>

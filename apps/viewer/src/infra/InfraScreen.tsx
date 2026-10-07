@@ -2,13 +2,12 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import type { ServerSummary } from "../api/client";
 import type { GraphRun } from "../api/types";
 import type { InfraBar } from "../chrome/TopBar";
-import { describe } from "./adapter";
+import { describe, platformOf } from "./adapter";
 import { platformLabel } from "./format";
 import { InfraFooter } from "./InfraFooter";
 import { InfraView, type InfraMode } from "./InfraView";
 import { runSha } from "./runSha";
 import { useCluster } from "./useCluster";
-import { platformOf } from "./adapter";
 
 const RUN_NOTE = "That run is not in the selected time window.";
 const POD_NOTE = "No pod for this run — finished runs' pods are removed.";
@@ -16,6 +15,8 @@ const POD_NOTE = "No pod for this run — finished runs' pods are removed.";
 interface Props {
   server: ServerSummary;
   runs: readonly GraphRun[];
+  /** The chosen kube context was saved for the server: reload the server list. */
+  onContextSaved?: () => void;
   /** The top bar, given the Infrastructure controls it should show. */
   topBar: (infra: InfraBar) => ReactNode;
   /** Switch to the Runs tab with this run selected. */
@@ -37,6 +38,7 @@ interface Props {
 export function InfraScreen({
   server,
   runs,
+  onContextSaved,
   topBar,
   onOpenRun,
   onRetry,
@@ -46,7 +48,7 @@ export function InfraScreen({
   loadedWindow,
   loadError,
 }: Props) {
-  const cluster = useCluster(server);
+  const cluster = useCluster(server, { onContextSaved });
   const [mode, setMode] = useState<InfraMode>("map");
   const [selectedPod, setSelectedPod] = useState<string | null>(null);
   // A note under the tab: that run is not loaded, or that run has no pod.
@@ -136,9 +138,12 @@ export function InfraScreen({
       })}
       <main className="main">
         {note && <p className="muted">{note}</p>}
+        {cluster.contextError && (
+          <p className="muted">{`Couldn't save the kube context for this server: ${cluster.contextError}`}</p>
+        )}
         <InfraView
           cluster={cluster}
-          serverUrl={server.url}
+          model={model}
           mode={mode}
           selectedPod={selectedPod}
           onSelectPod={setSelectedPod}

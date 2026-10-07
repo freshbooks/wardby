@@ -4,8 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({ kubePodEvents: vi.fn() }));
 vi.mock("../api/client", async (orig) => ({ ...(await orig<typeof import("../api/client")>()), ...api }));
 
+import { describe as describeCluster } from "./adapter";
 import { initialCluster } from "./state";
 import { gkeCluster, gkeInfo } from "./fixtures";
+import type { ClusterState } from "./types";
 import { InfraView } from "./InfraView";
 import type { UseCluster } from "./useCluster";
 
@@ -21,13 +23,20 @@ const base = (over: Partial<UseCluster> = {}): UseCluster => ({
   cluster: gkeCluster,
   loading: false,
   error: null,
+  contextError: null,
   ...over,
 });
+
+const withErrors = (kindErrors: ClusterState["kindErrors"], over: Partial<ClusterState> = {}) =>
+  base({ cluster: { ...gkeCluster, kindErrors, ...over } });
 
 const renderView = (cluster: UseCluster, extra: Partial<React.ComponentProps<typeof InfraView>> = {}) =>
   render(
     <InfraView
       cluster={cluster}
+      model={
+        cluster.info?.kubernetes ? describeCluster(cluster.cluster, cluster.info, { context: cluster.context }) : null
+      }
       mode="table"
       selectedPod={null}
       onSelectPod={vi.fn()}
@@ -90,6 +99,59 @@ describe("InfraView", () => {
     expect(screen.getByText(text)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(onRetry).toHaveBeenCalled();
+  });
+
+  it("asks for a context when the kubeconfig has no current one", () => {
+    renderView(base({ context: null, contexts: { current: null, contexts: ["a", "b"] }, cluster: initialCluster }));
+    expect(screen.getByText("Choose a kube context for this server.")).toBeInTheDocument();
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+  });
+
+  it("says when the kubeconfig has no contexts", () => {
+    renderView(base({ context: null, contexts: { current: null, contexts: [] }, cluster: initialCluster }));
+    expect(screen.getByText("Your kubeconfig has no contexts.")).toBeInTheDocument();
+  });
+
+  it("does not word a wardby server 403 as a Kubernetes RBAC problem", () => {
+    renderView(base({ error: { kind: "forbidden", message: "missing scope infra:read" } }));
+    expect(
+      screen.getByText("This wardby server refused to share its infrastructure: missing scope infra:read"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Kubernetes account/)).not.toBeInTheDocument();
+  });
+
+  it("names every other kind it could not list, above the data", () => {
+    renderView(
+      withErrors({
+        job: { kind: "forbidden", resource: "jobs" },
+        ingress: { kind: "forbidden", resource: "ingresses" },
+        secret: { kind: "forbidden", resource: "secrets" },
+      }),
+    );
+    expect(
+      screen.getByText("Your Kubernetes account can't list jobs in wardby. See the README for a read-only Role."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/can't list ingresses in wardby/)).toBeInTheDocument();
+    // Forbidden secrets are shown on the map as hidden names instead.
+    expect(screen.queryByText(/can't list secrets/)).not.toBeInTheDocument();
+    expect(screen.getByText("ALWAYS ON")).toBeInTheDocument();
+  });
+
+  it("shows one notice for the same error on many kinds, and a secrets error that is not 'no access'", () => {
+    const down = { kind: "unreachable" as const, message: "timeout" };
+    renderView(withErrors({ job: down, service: down, secret: down }));
+    expect(screen.getAllByText("Can't reach the cluster: timeout")).toHaveLength(1);
+  });
+
+  it("blocks on a pod error before the first pod list, and only notes one after it", () => {
+    const down = { kind: "unreachable" as const, message: "timeout" };
+    const { unmount } = renderView(withErrors({ pod: down }, { podsSynced: false }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Can't reach the cluster: timeout");
+    expect(screen.queryByText("ALWAYS ON")).not.toBeInTheDocument();
+    unmount();
+    renderView(withErrors({ pod: down }));
+    expect(screen.getByText("Can't reach the cluster: timeout")).toBeInTheDocument();
+    expect(screen.getByText("ALWAYS ON")).toBeInTheDocument();
   });
 
   it("renders the map when Map is selected", () => {

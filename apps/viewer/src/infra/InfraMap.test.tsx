@@ -1,7 +1,16 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { describe as describeCluster } from "./adapter";
-import { genericCluster, genericInfo, gkeCluster, gkeInfo, kindCluster, kindInfo, RUN_SHA } from "./fixtures";
+import {
+  genericCluster,
+  genericInfo,
+  gkeCluster,
+  gkeInfo,
+  kindCluster,
+  kindInfo,
+  RUN_SHA,
+  twoRunsCluster,
+} from "./fixtures";
 import { InfraMap } from "./InfraMap";
 
 const gke = describeCluster(gkeCluster, gkeInfo);
@@ -57,9 +66,24 @@ describe("InfraMap", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it("says secret names are hidden when unavailable", () => {
-    renderMap({ ...gke, secrets: { source: "Secret Manager", names: null } });
+  it("says secret names are hidden only for lack of access", () => {
+    renderMap({ ...gke, secrets: { source: "Secret Manager", names: null, forbidden: true } });
     expect(screen.getByText("Secret names hidden (no access)")).toBeInTheDocument();
+  });
+
+  it("says secret names are unavailable for any other error", () => {
+    renderMap({ ...gke, secrets: { source: "Secret Manager", names: null, forbidden: false } });
+    expect(screen.getByText("Secret names unavailable (see the error above)")).toBeInTheDocument();
+    expect(screen.queryByText(/no access/)).not.toBeInTheDocument();
+  });
+
+  it("lists each egress rule once across per-run policies", () => {
+    renderMap(describeCluster(twoRunsCluster, gkeInfo));
+    expect(
+      screen.getByText(
+        "NetworkPolicy: pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP, cidr 10.0.0.0/8 :443/TCP",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("renders the generic platform with Ingress and external Postgres", () => {
@@ -109,6 +133,9 @@ describe("InfraMap", () => {
     expect(screen.queryByText("Internet")).not.toBeInTheDocument();
     expect(screen.getByText("▼ coding proxy")).toBeInTheDocument();
     expect(screen.getByText("▼ run zone")).toBeInTheDocument();
+    // Its own labelled arrows only: no extra flow arrow under the card.
+    const card = screen.getByText(/^Control plane · outside the cluster/).closest(".map-card");
+    expect(card).not.toHaveClass("map-flow");
     expect(screen.getByRole("group", { name: "Pod sandbox · wardby-run-abc123" })).toBeInTheDocument();
   });
 
