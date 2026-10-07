@@ -5,7 +5,17 @@ const api = vi.hoisted(() => ({ kubePodEvents: vi.fn() }));
 vi.mock("../api/client", async (orig) => ({ ...(await orig<typeof import("../api/client")>()), ...api }));
 
 import { describe as describeCluster } from "./adapter";
-import { clusterOf, container, gkeCluster, gkeInfo, pod, RUN_SHA, twoRunsCluster } from "./fixtures";
+import {
+  clusterOf,
+  container,
+  gkeCluster,
+  gkeInfo,
+  kindCluster,
+  kindInfo,
+  pod,
+  RUN_SHA,
+  twoRunsCluster,
+} from "./fixtures";
 import { InfraPanel } from "./InfraPanel";
 
 const model = describeCluster(gkeCluster, gkeInfo);
@@ -136,6 +146,36 @@ describe("InfraPanel", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(onClose).toHaveBeenCalled();
+    await screen.findByText("No recent events");
+  });
+
+  it("lists the NetworkPolicies that select the pod", async () => {
+    api.kubePodEvents.mockResolvedValue([]);
+    const kind = describeCluster(kindCluster, kindInfo);
+    const run = kind.groups.codingRuns[0];
+    render(<InfraPanel pod={run} context="ctx" namespace="wardby" onOpenRun={vi.fn()} onClose={vi.fn()} />);
+    const items = within(screen.getByRole("heading", { name: "NETWORK POLICIES" }).parentElement!).getAllByRole(
+      "listitem",
+    );
+    expect(items.map((li) => li.textContent)).toEqual([
+      "default-denyBlocks all traffic to and from every pod, unless another policy allows it.",
+      "wardby-run-egressCoding runs can reach the coding proxy on TCP 8080.",
+    ]);
+    await screen.findByText("No recent events");
+  });
+
+  it("has no NETWORK POLICIES section when none selects the pod", async () => {
+    api.kubePodEvents.mockResolvedValue([]);
+    render(
+      <InfraPanel
+        pod={find("wardby-headroom-5b4a-klmno")}
+        context="ctx"
+        namespace="wardby"
+        onOpenRun={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("heading", { name: "NETWORK POLICIES" })).not.toBeInTheDocument();
     await screen.findByText("No recent events");
   });
 });

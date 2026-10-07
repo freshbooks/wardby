@@ -1,5 +1,5 @@
 import type { InfraInfo } from "../api/types";
-import { parseCpu, parseMemory, type Platform, type PodView } from "./adapter";
+import { countsTowardReady, parseCpu, parseMemory, type Platform, type PodView } from "./adapter";
 
 export function platformLabel(platform: Platform, info: InfraInfo | null): string {
   if (platform === "gke") return info?.kubernetes?.platform === "gke-autopilot" ? "GKE Autopilot" : "GKE";
@@ -37,16 +37,33 @@ export function resources(r: { cpu: string | null; memory: string | null }): str
 }
 
 export type DotKind = "ok" | "warn" | "bad" | "idle";
-export function containerDot(c: { ready: boolean; state: string; reason: string | null }): DotKind {
+export function containerDot(
+  c: { ready: boolean; state: string; reason: string | null; role?: string },
+  /** A terminating pod's containers are shutting down, which is not a problem. */
+  terminating = false,
+): DotKind {
+  // A finished setup step is done, not "ready".
+  if (c.role === "init" && c.state === "terminated" && c.reason === "Completed") return "idle";
   if (c.ready) return "ok";
+  if (terminating) return "idle";
   if (c.state === "terminated") return c.reason === "Completed" ? "idle" : "bad";
   if (c.state === "waiting") return c.reason && /Error|BackOff|Invalid/.test(c.reason) ? "bad" : "warn";
   return "warn";
 }
 
 export function statusKind(p: PodView): DotKind {
-  if (p.status === "Succeeded") return "idle";
+  if (p.terminating || p.phase === "Succeeded") return "idle";
+  if (p.phase === "Failed") return "bad";
   if (p.ready || p.status === "Running") return p.ready ? "ok" : "warn";
   if (/Error|BackOff|Failed|Invalid|OOM/.test(p.status)) return "bad";
   return "warn";
+}
+
+/** The ready count shown on a pod card: "2/2", or its end state in place of a misleading "0/2". */
+export function podReadiness(p: PodView): { text: string; className: string } {
+  if (p.terminating) return { text: "Terminating", className: "muted" };
+  if (p.phase === "Succeeded") return { text: "Completed", className: "muted" };
+  if (p.phase === "Failed") return { text: "Failed", className: "status bad" };
+  const counted = p.containers.filter(countsTowardReady);
+  return { text: `${counted.filter((c) => c.ready).length}/${counted.length}`, className: "muted" };
 }

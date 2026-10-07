@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest";
 import type { GraphRun } from "../api/types";
 import { initialFilters } from "../state/filters";
-import { FlowCanvas } from "./FlowCanvas";
+import { FlowCanvas, fitWidthViewport } from "./FlowCanvas";
 
 const viewportSpy = vi.hoisted(() => ({ setViewport: vi.fn() }));
 vi.mock("@xyflow/react", async (orig) => {
@@ -148,5 +148,17 @@ describe("FlowCanvas", () => {
       x: expect.any(Number),
       y: expect.any(Number),
     });
+  });
+});
+
+describe("fitWidthViewport", () => {
+  it("zooms so the graph's width fills the canvas, from its top-left", () => {
+    // 1000 wide graph at (100, 50) on a 548px canvas: (548 - 2*24) / 1000 = 0.5.
+    expect(fitWidthViewport({ x: 100, y: 50, width: 1000 }, 548)).toEqual({ x: 24 - 50, y: 24 - 25, zoom: 0.5 });
+  });
+
+  it("keeps the zoom between the canvas minimum and 1.5", () => {
+    expect(fitWidthViewport({ x: 0, y: 0, width: 100 }, 2000).zoom).toBe(1.5);
+    expect(fitWidthViewport({ x: 0, y: 0, width: 100_000 }, 500).zoom).toBe(0.2);
   });
 });

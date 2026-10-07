@@ -1,7 +1,17 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { describe as describeCluster } from "./adapter";
-import { clusterOf, container, gkeCluster, gkeInfo, kindCluster, kindInfo, pod, RUN_SHA } from "./fixtures";
+import {
+  clusterOf,
+  container,
+  gkeCluster,
+  gkeInfo,
+  kindCluster,
+  kindInfo,
+  pod,
+  RUN_SHA,
+  statesCluster,
+} from "./fixtures";
 import { InfraTable } from "./InfraTable";
 
 const model = describeCluster(gkeCluster, gkeInfo);
@@ -100,5 +110,16 @@ describe("InfraTable", () => {
   it("has no OUTSIDE THE CLUSTER group on GKE", () => {
     render(<InfraTable model={model} selected={null} onSelect={vi.fn()} onOpenRun={vi.fn()} />);
     expect(screen.queryByText("OUTSIDE THE CLUSTER")).not.toBeInTheDocument();
+  });
+
+  it("shows Completed (muted), Failed (red) and Terminating (muted) in the Status column", () => {
+    const m = describeCluster(statesCluster, gkeInfo);
+    render(<InfraTable model={m} selected={null} onSelect={vi.fn()} onOpenRun={vi.fn()} />);
+    expect(within(screen.getByRole("button", { name: /wardby-migrate-1/ })).getByText("Completed")).toHaveClass("idle");
+    expect(within(screen.getByRole("button", { name: /wardby-migrate-2/ })).getByText("Failed")).toHaveClass("bad");
+    const old = screen.getByRole("button", { name: /wardby-control-plane-old/ });
+    expect(within(old).getByText("Terminating")).toHaveClass("idle");
+    const dot = within(old).getByText("cloud-sql-proxy").querySelector(".infra-dot")!;
+    expect(dot).not.toHaveClass("bad");
   });
 });

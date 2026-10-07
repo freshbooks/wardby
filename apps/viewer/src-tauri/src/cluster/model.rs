@@ -72,6 +72,8 @@ pub struct InfraPod {
     pub service_account: Option<String>,
     pub started_at: Option<String>,
     pub ready: bool,
+    /// The pod has a deletion timestamp: it is shutting down.
+    pub terminating: bool,
     pub containers: Vec<InfraContainer>,
 }
 
@@ -117,7 +119,58 @@ pub struct InfraNetworkPolicy {
     pub name: String,
     pub pod_selector: BTreeMap<String, String>,
     pub policy_types: Vec<String>,
+    /// The pod selector has no labels and no expressions, so it selects every pod.
+    pub selects_all: bool,
+    pub ingress_rules: usize,
     pub egress: Vec<String>,
+    /// Structured ingress rules, for the plain-English intent sentences.
+    pub ingress: Vec<InfraPolicyRule>,
+    /// Structured egress rules; `egress` keeps the one-line summaries.
+    pub egress_rules: Vec<InfraPolicyRule>,
+}
+
+/// One ingress or egress rule: traffic from/to any of `peers` on any of `ports`
+/// (no ports means every port).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InfraPolicyRule {
+    pub peers: Vec<InfraPolicyPeer>,
+    pub ports: Vec<InfraPolicyPort>,
+}
+
+/// Crosses to the webview as `{ "kind": "<snake_case>", ...camelCase fields }`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum InfraPolicyPeer {
+    /// An empty `from`/`to`: any source or destination.
+    Any,
+    /// Pods by label; `namespace_labels` is set when a namespace selector is present.
+    Pods {
+        pod_labels: BTreeMap<String, String>,
+        namespace_labels: Option<BTreeMap<String, String>>,
+    },
+    Ip {
+        cidr: String,
+        except: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InfraPolicyPort {
+    pub port: Option<PolicyPortValue>,
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum PolicyPortValue {
+    Number(i32),
+    Name(String),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -128,6 +181,20 @@ pub struct InfraEdge {
     pub class: Option<String>,
     pub hosts: Vec<String>,
     pub annotations: BTreeMap<String, String>,
+    /// An HTTPRoute whose rules only redirect (RequestRedirect filters, no backends).
+    pub redirect_only: bool,
+    pub redirect_scheme: Option<String>,
+    /// Service names an HTTPRoute sends traffic to.
+    pub backends: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InfraBackendPolicy {
+    pub name: String,
+    pub target_kind: Option<String>,
+    pub target_name: Option<String>,
+    pub security_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -333,6 +400,7 @@ pub fn pod_from(pod: &Pod) -> InfraPod {
             .and_then(|s| s.start_time.as_ref())
             .map(time_string),
         ready: pod_ready(pod),
+        terminating: pod.metadata.deletion_timestamp.is_some(),
         containers: containers_of(pod),
     }
 }
@@ -419,6 +487,9 @@ pub fn edge_from_service(s: &Service) -> Option<InfraEdge> {
         class: spec.load_balancer_class.clone(),
         hosts,
         annotations: edge_annotations(&s.metadata),
+        redirect_only: false,
+        redirect_scheme: None,
+        backends: Vec::new(),
     })
 }
 
@@ -443,6 +514,9 @@ pub fn ingress_from(i: &Ingress) -> InfraEdge {
         class,
         hosts,
         annotations: edge_annotations(&i.metadata),
+        redirect_only: false,
+        redirect_scheme: None,
+        backends: Vec::new(),
     }
 }
 
@@ -487,6 +561,11 @@ pub fn edge_from_dynamic(kind: &'static str, v: &Value) -> InfraEdge {
     } else {
         (None, strings_at(v, &["spec", "hostnames"], None))
     };
+    let (redirect_only, redirect_scheme, backends) = if kind == "httproute" {
+        route_rules(v)
+    } else {
+        (false, None, Vec::new())
+    };
     InfraEdge {
         kind,
         name: str_at(v, &["metadata", "name"])
@@ -495,6 +574,62 @@ pub fn edge_from_dynamic(kind: &'static str, v: &Value) -> InfraEdge {
         class,
         hosts,
         annotations: dynamic_annotations(v),
+        redirect_only,
+        redirect_scheme,
+        backends,
+    }
+}
+
+/// (redirect only, redirect scheme, backend service names) of an HTTPRoute's rules.
+fn route_rules(v: &Value) -> (bool, Option<String>, Vec<String>) {
+    let rules: &[Value] = v
+        .pointer("/spec/rules")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let mut backends: Vec<String> = Vec::new();
+    let mut scheme = None;
+    let mut redirect_only = !rules.is_empty();
+    for rule in rules {
+        let refs = strings_at(rule, &["backendRefs"], Some("name"));
+        let filters: &[Value] = rule
+            .get("filters")
+            .and_then(Value::as_array)
+            .map_or(&[], Vec::as_slice);
+        let redirects = !filters.is_empty()
+            && filters
+                .iter()
+                .all(|f| str_at(f, &["type"]) == Some("RequestRedirect"));
+        if !refs.is_empty() || !redirects {
+            redirect_only = false;
+        }
+        if scheme.is_none() {
+            scheme = filters
+                .iter()
+                .find_map(|f| str_at(f, &["requestRedirect", "scheme"]))
+                .map(str::to_string);
+        }
+        for r in refs {
+            if !backends.contains(&r) {
+                backends.push(r);
+            }
+        }
+    }
+    (
+        redirect_only,
+        if redirect_only { scheme } else { None },
+        backends,
+    )
+}
+
+/// A GKE `GCPBackendPolicy`: what it targets and its Cloud Armor policy.
+pub fn backend_policy_from(v: &Value) -> InfraBackendPolicy {
+    InfraBackendPolicy {
+        name: str_at(v, &["metadata", "name"])
+            .unwrap_or_default()
+            .to_string(),
+        target_kind: str_at(v, &["spec", "targetRef", "kind"]).map(str::to_string),
+        target_name: str_at(v, &["spec", "targetRef", "name"]).map(str::to_string),
+        security_policy: str_at(v, &["spec", "default", "securityPolicy"]).map(str::to_string),
     }
 }
 
@@ -557,8 +692,61 @@ fn port_summary(p: &NetworkPolicyPort) -> Option<String> {
     ))
 }
 
+fn policy_peer(p: &NetworkPolicyPeer) -> InfraPolicyPeer {
+    if let Some(block) = &p.ip_block {
+        return InfraPolicyPeer::Ip {
+            cidr: block.cidr.clone(),
+            except: block.except.clone().unwrap_or_default(),
+        };
+    }
+    if p.pod_selector.is_none() && p.namespace_selector.is_none() {
+        return InfraPolicyPeer::Any;
+    }
+    let labels = |s: &LabelSelector| s.match_labels.clone().unwrap_or_default();
+    InfraPolicyPeer::Pods {
+        pod_labels: p.pod_selector.as_ref().map(labels).unwrap_or_default(),
+        namespace_labels: p.namespace_selector.as_ref().map(labels),
+    }
+}
+
+fn policy_port(p: &NetworkPolicyPort) -> InfraPolicyPort {
+    InfraPolicyPort {
+        port: p.port.as_ref().map(|v| match v {
+            IntOrString::Int(i) => PolicyPortValue::Number(*i),
+            IntOrString::String(s) => PolicyPortValue::Name(s.clone()),
+        }),
+        protocol: p.protocol.clone().unwrap_or_else(|| "TCP".into()),
+    }
+}
+
+fn policy_rule(
+    peers: Option<&[NetworkPolicyPeer]>,
+    ports: Option<&[NetworkPolicyPort]>,
+) -> InfraPolicyRule {
+    let peers = match peers {
+        Some(p) if !p.is_empty() => p.iter().map(policy_peer).collect(),
+        _ => vec![InfraPolicyPeer::Any],
+    };
+    InfraPolicyRule {
+        peers,
+        ports: ports.unwrap_or_default().iter().map(policy_port).collect(),
+    }
+}
+
 pub fn network_policy_from(np: &NetworkPolicy) -> InfraNetworkPolicy {
     let spec = np.spec.as_ref();
+    let ingress = spec
+        .and_then(|s| s.ingress.as_ref())
+        .into_iter()
+        .flatten()
+        .map(|r| policy_rule(r.from.as_deref(), r.ports.as_deref()))
+        .collect();
+    let egress_rules = spec
+        .and_then(|s| s.egress.as_ref())
+        .into_iter()
+        .flatten()
+        .map(|r| policy_rule(r.to.as_deref(), r.ports.as_deref()))
+        .collect();
     let egress = spec
         .and_then(|s| s.egress.as_ref())
         .into_iter()
@@ -591,7 +779,16 @@ pub fn network_policy_from(np: &NetworkPolicy) -> InfraNetworkPolicy {
         policy_types: spec
             .and_then(|s| s.policy_types.clone())
             .unwrap_or_default(),
+        selects_all: spec
+            .and_then(|s| s.pod_selector.as_ref())
+            .is_none_or(|sel| {
+                sel.match_labels.as_ref().is_none_or(|m| m.is_empty())
+                    && sel.match_expressions.as_ref().is_none_or(|m| m.is_empty())
+            }),
+        ingress_rules: spec.and_then(|s| s.ingress.as_ref()).map_or(0, Vec::len),
         egress,
+        ingress,
+        egress_rules,
     }
 }
 
@@ -848,5 +1045,128 @@ mod tests {
         assert!(gw.annotations.contains_key("networking.gke.io/certmap"));
         let route = edge_from_dynamic("httproute", &fixture("httproute"));
         assert_eq!((route.kind, route.hosts.len()), ("httproute", 2));
+    }
+
+    #[test]
+    fn terminating_pod_is_flagged_by_its_deletion_timestamp() {
+        assert!(pod_from(&fixture("pod-terminating")).terminating);
+        assert!(!pod_from(&fixture("run-pod")).terminating);
+    }
+
+    #[test]
+    fn redirect_only_route_carries_the_redirect_scheme() {
+        let r = edge_from_dynamic("httproute", &fixture("httproute-redirect"));
+        assert_eq!(r.hosts, vec!["wardby.example.com"]);
+        assert!(r.redirect_only);
+        assert_eq!(r.redirect_scheme.as_deref(), Some("https"));
+        assert!(r.backends.is_empty());
+        let plain = edge_from_dynamic("httproute", &fixture("httproute"));
+        assert!(!plain.redirect_only);
+        assert_eq!(plain.redirect_scheme, None);
+        assert_eq!(plain.backends, vec!["wardby"]);
+    }
+
+    #[test]
+    fn backend_policy_carries_target_and_security_policy() {
+        let p = backend_policy_from(&fixture("gcpbackendpolicy"));
+        assert_eq!(
+            (
+                p.name.as_str(),
+                p.target_kind.as_deref(),
+                p.target_name.as_deref(),
+                p.security_policy.as_deref()
+            ),
+            (
+                "wardby-policy",
+                Some("Gateway"),
+                Some("wardby-gw"),
+                Some("wardby-armor")
+            )
+        );
+        let bare = backend_policy_from(&serde_json::json!({"metadata": {"name": "x"}}));
+        assert_eq!(bare.security_policy, None);
+    }
+
+    #[test]
+    fn network_policy_reports_select_all_and_ingress_rules() {
+        let deny = network_policy_from(&fixture("networkpolicy-default-deny"));
+        assert!(deny.selects_all);
+        assert_eq!(deny.ingress_rules, 0);
+        assert_eq!(deny.policy_types, vec!["Ingress", "Egress"]);
+        let run = network_policy_from(&fixture("networkpolicy-run-egress"));
+        assert!(!run.selects_all);
+    }
+
+    #[test]
+    fn network_policy_carries_structured_rules() {
+        let np = network_policy_from(&fixture("networkpolicy-coding-proxy"));
+        let v = serde_json::to_value(&np).unwrap();
+        assert_eq!(
+            v["ingress"],
+            serde_json::json!([{
+                "peers": [{
+                    "kind": "pods",
+                    "podLabels": {"wardby.io/component": "coding-run"},
+                    "namespaceLabels": null
+                }],
+                "ports": [
+                    {"port": 8787, "protocol": "TCP"},
+                    {"port": 8788, "protocol": "TCP"}
+                ]
+            }])
+        );
+        assert_eq!(
+            v["egressRules"][0],
+            serde_json::json!({
+                "peers": [{
+                    "kind": "pods",
+                    "podLabels": {"k8s-app": "kube-dns"},
+                    "namespaceLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                }],
+                "ports": [
+                    {"port": 53, "protocol": "UDP"},
+                    {"port": 53, "protocol": "TCP"}
+                ]
+            })
+        );
+        assert_eq!(
+            v["egressRules"][1]["peers"],
+            serde_json::json!([{"kind": "ip", "cidr": "0.0.0.0/0", "except": ["10.0.0.0/8"]}])
+        );
+        // A named port with no protocol defaults to TCP; an empty selector has no labels.
+        assert_eq!(
+            v["egressRules"][2],
+            serde_json::json!({
+                "peers": [{"kind": "pods", "podLabels": {}, "namespaceLabels": null}],
+                "ports": [{"port": "metrics", "protocol": "TCP"}]
+            })
+        );
+        // No `to` means anyone.
+        assert_eq!(
+            v["egressRules"][3]["peers"],
+            serde_json::json!([{"kind": "any"}])
+        );
+        assert_eq!(np.egress.len(), 4);
+    }
+
+    #[test]
+    fn network_policy_without_rules_has_empty_structured_lists() {
+        let deny = network_policy_from(&fixture("networkpolicy-default-deny"));
+        assert!(deny.ingress.is_empty());
+        assert!(deny.egress_rules.is_empty());
+        let v = serde_json::to_value(&deny).unwrap();
+        assert_eq!(v["ingress"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn port_without_number_serializes_as_null() {
+        let p = policy_port(&NetworkPolicyPort {
+            protocol: Some("UDP".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            serde_json::to_value(p).unwrap(),
+            serde_json::json!({"port": null, "protocol": "UDP"})
+        );
     }
 }

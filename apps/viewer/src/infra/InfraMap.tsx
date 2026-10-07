@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { InfraModel, PodView } from "./adapter";
-import { containerDot } from "./format";
+import { containerDot, podReadiness } from "./format";
+import { openUrl } from "../api/client";
+import { useEndedRuns, type EndedRun } from "./endedRuns";
 import { visibleJobs } from "./jobs";
 
 interface Props {
@@ -11,16 +13,21 @@ interface Props {
   namespace?: string;
   jobFinishedAt?: ReadonlyMap<string, string | null>;
   now?: number;
+  /** Ended coding runs from the screen (see endedRuns.ts). */
+  endedRuns?: { ended: EndedRun[]; dismiss: (name: string) => void };
 }
 
-const readyCount = (p: PodView) => `${p.containers.filter((c) => c.ready).length}/${p.containers.length}`;
+function Readiness({ pod }: { pod: PodView }) {
+  const r = podReadiness(pod);
+  return <span className={r.className}>{r.text}</span>;
+}
 
-function Containers({ pod }: { pod: PodView }) {
+function Containers({ pod, ended = false }: { pod: PodView; ended?: boolean }) {
   return (
     <span className="map-containers">
       {pod.containers.map((c) => (
         <span key={c.name} className="map-container" title={`${c.name}: ${c.reason ?? c.state}`}>
-          <span className={`infra-dot ${containerDot(c)}`} aria-hidden="true" />
+          <span className={`infra-dot ${ended ? "idle" : containerDot(c, pod.terminating)}`} aria-hidden="true" />
           {c.name}
         </span>
       ))}
@@ -40,19 +47,39 @@ function PodCard({
   compact?: boolean;
 }) {
   return (
+    <div className={`map-card-wrap${pod.console ? " has-console" : ""}`}>
+      <button
+        type="button"
+        className={`map-card map-pod${compact ? " compact" : ""}`}
+        aria-pressed={selected}
+        title={pod.name}
+        onClick={onSelect}
+      >
+        <span className="map-title">
+          <span>{pod.title}</span>
+          <Readiness pod={pod} />
+        </span>
+        {!compact && <Containers pod={pod} />}
+        {!compact && pod.identity && <span className="muted map-identity">{pod.identity}</span>}
+      </button>
+      <ConsoleLink pod={pod} />
+    </div>
+  );
+}
+
+/** Opens the pod in the cloud console; sits in the card's corner (a link can't nest in the card's button). */
+function ConsoleLink({ pod }: { pod: PodView }) {
+  if (!pod.console) return null;
+  const { url, label } = pod.console;
+  return (
     <button
       type="button"
-      className={`map-card map-pod${compact ? " compact" : ""}`}
-      aria-pressed={selected}
-      title={pod.name}
-      onClick={onSelect}
+      className="map-console-link"
+      aria-label={`${label}: ${pod.title}`}
+      title={label}
+      onClick={() => void openUrl(url).catch(() => {})}
     >
-      <span className="map-title">
-        <span>{pod.title}</span>
-        <span className="muted">{readyCount(pod)}</span>
-      </span>
-      {!compact && <Containers pod={pod} />}
-      {!compact && pod.identity && <span className="muted map-identity">{pod.identity}</span>}
+      ↗
     </button>
   );
 }
@@ -62,25 +89,53 @@ function Sandbox({
   selected,
   onSelect,
   onOpenRun,
+  ended,
+  onClose,
 }: {
   pod: PodView;
   selected: boolean;
   onSelect: () => void;
   onOpenRun: (sha: string) => void;
+  /** The pod is gone; the card stays until closed (see endedRuns.ts). */
+  ended?: { leaving: boolean };
+  onClose?: () => void;
 }) {
   const label = `${pod.sandboxed && pod.runtime ? pod.runtime : "Pod"} sandbox · ${pod.name}`;
   const sha = pod.runSha;
+  // Pulses like a running run's box on the Runs graph, until the pod ends.
+  const active = !ended && !pod.terminating && (pod.phase === "Pending" || pod.phase === "Running");
+  const className = `map-sandbox${ended ? " ended" : ""}${ended?.leaving ? " leaving" : ""}`;
   return (
-    <div className="map-sandbox" role="group" aria-label={label}>
+    <div className={className} role="group" aria-label={label}>
       <span className="map-zone-label">{label}</span>
       <div className="map-sandbox-body">
-        <button type="button" className="map-card map-pod" aria-pressed={selected} title={pod.name} onClick={onSelect}>
-          <span className="map-title">
-            <span>{pod.title}</span>
-            <span className="muted">{readyCount(pod)}</span>
-          </span>
-          <Containers pod={pod} />
-        </button>
+        <div className={`map-card-wrap${pod.console && !ended ? " has-console" : ""}`}>
+          <button
+            type="button"
+            className={`map-card map-pod${active ? " pulse" : ""}`}
+            aria-pressed={selected}
+            title={pod.name}
+            onClick={onSelect}
+          >
+            <span className="map-title">
+              <span>{pod.title}</span>
+              {ended ? <span className="muted">Ended</span> : <Readiness pod={pod} />}
+            </span>
+            <Containers pod={pod} ended={!!ended} />
+          </button>
+          {!ended && <ConsoleLink pod={pod} />}
+        </div>
+        {ended && onClose && (
+          <button
+            type="button"
+            className="infra-open-run"
+            aria-label={`Close ${pod.title}`}
+            title="Close"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        )}
         {sha && (
           <button
             type="button"
@@ -89,7 +144,7 @@ function Sandbox({
             title="Open run"
             onClick={() => onOpenRun(sha)}
           >
-            ↗
+            Run ↗
           </button>
         )}
       </div>
@@ -97,13 +152,25 @@ function Sandbox({
   );
 }
 
-export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobFinishedAt, now: fixedNow }: Props) {
+export function InfraMap({
+  model,
+  selected,
+  onSelect,
+  onOpenRun,
+  namespace,
+  jobFinishedAt,
+  now: fixedNow,
+  endedRuns,
+}: Props) {
   const [clock, setClock] = useState(Date.now);
   useEffect(() => {
     const id = setInterval(() => setClock(Date.now()), 30_000);
     return () => clearInterval(id);
   }, []);
   const { alwaysOn, codingRuns } = model.groups;
+  // Owned by InfraScreen in the app; the local fallback keeps the Map usable on its own.
+  const local = useEndedRuns(codingRuns, !endedRuns);
+  const { ended, dismiss } = endedRuns ?? local;
   const jobs = visibleJobs(model.groups.jobs, jobFinishedAt, fixedNow ?? clock);
   const hosts = [...new Set(model.edge.flatMap((e) => e.hosts))];
   const main = alwaysOn.filter((p) => p.title !== "headroom");
@@ -116,7 +183,7 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
       <div className="map-col map-edge-col">
         {model.controlPlane.inCluster ? (
           <>
-            <div className="map-card map-static map-flow">
+            <div className={`map-card map-static map-flow${model.edge.length === 0 ? " map-enter" : ""}`}>
               <span className="map-title">Internet</span>
               {hosts.map((h) => (
                 <span key={h} className="muted">
@@ -125,7 +192,10 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
               ))}
             </div>
             {model.edge.map((e, i) => (
-              <div key={`${e.label}-${i}`} className="map-card map-static map-flow">
+              <div
+                key={`${e.label}-${i}`}
+                className={`map-card map-static map-flow${e.role ? "" : " map-protection"}${i === model.edge.length - 1 ? " map-enter" : ""}`}
+              >
                 <span className="map-title">{e.label}</span>
                 {e.detail.length > 0 && <span className="muted">{e.detail.join(" · ")}</span>}
               </div>
@@ -146,7 +216,10 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
               </div>
             )}
             {model.edge.map((e, i) => (
-              <div key={`${e.label}-${i}`} className="map-card map-static map-flow">
+              <div
+                key={`${e.label}-${i}`}
+                className={`map-card map-static map-flow${e.role ? "" : " map-protection"}${i === model.edge.length - 1 ? " map-enter" : ""}`}
+              >
                 <span className="map-title">{e.label}</span>
                 {e.detail.length > 0 && <span className="muted">{e.detail.join(" · ")}</span>}
               </div>
@@ -157,12 +230,33 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
 
       <div className="map-zone map-namespace">
         {namespace && <span className="map-zone-label">namespace {namespace}</span>}
+        {model.isolation.policies.count > 0 && (
+          <details className="map-policies">
+            <summary className="map-zone-label">
+              {model.isolation.policies.count === 1
+                ? "1 NetworkPolicy"
+                : `${model.isolation.policies.count} NetworkPolicies`}
+              {model.isolation.policies.defaultDeny && " · default deny"}
+            </summary>
+            <ul>
+              {model.isolation.policies.list.map((np) => (
+                <li key={np.name}>
+                  <span className="map-policy-name">{np.name}</span>
+                  <span className="map-policy-intent">{np.intent}</span>
+                  <span className="muted map-policy-raw">
+                    {np.selects} · {np.rules.join(" · ")}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         <div className="map-pods">
           {main.map((p) => (
             <PodCard key={p.name} pod={p} selected={selected === p.name} onSelect={() => onSelect(p.name)} />
           ))}
         </div>
-        {(codingRuns.length > 0 || rules.length > 0) && (
+        {(codingRuns.length > 0 || ended.length > 0 || rules.length > 0) && (
           <div className="map-fence">
             {rules.length > 0 && <span className="map-zone-label">NetworkPolicy: {rules.join(", ")}</span>}
             <div className="map-sandboxes">
@@ -175,7 +269,18 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
                   onOpenRun={onOpenRun}
                 />
               ))}
-              {codingRuns.length === 0 && <span className="muted">No coding runs</span>}
+              {ended.map((e) => (
+                <Sandbox
+                  key={`ended-${e.pod.name}`}
+                  pod={e.pod}
+                  selected={false}
+                  onSelect={() => {}}
+                  onOpenRun={onOpenRun}
+                  ended={{ leaving: e.leaving }}
+                  onClose={() => dismiss(e.pod.name)}
+                />
+              ))}
+              {codingRuns.length === 0 && ended.length === 0 && <span className="muted">No coding runs</span>}
             </div>
           </div>
         )}

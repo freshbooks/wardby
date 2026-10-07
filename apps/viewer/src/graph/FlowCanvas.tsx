@@ -1,4 +1,14 @@
-import { Background, ControlButton, Controls, ReactFlow, useReactFlow, type Edge, type Node } from "@xyflow/react";
+import {
+  Background,
+  ControlButton,
+  Controls,
+  getNodesBounds,
+  ReactFlow,
+  useReactFlow,
+  useStore,
+  type Edge,
+  type Node,
+} from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
 import type { GraphRun } from "../api/types";
@@ -44,8 +54,28 @@ function HomeViewport({ layoutKey }: { layoutKey: unknown }) {
 
 const ZOOM_ICON = { width: 14, height: 14, viewBox: "0 0 14 14", "aria-hidden": true, focusable: false } as const;
 
+const FIT_WIDTH_PAD = 24;
+const MIN_ZOOM = 0.2;
+const MAX_FIT_WIDTH_ZOOM = 1.5;
+
+/** Zoom so the graph's full width fills the canvas, showing it from the top (long graphs then scroll down). */
+export function fitWidthViewport(
+  bounds: { x: number; y: number; width: number },
+  canvasWidth: number,
+): { x: number; y: number; zoom: number } {
+  const room = Math.max(1, canvasWidth - 2 * FIT_WIDTH_PAD);
+  const zoom = Math.min(MAX_FIT_WIDTH_ZOOM, Math.max(MIN_ZOOM, room / Math.max(1, bounds.width)));
+  return { x: FIT_WIDTH_PAD - bounds.x * zoom, y: FIT_WIDTH_PAD - bounds.y * zoom, zoom };
+}
+
 function ViewportControls() {
-  const { zoomIn, zoomOut, fitView } = useReactFlow();
+  const { zoomIn, zoomOut, fitView, getNodes, setViewport } = useReactFlow();
+  const canvasWidth = useStore((s) => s.width);
+  const fitWidth = () => {
+    const nodes = getNodes();
+    if (nodes.length === 0 || canvasWidth === 0) return;
+    void setViewport(fitWidthViewport(getNodesBounds(nodes), canvasWidth), { duration: 200 });
+  };
   return (
     <Controls
       className="viewport-controls"
@@ -63,6 +93,11 @@ function ViewportControls() {
       <ControlButton title="Zoom out" aria-label="Zoom out" onClick={() => void zoomOut()}>
         <svg {...ZOOM_ICON}>
           <path d="M2 7h10" />
+        </svg>
+      </ControlButton>
+      <ControlButton title="Fit width" aria-label="Fit width" onClick={fitWidth}>
+        <svg {...ZOOM_ICON}>
+          <path d="M1.5 3v8M12.5 3v8M4 7h6M4 7l2-2M4 7l2 2M10 7l-2-2M10 7l-2 2" />
         </svg>
       </ControlButton>
       <ControlButton title="Fit view" aria-label="Fit view" onClick={() => void fitView({ padding: 0.1 })}>
@@ -171,7 +206,7 @@ export function FlowCanvas({ runs, filters, selectedId, onSelect }: Props) {
         // Follows the window theme (View ▸ Appearance or the system setting).
         colorMode="system"
         defaultViewport={HOME_VIEWPORT}
-        minZoom={0.2}
+        minZoom={MIN_ZOOM}
         nodesDraggable={false}
         nodesConnectable={false}
         proOptions={{ hideAttribution: true }}

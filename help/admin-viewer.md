@@ -3,7 +3,7 @@ id: admin-viewer
 title: Watch live runs with the admin viewer API
 summary: Read-only, deployment-wide live view of runs, sub-agent trees, triggers, outcomes and coding-run services for admins (admin:view).
 audience: operator
-tags: [viewer, admin, runs, live, sse, monitoring, desktop, app]
+tags: [viewer, admin, runs, live, sse, monitoring, desktop, app, infrastructure, kubernetes, pods, networkpolicy]
 appliesTo: ">=0.4.0"
 ---
 
@@ -40,7 +40,10 @@ The Infrastructure tab shows the Kubernetes pods where your deployment runs
 coding jobs, read-only. It uses your kubeconfig (switchable per server) and
 requires a minimal read-only Kubernetes role. See the Infrastructure view
 section of the [viewer README](../apps/viewer/README.md#infrastructure-view) for
-setup.
+setup. Its Map shows the request path (entry, protection layer such as Cloud
+Armor, routes), each NetworkPolicy with a plain-English summary, and on GKE a
+link from each pod to the Google Cloud console. The run graph's zoom controls
+include **Fit width**, which fills the canvas with the graph's width.
 
 For parameters, status codes, frame formats and schemas, follow
 [`docs/viewer-api.md`](../docs/viewer-api.md).

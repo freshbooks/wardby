@@ -1,10 +1,18 @@
 import type { InfraInfo } from "../api/types";
 import { initialCluster } from "./state";
-import type { ClusterKind, ClusterState, InfraContainer, InfraEdge, InfraPod, KindItems } from "./types";
+import type { ClusterKind, ClusterState, InfraContainer, InfraEdge, InfraPod, KindItems, PolicyRule } from "./types";
 
 // Neutral fixtures for the platform adapter and the Infrastructure tab.
 
 export const RUN_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+/** The run egress policy's one rule: the coding proxy on 8080/TCP (matches the `egress` summary string). */
+const PROXY_EGRESS: PolicyRule[] = [
+  {
+    peers: [{ kind: "pods", podLabels: { "app.kubernetes.io/name": "wardby-coding-proxy" }, namespaceLabels: null }],
+    ports: [{ port: 8080, protocol: "TCP" }],
+  },
+];
 
 const labels = {
   component: { "wardby.io/component": "coding-run" },
@@ -56,6 +64,7 @@ export function pod(name: string, over: Partial<InfraPod> = {}): InfraPod {
     serviceAccount: null,
     startedAt: "2026-10-01T10:00:00Z",
     ready: true,
+    terminating: false,
     containers: [container()],
     ...over,
   };
@@ -81,6 +90,9 @@ const gateway: InfraEdge = {
   class: "gke-l7-global-external-managed",
   hosts: ["wardby.example.com"],
   annotations: { "networking.gke.io/security-policy": "your-project-armor" },
+  redirectOnly: false,
+  redirectScheme: null,
+  backends: [],
 };
 
 export const gkeCluster: ClusterState = clusterOf({
@@ -132,16 +144,40 @@ export const gkeCluster: ClusterState = clusterOf({
       name: "wardby-run-egress",
       podSelector: labels.component,
       policyTypes: ["Egress"],
+      selectsAll: false,
+      ingressRules: 0,
+      ingress: [],
+      egressRules: PROXY_EGRESS,
       egress: ["pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP"],
     },
-    { name: "other", podSelector: { app: "other" }, policyTypes: ["Egress"], egress: ["anywhere"] },
+    {
+      name: "other",
+      podSelector: { app: "other" },
+      policyTypes: ["Egress"],
+      selectsAll: false,
+      ingressRules: 0,
+      ingress: [],
+      egressRules: [],
+      egress: ["anywhere"],
+    },
   ],
   secret_store: [{ name: "wardby-store", provider: "gcpsm" }],
   secret: [{ name: "wardby-db" }, { name: "wardby-oauth" }],
 });
 
 export const genericCluster: ClusterState = clusterOf({
-  ingress: [{ kind: "ingress", name: "wardby", class: "nginx", hosts: ["wardby.example.com"], annotations: {} }],
+  ingress: [
+    {
+      kind: "ingress",
+      name: "wardby",
+      class: "nginx",
+      hosts: ["wardby.example.com"],
+      annotations: {},
+      redirectOnly: false,
+      redirectScheme: null,
+      backends: [],
+    },
+  ],
   service_account: [{ name: "wardby", identity: {} }],
   pod: [
     pod("wardby-control-plane-1-aaaaa", {
@@ -170,11 +206,24 @@ export const kindCluster: ClusterState = clusterOf({
     }),
   ],
   network_policy: [
-    { name: "default-deny", podSelector: {}, policyTypes: ["Ingress", "Egress"], egress: [] },
+    {
+      name: "default-deny",
+      podSelector: {},
+      policyTypes: ["Ingress", "Egress"],
+      selectsAll: true,
+      ingressRules: 0,
+      ingress: [],
+      egressRules: [],
+      egress: [],
+    },
     {
       name: "wardby-run-egress",
       podSelector: labels.component,
       policyTypes: ["Egress"],
+      selectsAll: false,
+      ingressRules: 0,
+      ingress: [],
+      egressRules: PROXY_EGRESS,
       egress: ["pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP"],
     },
   ],
@@ -188,6 +237,10 @@ const runPolicy = (sha: string, egress: string[]) => ({
   name: `wardby-run-${sha.slice(0, 8)}`,
   podSelector: { ...labels.component, "wardby.io/run-sha256": sha },
   policyTypes: ["Egress"],
+  selectsAll: false,
+  ingressRules: 0,
+  ingress: [],
+  egressRules: egress.length ? PROXY_EGRESS : [],
   egress,
 });
 
@@ -205,4 +258,33 @@ export const twoRunsCluster: ClusterState = clusterOf({
     }),
   ],
   network_policy: [runPolicy(RUN_SHA, [PROXY_RULE]), runPolicy(RUN_SHA_2, [PROXY_RULE, "cidr 10.0.0.0/8 :443/TCP"])],
+});
+
+const stateOwner = { kind: "ReplicaSet", name: "wardby-control-plane-6d8f" };
+// Pods in the states the Map and Table label: terminating, completed and failed.
+export const statesCluster = clusterOf({
+  pod: [
+    pod("wardby-control-plane-new", { owner: stateOwner }),
+    pod("wardby-control-plane-old", {
+      owner: stateOwner,
+      ready: false,
+      terminating: true,
+      containers: [
+        container({ name: "control-plane" }),
+        container({ name: "cloud-sql-proxy", ready: false, state: "terminated", reason: "Error" }),
+      ],
+    }),
+    pod("wardby-migrate-1", {
+      owner: { kind: "Job", name: "wardby-migrate" },
+      phase: "Succeeded",
+      ready: false,
+      containers: [container({ name: "migrate", ready: false, state: "terminated", reason: "Completed" })],
+    }),
+    pod("wardby-migrate-2", {
+      owner: { kind: "Job", name: "wardby-migrate2" },
+      phase: "Failed",
+      ready: false,
+      containers: [container({ name: "migrate", ready: false, state: "terminated", reason: "Error" })],
+    }),
+  ],
 });

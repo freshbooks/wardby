@@ -1,0 +1,9 @@
+{
+  "apiVersion": "networking.gke.io/v1",
+  "kind": "GCPBackendPolicy",
+  "metadata": { "name": "wardby-policy", "namespace": "wardby" },
+  "spec": {
+    "default": { "securityPolicy": "wardby-armor" },
+    "targetRef": { "group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "wardby-gw" }
+  }
+}

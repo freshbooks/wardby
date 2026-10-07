@@ -131,6 +131,27 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+/* The infra row never wraps: the context picker shrinks (with an ellipsis) instead. */
+.infra-row {
+  flex-wrap: nowrap;
+}
+
+.infra-status {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.kube-context {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.kube-context select {
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
 .brand {
   font-weight: 700;
 }
@@ -639,12 +660,55 @@ button:disabled {
   }
 }
 
-.flow-node.pulse {
+.flow-node.pulse,
+.map-pod.pulse {
   animation: node-pulse 2s ease-in-out infinite;
 }
 
+/* A coding run whose pod is gone stays until closed, then squashes away. */
+.map-sandbox.ended {
+  opacity: 0.6;
+  transform-origin: top;
+}
+
+.map-sandbox.ended .map-pod {
+  cursor: default;
+}
+
+.map-sandbox.leaving {
+  animation: map-squash 350ms ease-in forwards;
+  overflow: hidden;
+}
+
+@keyframes map-squash {
+  from {
+    transform: scaleY(1);
+    max-height: 30rem;
+  }
+  to {
+    transform: scaleY(0);
+    max-height: 0;
+    opacity: 0;
+    margin: 0;
+    padding-block: 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .flow-node.pulse {
+  .map-sandbox.leaving {
+    animation: none;
+    display: none;
+  }
+}
+
+/* The selection ring is also a box-shadow; keep it steady. */
+.map-pod.pulse[aria-pressed="true"] {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-node.pulse,
+  .map-pod.pulse {
     animation: none;
   }
   .flow-node {
@@ -1085,6 +1149,10 @@ button:disabled {
   color: var(--bad);
 }
 
+.status.idle {
+  color: var(--muted);
+}
+
 .infra-facts {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -1138,6 +1206,74 @@ button:disabled {
   font-weight: 600;
 }
 
+/* The namespace's NetworkPolicies: a count that expands to one line per policy. */
+.map-policies summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+.map-policies ul {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0.25rem 0 0.5rem;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8rem;
+}
+
+.map-policies li {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.map-policy-name {
+  font-weight: 600;
+}
+
+.map-policy-raw {
+  font-size: 0.72rem;
+}
+
+/* A card with a console link: the link sits in the corner and the status shifts left. */
+.map-card-wrap {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+
+.map-card-wrap.has-console .map-title {
+  padding-right: 1.6rem;
+}
+
+.map-console-link {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.map-console-link:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The name gives way so the status (2/2, Completed, Terminating) always fits. */
+.map-title > :first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.map-title > :last-child:not(:first-child) {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .map-containers {
   display: grid;
   gap: 0.1rem;
@@ -1163,6 +1299,9 @@ button:disabled {
   position: relative;
   border: 1px solid var(--border);
   min-width: 0;
+  /* As tall as the edge path, so the path's last ▶ always lands on it. */
+  align-self: stretch;
+  align-content: start;
 }
 
 .map-fence {
@@ -1190,7 +1329,7 @@ button:disabled {
 }
 
 .map-small {
-  grid-template-columns: repeat(auto-fill, minmax(8rem, 12rem));
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 16rem));
 }
 
 .map-sandbox-body {
@@ -1199,7 +1338,8 @@ button:disabled {
   align-items: flex-start;
 }
 
-.map-sandbox-body .map-card {
+.map-sandbox-body .map-card,
+.map-sandbox-body .map-card-wrap {
   flex: 1;
 }
 
@@ -1214,13 +1354,20 @@ button:disabled {
   color: var(--muted);
 }
 
-.map-namespace::before {
+/* Traffic enters the namespace from the last step of the edge path (after any protection layer). */
+.map-enter::after {
   content: "▶";
   position: absolute;
-  left: -1.4rem;
-  top: 1rem;
+  right: -1.4rem;
+  top: 50%;
+  transform: translateY(-50%);
   font-size: 0.8rem;
   color: var(--muted);
+}
+
+/* A protection layer on the path (GKE: Cloud Armor). */
+.map-protection {
+  border-color: var(--accent);
 }
 
 .map-data-col .map-card::before {
@@ -1239,7 +1386,7 @@ button:disabled {
     gap: 1.5rem;
   }
 
-  .map-namespace::before,
+  .map-enter::after,
   .map-data-col .map-card::before {
     content: none;
   }

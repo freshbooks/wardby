@@ -2,13 +2,16 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { describe as describeCluster } from "./adapter";
 import {
+  clusterOf,
   genericCluster,
   genericInfo,
   gkeCluster,
   gkeInfo,
   kindCluster,
   kindInfo,
+  pod,
   RUN_SHA,
+  statesCluster,
   twoRunsCluster,
 } from "./fixtures";
 import { InfraMap } from "./InfraMap";
@@ -42,6 +45,24 @@ describe("InfraMap", () => {
     renderMap();
     const sandbox = screen.getByRole("group", { name: "gVisor sandbox · wardby-run-abc123" });
     expect(within(sandbox).getByText("agent")).toBeInTheDocument();
+  });
+
+  it("pulses an active coding run's card, like a running run on the graph", () => {
+    renderMap();
+    const sandbox = screen.getByRole("group", { name: "gVisor sandbox · wardby-run-abc123" });
+    expect(within(sandbox).getByTitle("wardby-run-abc123")).toHaveClass("pulse");
+    expect(screen.getByRole("button", { name: /control-plane/ })).not.toHaveClass("pulse");
+  });
+
+  it("keeps an ended coding run on the map, marked Ended, with a close button", () => {
+    const props = { selected: null, onSelect: vi.fn(), onOpenRun: vi.fn() };
+    const { rerender } = render(<InfraMap model={gke} {...props} />);
+    const withoutRun = { ...gke, groups: { ...gke.groups, codingRuns: [] } };
+    rerender(<InfraMap model={withoutRun} {...props} />);
+    const sandbox = screen.getByRole("group", { name: "gVisor sandbox · wardby-run-abc123" });
+    expect(sandbox).toHaveClass("ended");
+    expect(within(sandbox).getByText("Ended")).toBeInTheDocument();
+    expect(within(sandbox).getByRole("button", { name: /Close/ })).toBeInTheDocument();
   });
 
   it("lists always-on pods with ready counts, containers and identity", () => {
@@ -142,5 +163,81 @@ describe("InfraMap", () => {
   it("hides the location when the server URL is unknown", () => {
     renderMap(describeCluster(kindCluster, kindInfo));
     expect(screen.getByText("Control plane · outside the cluster")).toBeInTheDocument();
+  });
+
+  describe("pod state", () => {
+    const model = describeCluster(statesCluster, gkeInfo);
+    const card = (name: RegExp) => screen.getByRole("button", { name });
+
+    it("shows Completed (muted) instead of 0/n for a finished job pod", () => {
+      renderMap(model);
+      const c = card(/^wardby-migrateCompleted/);
+      const label = within(c).getByText("Completed");
+      expect(label).toHaveClass("muted");
+      expect(within(c).queryByText(/\d\/\d/)).not.toBeInTheDocument();
+    });
+
+    it("shows Failed in red", () => {
+      renderMap(model);
+      expect(within(card(/^wardby-migrate2Failed/)).getByText("Failed")).toHaveClass("status", "bad");
+    });
+
+    it("labels a terminating pod and does not colour its containers as problems", () => {
+      renderMap(model);
+      const old = screen
+        .getAllByRole("button", { name: /control-plane/ })
+        .find((b) => within(b).queryByText("Terminating"))!;
+      expect(within(old).getByText("Terminating")).toHaveClass("muted");
+      const dot = within(old).getByText("cloud-sql-proxy").querySelector(".infra-dot")!;
+      expect(dot).not.toHaveClass("bad");
+      expect(dot).not.toHaveClass("warn");
+    });
+  });
+
+  describe("NetworkPolicy line", () => {
+    it("always shows a namespace line with the policy count and default deny", () => {
+      renderMap(describeCluster(kindCluster, kindInfo));
+      expect(screen.getByText("2 NetworkPolicies · default deny")).toBeInTheDocument();
+    });
+
+    it("shows each policy's name, plain-English sentence, then the raw rules", () => {
+      renderMap(describeCluster(kindCluster, kindInfo));
+      const item = screen.getByText("wardby-run-egress").closest("li")!;
+      const parts = [...item.children].map((c) => [c.className, c.textContent]);
+      expect(parts).toEqual([
+        ["map-policy-name", "wardby-run-egress"],
+        ["map-policy-intent", "Coding runs can reach the coding proxy on TCP 8080."],
+        [
+          "muted map-policy-raw",
+          "wardby.io/component=coding-run · egress: pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP",
+        ],
+      ]);
+    });
+
+    it("shows the line without any coding run or egress rule, singular for one policy", () => {
+      const c = clusterOf({
+        pod: [pod("wardby-headroom-1-a", { owner: { kind: "ReplicaSet", name: "wardby-headroom-1" } })],
+        network_policy: [
+          {
+            name: "p",
+            podSelector: { app: "x" },
+            policyTypes: ["Ingress"],
+            selectsAll: false,
+            ingressRules: 1,
+            ingress: [],
+            egressRules: [],
+            egress: [],
+          },
+        ],
+      });
+      renderMap(describeCluster(c, gkeInfo));
+      expect(screen.getByText("1 NetworkPolicy")).toBeInTheDocument();
+      expect(document.querySelector(".map-fence")).toBeNull();
+    });
+
+    it("is absent when the namespace has no policies", () => {
+      renderMap(describeCluster(genericCluster, genericInfo));
+      expect(screen.queryByText(/\bNetworkPolic(?:y|ies)\b/)).not.toBeInTheDocument();
+    });
   });
 });

@@ -60,13 +60,14 @@ pub enum Kind {
     Ingress,
     Gateway,
     HttpRoute,
+    BackendPolicy,
     SecretStore,
     ExternalSecret,
     Secret,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 13] = [
         Kind::Pod,
         Kind::Deployment,
         Kind::Job,
@@ -76,6 +77,7 @@ impl Kind {
         Kind::Ingress,
         Kind::Gateway,
         Kind::HttpRoute,
+        Kind::BackendPolicy,
         Kind::SecretStore,
         Kind::ExternalSecret,
         Kind::Secret,
@@ -95,7 +97,7 @@ pub type WatchStream = BoxStream<'static, Result<WatchEvent, ClusterError>>;
 #[async_trait::async_trait]
 pub trait ClusterSource: Send + Sync + 'static {
     async fn namespace_exists(&self, ns: &str) -> Result<(), ClusterError>;
-    /// None when the kind's CRD is not installed (gateways, httproutes, secretstores, externalsecrets).
+    /// None when the kind's CRD is not installed (gateways, httproutes, gcpbackendpolicies, secretstores, externalsecrets).
     async fn watch(&self, kind: Kind, ns: &str) -> Result<Option<WatchStream>, ClusterError>;
 }
 
@@ -261,6 +263,11 @@ impl KubeSource {
 
 const GATEWAY: (&str, &str, &str) = ("gateway.networking.k8s.io", "Gateway", "gateways");
 const HTTP_ROUTE: (&str, &str, &str) = ("gateway.networking.k8s.io", "HTTPRoute", "httproutes");
+const BACKEND_POLICY: (&str, &str, &str) = (
+    "networking.gke.io",
+    "GCPBackendPolicy",
+    "gcpbackendpolicies",
+);
 const SECRET_STORE: (&str, &str, &str) = ("external-secrets.io", "SecretStore", "secretstores");
 const EXTERNAL_SECRET: (&str, &str, &str) =
     ("external-secrets.io", "ExternalSecret", "externalsecrets");
@@ -326,6 +333,13 @@ impl ClusterSource for KubeSource {
                 return self
                     .dynamic(ns, HTTP_ROUTE, |o| {
                         val(model::edge_from_dynamic("httproute", &val(o)))
+                    })
+                    .await;
+            }
+            Kind::BackendPolicy => {
+                return self
+                    .dynamic(ns, BACKEND_POLICY, |o| {
+                        val(model::backend_policy_from(&val(o)))
                     })
                     .await;
             }
@@ -989,6 +1003,7 @@ mod tests {
             for kind in [
                 Kind::Gateway,
                 Kind::HttpRoute,
+                Kind::BackendPolicy,
                 Kind::SecretStore,
                 Kind::ExternalSecret,
             ] {

@@ -36,7 +36,7 @@ function Row({
         <span className="infra-cell" role="cell">
           {pod.containers.map((c) => (
             <span key={c.name} className="infra-container" title={`${c.name}: ${c.reason ?? c.state}`}>
-              <span className={`infra-dot ${containerDot(c)}`} aria-hidden="true" />
+              <span className={`infra-dot ${containerDot(c, pod.terminating)}`} aria-hidden="true" />
               {c.name}
             </span>
           ))}

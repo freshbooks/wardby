@@ -78,6 +78,13 @@ export function TopBar(props: Props) {
     <header className="topbar">
       <div className="topbar-row">
         <span className="brand">wardby</span>
+        <div className="tabs" role="group" aria-label="View">
+          {(["runs", "infra"] as const).map((t) => (
+            <button key={t} type="button" aria-pressed={tab === t} onClick={() => props.onTabChange?.(t)}>
+              {t === "runs" ? "Runs" : "Infrastructure"}
+            </button>
+          ))}
+        </div>
         <label className="inline">
           <span className="sr-only">Server</span>
           <select
@@ -104,18 +111,9 @@ export function TopBar(props: Props) {
           {badge}
         </span>
       </div>
-      <div className="topbar-row">
-        <div className="tabs" role="group" aria-label="View">
-          {(["runs", "infra"] as const).map((t) => (
-            <button key={t} type="button" aria-pressed={tab === t} onClick={() => props.onTabChange?.(t)}>
-              {t === "runs" ? "Runs" : "Infrastructure"}
-            </button>
-          ))}
-        </div>
-      </div>
       {tab === "infra" ? (
         infra && (
-          <div className="topbar-row">
+          <div className="topbar-row infra-row">
             <div className="tabs" role="group" aria-label="Infrastructure view">
               {(["map", "table"] as const).map((m) => (
                 <button key={m} type="button" aria-pressed={infra.mode === m} onClick={() => infra.onModeChange(m)}>
@@ -123,14 +121,17 @@ export function TopBar(props: Props) {
                 </button>
               ))}
             </div>
-            <span className="muted">
-              {infra.context ?? "no context"} · {infra.platformLabel} · ns {infra.namespace ?? "–"} ·{" "}
-              {infra.watching ? "● watching" : "○ disconnected"}
+            <span className="muted infra-status">
+              {infra.platformLabel} · ns {infra.namespace ?? "–"} ·{" "}
+              <span className={`badge ${infra.watching ? "live" : "offline"}`}>
+                {infra.watching ? "● watching" : "○ disconnected"}
+              </span>
             </span>
-            <label className="inline">
+            <label className="inline kube-context">
               <span className="sr-only">Kube context</span>
               <select
                 aria-label="Kube context"
+                title={infra.context ?? undefined}
                 value={infra.context ?? ""}
                 onChange={(e) => infra.onContextChange(e.target.value)}
               >
