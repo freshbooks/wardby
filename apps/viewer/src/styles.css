@@ -660,12 +660,19 @@ button:disabled {
   }
 }
 
-.flow-node.pulse {
+.flow-node.pulse,
+.map-pod.pulse {
   animation: node-pulse 2s ease-in-out infinite;
 }
 
+/* The selection ring is also a box-shadow; keep it steady. */
+.map-pod.pulse[aria-pressed="true"] {
+  animation: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .flow-node.pulse {
+  .flow-node.pulse,
+  .map-pod.pulse {
     animation: none;
   }
   .flow-node {

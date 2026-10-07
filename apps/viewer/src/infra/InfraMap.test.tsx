@@ -47,6 +47,13 @@ describe("InfraMap", () => {
     expect(within(sandbox).getByText("agent")).toBeInTheDocument();
   });
 
+  it("pulses an active coding run's card, like a running run on the graph", () => {
+    renderMap();
+    const sandbox = screen.getByRole("group", { name: "gVisor sandbox · wardby-run-abc123" });
+    expect(within(sandbox).getByTitle("wardby-run-abc123")).toHaveClass("pulse");
+    expect(screen.getByRole("button", { name: /control-plane/ })).not.toHaveClass("pulse");
+  });
+
   it("lists always-on pods with ready counts, containers and identity", () => {
     renderMap();
     const card = screen.getByRole("button", { name: /control-plane/ });

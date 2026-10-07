@@ -73,11 +73,19 @@ function Sandbox({
 }) {
   const label = `${pod.sandboxed && pod.runtime ? pod.runtime : "Pod"} sandbox · ${pod.name}`;
   const sha = pod.runSha;
+  // Pulses like a running run's box on the Runs graph, until the pod ends.
+  const active = !pod.terminating && (pod.phase === "Pending" || pod.phase === "Running");
   return (
     <div className="map-sandbox" role="group" aria-label={label}>
       <span className="map-zone-label">{label}</span>
       <div className="map-sandbox-body">
-        <button type="button" className="map-card map-pod" aria-pressed={selected} title={pod.name} onClick={onSelect}>
+        <button
+          type="button"
+          className={`map-card map-pod${active ? " pulse" : ""}`}
+          aria-pressed={selected}
+          title={pod.name}
+          onClick={onSelect}
+        >
           <span className="map-title">
             <span>{pod.title}</span>
             <Readiness pod={pod} />
