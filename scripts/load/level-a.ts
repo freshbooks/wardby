@@ -31,6 +31,10 @@ const QUICK = process.env.LOAD_QUICK === "1";
 const POOL_MAX = Number(process.env.LOAD_POOL_MAX ?? 10);
 const REPLICAS = Number(process.env.LOAD_REPLICAS ?? 2);
 const OWNER = "load-owner";
+/** Comma-separated overrides, e.g. LOAD_DISPATCH_LEVELS=500,1000. LOAD_SCENARIOS=S2,S3 runs a subset. */
+const levels = (name: string, fallback: number[]): number[] =>
+  process.env[name] ? process.env[name]!.split(",").map(Number) : fallback;
+const SCENARIOS = new Set((process.env.LOAD_SCENARIOS ?? "S1,S2,S3,S4").split(","));
 
 const clients: PrismaClient[] = Array.from({ length: REPLICAS }, () => createPrismaClient(url, { poolMax: POOL_MAX }));
 const db = clients[0]!;
@@ -121,7 +125,7 @@ async function codingAgents(prefix: string, count: number, budgetGroupId: string
 
 /** S1: the scheduler's due check, which loads every scheduled agent and filters in JS. */
 async function scenarioScheduler(): Promise<void> {
-  const sizes = QUICK ? [100, 1000] : [100, 1000, 5000, 10000];
+  const sizes = levels("LOAD_SCHEDULER_LEVELS", QUICK ? [100, 1000] : [100, 1000, 5000, 10000]);
   const now = new Date();
   for (const n of sizes) {
     await reset();
@@ -161,9 +165,9 @@ async function scenarioScheduler(): Promise<void> {
 
 /** S2: concurrent coding dispatches spread over the simulated replicas. */
 async function scenarioDispatch(): Promise<void> {
-  const levels = QUICK ? [10, 50] : [10, 50, 100, 200];
+  const counts = levels("LOAD_DISPATCH_LEVELS", QUICK ? [10, 50] : [10, 50, 100, 200]);
   for (const grouped of [false, true]) {
-    for (const c of levels) {
+    for (const c of counts) {
       await reset();
       let groupId: string | null = null;
       if (grouped) {
@@ -201,8 +205,8 @@ async function scenarioDispatch(): Promise<void> {
 /** S3: many runs racing for K coding slots (advisory lock + counts). */
 async function scenarioSlots(): Promise<void> {
   const cap = 20;
-  const levels = QUICK ? [50] : [50, 200, 500];
-  for (const n of levels) {
+  const counts = levels("LOAD_SLOT_LEVELS", QUICK ? [50] : [50, 200, 500]);
+  for (const n of counts) {
     await reset();
     const agents = await codingAgents(`slot-${n}`, n, null);
     const runIds: string[] = [];
@@ -239,9 +243,9 @@ async function scenarioSlots(): Promise<void> {
 
 /** S4: R active runs each heartbeating every 250 ms (the poll loop's fastest rate). */
 async function scenarioHeartbeat(): Promise<void> {
-  const levels = QUICK ? [20, 100] : [20, 100, 300];
+  const counts = levels("LOAD_HEARTBEAT_LEVELS", QUICK ? [20, 100] : [20, 100, 300]);
   const durationMs = QUICK ? 3000 : 10_000;
-  for (const r of levels) {
+  for (const r of counts) {
     await reset();
     const agents = await codingAgents(`hb-${r}`, r, null);
     const runIds: string[] = [];
@@ -281,10 +285,10 @@ async function main(): Promise<void> {
   console.log(`Level A load test — pool ${POOL_MAX} per replica, ${REPLICAS} replicas${QUICK ? ", quick" : ""}\n`);
   console.log("| Scenario | Parameters | Samples | p50 ms | p95 ms | max ms | wall ms | Notes |");
   console.log("|---|---|---|---|---|---|---|---|");
-  await scenarioScheduler();
-  await scenarioDispatch();
-  await scenarioSlots();
-  await scenarioHeartbeat();
+  if (SCENARIOS.has("S1")) await scenarioScheduler();
+  if (SCENARIOS.has("S2")) await scenarioDispatch();
+  if (SCENARIOS.has("S3")) await scenarioSlots();
+  if (SCENARIOS.has("S4")) await scenarioHeartbeat();
   await reset();
 }
 
