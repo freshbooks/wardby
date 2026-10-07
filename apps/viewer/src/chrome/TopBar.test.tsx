@@ -154,7 +154,11 @@ describe("TopBar tabs", () => {
       />,
     );
     expect(screen.queryByLabelText("Search runs")).not.toBeInTheDocument();
-    expect(screen.getByText("ctx-a · GKE Autopilot · ns wardby · ● watching")).toBeInTheDocument();
+    // The context is shown once, in the picker; the status line leaves it out.
+    expect(screen.getByText("GKE Autopilot · ns wardby ·")).toBeInTheDocument();
+    expect(screen.queryByText(/ctx-a ·/)).not.toBeInTheDocument();
+    expect(screen.getByText("● watching")).toHaveClass("badge", "live");
+    expect(screen.getByLabelText("Kube context")).toHaveAttribute("title", "ctx-a");
     expect(screen.getByRole("button", { name: "Table" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "Map" }));
     expect(onModeChange).toHaveBeenCalledWith("map");
@@ -180,7 +184,10 @@ describe("TopBar tabs", () => {
         }}
       />,
     );
-    expect(screen.getByText("c · Kubernetes · ns w · ○ disconnected")).toBeInTheDocument();
+    expect(screen.getByText("Kubernetes · ns w ·")).toBeInTheDocument();
+    const dot = screen.getByText("○ disconnected");
+    expect(dot).toHaveClass("badge", "offline");
+    expect(dot).not.toHaveClass("live");
   });
 
   it("offers a placeholder when no context is chosen, so the first context can be picked", () => {

@@ -113,7 +113,7 @@ export function TopBar(props: Props) {
       </div>
       {tab === "infra" ? (
         infra && (
-          <div className="topbar-row">
+          <div className="topbar-row infra-row">
             <div className="tabs" role="group" aria-label="Infrastructure view">
               {(["map", "table"] as const).map((m) => (
                 <button key={m} type="button" aria-pressed={infra.mode === m} onClick={() => infra.onModeChange(m)}>
@@ -121,14 +121,17 @@ export function TopBar(props: Props) {
                 </button>
               ))}
             </div>
-            <span className="muted">
-              {infra.context ?? "no context"} · {infra.platformLabel} · ns {infra.namespace ?? "–"} ·{" "}
-              {infra.watching ? "● watching" : "○ disconnected"}
+            <span className="muted infra-status">
+              {infra.platformLabel} · ns {infra.namespace ?? "–"} ·{" "}
+              <span className={`badge ${infra.watching ? "live" : "offline"}`}>
+                {infra.watching ? "● watching" : "○ disconnected"}
+              </span>
             </span>
-            <label className="inline">
+            <label className="inline kube-context">
               <span className="sr-only">Kube context</span>
               <select
                 aria-label="Kube context"
+                title={infra.context ?? undefined}
                 value={infra.context ?? ""}
                 onChange={(e) => infra.onContextChange(e.target.value)}
               >
