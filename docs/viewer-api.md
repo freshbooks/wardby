@@ -143,8 +143,8 @@ it, adding a server, and what an external identity provider client needs.
 ## Response schemas
 
 JSON Schemas for every response and event are in `src/viewer/schemas/` of the
-source tree (`graph-snapshot.schema.json`, `run-detail.schema.json`,
-`infra-info.schema.json`, `viewer-event.schema.json`). Regenerate them with `npm run build:viewer-schemas`.
+source tree (`graph-snapshot.schema.json`, `infra-info.schema.json`,
+`run-detail.schema.json`, `viewer-event.schema.json`). Regenerate them with `npm run build:viewer-schemas`.
 
 ## Proxies and load balancers
 

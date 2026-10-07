@@ -38,4 +38,8 @@ describe("buildInfraInfo", () => {
     expect(buildInfraInfo({ JOB_LAUNCHER: "docker" })).toEqual({ launcher: "docker", kubernetes: null });
     expect(buildInfraInfo({})).toEqual({ launcher: "local", kubernetes: null });
   });
+
+  it("normalises an unknown JOB_LAUNCHER to local", () => {
+    expect(buildInfraInfo({ JOB_LAUNCHER: "k8s" })).toEqual({ launcher: "local", kubernetes: null });
+  });
 });
