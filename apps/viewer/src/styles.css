@@ -1222,13 +1222,16 @@ button:disabled {
 }
 
 .map-policies li {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0 0.5rem;
+  display: grid;
+  gap: 0.1rem;
 }
 
 .map-policy-name {
   font-weight: 600;
+}
+
+.map-policy-raw {
+  font-size: 0.72rem;
 }
 
 /* A card with a console link: the link sits in the corner and the status shifts left. */

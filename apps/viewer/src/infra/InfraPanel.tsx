@@ -90,8 +90,11 @@ export function InfraPanel({ pod, context, namespace, onOpenRun, onClose }: Prop
         <section className="panel-section">
           <h3>NETWORK POLICIES</h3>
           <ul className="panel-list">
-            {pod.policies.map((n) => (
-              <li key={n}>{n}</li>
+            {pod.policyIntents.map((p) => (
+              <li key={p.name}>
+                <strong>{p.name}</strong>
+                <div>{p.intent}</div>
+              </li>
             ))}
           </ul>
         </section>

@@ -200,6 +200,20 @@ describe("InfraMap", () => {
       expect(screen.getByText("2 NetworkPolicies · default deny")).toBeInTheDocument();
     });
 
+    it("shows each policy's name, plain-English sentence, then the raw rules", () => {
+      renderMap(describeCluster(kindCluster, kindInfo));
+      const item = screen.getByText("wardby-run-egress").closest("li")!;
+      const parts = [...item.children].map((c) => [c.className, c.textContent]);
+      expect(parts).toEqual([
+        ["map-policy-name", "wardby-run-egress"],
+        ["map-policy-intent", "Coding runs can reach the coding proxy on TCP 8080."],
+        [
+          "muted map-policy-raw",
+          "wardby.io/component=coding-run · egress: pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP",
+        ],
+      ]);
+    });
+
     it("shows the line without any coding run or egress rule, singular for one policy", () => {
       const c = clusterOf({
         pod: [pod("wardby-headroom-1-a", { owner: { kind: "ReplicaSet", name: "wardby-headroom-1" } })],
@@ -210,6 +224,8 @@ describe("InfraMap", () => {
             policyTypes: ["Ingress"],
             selectsAll: false,
             ingressRules: 1,
+            ingress: [],
+            egressRules: [],
             egress: [],
           },
         ],

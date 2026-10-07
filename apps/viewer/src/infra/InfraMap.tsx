@@ -236,7 +236,8 @@ export function InfraMap({
               {model.isolation.policies.list.map((np) => (
                 <li key={np.name}>
                   <span className="map-policy-name">{np.name}</span>
-                  <span className="muted">
+                  <span className="map-policy-intent">{np.intent}</span>
+                  <span className="muted map-policy-raw">
                     {np.selects} · {np.rules.join(" · ")}
                   </span>
                 </li>

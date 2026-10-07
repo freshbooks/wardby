@@ -157,7 +157,10 @@ describe("InfraPanel", () => {
     const items = within(screen.getByRole("heading", { name: "NETWORK POLICIES" }).parentElement!).getAllByRole(
       "listitem",
     );
-    expect(items.map((li) => li.textContent)).toEqual(["default-deny", "wardby-run-egress"]);
+    expect(items.map((li) => li.textContent)).toEqual([
+      "default-denyBlocks all traffic to and from every pod, unless another policy allows it.",
+      "wardby-run-egressCoding runs can reach the coding proxy on TCP 8080.",
+    ]);
     await screen.findByText("No recent events");
   });
 
