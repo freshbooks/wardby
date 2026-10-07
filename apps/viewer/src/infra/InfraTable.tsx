@@ -100,6 +100,21 @@ export function InfraTable({ model, selected, onSelect, onOpenRun, jobFinishedAt
             </span>
           ))}
         </div>
+        {!model.controlPlane.inCluster && (
+          <div role="rowgroup">
+            <h3 className="infra-group">OUTSIDE THE CLUSTER</h3>
+            <div className="infra-row-wrap" role="row">
+              <div className="infra-row">
+                <span className="infra-cell pod-name" role="cell">
+                  control-plane
+                </span>
+                <span className="infra-cell muted" role="cell">
+                  {model.controlPlane.location}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
         {sections.map(([title, pods]) => {
           const rows = pods.filter(keep);
           return (

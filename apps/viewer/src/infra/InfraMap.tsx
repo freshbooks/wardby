@@ -68,7 +68,7 @@ function Sandbox({
   onSelect: () => void;
   onOpenRun: (sha: string) => void;
 }) {
-  const label = `${pod.runtime ?? "Pod"} sandbox · ${pod.name}`;
+  const label = `${pod.runtime && !pod.runtime.startsWith("none") ? pod.runtime : "Pod"} sandbox · ${pod.name}`;
   const sha = pod.runSha;
   return (
     <div className="map-sandbox" role="group" aria-label={label}>
@@ -114,20 +114,43 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
   return (
     <div className="infra-map">
       <div className="map-col map-edge-col">
-        <div className="map-card map-static map-flow">
-          <span className="map-title">Internet</span>
-          {hosts.map((h) => (
-            <span key={h} className="muted">
-              {h}
-            </span>
-          ))}
-        </div>
-        {model.edge.map((e, i) => (
-          <div key={`${e.label}-${i}`} className="map-card map-static map-flow">
-            <span className="map-title">{e.label}</span>
-            {e.detail.length > 0 && <span className="muted">{e.detail.join(" · ")}</span>}
-          </div>
-        ))}
+        {model.controlPlane.inCluster ? (
+          <>
+            <div className="map-card map-static map-flow">
+              <span className="map-title">Internet</span>
+              {hosts.map((h) => (
+                <span key={h} className="muted">
+                  {h}
+                </span>
+              ))}
+            </div>
+            {model.edge.map((e, i) => (
+              <div key={`${e.label}-${i}`} className="map-card map-static map-flow">
+                <span className="map-title">{e.label}</span>
+                {e.detail.length > 0 && <span className="muted">{e.detail.join(" · ")}</span>}
+              </div>
+            ))}
+          </>
+        ) : (
+          <>
+            <div className="map-card map-static map-flow">
+              <span className="map-title">
+                {`Control plane · outside the cluster · ${model.controlPlane.location}`}
+              </span>
+            </div>
+            {model.edge.length === 0 && (
+              <div className="map-card map-static">
+                <span className="map-title">Local — no ingress</span>
+              </div>
+            )}
+            {model.edge.map((e, i) => (
+              <div key={`${e.label}-${i}`} className="map-card map-static map-flow">
+                <span className="map-title">{e.label}</span>
+                {e.detail.length > 0 && <span className="muted">{e.detail.join(" · ")}</span>}
+              </div>
+            ))}
+          </>
+        )}
       </div>
 
       <div className="map-zone map-namespace">

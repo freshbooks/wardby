@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { describe as describeCluster } from "./adapter";
-import { genericCluster, genericInfo, gkeCluster, gkeInfo, RUN_SHA } from "./fixtures";
+import { genericCluster, genericInfo, gkeCluster, gkeInfo, kindCluster, kindInfo, RUN_SHA } from "./fixtures";
 import { InfraMap } from "./InfraMap";
 
 const gke = describeCluster(gkeCluster, gkeInfo);
@@ -99,5 +99,14 @@ describe("InfraMap", () => {
     );
     expect(screen.getByRole("button", { name: /wardby-migrate/ })).toBeInTheDocument();
     expect(screen.getByText("jobs")).toBeInTheDocument();
+  });
+
+  it("shows an outside control plane card and a local edge for kind", () => {
+    const kind = describeCluster(kindCluster, kindInfo, { serverUrl: "http://127.0.0.1:18080/mcp", context: "kind-x" });
+    renderMap(kind);
+    expect(screen.getByText("Control plane · outside the cluster · 127.0.0.1:18080")).toBeInTheDocument();
+    expect(screen.getByText("Local — no ingress")).toBeInTheDocument();
+    expect(screen.queryByText("Internet")).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Pod sandbox · wardby-run-abc123" })).toBeInTheDocument();
   });
 });

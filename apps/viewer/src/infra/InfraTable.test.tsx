@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { describe as describeCluster } from "./adapter";
-import { gkeCluster, gkeInfo, RUN_SHA } from "./fixtures";
+import { gkeCluster, gkeInfo, kindCluster, kindInfo, RUN_SHA } from "./fixtures";
 import { InfraTable } from "./InfraTable";
 
 const model = describeCluster(gkeCluster, gkeInfo);
@@ -72,5 +72,13 @@ describe("InfraTable", () => {
       />,
     );
     expect(screen.getByRole("button", { name: /wardby-migrate/ })).toBeInTheDocument();
+  });
+
+  it("shows an OUTSIDE THE CLUSTER group for an external control plane", () => {
+    const kind = describeCluster(kindCluster, kindInfo, { serverUrl: "http://127.0.0.1:18080/mcp" });
+    render(<InfraTable model={kind} selected={null} onSelect={vi.fn()} onOpenRun={vi.fn()} />);
+    expect(screen.getByText("OUTSIDE THE CLUSTER")).toBeInTheDocument();
+    expect(screen.getByText("127.0.0.1:18080")).toBeInTheDocument();
+    expect(screen.queryByText("OUTSIDE THE CLUSTER")).toBeInTheDocument();
   });
 });

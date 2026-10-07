@@ -10,7 +10,12 @@ import type {
   KindItem,
 } from "./types";
 
-export type Platform = "gke" | "eks" | "generic";
+export type Platform = "gke" | "eks" | "kind" | "generic";
+
+export interface DescribeOpts {
+  serverUrl?: string;
+  context?: string | null;
+}
 export interface EdgeView {
   label: string;
   detail: string[];
@@ -36,6 +41,7 @@ export interface DataStoreView {
 }
 export interface InfraModel {
   platform: Platform;
+  controlPlane: { inCluster: true } | { inCluster: false; location: string };
   edge: EdgeView[];
   groups: { alwaysOn: PodView[]; codingRuns: PodView[]; jobs: PodView[] };
   isolation: { egressRules: string[]; sandbox: string | null };
@@ -138,17 +144,37 @@ const RULES: Record<Platform, PlatformRules> = {
       stores.some((s) => s.provider === "gcpsm") ? "Secret Manager" : stores.length ? "External Secrets" : null,
     sandbox: (rc) => rc,
   },
+  kind: {
+    edge: genericEdge,
+    identity: (sa) => (sa ? `SA ${sa.name}` : null),
+    database: genericDatabase,
+    secrets: (stores) => (stores.length ? "External Secrets" : null),
+    sandbox: (rc) => rc ?? "none (container runtime)",
+  },
   // PR 3 adds EKS; platformOf never returns it until then.
   eks: undefined as never,
 };
 
-export function platformOf(info: InfraInfo, cluster: ClusterState): Platform {
+export function platformOf(info: InfraInfo, cluster: ClusterState, opts: DescribeOpts = {}): Platform {
   // The server reports "generic" or "gke-autopilot"; other GKE (Standard) is detected only via the SA fallback below.
   if (info.kubernetes?.platform.startsWith("gke")) return "gke";
   for (const sa of cluster.objects.service_account.values()) {
     if ("iam.gke.io/gcp-service-account" in sa.identity) return "gke";
   }
+  if (opts.context?.startsWith("kind-")) return "kind";
+  for (const p of cluster.objects.pod.values()) {
+    if (p.node && (p.node.endsWith("-control-plane") || /-worker\d*$/.test(p.node))) return "kind";
+  }
   return "generic";
+}
+
+function hostPort(url: string | undefined): string {
+  if (!url) return "unknown";
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
+  }
 }
 
 const ALWAYS_ON: [prefix: string, title: string][] = [
@@ -177,8 +203,8 @@ function matches(selector: Record<string, string | undefined>, labels: Record<st
   return entries.length > 0 && entries.every(([k, v]) => labels[k] === v);
 }
 
-export function describe(cluster: ClusterState, info: InfraInfo): InfraModel {
-  const platform = platformOf(info, cluster);
+export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeOpts = {}): InfraModel {
+  const platform = platformOf(info, cluster, opts);
   const rules = RULES[platform];
   const k8s = info.kubernetes;
   const componentLabel = k8s?.componentLabel ?? {};
@@ -193,7 +219,7 @@ export function describe(cluster: ClusterState, info: InfraInfo): InfraModel {
       title,
       status: podStatus(p),
       ready: p.ready,
-      runtime: runtimeName(p.runtimeClass),
+      runtime: rules.sandbox(runtimeName(p.runtimeClass)),
       node: p.node,
       identity: rules.identity(sa),
       containers: p.containers,
@@ -241,6 +267,9 @@ export function describe(cluster: ClusterState, info: InfraInfo): InfraModel {
 
   return {
     platform,
+    controlPlane: alwaysOn.some((p) => p.title === "control-plane")
+      ? { inCluster: true }
+      : { inCluster: false, location: hostPort(opts.serverUrl) },
     edge: edges.map(rules.edge),
     groups: { alwaysOn, codingRuns, jobs },
     isolation: { egressRules, sandbox: rules.sandbox(runtimeName(k8s?.runtimeClass ?? null)) },

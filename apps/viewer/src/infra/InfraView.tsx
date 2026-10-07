@@ -30,6 +30,8 @@ function errorText(error: ClusterError | { kind: string; message?: string }, nam
 
 interface Props {
   cluster: UseCluster;
+  /** The selected server; where an out-of-cluster control plane lives. */
+  serverUrl?: string;
   mode: InfraMode;
   selectedPod: string | null;
   onSelectPod: (pod: string | null) => void;
@@ -37,9 +39,12 @@ interface Props {
   onRetry: () => void;
 }
 
-export function InfraView({ cluster: c, mode, selectedPod, onSelectPod, onOpenRun, onRetry }: Props) {
+export function InfraView({ cluster: c, serverUrl, mode, selectedPod, onSelectPod, onOpenRun, onRetry }: Props) {
   const { info, cluster, context } = c;
-  const model = useMemo(() => (info?.kubernetes ? describe(cluster, info) : null), [cluster, info]);
+  const model = useMemo(
+    () => (info?.kubernetes ? describe(cluster, info, { serverUrl, context }) : null),
+    [cluster, info, serverUrl, context],
+  );
   const jobFinishedAt = useMemo(
     () => new Map([...cluster.objects.job.values()].map((j) => [j.name, j.finishedAt])),
     [cluster.objects.job],

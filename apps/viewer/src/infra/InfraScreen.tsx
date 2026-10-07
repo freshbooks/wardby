@@ -55,11 +55,12 @@ export function InfraScreen({
   const [waiting, setWaiting] = useState<{ sha: string; chars: number } | null>(null);
 
   const { info } = cluster;
+  const opts = useMemo(() => ({ serverUrl: server.url, context: cluster.context }), [server.url, cluster.context]);
   const model = useMemo(
-    () => (info?.kubernetes && !cluster.error ? describe(cluster.cluster, info) : null),
-    [cluster.cluster, cluster.error, info],
+    () => (info?.kubernetes && !cluster.error ? describe(cluster.cluster, info, opts) : null),
+    [cluster.cluster, cluster.error, info, opts],
   );
-  const platform = info ? platformOf(info, cluster.cluster) : "generic";
+  const platform = info ? platformOf(info, cluster.cluster, opts) : "generic";
 
   const findRun = useCallback(
     async (sha: string, chars: number) => {
@@ -137,6 +138,7 @@ export function InfraScreen({
         {note && <p className="muted">{note}</p>}
         <InfraView
           cluster={cluster}
+          serverUrl={server.url}
           mode={mode}
           selectedPod={selectedPod}
           onSelectPod={setSelectedPod}

@@ -1,6 +1,16 @@
 import { describe as suite, expect, it } from "vitest";
 import { describe, parseCpu, parseMemory, platformOf } from "./adapter";
-import { clusterOf, container, genericCluster, genericInfo, gkeCluster, gkeInfo, pod } from "./fixtures";
+import {
+  clusterOf,
+  container,
+  genericCluster,
+  genericInfo,
+  gkeCluster,
+  gkeInfo,
+  kindCluster,
+  kindInfo,
+  pod,
+} from "./fixtures";
 
 suite("describe", () => {
   it("labels a GKE footprint", () => {
@@ -110,5 +120,37 @@ suite("quantities", () => {
     expect(parseMemory("1048576")).toBe(1);
     expect(parseMemory("1024Ki")).toBe(1);
     expect(parseMemory(null)).toBe(0);
+  });
+});
+
+suite("kind and out-of-cluster control planes", () => {
+  it("labels a kind cluster with the control plane outside it", () => {
+    const m = describe(kindCluster, kindInfo, {
+      serverUrl: "http://127.0.0.1:18080/mcp",
+      context: "kind-wardby-coding",
+    });
+    expect(m.platform).toBe("kind");
+    expect(m.controlPlane).toEqual({ inCluster: false, location: "127.0.0.1:18080" });
+    expect(m.edge).toEqual([]);
+    expect(m.groups.alwaysOn.map((p) => p.title)).toEqual(["coding-proxy"]);
+    expect(m.groups.codingRuns[0].runtime).toBe("none (container runtime)");
+    expect(m.dataStores[0].label).toBe("Postgres (external)");
+  });
+
+  it("detects kind from the context name or node names", () => {
+    expect(platformOf(genericInfo, kindCluster, { context: "kind-dev" })).toBe("kind");
+    expect(platformOf(genericInfo, kindCluster, {})).toBe("kind");
+    expect(platformOf(genericInfo, genericCluster, { context: "prod" })).toBe("generic");
+  });
+
+  it("keeps the control plane in-cluster on GKE", () => {
+    expect(describe(gkeCluster, gkeInfo).controlPlane).toEqual({ inCluster: true });
+  });
+
+  it("reports an outside control plane on any platform", () => {
+    const m = describe(clusterOf({}), genericInfo, {
+      serverUrl: "https://wardby.internal:8443/x",
+    });
+    expect(m.controlPlane).toEqual({ inCluster: false, location: "wardby.internal:8443" });
   });
 });

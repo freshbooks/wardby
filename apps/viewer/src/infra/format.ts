@@ -4,6 +4,7 @@ import { parseCpu, parseMemory, type Platform, type PodView } from "./adapter";
 export function platformLabel(platform: Platform, info: InfraInfo | null): string {
   if (platform === "gke") return info?.kubernetes?.platform === "gke-autopilot" ? "GKE Autopilot" : "GKE";
   if (platform === "eks") return "EKS";
+  if (platform === "kind") return "kind";
   return "Kubernetes";
 }
 

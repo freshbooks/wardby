@@ -150,3 +150,32 @@ export const genericCluster: ClusterState = clusterOf({
     }),
   ],
 });
+
+export const kindInfo: InfraInfo = {
+  launcher: "kubernetes",
+  kubernetes: { ...gkeInfo.kubernetes!, namespace: "wardby-coding", platform: "generic", runtimeClass: null },
+};
+
+// deploy/kind-coding: the control plane runs on the developer's machine; only the proxy and run pods are in-cluster.
+export const kindCluster: ClusterState = clusterOf({
+  pod: [
+    pod("wardby-coding-proxy-7c9d-fghij", {
+      owner: { kind: "ReplicaSet", name: "wardby-coding-proxy-7c9d" },
+      node: "wardby-coding-control-plane",
+    }),
+    pod("wardby-run-abc123", {
+      labels: { ...labels.component, "wardby.io/run-sha256": RUN_SHA },
+      node: "wardby-coding-control-plane",
+      containers: [container({ name: "agent" })],
+    }),
+  ],
+  network_policy: [
+    { name: "default-deny", podSelector: {}, policyTypes: ["Ingress", "Egress"], egress: [] },
+    {
+      name: "wardby-run-egress",
+      podSelector: labels.component,
+      policyTypes: ["Egress"],
+      egress: ["pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP"],
+    },
+  ],
+});
