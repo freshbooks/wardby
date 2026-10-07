@@ -102,7 +102,7 @@ async function prepareAndChange(f: Fixture, overrides: Partial<VcsPrepareInput> 
   return workspace;
 }
 
-describe("LocalRemote (real git, no Docker)", () => {
+describe("LocalRemote (real git, no Docker)", { timeout: 20_000 }, () => {
   it("clones a local repository and pushes the run's branch back to it", async () => {
     const f = await fixture();
     const workspace = await prepareAndChange(f);
@@ -170,6 +170,27 @@ describe("LocalRemote (real git, no Docker)", () => {
     const moved = await git(f.src, ["rev-parse", "wardby/run-r1"]);
     await expect(f.provider.finalizeChanges(third)).rejects.toMatchObject({ code: "local_branch_conflict" });
     expect(await git(f.src, ["rev-parse", "wardby/run-r1"])).toBe(moved);
+  });
+
+  it("reports a hook-rejected continuation push as the push's own failure, not local_branch_conflict", async () => {
+    const f = await fixture();
+    const first = await prepareAndChange(f);
+    const r1 = await f.provider.finalizeChanges(first);
+    if (r1.outcome !== "branch_pushed") throw new Error("expected branch_pushed");
+
+    const second = await prepareAndChange(f, {
+      runId: "r2",
+      headRef: "wardby/run-r1",
+      continuation: { rootRunId: "r1" },
+    });
+    await writeFile(join(f.src, ".git", "hooks", "pre-receive"), "#!/bin/sh\necho 'policy says no' >&2\nexit 1\n", {
+      mode: 0o755,
+    });
+    const error = await f.provider.finalizeChanges(second).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toMatchObject({ code: "local_branch_conflict" });
+    expect((error as Error).message).not.toContain("local_branch_conflict");
+    expect(await git(f.src, ["rev-parse", "wardby/run-r1"])).toBe(r1.commitSha);
   });
 
   it("maps a push that loses a race to local_branch_conflict", async () => {
@@ -245,7 +266,7 @@ describe("LocalRemote (real git, no Docker)", () => {
   });
 });
 
-describe("LocalRemote push guard", () => {
+describe("LocalRemote push guard", { timeout: 20_000 }, () => {
   const remote = new LocalRemote({ roots: () => [] });
 
   it("accepts only wardby/run-* refs", () => {

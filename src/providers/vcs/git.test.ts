@@ -104,6 +104,8 @@ class ScriptedGitRunner implements GitCommandRunner {
   remoteSha: string | null = null;
   remoteUrl = REMOTE_URL;
   pushFails = false;
+  /** When set alongside `pushFails`, the remote branch moves here as the push fails (a racing writer). */
+  remoteShaOnFailedPush: string | null = null;
   headRef = "wardby/run-run-1";
 
   async run(args: readonly string[], options?: GitCommandOptions): Promise<GitCommandResult> {
@@ -172,7 +174,10 @@ class ScriptedGitRunner implements GitCommandRunner {
       };
     }
     if (command === "push") {
-      if (this.pushFails) throw new GitCommandError(1, "push rejected");
+      if (this.pushFails) {
+        if (this.remoteShaOnFailedPush) this.remoteSha = this.remoteShaOnFailedPush;
+        throw new GitCommandError(1, "push rejected");
+      }
       this.remoteSha = this.headSha;
     }
     return { stdout: "", stderr: "" };
@@ -565,6 +570,27 @@ describe("GitVcsProvider", () => {
       const prepared = await provider.prepareWorkspace(continuationInput());
       git.changedPaths = ["CODEOWNERS"];
       await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_protected_path:CODEOWNERS");
+    });
+
+    it("propagates the push's own failure when the remote branch still sits at baseCommit (not a conflict)", async () => {
+      const { provider, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      git.remoteSha = BASE_SHA;
+      git.pushFails = true;
+      const failure = provider.finalizeChanges(prepared);
+      await expect(failure).rejects.toThrow("push rejected");
+      await expect(failure).rejects.not.toThrow("vcs_head_ref_conflict");
+    });
+
+    it("reports a conflict when the push fails because the remote branch raced to another commit", async () => {
+      const { provider, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      git.remoteSha = BASE_SHA;
+      git.pushFails = true;
+      git.remoteShaOnFailedPush = OTHER_SHA;
+      await expect(provider.finalizeChanges(prepared)).rejects.toThrow("vcs_head_ref_conflict");
     });
 
     it("still rejects a genuine conflict: the remote branch moved to neither baseCommit nor our new commit", async () => {

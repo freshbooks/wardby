@@ -754,9 +754,15 @@ export class GitVcsProvider implements VcsProvider {
       } catch (error) {
         const after = await this.remoteHead(workspace, auth);
         if (after === commitSha) return;
-        // The branch moved between the check above and the push: report it as the
-        // remote's conflict rather than the push's own (non-fast-forward) failure.
-        if (after !== null) throw this.remote.conflictError();
+        // The branch moved between the check above and the push (to something
+        // other than where we started or where we were going): report it as the
+        // remote's conflict rather than the push's own (non-fast-forward)
+        // failure. A remote still at baseCommit (a continuation) or still absent
+        // means the push itself failed -- auth, a protected branch, a network
+        // error, a rejecting hook -- so that error is the one to surface.
+        if (after !== null && after !== workspace.baseCommit && after !== commitSha) {
+          throw this.remote.conflictError();
+        }
         throw error;
       }
     });
