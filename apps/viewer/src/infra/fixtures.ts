@@ -1,10 +1,18 @@
 import type { InfraInfo } from "../api/types";
 import { initialCluster } from "./state";
-import type { ClusterKind, ClusterState, InfraContainer, InfraEdge, InfraPod, KindItems } from "./types";
+import type { ClusterKind, ClusterState, InfraContainer, InfraEdge, InfraPod, KindItems, PolicyRule } from "./types";
 
 // Neutral fixtures for the platform adapter and the Infrastructure tab.
 
 export const RUN_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+/** The run egress policy's one rule: the coding proxy on 8080/TCP (matches the `egress` summary string). */
+const PROXY_EGRESS: PolicyRule[] = [
+  {
+    peers: [{ kind: "pods", podLabels: { "app.kubernetes.io/name": "wardby-coding-proxy" }, namespaceLabels: null }],
+    ports: [{ port: 8080, protocol: "TCP" }],
+  },
+];
 
 const labels = {
   component: { "wardby.io/component": "coding-run" },
@@ -138,6 +146,8 @@ export const gkeCluster: ClusterState = clusterOf({
       policyTypes: ["Egress"],
       selectsAll: false,
       ingressRules: 0,
+      ingress: [],
+      egressRules: PROXY_EGRESS,
       egress: ["pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP"],
     },
     {
@@ -146,6 +156,8 @@ export const gkeCluster: ClusterState = clusterOf({
       policyTypes: ["Egress"],
       selectsAll: false,
       ingressRules: 0,
+      ingress: [],
+      egressRules: [],
       egress: ["anywhere"],
     },
   ],
@@ -200,6 +212,8 @@ export const kindCluster: ClusterState = clusterOf({
       policyTypes: ["Ingress", "Egress"],
       selectsAll: true,
       ingressRules: 0,
+      ingress: [],
+      egressRules: [],
       egress: [],
     },
     {
@@ -208,6 +222,8 @@ export const kindCluster: ClusterState = clusterOf({
       policyTypes: ["Egress"],
       selectsAll: false,
       ingressRules: 0,
+      ingress: [],
+      egressRules: PROXY_EGRESS,
       egress: ["pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP"],
     },
   ],
@@ -223,6 +239,8 @@ const runPolicy = (sha: string, egress: string[]) => ({
   policyTypes: ["Egress"],
   selectsAll: false,
   ingressRules: 0,
+  ingress: [],
+  egressRules: egress.length ? PROXY_EGRESS : [],
   egress,
 });
 

@@ -38,6 +38,8 @@ const netpol = (over: Partial<InfraNetworkPolicy> = {}): InfraNetworkPolicy => (
   policyTypes: ["Ingress", "Egress"],
   selectsAll: true,
   ingressRules: 0,
+  ingress: [],
+  egressRules: [],
   egress: [],
   ...over,
 });

@@ -10,6 +10,9 @@ import type {
   InfraSecretStore,
   InfraServiceAccount,
   KindItem,
+  PolicyPeer,
+  PolicyPort,
+  PolicyRule,
 } from "./types";
 
 /** Like kubectl's READY: one-shot init containers are setup steps, not part of the count. */
@@ -51,6 +54,8 @@ export interface PodView {
   egress: string[];
   /** Names of the NetworkPolicies that select this pod. */
   policies: string[];
+  /** What each of those policies means, in plain English. */
+  policyIntents: { name: string; intent: string }[];
   requests: { cpuMillis: number; memoryMiB: number };
   startedAt: string | null;
 }
@@ -60,6 +65,8 @@ export interface PolicyView {
   selects: string;
   /** e.g. "denies all", "ingress: 2 rules", "egress: <rule>, …". */
   rules: string[];
+  /** Plain-English sentences saying what the policy allows or blocks. */
+  intent: string;
 }
 export interface DataStoreView {
   label: string;
@@ -124,6 +131,8 @@ interface PlatformRules {
   sandbox(runtimeClass: string | null): string | null;
   /** A link to the pod in the provider's console; `context` is the kube context name. */
   podConsole(context: string | null | undefined, namespace: string, pod: string): { url: string; label: string } | null;
+  /** A provider-specific name for a peer ("Google's load balancer"), or null to fall back to the literal address. */
+  namedPeer(peer: PolicyPeer, ports: PolicyPort[]): string | null;
 }
 
 /** gcloud names GKE contexts `gke_<project>_<location>_<cluster>` (none of the parts contain `_`). */
@@ -204,6 +213,28 @@ const gkeDatabase = (alwaysOn: PodView[]): DataStoreView =>
     ? { label: "Cloud SQL", detail: ["via Auth Proxy", "IAM login"] }
     : genericDatabase();
 
+const GKE_LOAD_BALANCER_RANGES = ["130.211.0.0/22", "35.191.0.0/16"];
+const GKE_METADATA_IPS = ["169.254.169.254", "169.254.169.252"];
+const GKE_NODE_LOCAL_DNS = "169.254.20.10";
+const CLOUD_SQL_PROXY_PORT = 3307;
+
+/** The address of a single-host CIDR (a /32 or a bare IP), else null. */
+function singleHost(cidr: string): string | null {
+  const [ip, bits] = cidr.split("/");
+  return bits === undefined || bits === "32" ? ip : null;
+}
+
+function gkeNamedPeer(peer: PolicyPeer, ports: PolicyPort[]): string | null {
+  if (peer.kind !== "ip") return null;
+  if (GKE_LOAD_BALANCER_RANGES.includes(peer.cidr)) return "Google's load balancer";
+  const host = singleHost(peer.cidr);
+  if (!host) return null;
+  if (GKE_METADATA_IPS.includes(host)) return "the GKE metadata server";
+  if (host === GKE_NODE_LOCAL_DNS) return DNS_PHRASE;
+  if (ports.some((p) => p.port === CLOUD_SQL_PROXY_PORT)) return `Cloud SQL (${host}:${CLOUD_SQL_PROXY_PORT})`;
+  return null;
+}
+
 const GENERIC_RULES: PlatformRules = {
   edge: genericEdge,
   identity: (sa) => (sa ? `SA ${sa.name}` : null),
@@ -211,6 +242,7 @@ const GENERIC_RULES: PlatformRules = {
   secrets: (stores) => (stores.length ? "External Secrets" : null),
   sandbox: (rc) => rc,
   podConsole: () => null,
+  namedPeer: () => null,
 };
 
 const RULES: Record<Platform, PlatformRules> = {
@@ -223,6 +255,7 @@ const RULES: Record<Platform, PlatformRules> = {
       stores.some((s) => s.provider === "gcpsm") ? "Secret Manager" : stores.length ? "External Secrets" : null,
     sandbox: (rc) => rc,
     podConsole: gkePodConsole,
+    namedPeer: gkeNamedPeer,
   },
   kind: { ...GENERIC_RULES, sandbox: (rc) => rc ?? "none (container runtime)" },
   // PR 3 adds EKS; platformOf never returns it until then.
@@ -304,23 +337,195 @@ function deniesAll(np: InfraNetworkPolicy): boolean {
   return types.every((t) => (t === "Ingress" ? np.ingressRules === 0 : t === "Egress" ? np.egress.length === 0 : true));
 }
 
-function policyView(np: InfraNetworkPolicy): PolicyView {
+// ---- NetworkPolicy intent sentences -------------------------------------------------------------
+
+const DNS_PHRASE = "look up DNS names";
+const INTERNET_CIDRS = ["0.0.0.0/0", "::/0"];
+
+/** "A", "A and B", "A, B and C". */
+export function joinNatural(items: string[]): string {
+  const xs = [...new Set(items)];
+  if (xs.length <= 1) return xs.join("");
+  return `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
+}
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** Names the pods a label set picks out: "the coding proxy", "coding runs", "every pod", else k=v text. */
+export function podsName(labels: Record<string, string>): string {
+  const entries = Object.entries(labels);
+  if (entries.length === 0) return "every pod";
+  if (entries.length === 1) {
+    const [k, v] = entries[0];
+    if (k === "app.kubernetes.io/name" && v.startsWith("wardby-") && v.length > "wardby-".length)
+      return `the ${v.slice("wardby-".length).replace(/-/g, " ")}`;
+    if (k === "wardby.io/component" && v === "coding-run") return "coding runs";
+  }
+  return entries.map(([k, v]) => `${k}=${v}`).join(", ");
+}
+
+const isKubeDns = (labels: Record<string, string>) =>
+  Object.keys(labels).length === 1 && labels["k8s-app"] === "kube-dns";
+
+function namespaceName(labels: Record<string, string>): string {
+  const only = Object.entries(labels);
+  if (only.length === 1 && only[0][0] === "kubernetes.io/metadata.name") return only[0][1];
+  return only.map(([k, v]) => `${k}=${v}`).join(", ");
+}
+
+const isPort = (p: PolicyPort, n: number, protocol = "TCP") => p.port === n && p.protocol === protocol;
+
+/** "port 8787", "ports 8787 and 8788", "UDP port 53"; empty list is "" (every port). */
+function portsText(ports: PolicyPort[]): string {
+  const byProtocol = new Map<string, (number | string)[]>();
+  const anyPort: string[] = [];
+  for (const p of ports) {
+    if (p.port === null) anyPort.push(p.protocol);
+    else byProtocol.set(p.protocol, [...(byProtocol.get(p.protocol) ?? []), p.port]);
+  }
+  const parts = [...byProtocol].map(([protocol, nums]) => {
+    const prefix = protocol === "TCP" ? "" : `${protocol} `;
+    return `${prefix}port${nums.length === 1 ? "" : "s"} ${joinNatural(nums.map(String))}`;
+  });
+  for (const protocol of anyPort) parts.push(protocol === "TCP" ? "any port" : `any ${protocol} port`);
+  return joinNatural(parts);
+}
+
+/** The literal form: "TCP 9000", "TCP 80 and 443", "UDP 53". */
+function portsLiteral(ports: PolicyPort[]): string {
+  const byProtocol = new Map<string, string[]>();
+  for (const p of ports) byProtocol.set(p.protocol, [...(byProtocol.get(p.protocol) ?? []), String(p.port ?? "any")]);
+  return joinNatural([...byProtocol].map(([protocol, nums]) => `${protocol} ${joinNatural(nums)}`));
+}
+
+function peerLiteral(peer: PolicyPeer, anyText: string): string {
+  if (peer.kind === "any") return anyText;
+  if (peer.kind === "ip") return peer.except.length ? `${peer.cidr} (except ${peer.except.join(", ")})` : peer.cidr;
+  const pods = podsName(peer.podLabels);
+  if (!peer.namespaceLabels) return pods;
+  return `${pods} in namespace ${namespaceName(peer.namespaceLabels)}`;
+}
+
+function ingressClause(rule: PolicyRule, rules: PlatformRules): { peers: string; ports: string } {
+  const peers = rule.peers.map((p) =>
+    p.kind === "any" ? "anyone" : (rules.namedPeer(p, rule.ports) ?? peerLiteral(p, "anyone")),
+  );
+  return { peers: peers.includes("anyone") ? "anyone" : joinNatural(peers), ports: portsText(rule.ports) };
+}
+
+function ingressSentence(subject: string, ingress: PolicyRule[], rules: PlatformRules): string {
+  const clauses = ingress.map((r) => ingressClause(r, rules));
+  const anyone = clauses.some((c) => c.peers === "anyone");
+  if (clauses.length === 1) {
+    const [c] = clauses;
+    return `${anyone ? "Anyone" : `Only ${c.peers}`} can connect to ${subject}${c.ports ? `, on ${c.ports}` : ""}.`;
+  }
+  const list = joinNatural(clauses.map((c) => (c.ports ? `${c.peers} (on ${c.ports})` : c.peers)));
+  return `${anyone ? capitalize(list) : `Only ${list}`} can connect to ${subject}.`;
+}
+
+/** The "reach ..." noun phrases for one egress rule, plus whether it is a DNS lookup. */
+function egressPhrases(rule: PolicyRule, rules: PlatformRules): { dns: boolean; reach: string[] } {
+  if (rule.ports.some((p) => p.port === 53)) return { dns: true, reach: [] };
+  let dns = false;
+  const reach: string[] = [];
+  const literals: string[] = [];
+  for (const peer of rule.peers) {
+    const named = rules.namedPeer(peer, rule.ports);
+    if (named === DNS_PHRASE || (peer.kind === "pods" && isKubeDns(peer.podLabels))) {
+      dns = true;
+    } else if (named) {
+      reach.push(named);
+    } else if (peer.kind === "ip" && INTERNET_CIDRS.includes(peer.cidr)) {
+      const others = rule.ports.filter((p) => !isPort(p, 443));
+      if (rule.ports.length === 0) reach.push("the internet");
+      if (rule.ports.length > others.length) reach.push("the internet over HTTPS");
+      if (others.length) reach.push(`the internet on ${portsText(others)}`);
+    } else {
+      literals.push(peerLiteral(peer, "anywhere"));
+    }
+  }
+  const ports = portsLiteral(rule.ports);
+  if (literals.length) reach.push(`${joinNatural(literals)}${ports ? ` on ${ports}` : ""}`);
+  return { dns, reach };
+}
+
+function egressSentence(subject: string, egress: PolicyRule[], rules: PlatformRules): string {
+  const phrases = egress.map((r) => egressPhrases(r, rules));
+  const verbs: string[] = [];
+  if (phrases.some((p) => p.dns)) verbs.push(DNS_PHRASE);
+  const reach = [...new Set(phrases.flatMap((p) => p.reach))];
+  if (reach.length) verbs.push(`reach ${joinNatural(reach)}`);
+  return `${capitalize(subject)} can ${joinNatural(verbs)}.`;
+}
+
+/** Two selectors can pick the same pod unless some label key has different values in each. */
+function mayOverlap(a: InfraNetworkPolicy, b: InfraNetworkPolicy): boolean {
+  if (a.selectsAll || b.selectsAll) return true;
+  return Object.entries(a.podSelector).every(([k, v]) => b.podSelector[k] === undefined || b.podSelector[k] === v);
+}
+
+/** The directions a policy declares; Kubernetes defaults to Ingress, plus Egress when it has egress rules. */
+function declaredTypes(np: InfraNetworkPolicy): string[] {
+  return np.policyTypes.length ? np.policyTypes : ["Ingress", ...(np.egressRules.length ? ["Egress"] : [])];
+}
+
+/** Plain-English sentences for what a NetworkPolicy allows or blocks. Deterministic; unknown peers stay literal. */
+export function policyIntent(np: InfraNetworkPolicy, all: InfraNetworkPolicy[], rules: PlatformRules): string {
+  const types = declaredTypes(np);
+  const ingress = types.includes("Ingress");
+  const egress = types.includes("Egress");
+  const emptyLabels = Object.keys(np.podSelector).length === 0;
+  const subject = np.selectsAll ? "every pod" : emptyLabels ? "the selected pods" : podsName(np.podSelector);
+  const allowedElsewhere = (dir: "ingress" | "egress") =>
+    all.some(
+      (o) =>
+        o !== np &&
+        mayOverlap(np, o) &&
+        declaredTypes(o).includes(dir === "ingress" ? "Ingress" : "Egress") &&
+        (dir === "ingress" ? o.ingress : o.egressRules).length > 0,
+    );
+  const sentences: string[] = [];
+  if (np.selectsAll && ingress && egress && np.ingress.length === 0 && np.egressRules.length === 0)
+    return "Blocks all traffic to and from every pod, unless another policy allows it.";
+  if (ingress) {
+    if (np.ingress.length) sentences.push(ingressSentence(subject, np.ingress, rules));
+    else if (np.selectsAll)
+      sentences.push("Blocks all incoming traffic to every pod, unless another policy allows it.");
+    else
+      sentences.push(
+        `Nothing can connect to ${subject}${allowedElsewhere("ingress") ? " (other policies may allow it)" : ""}.`,
+      );
+  }
+  if (egress) {
+    if (np.egressRules.length) sentences.push(egressSentence(subject, np.egressRules, rules));
+    else if (np.selectsAll)
+      sentences.push("Blocks all outgoing traffic from every pod, unless another policy allows it.");
+    else
+      sentences.push(
+        `${capitalize(subject)} can't reach anything${allowedElsewhere("egress") ? " (other policies may allow it)" : ""}.`,
+      );
+  }
+  return sentences.join(" ");
+}
+
+function policyView(np: InfraNetworkPolicy, all: InfraNetworkPolicy[], rules: PlatformRules): PolicyView {
   const selects = np.selectsAll
     ? "all pods"
     : Object.entries(np.podSelector)
         .map(([k, v]) => `${k}=${v}`)
         .join(", ") || "all pods";
-  const rules: string[] = [];
-  if (deniesAll(np)) rules.push("denies all");
+  const summary: string[] = [];
+  if (deniesAll(np)) summary.push("denies all");
   else {
     if (np.policyTypes.includes("Ingress"))
-      rules.push(
+      summary.push(
         np.ingressRules === 0 ? "ingress: none" : `ingress: ${np.ingressRules} rule${np.ingressRules === 1 ? "" : "s"}`,
       );
     if (np.policyTypes.includes("Egress"))
-      rules.push(np.egress.length ? `egress: ${np.egress.join(", ")}` : "egress: none");
+      summary.push(np.egress.length ? `egress: ${np.egress.join(", ")}` : "egress: none");
   }
-  return { name: np.name, selects, rules };
+  return { name: np.name, selects, rules: summary, intent: policyIntent(np, all, rules) };
 }
 
 export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeOpts = {}): InfraModel {
@@ -352,6 +557,9 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
       console: rules.podConsole(opts.context, k8s?.namespace ?? "", p.name),
       egress: unique(policies.filter((np) => selects(np, p.labels)).flatMap((np) => np.egress)),
       policies: policies.filter((np) => selects(np, p.labels)).map((np) => np.name),
+      policyIntents: policies
+        .filter((np) => selects(np, p.labels))
+        .map((np) => ({ name: np.name, intent: policyIntent(np, policies, rules) })),
       requests: {
         cpuMillis: main.reduce((s, c) => s + parseCpu(c.requests.cpu), 0),
         memoryMiB: Math.round(main.reduce((s, c) => s + parseMemory(c.requests.memory), 0)),
@@ -408,7 +616,11 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
     isolation: {
       egressRules,
       sandbox: rules.sandbox(runtimeName(k8s?.runtimeClass ?? null)),
-      policies: { count: policies.length, defaultDeny: policies.some(deniesAll), list: policies.map(policyView) },
+      policies: {
+        count: policies.length,
+        defaultDeny: policies.some(deniesAll),
+        list: policies.map((np) => policyView(np, policies, rules)),
+      },
     },
     dataStores: [rules.database(alwaysOn)],
     secrets: {

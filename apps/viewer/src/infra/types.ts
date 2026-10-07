@@ -144,6 +144,20 @@ export interface InfraServiceAccount {
   name: string;
   identity: Record<string, string>;
 }
+/** Mirrors the Rust `InfraPolicyPeer`, tagged by `kind`. */
+export type PolicyPeer =
+  | { kind: "any" }
+  | { kind: "pods"; podLabels: Record<string, string>; namespaceLabels: Record<string, string> | null }
+  | { kind: "ip"; cidr: string; except: string[] };
+export interface PolicyPort {
+  port: number | string | null;
+  protocol: string;
+}
+/** Traffic from/to any of `peers` on any of `ports` (no ports means every port). */
+export interface PolicyRule {
+  peers: PolicyPeer[];
+  ports: PolicyPort[];
+}
 export interface InfraNetworkPolicy {
   name: string;
   podSelector: Record<string, string>;
@@ -152,6 +166,10 @@ export interface InfraNetworkPolicy {
   selectsAll: boolean;
   ingressRules: number;
   egress: string[];
+  /** Structured ingress rules; the intent sentences are built from these. */
+  ingress: PolicyRule[];
+  /** Structured egress rules (`egress` keeps the one-line summaries). */
+  egressRules: PolicyRule[];
 }
 export interface InfraSecretStore {
   name: string;
