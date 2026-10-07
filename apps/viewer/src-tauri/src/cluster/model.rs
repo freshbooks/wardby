@@ -72,6 +72,8 @@ pub struct InfraPod {
     pub service_account: Option<String>,
     pub started_at: Option<String>,
     pub ready: bool,
+    /// The pod has a deletion timestamp: it is shutting down.
+    pub terminating: bool,
     pub containers: Vec<InfraContainer>,
 }
 
@@ -117,6 +119,9 @@ pub struct InfraNetworkPolicy {
     pub name: String,
     pub pod_selector: BTreeMap<String, String>,
     pub policy_types: Vec<String>,
+    /// The pod selector has no labels and no expressions, so it selects every pod.
+    pub selects_all: bool,
+    pub ingress_rules: usize,
     pub egress: Vec<String>,
 }
 
@@ -128,6 +133,20 @@ pub struct InfraEdge {
     pub class: Option<String>,
     pub hosts: Vec<String>,
     pub annotations: BTreeMap<String, String>,
+    /// An HTTPRoute whose rules only redirect (RequestRedirect filters, no backends).
+    pub redirect_only: bool,
+    pub redirect_scheme: Option<String>,
+    /// Service names an HTTPRoute sends traffic to.
+    pub backends: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InfraBackendPolicy {
+    pub name: String,
+    pub target_kind: Option<String>,
+    pub target_name: Option<String>,
+    pub security_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -333,6 +352,7 @@ pub fn pod_from(pod: &Pod) -> InfraPod {
             .and_then(|s| s.start_time.as_ref())
             .map(time_string),
         ready: pod_ready(pod),
+        terminating: pod.metadata.deletion_timestamp.is_some(),
         containers: containers_of(pod),
     }
 }
@@ -419,6 +439,9 @@ pub fn edge_from_service(s: &Service) -> Option<InfraEdge> {
         class: spec.load_balancer_class.clone(),
         hosts,
         annotations: edge_annotations(&s.metadata),
+        redirect_only: false,
+        redirect_scheme: None,
+        backends: Vec::new(),
     })
 }
 
@@ -443,6 +466,9 @@ pub fn ingress_from(i: &Ingress) -> InfraEdge {
         class,
         hosts,
         annotations: edge_annotations(&i.metadata),
+        redirect_only: false,
+        redirect_scheme: None,
+        backends: Vec::new(),
     }
 }
 
@@ -487,6 +513,11 @@ pub fn edge_from_dynamic(kind: &'static str, v: &Value) -> InfraEdge {
     } else {
         (None, strings_at(v, &["spec", "hostnames"], None))
     };
+    let (redirect_only, redirect_scheme, backends) = if kind == "httproute" {
+        route_rules(v)
+    } else {
+        (false, None, Vec::new())
+    };
     InfraEdge {
         kind,
         name: str_at(v, &["metadata", "name"])
@@ -495,6 +526,62 @@ pub fn edge_from_dynamic(kind: &'static str, v: &Value) -> InfraEdge {
         class,
         hosts,
         annotations: dynamic_annotations(v),
+        redirect_only,
+        redirect_scheme,
+        backends,
+    }
+}
+
+/// (redirect only, redirect scheme, backend service names) of an HTTPRoute's rules.
+fn route_rules(v: &Value) -> (bool, Option<String>, Vec<String>) {
+    let rules: &[Value] = v
+        .pointer("/spec/rules")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let mut backends: Vec<String> = Vec::new();
+    let mut scheme = None;
+    let mut redirect_only = !rules.is_empty();
+    for rule in rules {
+        let refs = strings_at(rule, &["backendRefs"], Some("name"));
+        let filters: &[Value] = rule
+            .get("filters")
+            .and_then(Value::as_array)
+            .map_or(&[], Vec::as_slice);
+        let redirects = !filters.is_empty()
+            && filters
+                .iter()
+                .all(|f| str_at(f, &["type"]) == Some("RequestRedirect"));
+        if !refs.is_empty() || !redirects {
+            redirect_only = false;
+        }
+        if scheme.is_none() {
+            scheme = filters
+                .iter()
+                .find_map(|f| str_at(f, &["requestRedirect", "scheme"]))
+                .map(str::to_string);
+        }
+        for r in refs {
+            if !backends.contains(&r) {
+                backends.push(r);
+            }
+        }
+    }
+    (
+        redirect_only,
+        if redirect_only { scheme } else { None },
+        backends,
+    )
+}
+
+/// A GKE `GCPBackendPolicy`: what it targets and its Cloud Armor policy.
+pub fn backend_policy_from(v: &Value) -> InfraBackendPolicy {
+    InfraBackendPolicy {
+        name: str_at(v, &["metadata", "name"])
+            .unwrap_or_default()
+            .to_string(),
+        target_kind: str_at(v, &["spec", "targetRef", "kind"]).map(str::to_string),
+        target_name: str_at(v, &["spec", "targetRef", "name"]).map(str::to_string),
+        security_policy: str_at(v, &["spec", "default", "securityPolicy"]).map(str::to_string),
     }
 }
 
@@ -591,6 +678,13 @@ pub fn network_policy_from(np: &NetworkPolicy) -> InfraNetworkPolicy {
         policy_types: spec
             .and_then(|s| s.policy_types.clone())
             .unwrap_or_default(),
+        selects_all: spec
+            .and_then(|s| s.pod_selector.as_ref())
+            .is_none_or(|sel| {
+                sel.match_labels.as_ref().is_none_or(|m| m.is_empty())
+                    && sel.match_expressions.as_ref().is_none_or(|m| m.is_empty())
+            }),
+        ingress_rules: spec.and_then(|s| s.ingress.as_ref()).map_or(0, Vec::len),
         egress,
     }
 }
@@ -848,5 +942,55 @@ mod tests {
         assert!(gw.annotations.contains_key("networking.gke.io/certmap"));
         let route = edge_from_dynamic("httproute", &fixture("httproute"));
         assert_eq!((route.kind, route.hosts.len()), ("httproute", 2));
+    }
+
+    #[test]
+    fn terminating_pod_is_flagged_by_its_deletion_timestamp() {
+        assert!(pod_from(&fixture("pod-terminating")).terminating);
+        assert!(!pod_from(&fixture("run-pod")).terminating);
+    }
+
+    #[test]
+    fn redirect_only_route_carries_the_redirect_scheme() {
+        let r = edge_from_dynamic("httproute", &fixture("httproute-redirect"));
+        assert_eq!(r.hosts, vec!["wardby.example.com"]);
+        assert!(r.redirect_only);
+        assert_eq!(r.redirect_scheme.as_deref(), Some("https"));
+        assert!(r.backends.is_empty());
+        let plain = edge_from_dynamic("httproute", &fixture("httproute"));
+        assert!(!plain.redirect_only);
+        assert_eq!(plain.redirect_scheme, None);
+        assert_eq!(plain.backends, vec!["wardby"]);
+    }
+
+    #[test]
+    fn backend_policy_carries_target_and_security_policy() {
+        let p = backend_policy_from(&fixture("gcpbackendpolicy"));
+        assert_eq!(
+            (
+                p.name.as_str(),
+                p.target_kind.as_deref(),
+                p.target_name.as_deref(),
+                p.security_policy.as_deref()
+            ),
+            (
+                "wardby-policy",
+                Some("Gateway"),
+                Some("wardby-gw"),
+                Some("wardby-armor")
+            )
+        );
+        let bare = backend_policy_from(&serde_json::json!({"metadata": {"name": "x"}}));
+        assert_eq!(bare.security_policy, None);
+    }
+
+    #[test]
+    fn network_policy_reports_select_all_and_ingress_rules() {
+        let deny = network_policy_from(&fixture("networkpolicy-default-deny"));
+        assert!(deny.selects_all);
+        assert_eq!(deny.ingress_rules, 0);
+        assert_eq!(deny.policy_types, vec!["Ingress", "Egress"]);
+        let run = network_policy_from(&fixture("networkpolicy-run-egress"));
+        assert!(!run.selects_all);
     }
 }
