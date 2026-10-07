@@ -223,11 +223,23 @@ export function isLocalRepository(value: string): boolean {
   return value.startsWith(LOCAL_REPO_PREFIX);
 }
 
-/** Syntactic only: absolute, no NUL, normalized; returns "local:/abs/path" (no trailing slash). */
+/** Upper bound on a whole `local:/abs/path` value, in UTF-8 bytes. */
+export const MAX_LOCAL_REPOSITORY_BYTES = 4096;
+
+/**
+ * Syntactic only: at most MAX_LOCAL_REPOSITORY_BYTES, no ASCII control
+ * characters (NUL included), absolute, normalized; returns "local:/abs/path"
+ * (no trailing slash).
+ */
 export function normalizeLocalRepository(value: string): string {
   if (!isLocalRepository(value)) throw new Error("local repository must start with local:");
+  if (byteLength(value) > MAX_LOCAL_REPOSITORY_BYTES) {
+    throw new Error(`local repository must be at most ${MAX_LOCAL_REPOSITORY_BYTES} UTF-8 bytes`);
+  }
   const path = value.slice(LOCAL_REPO_PREFIX.length);
-  if (path.includes("\0")) throw new Error("local repository path must not contain NUL");
+  if (INVALID_SINGLE_LINE_CONTROL.test(path)) {
+    throw new Error("local repository path must not contain control characters");
+  }
   if (!isAbsolute(path)) throw new Error("local repository path must be absolute");
   return `${LOCAL_REPO_PREFIX}${resolve(path)}`;
 }
@@ -248,7 +260,7 @@ function normalizeCodingRepository(value: string): string {
 
 const repositorySchema = z
   .string()
-  .refine(isCodingRepository, "must be a canonical name or uncredentialed github.com repository")
+  .refine(isCodingRepository, "must be a canonical name, an uncredentialed github.com repository, or local:/absolute/path")
   .transform(normalizeCodingRepository);
 
 export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe branch ref").transform(normalizeGitRef);

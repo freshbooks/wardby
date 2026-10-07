@@ -142,4 +142,23 @@ describe("coding protocol repository", () => {
     expect(repoIssues("file:///x")).not.toEqual([]);
     expect(repoIssues("local:relative")).not.toEqual([]);
   });
+
+  it("names local: repositories in the schema error", () => {
+    expect(repoIssues("local:relative")[0]?.message).toMatch(/local:/);
+  });
+
+  it("caps a local path at 4096 UTF-8 bytes", () => {
+    const fits = `local:/${"a".repeat(4096 - "local:/".length)}`;
+    expect(Buffer.byteLength(fits)).toBe(4096);
+    expect(() => normalizeLocalRepository(fits)).not.toThrow();
+    expect(() => normalizeLocalRepository(`${fits}b`)).toThrow(/4096/);
+    expect(repoIssues(`${fits}b`)).not.toEqual([]);
+  });
+
+  it("rejects ASCII control characters in a local path", () => {
+    for (const bad of ["local:/x/\ny", "local:/x\ty", "local:/x\u001by", "local:/x\u007fy", "local:/x\ry"]) {
+      expect(() => normalizeLocalRepository(bad)).toThrow(/control/);
+      expect(repoIssues(bad)).not.toEqual([]);
+    }
+  });
 });
