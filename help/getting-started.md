@@ -20,7 +20,7 @@ applies the required database migrations, and can register Wardby with Codex or
 Claude Code. Run `wardby doctor` afterwards to verify the local installation.
 
 To try a coding agent and a review agent without a GitHub App, answer yes to the
-quickstart's coding step (or pass `--coding --trust <dir>`); it points them at a
+quickstart's coding step (or pass `--coding --trust <dir>`, a repository or a folder of repositories); it points them at a
 git folder on your machine. See [Use local git repositories](local-repositories.md).
 
 Use [Operate agents](operating-agents.md) to create and supervise managed work.

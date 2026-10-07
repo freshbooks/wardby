@@ -126,11 +126,20 @@ then:
 
 - asks which folders to trust (offering the git root of the current directory)
   and writes `LOCAL_REPO_ROOTS` and `JOB_LAUNCHER=docker` to `.wardby/.env`;
-- gets the images: from a release, the runtime and worker images pinned by
-  digest, or built from a wardby source checkout. `WARDBY_RUNTIME_IMAGE` and
-  `CODING_WORKER_IMAGE` (and, for Claude Code, `CODING_CLAUDE_WORKER_IMAGE` plus
-  `CODING_CLAUDE_TOOL_RUNNER_IMAGE`) override them with your own digests;
+- gets only the images the chosen provider needs, pulled by digest from a
+  release or built from a wardby source checkout: the runtime image, plus the
+  coding worker for Codex, or the Claude worker and tool-runner images for
+  Claude Code. `WARDBY_RUNTIME_IMAGE` and `CODING_WORKER_IMAGE` (and, for Claude
+  Code, `CODING_CLAUDE_WORKER_IMAGE` plus `CODING_CLAUDE_TOOL_RUNNER_IMAGE`)
+  override them with your own digests. The server requires `CODING_WORKER_IMAGE`
+  whichever provider you use, so a Claude Code setup points it at the Claude
+  worker; re-run quickstart with Codex to add the Codex worker;
 - starts the coding proxy and runs the coding preflight;
+- finds the repository: a trusted folder that is a git repository, or the
+  repositories directly inside a trusted folder (hidden folders are skipped).
+  With several it asks which to use; non-interactively it uses the first in
+  sorted order and prints the choice, so re-run with `--trust <repo>` to pick
+  another;
 - creates `local-builder` (a coding agent, $2 budget) and `local-reviewer`
   (a review agent, $1 budget) for the repository and prints the two
   `trigger_agent` calls to try; and

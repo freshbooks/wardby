@@ -9,8 +9,8 @@
  * git plumbing onto its own branch (starter-services.ts).
  */
 import { spawnSync } from "node:child_process";
-import { realpathSync, statSync } from "node:fs";
-import { delimiter, join, resolve } from "node:path";
+import { readdirSync, realpathSync, statSync } from "node:fs";
+import { delimiter, join, resolve, sep } from "node:path";
 
 import { dockerCodingPreflight } from "../coding/docker-preflight.js";
 import { cleanGitEnv } from "../coding/local-git.js";
@@ -243,12 +243,62 @@ function startProxy(paths: QuickstartPaths, state: QuickstartState, deps: Coding
   }
 }
 
-async function chooseRepository(roots: string[], opts: CodingStepOptions, deps: CodingDeps): Promise<string | null> {
-  if (await isRepositoryTop(roots[0], roots)) return roots[0];
-  if (opts.nonInteractive) {
-    for (const root of roots.slice(1)) if (await isRepositoryTop(root, roots)) return root;
-    return null;
+/** Git repositories among the trusted folders: a folder that is one, else its direct (non-hidden) children. */
+async function findRepositories(roots: string[]): Promise<string[]> {
+  const found: string[] = [];
+  const add = (path: string) => {
+    if (!found.includes(path)) found.push(path);
+  };
+  for (const root of roots) {
+    if (await isRepositoryTop(root, roots)) {
+      add(root);
+      continue;
+    }
+    let names: string[];
+    try {
+      names = readdirSync(root, { withFileTypes: true })
+        .filter((entry) => !entry.name.startsWith(".") && (entry.isDirectory() || entry.isSymbolicLink()))
+        .map((entry) => entry.name)
+        .sort();
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      let real: string;
+      try {
+        real = realpathSync(join(root, name));
+        if (!statSync(real).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      // A symlink out of the trusted folder is not a candidate; resolveLocalRepository checks the roots.
+      if (real !== root && !real.startsWith(root + sep)) continue;
+      if (await isRepositoryTop(real, roots)) add(real);
+    }
   }
+  return found;
+}
+
+async function chooseRepository(roots: string[], opts: CodingStepOptions, deps: CodingDeps): Promise<string | null> {
+  const found = await findRepositories(roots);
+  if (found.length === 1) return found[0];
+  if (found.length > 1) {
+    if (opts.nonInteractive) {
+      deps.log(`Found ${found.length} git repositories in the trusted folders; using ${found[0]}:`);
+      for (const repo of found) deps.log(`  ${repo}`);
+      deps.log("  To use another, re-run quickstart with --trust <repo>.");
+      return found[0];
+    }
+    deps.log("Git repositories found in the trusted folders:");
+    found.forEach((repo, index) => deps.log(`  [${index + 1}] ${repo}`));
+    for (;;) {
+      const answer = await deps.prompts.line(`Which repository should the agents use? [1-${found.length}] `, "1");
+      const index = Number(answer.trim()) - 1;
+      if (Number.isInteger(index) && index >= 0 && index < found.length) return found[index];
+      deps.log(`! Enter a number from 1 to ${found.length}.`);
+    }
+  }
+  if (opts.nonInteractive) return null;
   for (;;) {
     const answer = await deps.prompts.line(
       "Git repository for the agents (inside a trusted folder; blank = skip): ",
@@ -414,7 +464,7 @@ export async function codingStep(
 
     const repo = await chooseRepository(roots, opts, deps);
     if (!repo) {
-      deps.log("No git repository is inside the trusted folders yet; the agents were not created.");
+      deps.log("No git repository was found in or directly under the trusted folders; the agents were not created.");
       return { roots, provider };
     }
     const base = await repoDefaultBranch(repo);

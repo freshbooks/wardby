@@ -137,14 +137,19 @@ This step needs Docker, and an `OPENAI_API_KEY` (Codex) or `ANTHROPIC_API_KEY`
 1. asks which folders to trust (it offers the git root of the current
    directory) and writes them to `.wardby/.env` as `LOCAL_REPO_ROOTS`, together
    with `JOB_LAUNCHER=docker`;
-2. gets the runtime and worker images (and, for Claude Code, the Claude worker
-   and tool-runner images): pulled by digest from a published release, or built
-   from a wardby source checkout. Set `WARDBY_RUNTIME_IMAGE` and
+2. gets the images the chosen provider needs: the runtime image, plus the coding
+   worker (Codex) or the Claude worker and tool-runner images (Claude Code),
+   pulled by digest from a published release or built from a wardby source
+   checkout. The server always requires `CODING_WORKER_IMAGE`, so a Claude Code
+   setup points it at the Claude worker. Set `WARDBY_RUNTIME_IMAGE` and
    `CODING_WORKER_IMAGE` (and `CODING_CLAUDE_WORKER_IMAGE` plus
    `CODING_CLAUDE_TOOL_RUNNER_IMAGE` for Claude Code) to use images of your own;
 3. starts the coding proxy and runs the coding preflight;
 4. creates `local-builder` (a coding agent, $2 budget) and `local-reviewer` (a
-   review agent, $1 budget) for a repository inside the trusted folders; and
+   review agent, $1 budget) for a repository in the trusted folders (a trusted
+   folder that is a git repository, or one directly inside it; with several,
+   quickstart asks, or non-interactively uses the first in sorted order and
+   prints it, so pass `--trust <repo>` to choose another); and
 5. prints two `trigger_agent` calls: one asks `local-builder` for a change, the
    other asks `local-reviewer` to review the branch `wardby/run-<run id>` the
    run pushed into your repository.

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -313,8 +313,10 @@ describe("codingStep (non-interactive)", () => {
       deps,
     );
     const pulled = calls.filter((call) => call[1] === "pull").map((call) => call[2]);
-    expect(pulled).toEqual(expect.arrayContaining([claudeWorker, claudeToolRunner]));
+    expect(pulled).toEqual(expect.arrayContaining([RUNTIME, claudeWorker, claudeToolRunner]));
+    expect(pulled).not.toContain(WORKER);
     const env = readQuickstartEnv(paths());
+    expect(env.CODING_WORKER_IMAGE).toBe(claudeWorker);
     expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(claudeWorker);
     expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(claudeToolRunner);
   });
@@ -382,12 +384,29 @@ describe("codingStep (non-interactive)", () => {
       deps,
     );
     const tags = calls.filter((call) => call[1] === "build").map((call) => call[call.indexOf("--tag") + 1]);
-    expect(tags).toEqual(
-      expect.arrayContaining(["wardby-claude-coding-worker:local", "wardby-claude-tool-runner:local"]),
-    );
+    expect(tags).toEqual([
+      "wardby-runtime:local",
+      "wardby-claude-coding-worker:local",
+      "wardby-claude-tool-runner:local",
+    ]);
     const env = readQuickstartEnv(paths());
+    // The server and preflight still need CODING_WORKER_IMAGE; it points at the Claude worker.
+    expect(env.CODING_WORKER_IMAGE).toBe(BUILT_ID);
     expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(BUILT_ID);
     expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(BUILT_ID);
+  });
+
+  it("builds only the runtime and coding worker for codex from a source checkout", async () => {
+    rmSync(join(packageRoot, "dist", "quickstart-images.json"));
+    mkdirSync(join(packageRoot, "deploy"));
+    writeFileSync(join(packageRoot, "deploy", "Dockerfile"), "FROM scratch\n");
+    mkdirSync(join(packageRoot, "src", "coding-worker"), { recursive: true });
+    writeFileSync(join(packageRoot, "src", "coding-worker", "Dockerfile"), "FROM scratch\n");
+    writeQuickstartEnv(paths(), { OPENAI_API_KEY: "sk-test" });
+    const { deps, calls } = harness();
+    await codingStep(paths(), state, { nonInteractive: true, coding: true, trust: [repoA], provider: "codex" }, deps);
+    const tags = calls.filter((call) => call[1] === "build").map((call) => call[call.indexOf("--tag") + 1]);
+    expect(tags).toEqual(["wardby-runtime:local", "wardby-coding-worker:local"]);
   });
 
   it("skips Claude Code when its images are not available", async () => {
@@ -538,5 +557,78 @@ describe("quickstart compose files", () => {
     ]) {
       expect(base).toContain(variable);
     }
+  });
+});
+
+describe("repositories under trusted folders", () => {
+  const withCodex = () => writeQuickstartEnv(paths(), { OPENAI_API_KEY: "sk-test" });
+  const run = (trust: string[], overrides: Partial<CodingDeps> = {}) => {
+    const h = harness(overrides);
+    return codingStep(paths(), state, { nonInteractive: true, coding: true, trust }, h.deps).then((result) => ({
+      result,
+      ...h,
+    }));
+  };
+
+  it("uses the one repository directly under a trusted parent folder", async () => {
+    withCodex();
+    const parent = join(scratch, "parent");
+    makeRepo(join(parent, "demo-app"));
+    mkdirSync(join(parent, "notes"));
+    const { result, seeds } = await run([parent]);
+    expect(result?.repository).toBe(`local:${join(parent, "demo-app")}`);
+    expect(seeds[0].repository).toBe(`local:${join(parent, "demo-app")}`);
+  });
+
+  it("still counts a trusted folder that is itself a repository", async () => {
+    withCodex();
+    const { result } = await run([repoA]);
+    expect(result?.repository).toBe(`local:${repoA}`);
+  });
+
+  it("ignores hidden folders and symlinks that leave the trusted folder", async () => {
+    withCodex();
+    const parent = join(scratch, "parent");
+    makeRepo(join(parent, ".hidden-repo"));
+    symlinkSync(repoA, join(parent, "linked-out"));
+    makeRepo(join(parent, "real"));
+    const { result } = await run([parent]);
+    expect(result?.repository).toBe(`local:${join(parent, "real")}`);
+  });
+
+  it("non-interactive: takes the first of several in sorted order and says how to pick another", async () => {
+    withCodex();
+    const parent = join(scratch, "parent");
+    makeRepo(join(parent, "zeta"));
+    makeRepo(join(parent, "alpha"));
+    const { result, logs } = await run([parent]);
+    expect(result?.repository).toBe(`local:${join(parent, "alpha")}`);
+    const text = logs.join("\n");
+    expect(text).toContain(join(parent, "alpha"));
+    expect(text).toContain(join(parent, "zeta"));
+    expect(text).toMatch(/--trust <repo>/);
+  });
+
+  it("interactive: prompts to choose among several repositories", async () => {
+    withCodex();
+    const parent = join(scratch, "parent");
+    makeRepo(join(parent, "zeta"));
+    makeRepo(join(parent, "alpha"));
+    const h = harness({
+      prompts: {
+        line: async (question) => (question.includes("Add another") ? "" : question.includes("Which") ? "2" : ""),
+        yesNo: async () => false,
+        secret: async () => "",
+      },
+    });
+    const result = await codingStep(paths(), state, { nonInteractive: false, coding: true, trust: [parent] }, h.deps);
+    expect(result?.repository).toBe(`local:${join(parent, "zeta")}`);
+  });
+
+  it("says no repository was found in or directly under the trusted folders", async () => {
+    withCodex();
+    const { result, logs } = await run([folderB]);
+    expect(result?.repository).toBeUndefined();
+    expect(logs.join("\n")).toMatch(/No git repository was found in or directly under the trusted folders/);
   });
 });

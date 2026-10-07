@@ -50,41 +50,48 @@ export function prepareImages(
 ): PreparedImages {
   const resolved = resolveQuickstartImages({ env: deps.env, packageRoot: deps.packageRoot });
   if ("unavailable" in resolved) throw new CodingSkip(resolved.unavailable);
+  const claude = provider === "claude-code";
   if (resolved.source === "build") {
     build(deps, "deploy/Dockerfile", resolved.runtime, "runtime");
-    build(deps, "src/coding-worker/Dockerfile", resolved.worker);
-    const images: PreparedImages = { runtime: resolved.runtime, worker: imageId(deps, resolved.worker) };
-    if (provider === "claude-code") {
-      const claudeWorker = resolved.claudeWorker ?? "wardby-claude-coding-worker:local";
-      const claudeToolRunner = resolved.claudeToolRunner ?? "wardby-claude-tool-runner:local";
-      build(deps, "src/claude-coding-worker/Dockerfile", claudeWorker);
-      build(deps, "src/claude-tool-runner/Dockerfile", claudeToolRunner);
-      images.claudeWorker = imageId(deps, claudeWorker);
-      images.claudeToolRunner = imageId(deps, claudeToolRunner);
+    if (!claude) {
+      build(deps, "src/coding-worker/Dockerfile", resolved.worker);
+      return { runtime: resolved.runtime, worker: imageId(deps, resolved.worker) };
     }
-    return images;
+    const claudeWorkerTag = resolved.claudeWorker ?? "wardby-claude-coding-worker:local";
+    const claudeToolRunnerTag = resolved.claudeToolRunner ?? "wardby-claude-tool-runner:local";
+    build(deps, "src/claude-coding-worker/Dockerfile", claudeWorkerTag);
+    build(deps, "src/claude-tool-runner/Dockerfile", claudeToolRunnerTag);
+    const claudeWorker = imageId(deps, claudeWorkerTag);
+    // The server and the Docker preflight require CODING_WORKER_IMAGE whatever the provider, so a
+    // Claude-only setup points it at the Claude worker rather than building an unused Codex worker.
+    return {
+      runtime: resolved.runtime,
+      worker: claudeWorker,
+      claudeWorker,
+      claudeToolRunner: imageId(deps, claudeToolRunnerTag),
+    };
   }
-  if (!isImmutableDockerImage(resolved.worker)) {
-    throw new CodingSkip("CODING_WORKER_IMAGE must be an immutable digest (repo@sha256:...) or local image id");
-  }
-  const images: PreparedImages = { runtime: resolved.runtime, worker: resolved.worker };
-  if (provider === "claude-code") {
-    const claudeWorker = resolved.claudeWorker || config.CODING_CLAUDE_WORKER_IMAGE;
-    const claudeToolRunner = resolved.claudeToolRunner || config.CODING_CLAUDE_TOOL_RUNNER_IMAGE;
-    if (!claudeWorker || !claudeToolRunner) {
-      throw new CodingSkip(
-        "Claude Code images aren't available: set both CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE, upgrade to a release that publishes them, or run from a wardby source checkout",
-      );
+  if (!claude) {
+    if (!isImmutableDockerImage(resolved.worker)) {
+      throw new CodingSkip("CODING_WORKER_IMAGE must be an immutable digest (repo@sha256:...) or local image id");
     }
-    if (!isImmutableDockerImage(claudeWorker) || !isImmutableDockerImage(claudeToolRunner)) {
-      throw new CodingSkip(
-        "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be immutable digests (repo@sha256:...) or local image ids",
-      );
-    }
-    Object.assign(images, { claudeWorker, claudeToolRunner });
+    pullOrPresent(deps, resolved.runtime);
+    pullOrPresent(deps, resolved.worker);
+    return { runtime: resolved.runtime, worker: resolved.worker };
   }
-  for (const image of [images.runtime, images.worker, images.claudeWorker, images.claudeToolRunner]) {
-    if (image) pullOrPresent(deps, image);
+  const claudeWorker = resolved.claudeWorker || config.CODING_CLAUDE_WORKER_IMAGE;
+  const claudeToolRunner = resolved.claudeToolRunner || config.CODING_CLAUDE_TOOL_RUNNER_IMAGE;
+  if (!claudeWorker || !claudeToolRunner) {
+    throw new CodingSkip(
+      "Claude Code images aren't available: set both CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE, upgrade to a release that publishes them, or run from a wardby source checkout",
+    );
   }
-  return images;
+  if (!isImmutableDockerImage(claudeWorker) || !isImmutableDockerImage(claudeToolRunner)) {
+    throw new CodingSkip(
+      "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be immutable digests (repo@sha256:...) or local image ids",
+    );
+  }
+  for (const image of [resolved.runtime, claudeWorker, claudeToolRunner]) pullOrPresent(deps, image);
+  // CODING_WORKER_IMAGE is still required by the server and preflight; see above.
+  return { runtime: resolved.runtime, worker: claudeWorker, claudeWorker, claudeToolRunner };
 }
