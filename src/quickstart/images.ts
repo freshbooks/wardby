@@ -42,18 +42,17 @@ export function resolveQuickstartImages(opts: {
   packageRoot: string;
 }): QuickstartImages | { unavailable: string } {
   const { env, packageRoot } = opts;
+  // The Claude pair resolves on its own: both env vars together beat the package pair, and one
+  // image is never taken from the environment and the other from the package.
+  const envClaude =
+    env.CODING_CLAUDE_WORKER_IMAGE && env.CODING_CLAUDE_TOOL_RUNNER_IMAGE
+      ? { claudeWorker: env.CODING_CLAUDE_WORKER_IMAGE, claudeToolRunner: env.CODING_CLAUDE_TOOL_RUNNER_IMAGE }
+      : {};
   if (env.WARDBY_RUNTIME_IMAGE && env.CODING_WORKER_IMAGE) {
-    return {
-      runtime: env.WARDBY_RUNTIME_IMAGE,
-      worker: env.CODING_WORKER_IMAGE,
-      ...(env.CODING_CLAUDE_WORKER_IMAGE && env.CODING_CLAUDE_TOOL_RUNNER_IMAGE
-        ? { claudeWorker: env.CODING_CLAUDE_WORKER_IMAGE, claudeToolRunner: env.CODING_CLAUDE_TOOL_RUNNER_IMAGE }
-        : {}),
-      source: "env",
-    };
+    return { runtime: env.WARDBY_RUNTIME_IMAGE, worker: env.CODING_WORKER_IMAGE, ...envClaude, source: "env" };
   }
   const pinned = readPackageImages(packageRoot);
-  if (pinned) return { ...pinned, source: "package" };
+  if (pinned) return { ...pinned, ...envClaude, source: "package" };
   if (
     existsSync(join(packageRoot, "deploy", "Dockerfile")) &&
     existsSync(join(packageRoot, "src", "coding-worker", "Dockerfile"))

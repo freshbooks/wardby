@@ -319,6 +319,37 @@ describe("codingStep (non-interactive)", () => {
     expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(claudeToolRunner);
   });
 
+  it("uses only the Claude env pair over a packaged install lacking Claude images", async () => {
+    const claudeWorker = `ghcr.io/x/cw@sha256:${"6".repeat(64)}`;
+    const claudeToolRunner = `ghcr.io/x/ct@sha256:${"7".repeat(64)}`;
+    writeQuickstartEnv(paths(), { ANTHROPIC_API_KEY: "sk-ant" });
+    const { deps } = harness({
+      env: { CODING_CLAUDE_WORKER_IMAGE: claudeWorker, CODING_CLAUDE_TOOL_RUNNER_IMAGE: claudeToolRunner },
+    });
+    await codingStep(
+      paths(),
+      state,
+      { nonInteractive: true, coding: true, trust: [repoA], provider: "claude-code" },
+      deps,
+    );
+    const env = readQuickstartEnv(paths());
+    expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(claudeWorker);
+    expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(claudeToolRunner);
+  });
+
+  it("skips Claude Code with a clear message when only one Claude env var is set", async () => {
+    writeQuickstartEnv(paths(), { ANTHROPIC_API_KEY: "sk-ant" });
+    const { deps, logs } = harness({ env: { CODING_CLAUDE_WORKER_IMAGE: `ghcr.io/x/cw@sha256:${"6".repeat(64)}` } });
+    const result = await codingStep(
+      paths(),
+      state,
+      { nonInteractive: true, coding: true, trust: [repoA], provider: "claude-code" },
+      deps,
+    );
+    expect(result).toBeNull();
+    expect(logs.join("\n")).toMatch(/set both CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE/);
+  });
+
   it("does not pull Claude Code images when the provider is codex", async () => {
     writeFileSync(
       join(packageRoot, "dist", "quickstart-images.json"),

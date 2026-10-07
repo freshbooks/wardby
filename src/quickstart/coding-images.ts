@@ -73,7 +73,7 @@ export function prepareImages(
     const claudeToolRunner = resolved.claudeToolRunner || config.CODING_CLAUDE_TOOL_RUNNER_IMAGE;
     if (!claudeWorker || !claudeToolRunner) {
       throw new CodingSkip(
-        "Claude Code needs CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE, which this version of @wardby/cli was published without; upgrade @wardby/cli, choose Codex, set both, or run quickstart from a clone of the wardby repository",
+        "Claude Code images aren't available: set both CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE, upgrade to a release that publishes them, or run from a wardby source checkout",
       );
     }
     if (!isImmutableDockerImage(claudeWorker) || !isImmutableDockerImage(claudeToolRunner)) {

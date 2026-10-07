@@ -100,6 +100,44 @@ describe("resolveQuickstartImages", () => {
     ).toEqual({ runtime: "r:1", worker: "w:1", claudeWorker: "cw:1", claudeToolRunner: "ct:1", source: "env" });
   });
 
+  it("uses the Claude env pair over the package pair in package mode", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, claudeWorker, claudeToolRunner });
+    expect(
+      resolveQuickstartImages({
+        env: { CODING_CLAUDE_WORKER_IMAGE: "cw:1", CODING_CLAUDE_TOOL_RUNNER_IMAGE: "ct:1" },
+        packageRoot: dir,
+      }),
+    ).toEqual({ runtime, worker, claudeWorker: "cw:1", claudeToolRunner: "ct:1", source: "package" });
+  });
+
+  it("offers the Claude env pair when the package lacks Claude entries", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker });
+    expect(
+      resolveQuickstartImages({
+        env: { CODING_CLAUDE_WORKER_IMAGE: "cw:1", CODING_CLAUDE_TOOL_RUNNER_IMAGE: "ct:1" },
+        packageRoot: dir,
+      }),
+    ).toMatchObject({ claudeWorker: "cw:1", claudeToolRunner: "ct:1", source: "package" });
+  });
+
+  it("never mixes one Claude env image with the package's", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, claudeWorker, claudeToolRunner });
+    expect(resolveQuickstartImages({ env: { CODING_CLAUDE_WORKER_IMAGE: "cw:1" }, packageRoot: dir })).toEqual({
+      runtime,
+      worker,
+      claudeWorker,
+      claudeToolRunner,
+      source: "package",
+    });
+    writePackageFile(dir, { runtime, worker });
+    const result = resolveQuickstartImages({ env: { CODING_CLAUDE_TOOL_RUNNER_IMAGE: "ct:1" }, packageRoot: dir });
+    expect(result).not.toHaveProperty("claudeWorker");
+    expect(result).not.toHaveProperty("claudeToolRunner");
+  });
+
   it("never accepts tag-only refs from the package file", () => {
     const dir = root();
     writePackageFile(dir, { runtime: "ghcr.io/o/r/wardby-runtime:v1", worker });
