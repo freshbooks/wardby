@@ -1,5 +1,6 @@
 pub mod api;
 pub mod appearance;
+pub mod cluster;
 pub mod commands;
 pub mod error;
 pub mod events;
@@ -36,6 +37,9 @@ pub fn run() {
             commands::disconnect,
             commands::fetch_graph,
             commands::fetch_run,
+            commands::fetch_infra,
+            commands::kube_contexts,
+            commands::set_kube_context,
             commands::open_url,
         ])
         .run(tauri::generate_context!())

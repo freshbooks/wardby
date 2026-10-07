@@ -13,6 +13,9 @@ pub struct ServerConfig {
     pub name: String,
     pub url: String,
     pub client_id: Option<String>,
+    /// The kubeconfig context the Infrastructure view reads for this server.
+    #[serde(default)]
+    pub kube_context: Option<String>,
 }
 
 fn is_loopback_host(url: &Url) -> bool {
@@ -88,6 +91,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_config_saved_before_kube_context_existed_still_loads() {
+        let old = serde_json::json!({"name": "a", "url": "https://a.example", "client_id": null});
+        let c: ServerConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(c.kube_context, None);
+    }
+
+    #[test]
     fn normalizes_urls() {
         assert_eq!(
             normalize_server_url(" HTTPS://Wardby.Example.com/ ").unwrap(),
@@ -143,6 +153,7 @@ mod tests {
             name: "a".into(),
             url: "https://h.example".into(),
             client_id: None,
+            kube_context: Some("kind-dev".into()),
         };
         let back: ServerConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);

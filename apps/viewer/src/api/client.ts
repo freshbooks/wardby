@@ -2,7 +2,7 @@
 // calls carry server names, URLs, sign-in state and server JSON only.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { GraphSnapshot, RunDetail, ViewerEvent } from "./types";
+import type { GraphSnapshot, InfraInfo, RunDetail, ViewerEvent } from "./types";
 
 export const FRAME_EVENT = "viewer://frame";
 
@@ -41,6 +41,8 @@ export interface ServerSummary {
   name: string;
   url: string;
   signed_in: boolean;
+  /** The kubeconfig context the Infrastructure view reads for this server. */
+  kube_context: string | null;
 }
 
 /** Mirrors the Rust `StreamFrame`, tagged by `type`. */
@@ -82,6 +84,15 @@ export const fetchGraph = (url: string, since: string, limit: number) =>
   invoke<GraphSnapshot>("fetch_graph", { url, since, limit });
 
 export const fetchRun = (url: string, id: string) => invoke<RunDetail>("fetch_run", { url, id });
+
+export const fetchInfra = (url: string) => invoke<InfraInfo>("fetch_infra", { url });
+
+/** The contexts in the user's kubeconfig (names only). */
+export const kubeContexts = () => invoke<{ current: string | null; contexts: string[] }>("kube_contexts");
+
+/** Saves which kubeconfig context to use for a server; `null` clears it. */
+export const setKubeContext = (url: string, context: string | null) =>
+  invoke<void>("set_kube_context", { url, context });
 
 /** Opens an `https://` link in the system browser; Rust rejects every other scheme. */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });

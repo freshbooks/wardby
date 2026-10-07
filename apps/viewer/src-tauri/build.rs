@@ -13,6 +13,9 @@ fn main() {
             "disconnect",
             "fetch_graph",
             "fetch_run",
+            "fetch_infra",
+            "kube_contexts",
+            "set_kube_context",
             "open_url",
         ]),
     ))

@@ -14,6 +14,8 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_store::StoreExt;
 
 use crate::api::{KeychainStore, RefreshStore, Session};
+use crate::cluster::errors::ClusterError;
+use crate::cluster::kubeconfig::{self, KubeContexts};
 use crate::error::AppError;
 use crate::events::{
     EventsConfig, EventsHandle, SessionBuilder, StreamFrame, is_retryable, spawn_events_lazy,
@@ -415,6 +417,7 @@ pub struct ServerSummary {
     pub name: String,
     pub url: String,
     pub signed_in: bool,
+    pub kube_context: Option<String>,
 }
 
 fn summaries(list: &[ServerConfig], signed_in: impl Fn(&str) -> bool) -> Vec<ServerSummary> {
@@ -423,6 +426,7 @@ fn summaries(list: &[ServerConfig], signed_in: impl Fn(&str) -> bool) -> Vec<Ser
             name: c.name.clone(),
             url: c.url.clone(),
             signed_in: signed_in(&c.url),
+            kube_context: c.kube_context.clone(),
         })
         .collect()
 }
@@ -462,6 +466,7 @@ fn upsert_server(
             name,
             url,
             client_id,
+            kube_context: None,
         }),
     }
     Ok(())
@@ -475,6 +480,22 @@ fn set_client_id(list: &mut [ServerConfig], url: &str, client_id: &str) -> Resul
         .find(|c| c.url == url)
         .ok_or_else(removed_error)?;
     c.client_id = Some(client_id.to_string());
+    Ok(())
+}
+
+/// Records the kubeconfig context for a saved server; blank clears it.
+fn set_kube_context_in(
+    list: &mut [ServerConfig],
+    url: &str,
+    context: Option<String>,
+) -> Result<(), AppError> {
+    let c = list
+        .iter_mut()
+        .find(|c| c.url == url)
+        .ok_or_else(|| AppError::Protocol("unknown server".to_string()))?;
+    c.kube_context = context
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     Ok(())
 }
 
@@ -890,6 +911,43 @@ pub async fn fetch_run(
     fetch(&app, &state, &url, &path).await
 }
 
+const INFRA_PATH: &str = "/admin/api/infra";
+
+#[tauri::command]
+pub async fn fetch_infra(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<Value, AppError> {
+    let url = normalize_server_url(&url)?;
+    fetch(&app, &state, &url, INFRA_PATH).await
+}
+
+/// The contexts in the user's kubeconfig (names only, never credentials).
+#[tauri::command]
+pub async fn kube_contexts() -> Result<KubeContexts, ClusterError> {
+    tokio::task::spawn_blocking(kubeconfig::list_contexts)
+        .await
+        .map_err(|_| ClusterError::Other {
+            message: "kubeconfig task failed".to_string(),
+        })?
+}
+
+/// Which kubeconfig context the Infrastructure view uses for a server
+/// (`None` or blank clears it).
+#[tauri::command]
+pub async fn set_kube_context(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    context: Option<String>,
+) -> Result<(), AppError> {
+    let url = normalize_server_url(&url)?;
+    edit_servers(&app, &state, |list| {
+        set_kube_context_in(list, &url, context)
+    })
+}
+
 /// The only links the webview may ask the system browser to open: absolute
 /// `https://` URLs with a host and no embedded credentials.
 fn check_open_url(raw: &str) -> Result<url::Url, AppError> {
@@ -1190,6 +1248,7 @@ mod tests {
             name: name.into(),
             url: url.into(),
             client_id: id.map(Into::into),
+            kube_context: None,
         }
     }
 
@@ -1261,21 +1320,72 @@ mod tests {
             vec![ServerSummary {
                 name: "a".into(),
                 url: "https://a.example".into(),
-                signed_in: true
+                signed_in: true,
+                kube_context: None,
             }]
         );
         let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v[0].as_object().unwrap().len(), 3);
+        assert_eq!(v[0].as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn kube_context_is_set_and_cleared_per_server() {
+        let mut list = vec![
+            cfg("a", "https://a.example", None),
+            cfg("b", "https://b.example", None),
+        ];
+        set_kube_context_in(&mut list, "https://a.example", Some(" kind-dev ".into())).unwrap();
+        assert_eq!(list[0].kube_context.as_deref(), Some("kind-dev"));
+        assert_eq!(list[1].kube_context, None);
+        let s = summaries(&list, |_| false);
+        assert_eq!(s[0].kube_context.as_deref(), Some("kind-dev"));
+        set_kube_context_in(&mut list, "https://a.example", Some("  ".into())).unwrap();
+        assert_eq!(list[0].kube_context, None);
+        set_kube_context_in(&mut list, "https://a.example", Some("gke".into())).unwrap();
+        set_kube_context_in(&mut list, "https://a.example", None).unwrap();
+        assert_eq!(list[0].kube_context, None);
+        assert!(set_kube_context_in(&mut list, "https://gone.example", None).is_err());
+    }
+
+    #[tokio::test]
+    async fn infra_is_fetched_from_the_admin_api() {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(INFRA_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"namespace": "wardby"})),
+            )
+            .expect(1)
+            .mount(&s)
+            .await;
+        let sess = live_session(&s.uri());
+        assert_eq!(
+            sess.get_json(INFRA_PATH).await.unwrap(),
+            serde_json::json!({"namespace": "wardby"})
+        );
+
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(INFRA_PATH))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&s)
+            .await;
+        let sess = live_session(&s.uri());
+        assert!(matches!(
+            sess.get_json(INFRA_PATH).await,
+            Err(AppError::Forbidden)
+        ));
     }
 
     #[test]
     fn saved_config_has_no_token_field() {
         let v = serde_json::to_value(cfg("a", "https://a.example", Some("c"))).unwrap();
         let keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
-        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.len(), 4);
         assert!(
             keys.iter()
-                .all(|k| ["name", "url", "client_id"].contains(&k.as_str()))
+                .all(|k| ["name", "url", "client_id", "kube_context"].contains(&k.as_str()))
         );
     }
 
