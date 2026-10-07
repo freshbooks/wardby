@@ -139,6 +139,9 @@ client of this API: it signs in with the same flow described under Access,
 draws the graph, and updates it from the event stream. See
 [`apps/viewer/README.md`](https://github.com/wardby/wardby/tree/main/apps/viewer) for prerequisites, running
 it, adding a server, and what an external identity provider client needs.
+Its Infrastructure tab uses `GET /admin/api/infra` to find the server's
+namespace and run labels, then reads that namespace read-only with the
+operator's own kubeconfig; the README lists the Kubernetes Role it needs.
 
 ## Response schemas
 

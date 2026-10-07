@@ -78,17 +78,27 @@ enter its client id when adding the server. The client must:
 
 ## Infrastructure view
 
-The Infrastructure tab shows the Kubernetes pods where this Wardby deployment
-runs coding jobs: the control plane, proxy, worker pods, databases, secrets
-management, and network policies. It reads from your kubeconfig, using the
-current context by default and allowing you to switch contexts per server. The
-view is read-only.
+The Infrastructure tab shows the Kubernetes namespace where a server runs coding
+jobs: the control plane, the coding proxy, each run's pod with its containers and
+sandbox, jobs, service accounts and their cloud identities, network policies,
+ingress, and secret stores. **Map** draws them as zones; **Table** lists them
+with status, CPU and memory, and age. Select a pod for its containers and recent
+events; **Open run** jumps to the run that started it, and a coding run's
+**Pod ↗** button jumps back to its pod while it is still running.
 
-The app extends `PATH` for `exec` credential plugins with Homebrew's bin
-directory and the Google Cloud SDK's bin directories, so it can find
-`gke-gcloud-auth-plugin` (for GKE) and the AWS CLI (for EKS) without you
-configuring `PATH` manually. If your kubeconfig uses other plugins, ensure they
-are on your system's `PATH`.
+The tab appears when the server uses the Kubernetes launcher. It reads the
+cluster with your own kubeconfig (`$KUBECONFIG` or `~/.kube/config`), using the
+current context unless you choose another for that server, and it only reads.
+When `wardby serve` runs outside the cluster — for example against a local
+[kind](https://kind.sigs.k8s.io/) cluster — the map shows the control plane as
+outside the cluster, at the server's address.
+
+Credential plugins (`exec` entries in your kubeconfig) run with `/opt/homebrew/bin`,
+`/usr/local/bin` and the Google Cloud SDK's `bin` directories added to `PATH`, so
+`gke-gcloud-auth-plugin` (GKE) and the AWS CLI (EKS) are found when installed
+there. Any other plugin must be on the `PATH` the app starts with. If sign-in
+fails, run your cloud's login (for example `gcloud auth login`) and select
+**Retry**.
 
 To grant the viewer read-only Kubernetes access, create a `Role` and
 `RoleBinding`. The following YAML is sufficient:
@@ -128,8 +138,9 @@ subjects:
 ```
 
 Replace `wardby-coding` with the namespace where your coding runs execute, and
-`<you>` with the identity under which you access Kubernetes (usually your
-`kubernetes.io/username` from `kubectl auth whoami`).
+`<you>` with the user your kubeconfig signs in as (`kubectl auth whoami` shows
+it; on GKE and EKS it is usually your cloud account's email or IAM identity).
+Without access the tab names the resource it couldn't list.
 
 The Role deliberately omits `secrets`, because Kubernetes RBAC cannot restrict
 access to individual Secret names; Secret names appear as hidden in the
