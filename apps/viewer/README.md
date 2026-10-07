@@ -95,6 +95,23 @@ When `wardby serve` runs outside the cluster — for example against a local
 [kind](https://kind.sigs.k8s.io/) cluster — the map shows the control plane as
 outside the cluster, at the server's address.
 
+On the Map, the left column follows a request's path: the public entry
+(Gateway, Ingress or load balancer, noting any HTTP → HTTPS redirect), any
+protection layer in front of the backends (on GKE, the Cloud Armor policy a
+`GCPBackendPolicy` attaches), then the routes into the namespace. The
+namespace's NetworkPolicies expand into one line per policy: a plain-English
+summary of what it allows, built from its rules, with the exact selector and
+rules underneath. The summary recognises common shapes (deny-all, DNS, the
+internet over HTTPS, pod-to-pod access, and on GKE the load balancer ranges,
+metadata server and Cloud SQL); anything else is shown literally, and
+selectors written as `matchExpressions` aren't reflected in the summary.
+
+A coding run's pod pulses while it is running. When the pod is deleted, its
+card stays on the Map, marked **Ended**, until you close it or for two
+minutes. On GKE, each pod card has a ↗ link to the pod in the Google Cloud
+console; it needs the kube context to keep the name `gcloud` gives it
+(`gke_<project>_<location>_<cluster>`).
+
 Credential plugins (`exec` entries in your kubeconfig) run with `/opt/homebrew/bin`,
 `/usr/local/bin` and the Google Cloud SDK's `bin` directories added to `PATH`, so
 `gke-gcloud-auth-plugin` (GKE) and the AWS CLI (EKS) are found when installed
