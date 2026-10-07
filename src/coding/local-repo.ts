@@ -1,13 +1,20 @@
 import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { delimiter, isAbsolute, resolve, sep } from "node:path";
+import { delimiter, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+
+import { LOCAL_REPO_PREFIX, isLocalRepository, normalizeLocalRepository } from "./protocol.js";
+
+export { LOCAL_REPO_PREFIX, isLocalRepository, normalizeLocalRepository };
 
 const run = promisify(execFile);
 
-/** Repository identity prefix for a git folder on the wardby host: `local:/abs/path`. */
-export const LOCAL_REPO_PREFIX = "local:";
+function cleanGitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+  return env;
+}
 
 export type LocalRepoErrorCode =
   "local_repo_not_allowed" | "local_repo_not_found" | "local_ref_not_found" | "local_branch_conflict";
@@ -20,19 +27,6 @@ export class LocalRepoError extends Error {
     super(`${code}: ${message}`);
     this.name = "LocalRepoError";
   }
-}
-
-export function isLocalRepository(value: string): boolean {
-  return value.startsWith(LOCAL_REPO_PREFIX);
-}
-
-/** Syntactic only: absolute, no NUL, normalized; returns "local:/abs/path" (no trailing slash). */
-export function normalizeLocalRepository(value: string): string {
-  if (!isLocalRepository(value)) throw new Error("local repository must start with local:");
-  const path = value.slice(LOCAL_REPO_PREFIX.length);
-  if (path.includes("\0")) throw new Error("local repository path must not contain NUL");
-  if (!isAbsolute(path)) throw new Error("local repository path must be absolute");
-  return `${LOCAL_REPO_PREFIX}${resolve(path)}`;
 }
 
 /** Splits LOCAL_REPO_ROOTS on the platform path delimiter; roots are realpath'd, missing ones are reported. */
@@ -76,7 +70,9 @@ export async function resolveLocalRepository(
   }
   let top: string;
   try {
-    const { stdout } = await run("git", ["-C", target, "rev-parse", "--show-toplevel"]);
+    const { stdout } = await run("git", ["-C", target, "rev-parse", "--show-toplevel"], {
+      env: cleanGitEnv(),
+    });
     top = await realpath(stdout.trim());
   } catch {
     throw new LocalRepoError("local_repo_not_found", "path is not a git work tree");

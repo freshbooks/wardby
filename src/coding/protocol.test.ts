@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   CODING_TASK_TRAILER_RESERVE_BYTES,
@@ -528,5 +529,12 @@ describe("composeCodingTask", () => {
       "Standing instructions for this coding agent:\nServices for this run: ...\n\nRequest:\nAdd a joke.",
     );
     expect(composeCodingTask("  ", "Add a joke.")).toBe("Add a joke.");
+  });
+});
+
+describe("protocol.ts is shipped to workers as a single file", () => {
+  it("has no relative imports", () => {
+    const source = readFileSync(new URL("./protocol.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/from\s+["']\.\.?\//);
   });
 });

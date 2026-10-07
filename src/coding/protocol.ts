@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isLocalRepository, normalizeLocalRepository } from "./local-repo.js";
+import { isAbsolute, resolve } from "node:path";
 
 export const CODING_PROTOCOL_VERSION = 1 as const;
 /** The code host every coding run's repository and pull request live on (see pullRequestUrlSchema); the one place to change when another is added. */
@@ -214,6 +214,22 @@ function isGitRef(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Repository identity prefix for a git folder on the wardby host: `local:/abs/path`. */
+export const LOCAL_REPO_PREFIX = "local:";
+
+export function isLocalRepository(value: string): boolean {
+  return value.startsWith(LOCAL_REPO_PREFIX);
+}
+
+/** Syntactic only: absolute, no NUL, normalized; returns "local:/abs/path" (no trailing slash). */
+export function normalizeLocalRepository(value: string): string {
+  if (!isLocalRepository(value)) throw new Error("local repository must start with local:");
+  const path = value.slice(LOCAL_REPO_PREFIX.length);
+  if (path.includes("\0")) throw new Error("local repository path must not contain NUL");
+  if (!isAbsolute(path)) throw new Error("local repository path must be absolute");
+  return `${LOCAL_REPO_PREFIX}${resolve(path)}`;
 }
 
 function isCodingRepository(value: string): boolean {
