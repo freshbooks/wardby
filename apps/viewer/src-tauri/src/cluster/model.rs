@@ -507,14 +507,29 @@ pub fn service_account_from(sa: &ServiceAccount) -> InfraServiceAccount {
     }
 }
 
+/// A label selector in kubectl syntax (`k=v,k in (a,b),k notin (c),k,!k`);
+/// `*` only when it has neither labels nor expressions (it selects everything).
 fn selector_string(sel: &LabelSelector) -> String {
-    match sel.match_labels.as_ref().filter(|m| !m.is_empty()) {
-        Some(m) => m
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(","),
-        None => "*".into(),
+    let labels = sel
+        .match_labels
+        .iter()
+        .flatten()
+        .map(|(k, v)| format!("{k}={v}"));
+    let expressions = sel.match_expressions.iter().flatten().map(|e| {
+        let values = e.values.as_deref().unwrap_or_default().join(",");
+        match e.operator.as_str() {
+            "In" => format!("{} in ({values})", e.key),
+            "NotIn" => format!("{} notin ({values})", e.key),
+            "Exists" => e.key.clone(),
+            "DoesNotExist" => format!("!{}", e.key),
+            op => format!("{} {op} ({values})", e.key),
+        }
+    });
+    let parts: Vec<String> = labels.chain(expressions).collect();
+    if parts.is_empty() {
+        "*".into()
+    } else {
+        parts.join(",")
     }
 }
 
@@ -733,6 +748,30 @@ mod tests {
             vec!["pods app.kubernetes.io/name=wardby-coding-proxy :8080/TCP"]
         );
         assert_eq!(np.policy_types, vec!["Egress"]);
+    }
+
+    #[test]
+    fn selector_with_expressions_is_never_shown_as_everything() {
+        let sel: LabelSelector = serde_json::from_value(serde_json::json!({
+            "matchLabels": {"app": "proxy"},
+            "matchExpressions": [
+                {"key": "tier", "operator": "In", "values": ["a", "b"]},
+                {"key": "env", "operator": "NotIn", "values": ["dev"]},
+                {"key": "owned", "operator": "Exists"},
+                {"key": "legacy", "operator": "DoesNotExist"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            selector_string(&sel),
+            "app=proxy,tier in (a,b),env notin (dev),owned,!legacy"
+        );
+        let only: LabelSelector = serde_json::from_value(serde_json::json!({
+            "matchExpressions": [{"key": "tier", "operator": "In", "values": ["a"]}]
+        }))
+        .unwrap();
+        assert_eq!(selector_string(&only), "tier in (a)");
+        assert_eq!(selector_string(&LabelSelector::default()), "*");
     }
 
     #[test]

@@ -1056,6 +1056,8 @@ pub async fn kube_pod_events(
     namespace: String,
     pod: String,
 ) -> Result<Vec<InfraEvent>, ClusterError> {
+    // Validate before reading the kubeconfig (and running any exec plugin).
+    watch::check_pod_target(&namespace, &pod)?;
     let client = kubeconfig::client_for(&context).await?;
     watch::pod_events(client, &namespace, &pod).await
 }
@@ -1154,6 +1156,29 @@ mod tests {
             "a stopped connect started a watch"
         );
         assert!(st.clusters_slot().handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn kube_pod_events_rejects_bad_names_before_reading_the_kubeconfig() {
+        // An unknown context would fail later; the name check must come first.
+        let err = kube_pod_events("no-such-context".into(), "Bad NS".into(), "p".into())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ClusterError::Other {
+                message: "invalid namespace name".into()
+            }
+        );
+        let err = kube_pod_events("no-such-context".into(), "wardby".into(), "a,b".into())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ClusterError::Other {
+                message: "invalid pod name".into()
+            }
+        );
     }
 
     #[tokio::test]

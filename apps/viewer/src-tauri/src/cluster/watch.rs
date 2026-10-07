@@ -2,6 +2,7 @@
 //! the frames the Infrastructure tab consumes.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::stream::BoxStream;
 use futures_util::{Stream, StreamExt};
@@ -129,41 +130,74 @@ pub fn spawn_cluster(
     })
 }
 
+/// Backoff between recreating a failed watch (short under test).
+const RESTART_MIN: Duration = if cfg!(test) {
+    Duration::from_millis(1)
+} else {
+    Duration::from_secs(1)
+};
+const RESTART_MAX: Duration = if cfg!(test) {
+    Duration::from_millis(8)
+} else {
+    Duration::from_secs(30)
+};
+
+/// Watches one kind. kube's watcher resumes after a watch error without a
+/// fresh list, so when it is healthy again nothing says so (and a quiet
+/// namespace sends no frame at all). Instead, a failed watch is dropped and
+/// recreated with backoff: its initial list arrives as a `Snapshot`, which
+/// tells the UI the kind recovered.
 async fn watch_kind(source: Arc<dyn ClusterSource>, kind: Kind, ns: String, emit: Emit) {
-    let mut stream = match source.watch(kind, &ns).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            emit(ClusterFrame::Snapshot {
-                kind,
-                items: Vec::new(),
-            });
-            return;
-        }
-        Err(error) => {
-            emit(ClusterFrame::KindError { kind, error });
-            return;
-        }
-    };
-    // A failing watch retries with backoff; report each distinct failure once
-    // until the watch recovers.
+    // Report each distinct failure once until the watch recovers.
     let mut last_error: Option<ClusterError> = None;
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(ev) => {
-                last_error = None;
-                emit(match ev {
-                    WatchEvent::Restarted(items) => ClusterFrame::Snapshot { kind, items },
-                    WatchEvent::Applied(item) => ClusterFrame::Applied { kind, item },
-                    WatchEvent::Deleted(name) => ClusterFrame::Deleted { kind, name },
+    let mut delay = RESTART_MIN;
+    loop {
+        let mut stream = match source.watch(kind, &ns).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                emit(ClusterFrame::Snapshot {
+                    kind,
+                    items: Vec::new(),
                 });
+                return;
             }
             Err(error) => {
-                if last_error.as_ref() != Some(&error) {
-                    last_error = Some(error.clone());
-                    emit(ClusterFrame::KindError { kind, error });
+                emit(ClusterFrame::KindError { kind, error });
+                return;
+            }
+        };
+        let started = tokio::time::Instant::now();
+        let mut failed = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(ev) => {
+                    last_error = None;
+                    emit(match ev {
+                        WatchEvent::Restarted(items) => ClusterFrame::Snapshot { kind, items },
+                        WatchEvent::Applied(item) => ClusterFrame::Applied { kind, item },
+                        WatchEvent::Deleted(name) => ClusterFrame::Deleted { kind, name },
+                    });
+                }
+                Err(error) => {
+                    if last_error.as_ref() != Some(&error) {
+                        last_error = Some(error.clone());
+                        emit(ClusterFrame::KindError { kind, error });
+                    }
+                    failed = true;
+                    break;
                 }
             }
         }
+        if !failed {
+            return;
+        }
+        drop(stream);
+        // A watch that stayed up a while starts the backoff over.
+        if started.elapsed() >= RESTART_MAX {
+            delay = RESTART_MIN;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(RESTART_MAX);
     }
 }
 
@@ -338,6 +372,18 @@ pub fn check_namespace(ns: &str) -> Result<(), ClusterError> {
     }
 }
 
+/// The namespace and pod name are safe to put in a request.
+pub fn check_pod_target(ns: &str, pod: &str) -> Result<(), ClusterError> {
+    check_namespace(ns)?;
+    if valid_name(pod, false) {
+        Ok(())
+    } else {
+        Err(ClusterError::Other {
+            message: "invalid pod name".to_string(),
+        })
+    }
+}
+
 /// The newest `POD_EVENTS` events, newest first.
 fn newest_events(mut events: Vec<Event>) -> Vec<InfraEvent> {
     let at = |e: &Event| {
@@ -361,12 +407,7 @@ pub async fn pod_events(
     ns: &str,
     pod: &str,
 ) -> Result<Vec<InfraEvent>, ClusterError> {
-    check_namespace(ns)?;
-    if !valid_name(pod, false) {
-        return Err(ClusterError::Other {
-            message: "invalid pod name".to_string(),
-        });
-    }
+    check_pod_target(ns, pod)?;
     let lp = ListParams::default().fields(&format!(
         "involvedObject.kind=Pod,involvedObject.name={pod}"
     ));
@@ -436,10 +477,12 @@ fn watch_error(e: &watcher::Error, resource: &str, ns: &str) -> Option<ClusterEr
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    type Segments = VecDeque<Vec<Result<WatchEvent, ClusterError>>>;
 
     #[derive(Default)]
     struct FakeSource {
@@ -449,6 +492,9 @@ mod tests {
         absent: HashSet<Kind>,
         /// Kinds whose stream never ends; the flag is set when it is dropped.
         hang: HashMap<Kind, Arc<AtomicBool>>,
+        /// One stream per `watch` call, in order (a recreated watch takes the next).
+        restarts: Mutex<HashMap<Kind, Segments>>,
+        watch_calls: Mutex<HashMap<Kind, usize>>,
     }
 
     struct SetOnDrop(Arc<AtomicBool>);
@@ -467,8 +513,18 @@ mod tests {
             }
         }
         async fn watch(&self, kind: Kind, _ns: &str) -> Result<Option<WatchStream>, ClusterError> {
+            *self.watch_calls.lock().unwrap().entry(kind).or_default() += 1;
             if let Some(e) = self.watch_errors.get(&kind) {
                 return Err(e.clone());
+            }
+            if let Some(evs) = self
+                .restarts
+                .lock()
+                .unwrap()
+                .get_mut(&kind)
+                .and_then(VecDeque::pop_front)
+            {
+                return Ok(Some(futures_util::stream::iter(evs).boxed()));
             }
             if self.absent.contains(&kind) {
                 return Ok(None);
@@ -628,14 +684,13 @@ mod tests {
     #[tokio::test]
     async fn a_repeated_stream_error_is_reported_once_until_it_recovers() {
         let source = FakeSource::default();
-        source.events.lock().unwrap().insert(
+        source.restarts.lock().unwrap().insert(
             Kind::Job,
-            vec![
-                Err(forbidden("jobs")),
-                Err(forbidden("jobs")),
-                Ok(WatchEvent::Restarted(vec![])),
-                Err(forbidden("jobs")),
-            ],
+            VecDeque::from([
+                vec![Err(forbidden("jobs"))],
+                vec![Err(forbidden("jobs"))],
+                vec![Ok(WatchEvent::Restarted(vec![])), Err(forbidden("jobs"))],
+            ]),
         );
         let frames = run(source).await;
         let err = ClusterFrame::KindError {
@@ -653,6 +708,55 @@ mod tests {
                 err
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_watch_is_recreated_so_recovery_relists() {
+        // kube's watcher resumes after a watch error without a fresh list, so
+        // a quiet namespace would never show that it recovered: recreate it.
+        let source = Arc::new(FakeSource::default());
+        source.restarts.lock().unwrap().insert(
+            Kind::Pod,
+            VecDeque::from([
+                vec![
+                    Ok(WatchEvent::Restarted(vec![json!({"name": "p1"})])),
+                    Err(ClusterError::Unreachable {
+                        message: "connection refused".into(),
+                    }),
+                    // Never delivered: the failed stream is dropped.
+                    Ok(WatchEvent::Applied(json!({"name": "stale"}))),
+                ],
+                vec![Ok(WatchEvent::Restarted(vec![json!({"name": "p1"})]))],
+            ]),
+        );
+        let frames: Frames = Arc::default();
+        let sink = frames.clone();
+        let handle = spawn_cluster(source.clone(), "wardby".into(), move |f| {
+            sink.lock().unwrap().push(f)
+        });
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("cluster task did not finish")
+            .unwrap();
+        let snapshot = ClusterFrame::Snapshot {
+            kind: Kind::Pod,
+            items: vec![json!({"name": "p1"})],
+        };
+        assert_eq!(
+            of_kind(&frames.lock().unwrap(), Kind::Pod),
+            vec![
+                snapshot.clone(),
+                ClusterFrame::KindError {
+                    kind: Kind::Pod,
+                    error: ClusterError::Unreachable {
+                        message: "connection refused".into()
+                    }
+                },
+                snapshot
+            ]
+        );
+        // Recreated once; the second stream ended cleanly.
+        assert_eq!(source.watch_calls.lock().unwrap()[&Kind::Pod], 2);
     }
 
     #[tokio::test]
@@ -786,7 +890,7 @@ mod tests {
 
     mod kube_source {
         use super::*;
-        use wiremock::matchers::{header_regex, method, path};
+        use wiremock::matchers::{header_regex, method, path, query_param, query_param_is_missing};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         fn source(server: &MockServer) -> KubeSource {
@@ -818,11 +922,32 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn secrets_are_listed_as_metadata_only() {
+        async fn secrets_are_listed_and_watched_as_metadata_only() {
             let server = MockServer::start().await;
-            // Only a metadata-only request matches; a full list would 404.
+            // Only metadata-only requests match; a full list or watch would 404.
             Mock::given(method("GET"))
                 .and(path("/api/v1/namespaces/wardby/secrets"))
+                .and(query_param("watch", "true"))
+                .and(header_regex("accept", "as=PartialObjectMetadata;"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_string(
+                        json!({
+                            "type": "ADDED",
+                            "object": {
+                                "kind": "PartialObjectMetadata",
+                                "apiVersion": "meta.k8s.io/v1",
+                                "metadata": {"name": "api-key", "resourceVersion": "2"}
+                            }
+                        })
+                        .to_string()
+                            + "\n",
+                    ),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/namespaces/wardby/secrets"))
+                .and(query_param_is_missing("watch"))
                 .and(header_regex("accept", "as=PartialObjectMetadataList"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                     "kind": "PartialObjectMetadataList",
@@ -837,11 +962,17 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(describe(&first), r#"restarted [{"name":"db-password"}]"#);
+            let mut next = async || {
+                tokio::time::timeout(Duration::from_secs(5), stream.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            };
+            assert_eq!(
+                describe(&next().await),
+                r#"restarted [{"name":"db-password"}]"#
+            );
+            assert_eq!(describe(&next().await), r#"applied {"name":"api-key"}"#);
         }
 
         #[tokio::test]
