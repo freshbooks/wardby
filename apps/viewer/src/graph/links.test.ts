@@ -37,7 +37,7 @@ describe("links", () => {
     expect(
       outcomeLink({ kind: "check", provider: "github", repository: "o/r", number: null, completed: true, at: null }),
     ).toBeNull();
-    expect(outcomeLink({ kind: "issue_comment", provider: "jira", issueKey: "K-1", at: null })).toBeNull();
+    expect(outcomeLink({ kind: "issue_comment", provider: "jira", issueKey: "K-1", url: null, at: null })).toBeNull();
     expect(triggerLink({ kind: "code_host", provider: "github", repository: "o/r", number: 3, event: "mention" })).toBe(
       "https://github.com/o/r/issues/3",
     );
@@ -47,6 +47,24 @@ describe("links", () => {
   it("refuses a repository name that is not owner/name", () => {
     expect(
       triggerLink({ kind: "code_host", provider: "github", repository: "o/r/../x", number: 3, event: "review" }),
+    ).toBeNull();
+  });
+
+  it("uses the server's Jira links, https only", () => {
+    const url = "https://your-site.atlassian.net/browse/SCRUM-15";
+    expect(triggerLink({ kind: "issue", provider: "jira", issueKey: "SCRUM-15", url })).toBe(url);
+    expect(triggerLink({ kind: "issue", provider: "jira", issueKey: "SCRUM-15", url: null })).toBeNull();
+    expect(
+      outcomeLink({
+        kind: "issue_comment",
+        provider: "jira",
+        issueKey: "SCRUM-15",
+        url: `${url}?focusedCommentId=1`,
+        at: null,
+      }),
+    ).toBe(`${url}?focusedCommentId=1`);
+    expect(
+      outcomeLink({ kind: "issue_comment", provider: "jira", issueKey: "K-1", url: "javascript:x", at: null }),
     ).toBeNull();
   });
 });

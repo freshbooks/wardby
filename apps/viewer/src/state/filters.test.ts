@@ -102,7 +102,7 @@ describe("one search rule across graph, counts, cost and timeline", () => {
     }) as GraphRun["outcomes"][number];
   const runs = [
     mk("r1", { outcomes: [pr("owner/repo", 12)] }),
-    mk("r2", { trigger: { kind: "issue", provider: "jira", issueKey: "SCRUM-6" }, costUsd: 0.25 }),
+    mk("r2", { trigger: { kind: "issue", provider: "jira", issueKey: "SCRUM-6", url: null }, costUsd: 0.25 }),
     mk("r3", { trigger: { kind: "code_host", provider: "github", repository: "o/x", number: 12, event: "review" } }),
     mk("r4", {}),
   ];

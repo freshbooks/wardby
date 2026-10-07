@@ -68,6 +68,11 @@ started with; `services` holds their recorded readiness. A finished run can
 declare a service that has no readiness record, for example a run from before
 the server recorded service status.
 
+A Jira trigger and a Jira comment outcome carry `url`: the issue's page on the
+site in `WARDBY_JIRA_SITE_URL`, and for the comment the same page opened at
+wardby's comment (`?focusedCommentId=`). Both are `null` when Jira isn't
+configured.
+
 Each outcome carries `at`, when it happened: when a pull request was opened,
 when a comment was last updated, or when a check completed (`null` while a
 check is still pending).

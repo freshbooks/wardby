@@ -10,7 +10,7 @@ import type { PrismaClient } from "#prisma";
 import type { McpRequestContext } from "../mcp/context.js";
 import { requireScope } from "../mcp/auth/resource-server.js";
 import { sendJson } from "../mcp/transport/streamable-http.js";
-import { DEFAULT_GRAPH_LIMIT, MAX_GRAPH_LIMIT, loadGraph, parseSince } from "./graph.js";
+import { DEFAULT_GRAPH_LIMIT, MAX_GRAPH_LIMIT, loadGraph, parseSince, type IssueSites } from "./graph.js";
 import { loadRunDetail } from "./run-detail.js";
 import type { ViewerEventBus } from "./event-bus.js";
 
@@ -26,6 +26,8 @@ export interface ViewerApiDeps {
   bus: ViewerEventBus;
   authenticate: (authorization: string | undefined) => Promise<McpRequestContext>;
   canonicalUri: string;
+  /** Issue-tracker site origins by provider, for issue and comment links (empty when none is configured). */
+  issueSites?: IssueSites;
   heartbeatMs?: number; // tests
   maxBufferedBytes?: number; // tests
 }
@@ -133,7 +135,7 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
           sendJson(res, 400, { error: "invalid_since" });
           return true;
         }
-        sendJson(res, 200, await loadGraph(deps.db, { since, limit, now }));
+        sendJson(res, 200, await loadGraph(deps.db, { since, limit, now, issueSites: deps.issueSites }));
         return true;
       }
 
@@ -144,7 +146,7 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
         } catch {
           /* malformed escape: fails the id check below */
         }
-        const detail = RUN_ID.test(id) ? await loadRunDetail(deps.db, id) : null;
+        const detail = RUN_ID.test(id) ? await loadRunDetail(deps.db, id, deps.issueSites) : null;
         if (!detail) sendJson(res, 404, { error: "not_found" });
         else sendJson(res, 200, detail);
         return true;

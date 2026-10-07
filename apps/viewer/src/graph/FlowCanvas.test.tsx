@@ -50,7 +50,7 @@ function makeRun(id: string, overrides: Partial<GraphRun> = {}): GraphRun {
 
 describe("FlowCanvas", () => {
   const runs = [
-    makeRun("one", { outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "WAR-1", at: null }] }),
+    makeRun("one", { outcomes: [{ kind: "issue_comment", provider: "jira", issueKey: "WAR-1", url: null, at: null }] }),
     makeRun("two", { startedAt: "2026-01-02T00:00:00.000Z" }),
   ];
 

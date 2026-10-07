@@ -1,7 +1,7 @@
 /** The run detail read model behind GET /admin/api/runs/:id (docs/viewer-api.md). */
 import type { PrismaClient } from "#prisma";
 import type { RunDetail } from "./api-schema.js";
-import { loadGraphRuns } from "./graph.js";
+import { loadGraphRuns, type IssueSites } from "./graph.js";
 
 type CodingDetail = NonNullable<RunDetail["coding"]>;
 
@@ -19,8 +19,12 @@ function serviceDetails(snapshot: unknown): CodingDetail["services"] {
   }));
 }
 
-export async function loadRunDetail(db: PrismaClient, runId: string): Promise<RunDetail | null> {
-  const [graphRun] = await loadGraphRuns(db, [runId]);
+export async function loadRunDetail(
+  db: PrismaClient,
+  runId: string,
+  issueSites: IssueSites = {},
+): Promise<RunDetail | null> {
+  const [graphRun] = await loadGraphRuns(db, [runId], issueSites);
   if (!graphRun) return null;
   const [row, children] = await Promise.all([
     db.run.findUniqueOrThrow({
