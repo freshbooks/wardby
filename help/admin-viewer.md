@@ -23,6 +23,7 @@ Endpoints, all `GET`:
 
 - `/admin/api/graph?since=1h&limit=500`: a snapshot of runs in a time window.
 - `/admin/api/runs/<id>`: one run in full, including its final text and error.
+- `/admin/api/infra`: how this deployment runs coding jobs (launcher, Kubernetes namespace, platform, run labels).
 - `/admin/api/events`: a Server-Sent Events stream of live changes.
 
 The stream has no replay: open the event stream first, then load the graph,
