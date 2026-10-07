@@ -2,9 +2,11 @@
 // calls carry server names, URLs, sign-in state and server JSON only.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { ClusterPayload, InfraEvent } from "../infra/types";
 import type { GraphSnapshot, InfraInfo, RunDetail, ViewerEvent } from "./types";
 
 export const FRAME_EVENT = "viewer://frame";
+export const CLUSTER_EVENT = "viewer://cluster";
 
 /** Mirrors the Rust `AppError` serialization. */
 export type AppErrorKind =
@@ -94,10 +96,29 @@ export const kubeContexts = () => invoke<{ current: string | null; contexts: str
 export const setKubeContext = (url: string, context: string | null) =>
   invoke<void>("set_kube_context", { url, context });
 
+/**
+ * Starts the live, read-only watch of a namespace, replacing any previous one for the
+ * server. Frames arrive on `CLUSTER_EVENT`; rejects with a `ClusterError`.
+ */
+export const kubeConnect = (url: string, context: string, namespace: string) =>
+  invoke<void>("kube_connect", { url, context, namespace });
+
+/** Stops the server's cluster watch. */
+export const kubeDisconnect = (url: string) => invoke<void>("kube_disconnect", { url });
+
+/** The newest events for one pod; rejects with a `ClusterError`. */
+export const kubePodEvents = (context: string, namespace: string, pod: string) =>
+  invoke<InfraEvent[]>("kube_pod_events", { context, namespace, pod });
+
 /** Opens an `https://` link in the system browser; Rust rejects every other scheme. */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
 
 /** Subscribes to stream frames; resolves to the function that unsubscribes. */
 export function onFrame(cb: (payload: FramePayload) => void): Promise<UnlistenFn> {
   return listen<FramePayload>(FRAME_EVENT, (e) => cb(e.payload));
+}
+
+/** Subscribes to cluster frames; resolves to the function that unsubscribes. */
+export function onCluster(cb: (payload: ClusterPayload) => void): Promise<UnlistenFn> {
+  return listen<ClusterPayload>(CLUSTER_EVENT, (e) => cb(e.payload));
 }
