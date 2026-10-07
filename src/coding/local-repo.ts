@@ -17,7 +17,12 @@ function cleanGitEnv(): NodeJS.ProcessEnv {
 }
 
 export type LocalRepoErrorCode =
-  "local_repo_not_allowed" | "local_repo_not_found" | "local_ref_not_found" | "local_branch_conflict";
+  | "local_repo_not_allowed"
+  | "local_repo_not_found"
+  | "local_ref_not_found"
+  | "local_ref_invalid"
+  | "local_path_invalid"
+  | "local_branch_conflict";
 
 export class LocalRepoError extends Error {
   constructor(

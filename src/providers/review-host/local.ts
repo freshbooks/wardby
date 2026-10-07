@@ -13,8 +13,6 @@
  * `git check-ref-format --branch` accepts and that cannot read as an option),
  * and revisions follow `--end-of-options`.
  */
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { PrismaClient } from "#prisma";
 import {
   LocalRepoError,
@@ -22,6 +20,7 @@ import {
   normalizeLocalRepository,
   resolveLocalRepository,
 } from "../../coding/local-repo.js";
+import { SHA, isSafeRefName, isSafeRepoPath, localGit as git } from "../../coding/local-git.js";
 import { skippedInListing } from "./github.js";
 import { verdictConclusion } from "./review-format.js";
 import {
@@ -43,16 +42,11 @@ import {
   type StartCheckInput,
 } from "./types.js";
 
-const run = promisify(execFile);
-
-const SHA = /^[0-9a-f]{40}$/;
-const MAX_REF_CHARS = 250;
 /** GitHub lists at most 3 pages of 100 files; match it. */
 const MAX_PR_FILES = 300;
 const MAX_LISTED_FILES = 1000;
 const MAX_BODY_CHARS = 8000;
 const MAX_LOGGED_COMMITS = 100;
-const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 const MAX_PG_INT = 2_147_483_647;
 
 const STATUS: Record<string, string> = {
@@ -87,48 +81,12 @@ export interface LocalReviewHostOptions {
   roots?: () => readonly string[];
 }
 
-function cleanGitEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
-  return env;
-}
-
 function fail(message: string): never {
   throw new ReviewHostError("host_api_error", message);
 }
 
-/** Runs git read-only in `dir`. Throws the raw execFile error; callers decide what a failure means. */
-async function git(dir: string, args: string[], maxBuffer = GIT_MAX_BUFFER): Promise<string> {
-  const { stdout } = await run(
-    "git",
-    [
-      "--literal-pathspecs",
-      "--no-optional-locks",
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      "core.hooksPath=/dev/null",
-      "-c",
-      "diff.external=",
-      "-C",
-      dir,
-      ...args,
-    ],
-    { env: cleanGitEnv(), maxBuffer, encoding: "utf8" },
-  );
-  return stdout;
-}
-
-/** A path inside the repository: relative, no `.`/`..`/empty segments, no NUL. */
 function assertRepoPath(path: string): void {
-  if (
-    !path ||
-    path.includes("\0") ||
-    path.startsWith("/") ||
-    path.split("/").some((part) => part === "" || part === "." || part === "..")
-  ) {
-    fail("path_invalid");
-  }
+  if (!isSafeRepoPath(path)) fail("path_invalid");
 }
 
 function prUrl(row: PullRequestRow): string {
@@ -178,22 +136,9 @@ export class LocalReviewHost implements CodeReviewHost {
   }
 
   /** Rejects anything but a plain branch/tag name before it can reach git as a revision or an option. */
+  /** Rejects anything but a plain branch/tag name before it can reach git as a revision or an option. */
   private async assertRefName(dir: string, name: string): Promise<void> {
-    if (
-      !name ||
-      name.length > MAX_REF_CHARS ||
-      name.startsWith("-") ||
-      name.includes("\0") ||
-      name.includes("@{") ||
-      !/^[\x21-\x7e]+$/.test(name)
-    ) {
-      fail("ref_invalid");
-    }
-    try {
-      await git(dir, ["check-ref-format", "--branch", name], 64 * 1024);
-    } catch {
-      fail("ref_invalid");
-    }
+    if (!(await isSafeRefName(dir, name))) fail("ref_invalid");
   }
 
   /** The commit a sha or branch name points at. */

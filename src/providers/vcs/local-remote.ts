@@ -6,6 +6,8 @@ import {
   normalizeLocalRepository,
   resolveLocalRepository,
 } from "../../coding/local-repo.js";
+import { SHA, isSafeRefName, isSafeRepoPath, localGit } from "../../coding/local-git.js";
+import type { RepositoryFileInput } from "./github.js";
 import type { GitRemote, PublishInput, PublishResult } from "./remote.js";
 
 /** The only refs a local remote ever writes into the user's repository. */
@@ -54,6 +56,39 @@ export class LocalRemote implements GitRemote {
 
   /** No pull request to check: a continuation's branch must exist, which prepare's ls-remote pre-check enforces. */
   async assertContinuationOpen(): Promise<void> {}
+
+  /**
+   * One committed file at a ref, read from git objects (never the working tree).
+   * null = the file does not exist at that ref; a missing ref is
+   * local_ref_not_found; a repository outside the roots is refused.
+   */
+  async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {
+    const { path: dir } = await resolveLocalRepository(input.repository, this.options.roots());
+    if (!isSafeRepoPath(input.path)) throw new LocalRepoError("local_path_invalid", "invalid repository file path");
+    if (!SHA.test(input.ref) && !(await isSafeRefName(dir, input.ref))) {
+      throw new LocalRepoError("local_ref_invalid", "invalid ref");
+    }
+    let sha: string;
+    try {
+      sha = (
+        await localGit(
+          dir,
+          ["rev-parse", "--verify", "--quiet", "--end-of-options", `${input.ref}^{commit}`],
+          64 * 1024,
+        )
+      ).trim();
+    } catch {
+      throw new LocalRepoError("local_ref_not_found", `ref ${input.ref} does not exist in the local repository`);
+    }
+    if (!SHA.test(sha)) throw new LocalRepoError("local_ref_not_found", `ref ${input.ref} does not exist`);
+    const listing = await localGit(dir, ["ls-tree", "-z", "--end-of-options", sha, "--", input.path], 64 * 1024);
+    if (!listing) return null;
+    if (!/^100(?:644|755) blob /.test(listing)) throw new Error("local_file_not_a_file");
+    const object = `${sha}:${input.path}`;
+    const size = Number((await localGit(dir, ["cat-file", "-s", "--end-of-options", object], 64 * 1024)).trim());
+    if (!Number.isSafeInteger(size) || size > input.maxBytes) throw new Error("local_file_too_large");
+    return localGit(dir, ["cat-file", "blob", "--end-of-options", object], input.maxBytes * 4 + 1024);
+  }
 
   async publish({ workspace }: PublishInput): Promise<PublishResult> {
     this.assertPushRef(workspace.headRef);

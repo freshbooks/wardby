@@ -266,4 +266,69 @@ describe("LocalRemote push guard", () => {
     expect(remote.gitConfig).toEqual(["-c", "protocol.file.allow=always"]);
     expect(remote.cloneUrl("local:/tmp/a b")).toBe("file:///tmp/a%20b");
   });
+
+  describe("readRepositoryFile", () => {
+    const read = (
+      f: Fixture,
+      over: Partial<{ repository: string; ref: string; path: string; maxBytes: number }> = {},
+    ) =>
+      f.provider.readRepositoryFile({
+        repository: `local:${f.src}`,
+        ref: "main",
+        path: ".wardby/services.yaml",
+        maxBytes: 8192,
+        ...over,
+      });
+
+    it("reads a committed file at the ref, exactly", async () => {
+      const f = await fixture();
+      await mkdir(join(f.src, ".wardby"));
+      await writeFile(join(f.src, ".wardby", "services.yaml"), "services:\n  db:\n    image: postgres\n");
+      await git(f.src, ["add", ".wardby/services.yaml"]);
+      await git(f.src, ["commit", "-m", "services"]);
+      expect(await read(f)).toBe("services:\n  db:\n    image: postgres\n");
+    });
+
+    it("returns null when the file is absent at the ref", async () => {
+      const f = await fixture();
+      expect(await read(f)).toBeNull();
+    });
+
+    it("returns null for a file present only in the working tree, and ignores working-tree edits", async () => {
+      const f = await fixture();
+      await mkdir(join(f.src, ".wardby"));
+      await writeFile(join(f.src, ".wardby", "services.yaml"), "uncommitted\n");
+      expect(await read(f)).toBeNull();
+      expect(await read(f, { path: "README.md" })).toBe("hello again\n");
+      await writeFile(join(f.src, "README.md"), "edited\n");
+      expect(await read(f, { path: "README.md" })).toBe("hello again\n");
+    });
+
+    it("rejects traversal paths and option-like refs", async () => {
+      const f = await fixture();
+      await expect(read(f, { path: "../x" })).rejects.toThrow();
+      await expect(read(f, { path: "a/./b" })).rejects.toThrow();
+      await expect(read(f, { path: "/etc/passwd" })).rejects.toThrow();
+      await expect(read(f, { ref: "--output=/tmp/x" })).rejects.toThrow();
+    });
+
+    it("reports a missing ref as local_ref_not_found", async () => {
+      const f = await fixture();
+      await expect(read(f, { ref: "nope" })).rejects.toMatchObject({ code: "local_ref_not_found" });
+    });
+
+    it("refuses a repository outside the roots", async () => {
+      const f = await fixture();
+      const other = join(f.root, "other");
+      await makeRepo(other);
+      await expect(read(f, { repository: `local:${other}` })).rejects.toMatchObject({
+        code: "local_repo_not_allowed",
+      });
+    });
+
+    it("refuses a file above maxBytes", async () => {
+      const f = await fixture();
+      await expect(read(f, { path: "README.md", maxBytes: 3 })).rejects.toThrow("local_file_too_large");
+    });
+  });
 });

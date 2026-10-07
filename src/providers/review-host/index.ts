@@ -19,16 +19,14 @@ function githubClient(env: NodeJS.ProcessEnv): GitHubAppClient | null {
 
 /**
  * One host per configured provider: github when a GitHub App is configured,
- * local when LOCAL_REPO_ROOTS names at least one existing root (the roots are
- * re-read on every local call). Empty = the repo_* tools are never offered.
+ * local always (the roots are re-read on every local call, so a link with no
+ * roots configured is refused with local_repo_not_allowed at call time).
  */
 export function buildReviewHosts(env: NodeJS.ProcessEnv, db: LocalReviewHostOptions["db"]): ReviewHostRegistry {
   const hosts: ReviewHostRegistry = {};
   const client = githubClient(env);
   if (client) hosts.github = new GitHubReviewHost(client);
-  if (loadLocalRepoRoots(env).roots.length > 0) {
-    hosts.local = new LocalReviewHost({ db, roots: () => loadLocalRepoRoots(env).roots });
-  }
+  hosts.local = new LocalReviewHost({ db, roots: () => loadLocalRepoRoots(env).roots });
   return hosts;
 }
 
