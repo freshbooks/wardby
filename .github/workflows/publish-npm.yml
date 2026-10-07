@@ -9,7 +9,51 @@ permissions:
   id-token: write
 
 jobs:
+  # Publishes the images the quickstart's optional coding step runs, before the
+  # package that references them. Release publishing only; nothing is deployed.
+  images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+    outputs:
+      runtime: ${{ steps.runtime.outputs.digest }}
+      worker: ${{ steps.worker.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - run: node scripts/coding-worker-image-policy.mjs ../src/coding-worker/Dockerfile --kind=runtime
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: runtime
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: runtime
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}/wardby-runtime:${{ github.event.release.tag_name }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: worker
+        with:
+          context: .
+          file: src/coding-worker/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}/wardby-coding-worker:${{ github.event.release.tag_name }}
+
   publish:
+    needs: images
     runs-on: ubuntu-latest
     # test:package installs the packed tarball in a linux/amd64 container and
     # runs quickstart's migrations and the CLI against a throwaway database it
@@ -43,6 +87,23 @@ jobs:
           const { version } = JSON.parse(readFileSync("package.json", "utf8"));
           if (process.env.RELEASE_TAG !== `v${version}`)
           throw new Error(`release ${process.env.RELEASE_TAG} does not match v${version}`);'
+      - run: npm run build
+      # Ship the pushed digests in the tarball (dist/ is in "files"). The
+      # quickstart resolves images by digest only, never by tag.
+      - name: Record image digests
+        env:
+          IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+          RUNTIME_DIGEST: ${{ needs.images.outputs.runtime }}
+          WORKER_DIGEST: ${{ needs.images.outputs.worker }}
+        run: >-
+          node -e 'const { mkdirSync, writeFileSync } = require("node:fs");
+          const { IMAGE_PREFIX, RUNTIME_DIGEST, WORKER_DIGEST } = process.env;
+          for (const d of [RUNTIME_DIGEST, WORKER_DIGEST])
+          if (!/^sha256:[0-9a-f]{64}$/.test(d)) throw new Error(`bad digest ${d}`);
+          mkdirSync("dist", { recursive: true });
+          writeFileSync("dist/quickstart-images.json", JSON.stringify({
+          runtime: `${IMAGE_PREFIX}/wardby-runtime@${RUNTIME_DIGEST}`,
+          worker: `${IMAGE_PREFIX}/wardby-coding-worker@${WORKER_DIGEST}` }) + "\n");'
       - run: npm run test:package
         env:
           DATABASE_URL: postgresql://wardby:test-only@localhost:5432/package

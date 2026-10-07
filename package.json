@@ -36,6 +36,7 @@
     "NOTICE",
     "bin/",
     "docs/",
+    "deploy/local/docker-compose.quickstart-coding.yml",
     "deploy/local/docker-compose.yml",
     "dist/",
     "help/",
