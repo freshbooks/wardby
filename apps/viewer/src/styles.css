@@ -665,6 +665,42 @@ button:disabled {
   animation: node-pulse 2s ease-in-out infinite;
 }
 
+/* A coding run whose pod is gone stays until closed, then squashes away. */
+.map-sandbox.ended {
+  opacity: 0.6;
+  transform-origin: top;
+}
+
+.map-sandbox.ended .map-pod {
+  cursor: default;
+}
+
+.map-sandbox.leaving {
+  animation: map-squash 350ms ease-in forwards;
+  overflow: hidden;
+}
+
+@keyframes map-squash {
+  from {
+    transform: scaleY(1);
+    max-height: 30rem;
+  }
+  to {
+    transform: scaleY(0);
+    max-height: 0;
+    opacity: 0;
+    margin: 0;
+    padding-block: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .map-sandbox.leaving {
+    animation: none;
+    display: none;
+  }
+}
+
 /* The selection ring is also a box-shadow; keep it steady. */
 .map-pod.pulse[aria-pressed="true"] {
   animation: none;
