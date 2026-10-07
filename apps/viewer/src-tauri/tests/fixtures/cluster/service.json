@@ -1,0 +1,2 @@
+{"apiVersion":"v1","kind":"Service","metadata":{"name":"wardby","namespace":"wardby"},
+"spec":{"type":"ClusterIP","ports":[{"port":80,"protocol":"TCP","targetPort":8080}],"selector":{"app.kubernetes.io/name":"wardby"}}}

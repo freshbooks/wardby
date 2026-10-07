@@ -1,0 +1,16 @@
+{"apiVersion":"v1","kind":"Pod","metadata":{"name":"wardby-run-0123456789abcdef0123","namespace":"wardby-coding",
+"labels":{"wardby.io/component":"coding-run","wardby.io/run-sha256":"0123456789abcdef0123456789abcdef01234567","pod-template-hash":"abc","app.kubernetes.io/managed-by":"wardby"},
+"ownerReferences":[{"apiVersion":"batch/v1","kind":"Job","name":"wardby-run-0123456789abcdef0123","uid":"u-1","controller":true}]},
+"spec":{"runtimeClassName":"gvisor","nodeName":"gke-node-1","serviceAccountName":"wardby-run",
+"initContainers":[
+{"name":"storage-init","image":"registry.example.com/wardby/driver:1.2.3"},
+{"name":"postgres","image":"docker.io/library/postgres@sha256:aaaaaaaaaaaabbbbbbbbbbbbccccccccccccddddddddddddeeeeeeeeeeeeffff","restartPolicy":"Always"},
+{"name":"redis","image":"docker.io/library/redis:7","restartPolicy":"Always"}],
+"containers":[{"name":"worker","image":"registry.example.com/wardby/worker:latest","resources":{"requests":{"cpu":"2","memory":"4Gi"},"limits":{"cpu":"4","memory":"8Gi"}}}]},
+"status":{"phase":"Running","startTime":"2026-10-03T12:00:00Z",
+"initContainerStatuses":[
+{"name":"storage-init","image":"x","imageID":"x","ready":true,"restartCount":0,"state":{"terminated":{"exitCode":0,"reason":"Completed"}}},
+{"name":"postgres","image":"x","imageID":"x","ready":true,"restartCount":0,"state":{"running":{"startedAt":"2026-10-03T12:00:05Z"}}},
+{"name":"redis","image":"x","imageID":"x","ready":false,"restartCount":3,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}],
+"containerStatuses":[{"name":"worker","image":"x","imageID":"x","ready":true,"restartCount":0,"state":{"running":{"startedAt":"2026-10-03T12:00:10Z"}}}],
+"conditions":[{"type":"Ready","status":"True"}]}}

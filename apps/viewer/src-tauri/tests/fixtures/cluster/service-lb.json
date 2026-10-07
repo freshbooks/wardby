@@ -1,0 +1,2 @@
+{"apiVersion":"v1","kind":"Service","metadata":{"name":"wardby-lb","namespace":"wardby","annotations":{"cloud.google.com/neg":"{\"ingress\":true}","other":"x"}},
+"spec":{"type":"LoadBalancer","ports":[{"port":443,"protocol":"TCP","targetPort":"https"}]}}

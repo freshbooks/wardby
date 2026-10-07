@@ -4,3 +4,4 @@
 
 pub mod errors;
 pub mod kubeconfig;
+pub mod model;
