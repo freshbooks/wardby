@@ -183,7 +183,7 @@ export function InfraMap({
       <div className="map-col map-edge-col">
         {model.controlPlane.inCluster ? (
           <>
-            <div className="map-card map-static map-flow">
+            <div className={`map-card map-static map-flow${model.edge.length === 0 ? " map-enter" : ""}`}>
               <span className="map-title">Internet</span>
               {hosts.map((h) => (
                 <span key={h} className="muted">
@@ -192,7 +192,10 @@ export function InfraMap({
               ))}
             </div>
             {model.edge.map((e, i) => (
-              <div key={`${e.label}-${i}`} className="map-card map-static map-flow">
+              <div
+                key={`${e.label}-${i}`}
+                className={`map-card map-static map-flow${e.role ? "" : " map-protection"}${i === model.edge.length - 1 ? " map-enter" : ""}`}
+              >
                 <span className="map-title">{e.label}</span>
                 {e.detail.length > 0 && <span className="muted">{e.detail.join(" · ")}</span>}
               </div>
@@ -213,7 +216,10 @@ export function InfraMap({
               </div>
             )}
             {model.edge.map((e, i) => (
-              <div key={`${e.label}-${i}`} className="map-card map-static map-flow">
+              <div
+                key={`${e.label}-${i}`}
+                className={`map-card map-static map-flow${e.role ? "" : " map-protection"}${i === model.edge.length - 1 ? " map-enter" : ""}`}
+              >
                 <span className="map-title">{e.label}</span>
                 {e.detail.length > 0 && <span className="muted">{e.detail.join(" · ")}</span>}
               </div>

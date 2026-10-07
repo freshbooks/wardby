@@ -48,7 +48,9 @@ suite("describe", () => {
   it("labels a GKE footprint", () => {
     const m = describe(gkeCluster, gkeInfo);
     expect(m.platform).toBe("gke");
-    expect(m.edge[0]).toMatchObject({ label: "Gateway", detail: expect.arrayContaining(["Cloud Armor", "TLS"]) });
+    // The request path: Gateway, then Cloud Armor as its own step, then the routes.
+    expect(m.edge[0]).toMatchObject({ label: "Gateway", detail: expect.arrayContaining(["TLS"]) });
+    expect(m.edge[1]).toMatchObject({ label: "Cloud Armor" });
     expect(m.dataStores[0]).toMatchObject({ label: "Cloud SQL" });
     expect(m.secrets.source).toBe("Secret Manager");
     expect(m.groups.alwaysOn.map((p) => p.title)).toEqual(["control-plane", "coding-proxy", "headroom"]);
@@ -281,15 +283,32 @@ suite("kind and out-of-cluster control planes", () => {
   it("adds Cloud Armor from a GCPBackendPolicy targeting the Gateway (GKE only)", () => {
     const gw = { ...gkeCluster.objects.gateway.get("wardby-gateway")!, annotations: {} };
     const c = clusterOf({ gateway: [gw], backend_policy: [policy()] });
-    expect(describe(c, gkeInfo).edge[0].detail).toEqual(["Cloud Armor armor-1", "TLS"]);
+    expect(describe(c, gkeInfo).edge.map((e) => [e.label, e.detail])).toEqual([
+      ["Gateway", ["TLS"]],
+      ["Cloud Armor", ["armor-1"]],
+    ]);
     // A policy without a securityPolicy, or aimed at another target, adds nothing.
     const none = clusterOf({
       gateway: [gw],
       backend_policy: [policy({ securityPolicy: null }), policy({ name: "q", targetName: "elsewhere" })],
     });
-    expect(describe(none, gkeInfo).edge[0].detail).toEqual(["TLS"]);
+    expect(describe(none, gkeInfo).edge.map((e) => e.label)).toEqual(["Gateway"]);
     // Other platforms ignore the CRD.
     expect(describe(c, genericInfo).edge[0].detail).toEqual([]);
+  });
+
+  it("folds a redirect-only route into the entry and orders the path entry → protection → routes", () => {
+    const gw = { ...gkeCluster.objects.gateway.get("wardby-gateway")!, annotations: {} };
+    const c = clusterOf({
+      gateway: [gw],
+      http_route: [route({ name: "main" }), route({ name: "redir", redirectOnly: true, redirectScheme: "https" })],
+      backend_policy: [policy({ targetKind: "Service", targetName: "web" })],
+    });
+    expect(describe(c, gkeInfo).edge.map((e) => [e.label, e.detail])).toEqual([
+      ["Gateway", ["TLS", "HTTP → HTTPS redirect"]],
+      ["Cloud Armor", ["armor-1"]],
+      ["HTTPRoute", ["app.example.com"]],
+    ]);
   });
 
   it("adds Cloud Armor to the HTTPRoute behind a Service that a policy targets", () => {
@@ -297,9 +316,12 @@ suite("kind and out-of-cluster control planes", () => {
       http_route: [route({ name: "main" }), route({ name: "other", backends: ["api"] })],
       backend_policy: [policy({ targetKind: "Service", targetName: "web" })],
     });
-    const [main, other] = describe(c, gkeInfo).edge;
-    expect(main.detail).toEqual(["app.example.com", "Cloud Armor armor-1"]);
-    expect(other.detail).toEqual(["app.example.com"]);
+    // Cloud Armor is a step in front of the routes, not a detail on one.
+    expect(describe(c, gkeInfo).edge.map((e) => [e.label, e.detail])).toEqual([
+      ["Cloud Armor", ["armor-1"]],
+      ["HTTPRoute", ["app.example.com"]],
+      ["HTTPRoute", ["app.example.com"]],
+    ]);
   });
 
   it("labels completed, failed and terminating pods", () => {

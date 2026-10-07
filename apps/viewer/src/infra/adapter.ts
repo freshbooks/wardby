@@ -30,6 +30,12 @@ export interface EdgeView {
   label: string;
   detail: string[];
   hosts: string[];
+  /** Where it sits on the request path: the public entry (Gateway, Ingress, LB) or a route behind it. */
+  role?: "entry" | "route";
+  /** A redirect-only route's effect, shown on the entry instead of as a path step. */
+  redirect?: string;
+  /** A protection layer in front of the backends (GKE: Cloud Armor); becomes its own path step. */
+  protection?: { label: string; names: string[] };
 }
 export interface PodView {
   name: string;
@@ -167,9 +173,40 @@ function routeDetail(e: InfraEdge): string[] {
 
 const genericEdge = (e: InfraEdge): EdgeView => ({
   label: GENERIC_EDGE_LABELS[e.kind] ?? e.kind,
-  detail: isRoute(e) ? routeDetail(e) : [],
+  detail: isRoute(e) && !e.redirectOnly ? routeDetail(e) : [],
   hosts: e.hosts,
+  role: isRoute(e) ? "route" : "entry",
+  ...(isRoute(e) && e.redirectOnly ? { redirect: routeDetail(e)[0] } : {}),
 });
+
+/**
+ * Orders the edge views as the request travels: entries, then each protection layer as its
+ * own step, then the routes into the namespace. Redirect-only routes become a note on the entry.
+ */
+function edgePath(views: EdgeView[]): EdgeView[] {
+  const strip = (v: EdgeView): EdgeView => {
+    const copy = { ...v };
+    delete copy.protection;
+    delete copy.redirect;
+    return copy;
+  };
+  const redirects = [...new Set(views.flatMap((v) => (v.redirect ? [v.redirect] : [])))];
+  const entries = views.filter((v) => v.role === "entry").map(strip);
+  if (entries.length) entries[0] = { ...entries[0], detail: [...entries[0].detail, ...redirects] };
+  const layers = new Map<string, Set<string>>();
+  for (const v of views) {
+    if (!v.protection) continue;
+    const names = layers.get(v.protection.label) ?? new Set<string>();
+    v.protection.names.forEach((n) => names.add(n));
+    layers.set(v.protection.label, names);
+  }
+  const protection = [...layers].map(([label, names]): EdgeView => ({ label, detail: [...names], hosts: [] }));
+  const routes = views.filter((v) => v.role !== "entry" && !v.redirect).map(strip);
+  const orphanRedirects = entries.length
+    ? []
+    : views.filter((v) => v.redirect).map((v) => ({ ...strip(v), detail: [v.redirect!] }));
+  return [...entries, ...protection, ...routes, ...orphanRedirects];
+}
 
 /** Cloud Armor policy names a GCPBackendPolicy attaches to a Gateway or to the Services a route sends traffic to. */
 function armorPolicies(e: InfraEdge, ctx: EdgeContext): string[] {
@@ -185,21 +222,17 @@ function armorPolicies(e: InfraEdge, ctx: EdgeContext): string[] {
 const genericDatabase = (): DataStoreView => ({ label: "Postgres (external)", detail: [] });
 
 const gkeEdge = (e: InfraEdge, ctx: EdgeContext): EdgeView => {
-  if (e.kind !== "gateway") {
-    const view = genericEdge(e);
-    return { ...view, detail: [...view.detail, ...armorPolicies(e, ctx).map((n) => `Cloud Armor ${n}`)] };
-  }
-  const detail: string[] = [];
-  const armor = Object.entries(e.annotations).some(
-    ([k, v]) =>
-      (k.startsWith("networking.gke.io/") || k.startsWith("cloud.google.com/")) &&
-      /armor|security[-_ ]?policy/i.test(`${k} ${v}`),
-  );
   const named = armorPolicies(e, ctx);
-  if (named.length) detail.push(...named.map((n) => `Cloud Armor ${n}`));
-  else if (armor) detail.push("Cloud Armor");
-  if (e.hosts.length) detail.push("TLS");
-  return { label: "Gateway", detail, hosts: e.hosts };
+  const armorAnnotation =
+    e.kind === "gateway" &&
+    Object.entries(e.annotations).some(
+      ([k, v]) =>
+        (k.startsWith("networking.gke.io/") || k.startsWith("cloud.google.com/")) &&
+        /armor|security[-_ ]?policy/i.test(`${k} ${v}`),
+    );
+  const protection = named.length || armorAnnotation ? { protection: { label: "Cloud Armor", names: named } } : {};
+  if (e.kind !== "gateway") return { ...genericEdge(e), ...protection };
+  return { label: "Gateway", detail: e.hosts.length ? ["TLS"] : [], hosts: e.hosts, role: "entry", ...protection };
 };
 
 const gkeIdentity = (sa: InfraServiceAccount | null): string | null => {
@@ -613,7 +646,7 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
       alwaysOn.some((p) => p.title === "control-plane") || !cluster.podsSynced // unknown until the pod snapshot arrives
         ? { inCluster: true }
         : { inCluster: false, location: hostPort(opts.serverUrl) },
-    edge: edges.map((e) => rules.edge(e, { backendPolicies: values(cluster, "backend_policy") })),
+    edge: edgePath(edges.map((e) => rules.edge(e, { backendPolicies: values(cluster, "backend_policy") }))),
     groups: { alwaysOn, codingRuns, jobs },
     isolation: {
       egressRules,

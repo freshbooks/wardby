@@ -1299,6 +1299,9 @@ button:disabled {
   position: relative;
   border: 1px solid var(--border);
   min-width: 0;
+  /* As tall as the edge path, so the path's last ▶ always lands on it. */
+  align-self: stretch;
+  align-content: start;
 }
 
 .map-fence {
@@ -1351,13 +1354,20 @@ button:disabled {
   color: var(--muted);
 }
 
-.map-namespace::before {
+/* Traffic enters the namespace from the last step of the edge path (after any protection layer). */
+.map-enter::after {
   content: "▶";
   position: absolute;
-  left: -1.4rem;
-  top: 1rem;
+  right: -1.4rem;
+  top: 50%;
+  transform: translateY(-50%);
   font-size: 0.8rem;
   color: var(--muted);
+}
+
+/* A protection layer on the path (GKE: Cloud Armor). */
+.map-protection {
+  border-color: var(--accent);
 }
 
 .map-data-col .map-card::before {
@@ -1376,7 +1386,7 @@ button:disabled {
     gap: 1.5rem;
   }
 
-  .map-namespace::before,
+  .map-enter::after,
   .map-data-col .map-card::before {
     content: none;
   }
