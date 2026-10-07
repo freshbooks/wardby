@@ -480,6 +480,10 @@ model CodingRun {
   /// The originating tracker issue ("jira" + key), set by the control plane from the run tree, never from model output.
   issueProvider     String?
   issueKey          String?
+  /// The branch a run pushed to a local repository (no pull request exists); null otherwise.
+  resultBranch      String?
+  /// The commit the run started from (the base ref's tip when the workspace was prepared).
+  baseSha           String?
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
   proxySession      CodingProxySession?

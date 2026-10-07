@@ -467,7 +467,7 @@ const pullRequestUrlSchema = z
 export const CodingRunResultSchema = z
   .object({
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
-    outcome: z.enum(["pull_request_opened", "pull_request_updated", "no_changes", "budget_exhausted"]),
+    outcome: z.enum(["pull_request_opened", "pull_request_updated", "branch_pushed", "no_changes", "budget_exhausted"]),
     repository: repositorySchema,
     baseRef: CodingBaseRefSchema,
     headRef: CodingBaseRefSchema.optional(),
@@ -490,7 +490,17 @@ export const CodingRunResultSchema = z
     if (isPrOutcome && prFields.some((field) => field === undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a PR outcome requires all PR fields" });
     }
-    if (!isPrOutcome && prFields.some((field) => field !== undefined)) {
+    if (value.outcome === "branch_pushed") {
+      if (value.headRef === undefined || value.commitSha === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "a pushed-branch outcome requires headRef and commitSha",
+        });
+      }
+      if (value.pullRequestUrl !== undefined || value.pullRequestNumber !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a pushed-branch outcome has no pull request" });
+      }
+    } else if (!isPrOutcome && prFields.some((field) => field !== undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "non-PR outcomes must not include PR fields" });
     }
     if (value.pullRequestUrl && value.pullRequestNumber) {

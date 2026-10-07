@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { GitVcsProvider } from "./git.js";
+import { GitVcsProvider, NodeGitCommandRunner, type GitCommandRunner } from "./git.js";
 import { LocalRemote } from "./local-remote.js";
 import type { PreparedWorkspace, VcsPrepareInput } from "./types.js";
 
@@ -170,6 +170,41 @@ describe("LocalRemote (real git, no Docker)", () => {
     const moved = await git(f.src, ["rev-parse", "wardby/run-r1"]);
     await expect(f.provider.finalizeChanges(third)).rejects.toMatchObject({ code: "local_branch_conflict" });
     expect(await git(f.src, ["rev-parse", "wardby/run-r1"])).toBe(moved);
+  });
+
+  it("maps a push that loses a race to local_branch_conflict", async () => {
+    const f = await fixture();
+    const workspace = await prepareAndChange(f);
+    const inner = new NodeGitCommandRunner({ homeDir: join(f.root, "vcs", ".home") });
+    const racing: GitCommandRunner = {
+      async run(args, options) {
+        if (args.includes("push")) {
+          // Another writer creates the branch (unrelated history) between ls-remote and push.
+          const tree = await git(f.src, ["rev-parse", "main^{tree}"]);
+          const orphan = await git(f.src, ["commit-tree", tree, "-m", "orphan"]);
+          await git(f.src, ["update-ref", "refs/heads/wardby/run-r1", orphan]);
+        }
+        return inner.run(args, options);
+      },
+    };
+    const provider = new GitVcsProvider({
+      rootDir: join(f.root, "vcs"),
+      remote: new LocalRemote({ roots: () => f.roots }),
+      git: racing,
+    });
+    await expect(provider.finalizeChanges(workspace)).rejects.toMatchObject({ code: "local_branch_conflict" });
+  });
+
+  it("refuses to push a branch that is checked out in the source repository", async () => {
+    const f = await fixture();
+    const workspace = await prepareAndChange(f);
+    await git(f.src, ["checkout", "-b", "wardby/run-r1"]);
+    const before = await snapshot(f.src);
+    const error = await f.provider.finalizeChanges(workspace).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "local_branch_conflict" });
+    expect((error as Error).message).toContain("checked out");
+    expect(await snapshot(f.src)).toEqual(before);
+    expect(await git(f.src, ["rev-parse", "wardby/run-r1"])).toBe(workspace.baseCommit);
   });
 
   it("refuses a repository outside the roots, and roots that changed before finalize", async () => {

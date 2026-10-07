@@ -44,6 +44,8 @@ export interface GitRemote {
   refNotFoundError?(ref: string): Error;
   /** When set, called with headRef before any push; throws to refuse writing that ref (GitHub: unset). */
   assertPushRef?(headRef: string): void;
+  /** When set, called inside withAccess right before the push; throws to refuse it (GitHub: unset). */
+  beforePush?(repository: string, headRef: string): Promise<void>;
   notifyContinuationStarted?: VcsProvider["notifyContinuationStarted"];
   notifyContinuationFinished?: VcsProvider["notifyContinuationFinished"];
   readRepositoryFile?: VcsProvider["readRepositoryFile"];

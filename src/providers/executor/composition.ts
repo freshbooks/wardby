@@ -60,7 +60,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   }
   const workspaceRoot = resolve(github.workRoot ?? resolve(tmpdir(), "wardby-vcs"));
   const artifactRoot = resolve(config.artifactRoot ?? resolve(tmpdir(), "wardby-coding-artifacts"));
-  const vcs = buildVcsProvider(providerConfig, { ...github, workRoot: workspaceRoot });
+  const vcs = buildVcsProvider(providerConfig, { ...github, workRoot: workspaceRoot }, env);
   const capabilities = new RunCapabilityVault();
   const sessions = new CodingProxy({
     ledger: new PrismaProxyLedger(options.db),

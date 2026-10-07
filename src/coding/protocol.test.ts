@@ -262,6 +262,18 @@ describe("CodingRunResultSchema", () => {
     expect(() => CodingRunResultSchema.parse({ ...result, tag: "Add 20 jokes" })).toThrow();
   });
 
+  it("accepts a pushed-branch outcome with a branch and commit but no pull request", () => {
+    const pushed = {
+      ...result,
+      outcome: "branch_pushed",
+      pullRequestUrl: undefined,
+      pullRequestNumber: undefined,
+    };
+    expect(CodingRunResultSchema.parse(pushed)).toMatchObject({ outcome: "branch_pushed", commitSha: "a".repeat(40) });
+    expect(() => CodingRunResultSchema.parse({ ...pushed, headRef: undefined })).toThrow();
+    expect(() => CodingRunResultSchema.parse({ ...pushed, pullRequestNumber: 42 })).toThrow();
+  });
+
   it("binds PR URL, repository, number, and fields to the PR outcome", () => {
     expect(CodingRunResultSchema.parse(result)).toMatchObject({ commitSha: "a".repeat(40) });
     expect(() =>

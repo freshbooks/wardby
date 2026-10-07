@@ -738,6 +738,7 @@ export class GitVcsProvider implements VcsProvider {
       const auth = token !== undefined ? { authToken: token } : {};
       const remote = await this.remoteHead(workspace, auth);
       if (remote === commitSha) return;
+      await this.remote.beforePush?.(workspace.repository, workspace.headRef);
       // A continuation's remote branch legitimately already sits at
       // baseCommit (that's the tip we cloned and committed on top of) --
       // that's the expected fast-forward pre-push state, not a conflict.
@@ -751,7 +752,11 @@ export class GitVcsProvider implements VcsProvider {
           auth,
         );
       } catch (error) {
-        if ((await this.remoteHead(workspace, auth)) === commitSha) return;
+        const after = await this.remoteHead(workspace, auth);
+        if (after === commitSha) return;
+        // The branch moved between the check above and the push: report it as the
+        // remote's conflict rather than the push's own (non-fast-forward) failure.
+        if (after !== null) throw this.remote.conflictError();
         throw error;
       }
     });

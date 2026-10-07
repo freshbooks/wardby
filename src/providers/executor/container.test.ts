@@ -137,7 +137,7 @@ function gateWith(
 }
 
 class FakeStore implements ContainerExecutionStore {
-  completions: unknown[] = [];
+  completions: Array<{ status: string; result: unknown; record?: { resultBranch?: string; baseSha?: string } }> = [];
   terminations: unknown[] = [];
   /** Every handle written, in order, so tests can see whether one was stored before launching. */
   persistedHandles: JobHandle[] = [];
@@ -191,11 +191,16 @@ class FakeStore implements ContainerExecutionStore {
     this.heartbeats += 1;
   }
 
-  async complete(runId: string, status: "succeeded" | "budget_exhausted", result: never): Promise<void> {
+  async complete(
+    runId: string,
+    status: "succeeded" | "budget_exhausted",
+    result: never,
+    record?: { resultBranch?: string; baseSha?: string },
+  ): Promise<void> {
     if (runId !== this.run.runId || ["succeeded", "budget_exhausted"].includes(this.run.status)) return;
     this.run.status = status;
     this.run.result = structuredClone(result);
-    this.completions.push({ status, result: structuredClone(result) });
+    this.completions.push({ status, result: structuredClone(result), record: structuredClone(record) });
   }
 
   async terminate(
@@ -291,6 +296,8 @@ class FakeVcs implements VcsProvider {
   workspace: PreparedWorkspace | null = null;
   lastFinalizeDetails?: FinalizeChangesDetails;
   lastPrepareInput?: VcsPrepareInput;
+  /** Make finalize report a pushed branch (a local repository) instead of a pull request. */
+  pushBranchOnly = false;
   notifyStartedCalls = 0;
   lastNotifyStartedAgentName?: string;
   notifyFinishedCalls: Array<{
@@ -324,6 +331,16 @@ class FakeVcs implements VcsProvider {
     this.finalized += 1;
     this.lastFinalizeDetails = details;
     this.events.push("finalize");
+    if (this.pushBranchOnly) {
+      return {
+        outcome: "branch_pushed",
+        repository: workspace.repository,
+        baseRef: "main",
+        baseCommit: "a".repeat(40),
+        headRef: workspace.headRef,
+        commitSha: "b".repeat(40),
+      };
+    }
     return {
       outcome: workspace.continuation ? "pull_request_updated" : "pull_request_opened",
       repository: "openai/example",
@@ -799,6 +816,32 @@ describe("ContainerExecutor", () => {
       budgetReservedUsd: 2,
       budgetActualUsd: 0.01,
     });
+  });
+
+  it("records a pushed local branch as a succeeded run with resultBranch and baseSha", async () => {
+    // The profile schema still names GitHub repositories only; the fake VCS stands in for a local one.
+    const created = await harness();
+    created.vcs.pushBranchOnly = true;
+    await created.executor.start("run-1");
+
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.store.run.result).toMatchObject({
+      outcome: "branch_pushed",
+      headRef: "wardby/run-run-1",
+      commitSha: "b".repeat(40),
+    });
+    expect(created.store.run.result).not.toHaveProperty("pullRequestUrl");
+    expect(created.store.completions[0]?.record).toEqual({
+      resultBranch: "wardby/run-run-1",
+      baseSha: "a".repeat(40),
+    });
+    expect(created.observer.events.map((event) => event.stage)).toContain("branch_pushed");
+  });
+
+  it("records baseSha but no resultBranch for a pull request outcome", async () => {
+    const created = await harness();
+    await created.executor.start("run-1");
+    expect(created.store.completions[0]?.record).toEqual({ baseSha: "a".repeat(40) });
   });
 
   it("revision-in-place: threads continuation through to the VCS layer and persists pull_request_updated", async () => {

@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import {
   LOCAL_REPO_PREFIX,
@@ -68,6 +69,26 @@ export class LocalRemote implements GitRemote {
 
   refNotFoundError(ref: string): Error {
     return new LocalRepoError("local_ref_not_found", `branch ${ref} does not exist in the local repository`);
+  }
+
+  /**
+   * receive.denyCurrentBranch=updateInstead (a user setting) would rewrite the
+   * user's working tree when the pushed branch is the one checked out there,
+   * so refuse before pushing.
+   */
+  async beforePush(repository: string, headRef: string): Promise<void> {
+    const path = normalizeLocalRepository(repository).slice(LOCAL_REPO_PREFIX.length);
+    const checkedOut = await new Promise<string>((resolvePromise) => {
+      execFile(
+        "git",
+        ["-C", path, "-c", "core.fsmonitor=false", "symbolic-ref", "-q", "HEAD"],
+        { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" } },
+        (error, stdout) => resolvePromise(error ? "" : stdout.trim()),
+      );
+    });
+    if (checkedOut === `refs/heads/${headRef}`) {
+      throw new LocalRepoError("local_branch_conflict", `branch ${headRef} is checked out in the local repository`);
+    }
   }
 
   assertPushRef(headRef: string): void {

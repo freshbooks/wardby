@@ -94,6 +94,14 @@ export async function normalizeCollectedLockfiles(provider: string, workspacePat
   });
 }
 
+/** Columns on CodingRun recorded when a run completes, beyond its result JSON. */
+export interface CodingRunRecord {
+  /** The pushed branch of a run on a local repository. */
+  resultBranch?: string;
+  /** The commit the run started from. */
+  baseSha?: string;
+}
+
 export interface ContainerRunSnapshot {
   runId: string;
   status: string;
@@ -173,7 +181,12 @@ export interface ContainerExecutionStore {
    * Related pull requests section. Optional: without it no section is written.
    */
   relatedPullRequests?(runId: string): Promise<RelatedPullRequestEntry[]>;
-  complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void>;
+  complete(
+    runId: string,
+    status: "succeeded" | "budget_exhausted",
+    result: CodingRunResult,
+    record?: CodingRunRecord,
+  ): Promise<void>;
   terminate(
     runId: string,
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
@@ -389,7 +402,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
   }
 
-  async complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void> {
+  async complete(
+    runId: string,
+    status: "succeeded" | "budget_exhausted",
+    result: CodingRunResult,
+    record: CodingRunRecord = {},
+  ): Promise<void> {
     const finishedAt = new Date();
     const finished = await this.db.$transaction(async (tx) => {
       const run = await tx.run.findUnique({ where: { id: runId }, include: { codingRun: true } });
@@ -400,7 +418,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       }
       await tx.codingRun.update({
         where: { runId },
-        data: { result, resultSchema: CODING_PROTOCOL_VERSION },
+        data: {
+          result,
+          resultSchema: CODING_PROTOCOL_VERSION,
+          ...(record.resultBranch ? { resultBranch: record.resultBranch } : {}),
+          ...(record.baseSha ? { baseSha: record.baseSha } : {}),
+        },
       });
       await tx.run.update({
         where: { id: runId },
@@ -1058,17 +1081,18 @@ export class ContainerExecutor implements Executor {
         ...this.issueFor(current),
         ...(await this.relatedFor(current)),
       });
-      // A pushed branch (local repository) is a successful finalize with no
-      // pull request; the result schema has no outcome for it yet, so it is
-      // recorded without PR fields.
-      const result = this.resultFor(
-        output,
-        current,
-        finalized.outcome === "branch_pushed" ? "no_changes" : finalized.outcome,
-        finalized,
-      );
-      await this.options.store.complete(run.runId, "succeeded", result);
-      if (finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated") {
+      // A pushed branch (local repository) is a successful run with no pull
+      // request; its branch is recorded on the run for the operator to merge.
+      const result = this.resultFor(output, current, finalized.outcome, finalized);
+      await this.options.store.complete(run.runId, "succeeded", result, {
+        baseSha: finalized.baseCommit,
+        ...(finalized.outcome === "branch_pushed" ? { resultBranch: finalized.headRef } : {}),
+      });
+      if (
+        finalized.outcome === "pull_request_opened" ||
+        finalized.outcome === "pull_request_updated" ||
+        finalized.outcome === "branch_pushed"
+      ) {
         this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
       }
       this.terminal(current, "succeeded");
@@ -1130,7 +1154,7 @@ export class ContainerExecutor implements Executor {
   private resultFor(
     output: CodingAgentOutput,
     run: ContainerRunSnapshot,
-    forcedOutcome?: "pull_request_opened" | "pull_request_updated" | "no_changes" | "budget_exhausted",
+    forcedOutcome?: CodingRunResult["outcome"],
     finalized?: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>,
   ): CodingRunResult {
     const outcome = forcedOutcome ?? (output.outcome === "budget_exhausted" ? "budget_exhausted" : "no_changes");
@@ -1147,7 +1171,9 @@ export class ContainerExecutor implements Executor {
             pullRequestUrl: finalized.pullRequestUrl,
             pullRequestNumber: finalized.pullRequestNumber,
           }
-        : {}),
+        : outcome === "branch_pushed" && finalized?.outcome === "branch_pushed"
+          ? { headRef: finalized.headRef, commitSha: finalized.commitSha }
+          : {}),
       summary: output.summary,
       tests: output.tests,
       tag: output.tag,
