@@ -79,6 +79,9 @@ export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy"
  * Single source: `runLabels` stamps it, `readProxyWitness` checks the proxy admits it.
  */
 export const RUN_COMPONENT_LABEL = { "wardby.io/component": "coding-run" } as const;
+/** Label on every coding-run pod/Job: the first 40 hex chars of sha256(runId). */
+export const RUN_SHA_LABEL = "wardby.io/run-sha256";
+export const RUN_SHA_CHARS = 40;
 /** The probe proved enforcement: the proxy port connected and the deny port was blocked. */
 export const ENFORCEMENT_PROBE_PROVEN = 0;
 /** The deny port was reachable: no policy is blocking it, or the policy is not port-scoped. */
@@ -171,14 +174,14 @@ export function kubernetesRunNamesForToken(token: string): Omit<KubernetesRunNam
 export function kubernetesRunNames(runId: string): KubernetesRunNames {
   if (!RUN_ID.test(runId)) throw isolationError();
   const digest = sha256(runId);
-  return { ...kubernetesRunNamesForToken(digest.slice(0, 20)), runSha: digest.slice(0, 40) };
+  return { ...kubernetesRunNamesForToken(digest.slice(0, 20)), runSha: digest.slice(0, RUN_SHA_CHARS) };
 }
 
 export function runLabels(runId: string): Record<string, string> {
   return {
     "app.kubernetes.io/managed-by": "wardby",
     ...RUN_COMPONENT_LABEL,
-    "wardby.io/run-sha256": kubernetesRunNames(runId).runSha,
+    [RUN_SHA_LABEL]: kubernetesRunNames(runId).runSha,
   };
 }
 

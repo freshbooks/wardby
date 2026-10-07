@@ -1,0 +1,80 @@
+{
+  "$ref": "#/definitions/infra-info",
+  "definitions": {
+    "infra-info": {
+      "type": "object",
+      "properties": {
+        "launcher": {
+          "type": "string",
+          "enum": [
+            "local",
+            "docker",
+            "kubernetes"
+          ]
+        },
+        "kubernetes": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "namespace": {
+                  "type": "string"
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "runtimeClass": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "proxyService": {
+                  "type": "string"
+                },
+                "runLabel": {
+                  "type": "string"
+                },
+                "runLabelHashChars": {
+                  "type": "integer"
+                },
+                "componentLabel": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "managedByLabel": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "namespace",
+                "platform",
+                "runtimeClass",
+                "proxyService",
+                "runLabel",
+                "runLabelHashChars",
+                "componentLabel",
+                "managedByLabel"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "launcher",
+        "kubernetes"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
