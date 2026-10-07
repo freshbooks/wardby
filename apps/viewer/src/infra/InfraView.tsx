@@ -1,14 +1,12 @@
 import { useMemo } from "react";
 import { describe } from "./adapter";
+import { InfraMap } from "./InfraMap";
 import { InfraPanel } from "./InfraPanel";
 import { InfraTable } from "./InfraTable";
 import type { ClusterError } from "./types";
 import type { UseCluster } from "./useCluster";
 
 export type InfraMode = "map" | "table";
-
-// Task 7 replaces this note with the real Map view.
-const MAP_NOTE = "Map view arrives in the next step";
 
 function errorText(error: ClusterError | { kind: string; message?: string }, namespace: string): string {
   const e = error as ClusterError;
@@ -71,18 +69,22 @@ export function InfraView({ cluster: c, mode, selectedPod, onSelectPod, onOpenRu
 
   const pods = [...model.groups.alwaysOn, ...model.groups.codingRuns, ...model.groups.jobs];
   const pod = pods.find((p) => p.name === selectedPod);
+  const select = (name: string) => onSelectPod(name === selectedPod ? null : name);
 
   return (
     <div className="workspace infra-workspace">
       <div className="infra-main">
-        {mode === "map" && <p className="muted">{MAP_NOTE}</p>}
-        <InfraTable
-          model={model}
-          selected={selectedPod}
-          onSelect={(name) => onSelectPod(name === selectedPod ? null : name)}
-          onOpenRun={onOpenRun}
-          jobFinishedAt={jobFinishedAt}
-        />
+        {mode === "map" ? (
+          <InfraMap model={model} selected={selectedPod} onSelect={select} onOpenRun={onOpenRun} />
+        ) : (
+          <InfraTable
+            model={model}
+            selected={selectedPod}
+            onSelect={select}
+            onOpenRun={onOpenRun}
+            jobFinishedAt={jobFinishedAt}
+          />
+        )}
       </div>
       {pod && (
         <InfraPanel

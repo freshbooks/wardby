@@ -92,9 +92,9 @@ describe("InfraView", () => {
     expect(onRetry).toHaveBeenCalled();
   });
 
-  it("notes that the map arrives next when Map is selected", () => {
+  it("renders the map when Map is selected", () => {
     renderView(base(), { mode: "map" });
-    expect(screen.getByText("Map view arrives in the next step")).toBeInTheDocument();
-    expect(screen.getByText("ALWAYS ON")).toBeInTheDocument();
+    expect(screen.getByText("Internet")).toBeInTheDocument();
+    expect(screen.queryByText("ALWAYS ON")).not.toBeInTheDocument();
   });
 });

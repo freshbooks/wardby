@@ -23,7 +23,7 @@ interface Props {
 /** The Infrastructure tab: owns the cluster watch, so it only runs while the tab is open. */
 export function InfraScreen({ server, runs, topBar, onOpenRun, onRetry }: Props) {
   const cluster = useCluster(server);
-  const [mode, setMode] = useState<InfraMode>("table");
+  const [mode, setMode] = useState<InfraMode>("map");
   const [selectedPod, setSelectedPod] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
 
