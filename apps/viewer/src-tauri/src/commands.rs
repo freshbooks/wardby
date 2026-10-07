@@ -80,9 +80,22 @@ pub struct AppState {
     cancel_epochs: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     /// Sign-ins in flight, by server URL.
     signins: std::sync::Mutex<HashMap<String, tokio::task::AbortHandle>>,
-    /// Live cluster watches, by server URL. Aborting a handle stops every
-    /// per-kind watch under it.
-    clusters: std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Live cluster watches and the requests that may install one (see
+    /// `Clusters`).
+    clusters: std::sync::Mutex<Clusters>,
+}
+
+/// Cluster watches by server URL, plus the bookkeeping that keeps a slow
+/// `kube_connect` from installing after it was stopped or overtaken. Always
+/// locked briefly, never across an await.
+#[derive(Default)]
+struct Clusters {
+    /// Live watches. Aborting a handle stops every per-kind watch under it.
+    handles: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// The newest generation per server; only a request holding it may
+    /// install. Bumped by every `kube_connect` and every stop.
+    current: HashMap<String, u64>,
+    next_gen: u64,
 }
 
 /// Removes a sign-in's registration (and aborts it if still running) when the
@@ -105,26 +118,48 @@ impl Drop for SignInGuard<'_> {
 }
 
 impl AppState {
-    /// Installs a server's cluster watch, stopping any previous one.
-    fn put_cluster(&self, url: String, handle: tokio::task::JoinHandle<()>) {
-        let old = self
-            .clusters
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(url, handle);
-        if let Some(old) = old {
-            old.abort();
-        }
+    fn clusters_slot(&self) -> std::sync::MutexGuard<'_, Clusters> {
+        self.clusters.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Stops a server's cluster watch, if any.
+    /// Registers a `kube_connect` for `url`, superseding any older one. Taken
+    /// BEFORE the request awaits anything.
+    fn begin_cluster(&self, url: &str) -> u64 {
+        let mut cl = self.clusters_slot();
+        cl.next_gen += 1;
+        let gen_ = cl.next_gen;
+        cl.current.insert(url.to_string(), gen_);
+        gen_
+    }
+
+    /// Starts (`start`) and installs a watch only if `gen_` is still the
+    /// newest request for `url`, replacing (aborting) any previous watch.
+    /// Otherwise nothing is started, so a stopped or overtaken request never
+    /// emits a frame. Returns whether it was installed.
+    fn start_cluster(
+        &self,
+        url: &str,
+        gen_: u64,
+        start: impl FnOnce() -> tokio::task::JoinHandle<()>,
+    ) -> bool {
+        let mut cl = self.clusters_slot();
+        if cl.current.get(url) != Some(&gen_) {
+            return false;
+        }
+        if let Some(old) = cl.handles.insert(url.to_string(), start()) {
+            old.abort();
+        }
+        true
+    }
+
+    /// Stops a server's cluster watch, if any, and cancels a `kube_connect`
+    /// still in flight for it.
     fn stop_cluster(&self, url: &str) {
-        let handle = self
-            .clusters
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(url);
-        if let Some(h) = handle {
+        let mut cl = self.clusters_slot();
+        cl.next_gen += 1;
+        let gen_ = cl.next_gen;
+        cl.current.insert(url.to_string(), gen_);
+        if let Some(h) = cl.handles.remove(url) {
             h.abort();
         }
     }
@@ -994,13 +1029,16 @@ pub async fn kube_connect(
         message: e.to_string(),
     })?;
     watch::check_namespace(&namespace)?;
+    // Registered before the await: a stop or a newer connect meanwhile wins.
+    let gen_ = state.begin_cluster(&url);
     let client = kubeconfig::client_for(&context).await?;
     let source = Arc::new(watch::KubeSource::new(client));
     let server = url.clone();
-    let handle = watch::spawn_cluster(source, namespace, move |frame| {
-        let _ = app.emit(CLUSTER_EVENT, json!({ "server": server, "frame": frame }));
+    state.start_cluster(&url, gen_, || {
+        watch::spawn_cluster(source, namespace, move |frame| {
+            let _ = app.emit(CLUSTER_EVENT, json!({ "server": server, "frame": frame }));
+        })
     });
-    state.put_cluster(url, handle);
     Ok(())
 }
 
@@ -1069,29 +1107,74 @@ mod tests {
 
     use crate::events::spawn_events;
 
+    fn pending_watch() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(futures_util::future::pending::<()>())
+    }
+
+    /// Starts a watch the way `kube_connect` would after its await; returns
+    /// the abort handle if it was installed.
+    fn start(st: &AppState, url: &str, gen_: u64) -> Option<tokio::task::AbortHandle> {
+        let mut abort = None;
+        st.start_cluster(url, gen_, || {
+            let h = pending_watch();
+            abort = Some(h.abort_handle());
+            h
+        });
+        abort
+    }
+
     #[tokio::test]
     async fn a_cluster_watch_is_stopped_by_replacement_and_by_stop() {
         let st = AppState::default();
         let url = "https://wardby.example.com";
-        let pending = || tokio::spawn(futures_util::future::pending::<()>());
-        let first = pending();
-        let first_abort = first.abort_handle();
-        st.put_cluster(url.into(), first);
-        let second = pending();
-        let second_abort = second.abort_handle();
-        st.put_cluster(url.into(), second);
+        let g1 = st.begin_cluster(url);
+        let first = start(&st, url, g1).expect("first installs");
+        let g2 = st.begin_cluster(url);
+        let second = start(&st, url, g2).expect("second installs");
         tokio::task::yield_now().await;
-        assert!(first_abort.is_finished(), "replaced watch keeps running");
-        assert!(!second_abort.is_finished());
+        assert!(first.is_finished(), "replaced watch keeps running");
+        assert!(!second.is_finished());
         st.stop_cluster("https://other.example.com");
-        assert!(
-            !second_abort.is_finished(),
-            "another server's stop hit this one"
-        );
+        assert!(!second.is_finished(), "another server's stop hit this one");
         st.stop_cluster(url);
         tokio::task::yield_now().await;
-        assert!(second_abort.is_finished());
-        assert!(st.clusters.lock().unwrap().is_empty());
+        assert!(second.is_finished());
+        assert!(st.clusters_slot().handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disconnect_while_kube_connecting_installs_nothing() {
+        let st = AppState::default();
+        let url = "https://wardby.example.com";
+        let g = st.begin_cluster(url);
+        // kube_disconnect / sign_out / remove_server while client_for awaits.
+        st.stop_cluster(url);
+        assert!(
+            start(&st, url, g).is_none(),
+            "a stopped connect started a watch"
+        );
+        assert!(st.clusters_slot().handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_newer_kube_connect_wins() {
+        let st = AppState::default();
+        let url = "https://wardby.example.com";
+        // Out of order: the newer connect finishes first.
+        let older = st.begin_cluster(url);
+        let newer = st.begin_cluster(url);
+        let live = start(&st, url, newer).expect("newer installs");
+        assert!(
+            start(&st, url, older).is_none(),
+            "older connect replaced the newer"
+        );
+        tokio::task::yield_now().await;
+        assert!(!live.is_finished());
+        // Another server's connect does not supersede this one.
+        let other = st.begin_cluster("https://other.example.com");
+        assert!(start(&st, "https://other.example.com", other).is_some());
+        assert!(!live.is_finished());
+        assert_eq!(st.clusters_slot().handles.len(), 2);
     }
 
     /// Installs a stream the way a connect request would.
