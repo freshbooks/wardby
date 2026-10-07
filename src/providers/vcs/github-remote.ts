@@ -40,6 +40,10 @@ export class GitHubRemote implements GitRemote {
       options.sleep ?? ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
   }
 
+  normalizeRepository(repository: string): string {
+    return normalizeGitHubRepository(repository);
+  }
+
   cloneUrl(repository: string): string {
     const cloneUrl = this.cloneUrlForRepository(repository);
     if (!this.options.cloneUrlForRepository && cloneUrl !== `https://github.com/${repository}.git`) {

@@ -20,6 +20,8 @@ export type PublishResult = { kind: "pull_request"; number: number; url: string 
 export interface GitRemote {
   /** Extra `-c` pairs appended after HARDENED_GIT_CONFIG for clone/push/ls-remote (GitHub: none). */
   readonly gitConfig: readonly string[];
+  /** Syntactic normalization of a repository id for this remote (GitHub: owner/name; local: local:/abs/path). */
+  normalizeRepository(repository: string): string;
   cloneUrl(repository: string): string;
   /** Runs fn with an auth token for git (GitHub: installation token; local: undefined). */
   withAccess<T>(repository: string, fn: (token: string | undefined) => Promise<T>): Promise<T>;
@@ -34,6 +36,14 @@ export interface GitRemote {
   publish(input: PublishInput): Promise<PublishResult>;
   /** The error pushOnce throws when the remote branch moved since the clone. */
   conflictError(): Error;
+  /**
+   * When set, prepareWorkspace runs `ls-remote --heads` for the branch it is
+   * about to clone and throws this error if the branch is absent, instead of
+   * leaving a missing ref to surface as an opaque clone failure (GitHub: unset).
+   */
+  refNotFoundError?(ref: string): Error;
+  /** When set, called with headRef before any push; throws to refuse writing that ref (GitHub: unset). */
+  assertPushRef?(headRef: string): void;
   notifyContinuationStarted?: VcsProvider["notifyContinuationStarted"];
   notifyContinuationFinished?: VcsProvider["notifyContinuationFinished"];
   readRepositoryFile?: VcsProvider["readRepositoryFile"];

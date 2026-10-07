@@ -13,12 +13,7 @@ import {
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { globRegex } from "../../core/glob.js";
 import type { Writable } from "node:stream";
-import {
-  MAX_REDACTED_SPAN,
-  redactTokenShapedValues,
-  normalizeGitHubRepository,
-  normalizeGitRef,
-} from "../../coding/protocol.js";
+import { MAX_REDACTED_SPAN, redactTokenShapedValues, normalizeGitRef } from "../../coding/protocol.js";
 import { isSafeGitHubInstallationToken, type RepositoryFileInput } from "./github.js";
 import type { GitRemote } from "./remote.js";
 import type {
@@ -315,6 +310,22 @@ export class GitVcsProvider implements VcsProvider {
 
     try {
       await this.remote.withAccess(normalized.repository, async (token) => {
+        const auth = token !== undefined ? { authToken: token } : {};
+        if (this.remote.refNotFoundError) {
+          const listed = await this.git.run(
+            [
+              ...HARDENED_GIT_CONFIG,
+              ...this.remote.gitConfig,
+              "ls-remote",
+              "--heads",
+              cloneUrl,
+              `refs/heads/${cloneBranch}`,
+            ],
+            { cwd: runRoot, ...auth },
+          );
+          const found = listed.stdout.split("\n").some((line) => line.split("\t")[1] === `refs/heads/${cloneBranch}`);
+          if (!found) throw this.remote.refNotFoundError(cloneBranch);
+        }
         await this.git.run(
           [
             ...HARDENED_GIT_CONFIG,
@@ -336,7 +347,7 @@ export class GitVcsProvider implements VcsProvider {
             cloneUrl,
             workspacePath,
           ],
-          { cwd: runRoot, ...(token !== undefined ? { authToken: token } : {}) },
+          { cwd: runRoot, ...auth },
         );
       });
       await rm(resolve(workspacePath, ".git"), { force: true });
@@ -502,7 +513,17 @@ export class GitVcsProvider implements VcsProvider {
     await this.remote.assertContinuationOpen(prepared);
     await this.pushOnce(prepared, commitSha);
     const published = await this.remote.publish({ workspace: prepared, details, changedPaths: changed });
-    if (published.kind !== "pull_request") throw new Error("vcs_publish_kind_unsupported");
+    if (published.kind === "branch") {
+      if (published.branch !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
+      return {
+        outcome: "branch_pushed",
+        repository: prepared.repository,
+        baseRef: prepared.baseRef,
+        baseCommit: prepared.baseCommit,
+        headRef: prepared.headRef,
+        commitSha,
+      };
+    }
     return {
       outcome: prepared.continuation ? "pull_request_updated" : "pull_request_opened",
       repository: prepared.repository,
@@ -562,7 +583,7 @@ export class GitVcsProvider implements VcsProvider {
     input: VcsPrepareInput,
   ): Omit<PreparedWorkspace, "id" | "baseCommit" | "workspacePath" | "gitMetadataPath"> {
     if (!SAFE_RUN_ID.test(input.runId)) throw new Error("vcs_run_id_invalid");
-    const repository = normalizeGitHubRepository(input.repository);
+    const repository = this.remote.normalizeRepository(input.repository);
     const baseRef = normalizeGitRef(input.baseRef);
     const headRef = normalizeGitRef(input.headRef);
     // Revision-in-place: a continuation's headRef legitimately belongs to a
@@ -712,6 +733,7 @@ export class GitVcsProvider implements VcsProvider {
   }
 
   private async pushOnce(workspace: PreparedWorkspace, commitSha: string): Promise<void> {
+    this.remote.assertPushRef?.(workspace.headRef);
     await this.remote.withAccess(workspace.repository, async (token) => {
       const auth = token !== undefined ? { authToken: token } : {};
       const remote = await this.remoteHead(workspace, auth);

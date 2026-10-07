@@ -1058,7 +1058,15 @@ export class ContainerExecutor implements Executor {
         ...this.issueFor(current),
         ...(await this.relatedFor(current)),
       });
-      const result = this.resultFor(output, current, finalized.outcome, finalized);
+      // A pushed branch (local repository) is a successful finalize with no
+      // pull request; the result schema has no outcome for it yet, so it is
+      // recorded without PR fields.
+      const result = this.resultFor(
+        output,
+        current,
+        finalized.outcome === "branch_pushed" ? "no_changes" : finalized.outcome,
+        finalized,
+      );
       await this.options.store.complete(run.runId, "succeeded", result);
       if (finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated") {
         this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
