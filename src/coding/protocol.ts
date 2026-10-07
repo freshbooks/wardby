@@ -260,7 +260,10 @@ function normalizeCodingRepository(value: string): string {
 
 const repositorySchema = z
   .string()
-  .refine(isCodingRepository, "must be a canonical name, an uncredentialed github.com repository, or local:/absolute/path")
+  .refine(
+    isCodingRepository,
+    "must be a canonical name, an uncredentialed github.com repository, or local:/absolute/path",
+  )
   .transform(normalizeCodingRepository);
 
 export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe branch ref").transform(normalizeGitRef);
