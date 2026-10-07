@@ -1,0 +1,43 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "wardby-6d9f7c-abcde",
+    "namespace": "wardby",
+    "labels": { "app.kubernetes.io/name": "wardby", "unrelated": "x" },
+    "ownerReferences": [
+      { "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "wardby-6d9f7c", "uid": "u-2", "controller": true }
+    ]
+  },
+  "spec": {
+    "nodeName": "gke-node-2",
+    "serviceAccountName": "wardby-app",
+    "containers": [
+      { "name": "wardby", "image": "registry.example.com/wardby/wardby:0.3.0" },
+      { "name": "cloud-sql-proxy", "image": "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.x" }
+    ]
+  },
+  "status": {
+    "phase": "Running",
+    "startTime": "2026-10-01T08:00:00Z",
+    "containerStatuses": [
+      {
+        "name": "wardby",
+        "image": "x",
+        "imageID": "x",
+        "ready": true,
+        "restartCount": 0,
+        "state": { "running": { "startedAt": "2026-10-01T08:00:02Z" } }
+      },
+      {
+        "name": "cloud-sql-proxy",
+        "image": "x",
+        "imageID": "x",
+        "ready": true,
+        "restartCount": 1,
+        "state": { "running": { "startedAt": "2026-10-01T08:00:03Z" } }
+      }
+    ],
+    "conditions": [{ "type": "Ready", "status": "True" }]
+  }
+}

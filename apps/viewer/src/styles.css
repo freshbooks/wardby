@@ -964,3 +964,292 @@ button:disabled {
 .react-flow__edge.chain-edge .react-flow__edge-textbg {
   fill: var(--bg);
 }
+
+/* Tabs and the Infrastructure view */
+.tabs {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.tabs button[aria-pressed="true"],
+.infra-row[aria-pressed="true"] {
+  border-color: var(--accent);
+}
+
+.infra-workspace {
+  min-width: 0;
+}
+
+.infra-main {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 0.5rem 0.75rem;
+}
+
+.infra-message {
+  padding: 1rem 0.75rem;
+  display: grid;
+  gap: 0.5rem;
+  justify-items: start;
+}
+
+/* Errors on single kinds, shown above the data that could be read. */
+.infra-notices {
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+}
+
+.infra-notices p {
+  margin: 0;
+}
+
+.infra-head,
+.infra-row {
+  display: grid;
+  grid-template-columns: minmax(12rem, 2fr) minmax(8rem, 2fr) minmax(8rem, 1fr) 8rem 4rem;
+  gap: 0.75rem;
+  text-align: left;
+}
+
+.infra-head {
+  padding: 0.25rem 0.5rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.infra-row-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.infra-row {
+  flex: 1;
+  min-width: 0;
+  align-items: baseline;
+}
+
+.infra-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.infra-group {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.infra-container {
+  margin-right: 0.6rem;
+}
+
+.infra-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.3rem;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.infra-dot.ok {
+  background: var(--ok);
+}
+
+.infra-dot.warn {
+  background: var(--warn);
+}
+
+.infra-dot.bad {
+  background: var(--bad);
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.warn {
+  color: var(--warn);
+}
+
+.status.bad {
+  color: var(--bad);
+}
+
+.infra-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.75rem;
+  margin: 0.5rem 0 0;
+}
+
+.infra-facts dt {
+  color: var(--muted);
+}
+
+.infra-facts dd {
+  margin: 0;
+}
+
+/* Infrastructure map */
+.infra-map {
+  display: grid;
+  grid-template-columns: minmax(9rem, 12rem) minmax(0, 1fr) minmax(10rem, 14rem);
+  gap: 2rem;
+  align-items: start;
+}
+
+.map-col {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.map-card {
+  position: relative;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  min-width: 0;
+}
+
+.map-pod[aria-pressed="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.map-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-weight: 600;
+}
+
+.map-containers {
+  display: grid;
+  gap: 0.1rem;
+  font-size: 0.8rem;
+}
+
+.map-identity {
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.map-zone,
+.map-fence,
+.map-sandbox {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+}
+
+.map-namespace {
+  position: relative;
+  border: 1px solid var(--border);
+  min-width: 0;
+}
+
+.map-fence {
+  border: 2px dashed var(--warn);
+}
+
+.map-sandbox {
+  border: 1px dashed var(--bad);
+}
+
+.map-zone-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.map-fence > .map-zone-label {
+  color: var(--warn);
+}
+
+.map-pods,
+.map-sandboxes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem;
+}
+
+.map-small {
+  grid-template-columns: repeat(auto-fill, minmax(8rem, 12rem));
+}
+
+.map-sandbox-body {
+  display: flex;
+  gap: 0.25rem;
+  align-items: flex-start;
+}
+
+.map-sandbox-body .map-card {
+  flex: 1;
+}
+
+/* Arrows between columns: a down arrow under each edge card; the column arrows are hidden when the grid wraps. */
+.map-flow:not(:last-child)::after {
+  content: "▼";
+  position: absolute;
+  left: 50%;
+  bottom: -1.15rem;
+  transform: translateX(-50%);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.map-namespace::before {
+  content: "▶";
+  position: absolute;
+  left: -1.4rem;
+  top: 1rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.map-data-col .map-card::before {
+  content: "◀";
+  position: absolute;
+  left: -1.4rem;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+@media (max-width: 800px) {
+  .infra-map {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+  }
+
+  .map-namespace::before,
+  .map-data-col .map-card::before {
+    content: none;
+  }
+}
+
+.infra-row-span .infra-cell {
+  grid-column: 1 / -1;
+}
+
+.map-arrow {
+  font-size: 0.7rem;
+  color: var(--muted);
+}

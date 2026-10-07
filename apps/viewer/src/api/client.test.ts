@@ -11,12 +11,15 @@ import {
   connect,
   disconnect,
   fetchGraph,
+  fetchInfra,
   fetchRun,
   isAppError,
+  kubeContexts,
   listServers,
   onFrame,
   openUrl,
   removeServer,
+  setKubeContext,
   signIn,
   signOut,
   type FramePayload,
@@ -45,6 +48,10 @@ describe("command wrappers", () => {
     await fetchGraph("https://w.example", "24h", 200);
     await fetchRun("https://w.example", "run-1");
     await openUrl("https://github.com/o/r/pull/7");
+    await fetchInfra("https://w.example");
+    await kubeContexts();
+    await setKubeContext("https://w.example", "kind-dev");
+    await setKubeContext("https://w.example", null);
     expect(invokeMock.mock.calls).toEqual([
       ["list_servers"],
       ["add_server", { name: "Prod", url: "https://w.example", clientId: "cid" }],
@@ -58,12 +65,16 @@ describe("command wrappers", () => {
       ["fetch_graph", { url: "https://w.example", since: "24h", limit: 200 }],
       ["fetch_run", { url: "https://w.example", id: "run-1" }],
       ["open_url", { url: "https://github.com/o/r/pull/7" }],
+      ["fetch_infra", { url: "https://w.example" }],
+      ["kube_contexts"],
+      ["set_kube_context", { url: "https://w.example", context: "kind-dev" }],
+      ["set_kube_context", { url: "https://w.example", context: null }],
     ]);
   });
 
   it("returns what the command returns and passes rejections through", async () => {
-    invokeMock.mockResolvedValueOnce([{ name: "a", url: "https://a", signed_in: true }]);
-    expect(await listServers()).toEqual([{ name: "a", url: "https://a", signed_in: true }]);
+    invokeMock.mockResolvedValueOnce([{ name: "a", url: "https://a", signed_in: true, kube_context: null }]);
+    expect(await listServers()).toEqual([{ name: "a", url: "https://a", signed_in: true, kube_context: null }]);
     const err = { kind: "forbidden", message: "no" };
     invokeMock.mockRejectedValueOnce(err);
     await expect(signIn("https://a")).rejects.toBe(err);

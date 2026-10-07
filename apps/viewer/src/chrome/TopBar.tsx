@@ -7,6 +7,20 @@ import { formatWindowTotal, TRUNCATED_TITLE } from "../format/spend";
 import { STATUS_GROUPS, WINDOWS, type Filters, type StatusGroup, type WindowSize } from "../state/filters";
 import { exactUsd, formatUsd } from "../format/money";
 
+export type Tab = "runs" | "infra";
+
+/** Cluster line and view controls shown on the Infrastructure tab. */
+export interface InfraBar {
+  mode: "map" | "table";
+  onModeChange: (m: "map" | "table") => void;
+  context: string | null;
+  contexts: string[];
+  onContextChange: (c: string) => void;
+  platformLabel: string;
+  namespace: string | null;
+  watching: boolean;
+}
+
 const GROUP_LABEL: Record<StatusGroup, string> = {
   running: "running",
   failed: "failed",
@@ -34,6 +48,9 @@ interface Props {
   /** Runs (matching the other filters) that fall inside the brushed range. */
   rangeRunCount: number;
   onClearRange: () => void;
+  tab?: Tab;
+  onTabChange?: (t: Tab) => void;
+  infra?: InfraBar;
 }
 
 function toggled<T>(set: ReadonlySet<T>, value: T): Set<T> {
@@ -53,6 +70,8 @@ export function TopBar(props: Props) {
   const { servers, selectedUrl, filters, onFiltersChange } = props;
   const spend = spendSummary(props.spend);
   const set = (patch: Partial<Filters>) => onFiltersChange({ ...filters, ...patch });
+  const tab = props.tab ?? "runs";
+  const infra = tab === "infra" ? props.infra : undefined;
   const badge = props.live ? "● live" : props.reconnecting ? "◌ reconnecting" : "○ offline";
 
   return (
@@ -86,97 +105,146 @@ export function TopBar(props: Props) {
         </span>
       </div>
       <div className="topbar-row">
-        <label className="inline">
-          <span className="sr-only">Time window</span>
-          <select
-            aria-label="Time window"
-            value={filters.window}
-            onChange={(e) => set({ window: e.target.value as WindowSize })}
-          >
-            {WINDOWS.map((w) => (
-              <option key={w} value={w}>
-                Last {w}
-              </option>
-            ))}
-          </select>
-        </label>
-        <details className="agent-filter">
-          <summary>{filters.agents.size === 0 ? "Agents: all" : `Agents: ${filters.agents.size}`}</summary>
-          <div className="popover">
-            {props.agents.length === 0 && <span className="muted">No agents in window</span>}
-            {props.agents.map((a) => (
-              <label key={a.id} className="check">
+        <div className="tabs" role="group" aria-label="View">
+          {(["runs", "infra"] as const).map((t) => (
+            <button key={t} type="button" aria-pressed={tab === t} onClick={() => props.onTabChange?.(t)}>
+              {t === "runs" ? "Runs" : "Infrastructure"}
+            </button>
+          ))}
+        </div>
+      </div>
+      {tab === "infra" ? (
+        infra && (
+          <div className="topbar-row">
+            <div className="tabs" role="group" aria-label="Infrastructure view">
+              {(["map", "table"] as const).map((m) => (
+                <button key={m} type="button" aria-pressed={infra.mode === m} onClick={() => infra.onModeChange(m)}>
+                  {m === "map" ? "Map" : "Table"}
+                </button>
+              ))}
+            </div>
+            <span className="muted">
+              {infra.context ?? "no context"} · {infra.platformLabel} · ns {infra.namespace ?? "–"} ·{" "}
+              {infra.watching ? "● watching" : "○ disconnected"}
+            </span>
+            <label className="inline">
+              <span className="sr-only">Kube context</span>
+              <select
+                aria-label="Kube context"
+                value={infra.context ?? ""}
+                onChange={(e) => infra.onContextChange(e.target.value)}
+              >
+                {!infra.context && (
+                  <option value="" disabled>
+                    Choose a context…
+                  </option>
+                )}
+                {infra.context && !infra.contexts.includes(infra.context) && (
+                  <option value={infra.context}>{infra.context}</option>
+                )}
+                {infra.contexts.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )
+      ) : (
+        <div className="topbar-row">
+          <label className="inline">
+            <span className="sr-only">Time window</span>
+            <select
+              aria-label="Time window"
+              value={filters.window}
+              onChange={(e) => set({ window: e.target.value as WindowSize })}
+            >
+              {WINDOWS.map((w) => (
+                <option key={w} value={w}>
+                  Last {w}
+                </option>
+              ))}
+            </select>
+          </label>
+          <details className="agent-filter">
+            <summary>{filters.agents.size === 0 ? "Agents: all" : `Agents: ${filters.agents.size}`}</summary>
+            <div className="popover">
+              {props.agents.length === 0 && <span className="muted">No agents in window</span>}
+              {props.agents.map((a) => (
+                <label key={a.id} className="check">
+                  <input
+                    type="checkbox"
+                    checked={filters.agents.has(a.id)}
+                    onChange={() => set({ agents: toggled(filters.agents, a.id) })}
+                  />
+                  {a.name}
+                </label>
+              ))}
+            </div>
+          </details>
+          <fieldset className="statuses">
+            <legend className="sr-only">Status</legend>
+            {STATUS_GROUPS.map((g) => (
+              <label key={g} className="check">
                 <input
                   type="checkbox"
-                  checked={filters.agents.has(a.id)}
-                  onChange={() => set({ agents: toggled(filters.agents, a.id) })}
+                  checked={filters.statuses.has(g)}
+                  onChange={() => set({ statuses: toggled(filters.statuses, g) })}
                 />
-                {a.name}
+                {GROUP_LABEL[g]}
               </label>
             ))}
-          </div>
-        </details>
-        <fieldset className="statuses">
-          <legend className="sr-only">Status</legend>
-          {STATUS_GROUPS.map((g) => (
-            <label key={g} className="check">
-              <input
-                type="checkbox"
-                checked={filters.statuses.has(g)}
-                onChange={() => set({ statuses: toggled(filters.statuses, g) })}
-              />
-              {GROUP_LABEL[g]}
-            </label>
-          ))}
-        </fieldset>
-        <input
-          type="search"
-          aria-label="Search runs"
-          placeholder="search…"
-          value={filters.search}
-          onChange={(e) => set({ search: e.target.value })}
-        />
-        {filters.timeRange && (
-          <div className="range-chip">
-            <span>
-              {formatSpanTime(filters.window, filters.timeRange.from)} →{" "}
-              {formatSpanTime(filters.window, filters.timeRange.to)} · {plural(props.rangeRunCount, "run")}
-            </span>
-            <button type="button" aria-label="Clear time range" title="Clear time range" onClick={props.onClearRange}>
-              ✕
-            </button>
-          </div>
-        )}
-        {spend && (
-          <div className="spend" aria-label="Today's spend">
-            <span
-              title={
-                props.windowSpendTruncated
-                  ? `${exactUsd(props.windowSpendUsd)}\n${TRUNCATED_TITLE}`
-                  : exactUsd(props.windowSpendUsd)
-              }
-            >
-              {filters.window} {formatWindowTotal(props.windowSpendUsd, props.windowSpendTruncated ?? false)} ·{" "}
-            </span>
-            <span title={`${exactUsd(spend.spent)}${spend.cap !== null ? ` / ${exactUsd(spend.cap)}` : ""}`}>
-              Today {formatUsd(spend.spent)}
-              {spend.cap !== null && ` / ${formatUsd(spend.cap)}`}
-            </span>
-            {spend.cap !== null && (
-              <div
-                className="meter"
-                role="meter"
-                aria-label="Spend against daily cap"
-                aria-valuemin={0}
-                aria-valuemax={spend.cap}
-                aria-valuenow={Math.min(spend.spent, spend.cap)}
+          </fieldset>
+          <input
+            type="search"
+            aria-label="Search runs"
+            placeholder="search…"
+            value={filters.search}
+            onChange={(e) => set({ search: e.target.value })}
+          />
+          {filters.timeRange && (
+            <div className="range-chip">
+              <span>
+                {formatSpanTime(filters.window, filters.timeRange.from)} →{" "}
+                {formatSpanTime(filters.window, filters.timeRange.to)} · {plural(props.rangeRunCount, "run")}
+              </span>
+              <button type="button" aria-label="Clear time range" title="Clear time range" onClick={props.onClearRange}>
+                ✕
+              </button>
+            </div>
+          )}
+          {spend && (
+            <div className="spend" aria-label="Today's spend">
+              <span
+                title={
+                  props.windowSpendTruncated
+                    ? `${exactUsd(props.windowSpendUsd)}\n${TRUNCATED_TITLE}`
+                    : exactUsd(props.windowSpendUsd)
+                }
               >
-                <div style={{ width: `${Math.min(100, (spend.spent / spend.cap) * 100)}%` }} />
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+                {filters.window} {formatWindowTotal(props.windowSpendUsd, props.windowSpendTruncated ?? false)} ·{" "}
+              </span>
+              <span title={`${exactUsd(spend.spent)}${spend.cap !== null ? ` / ${exactUsd(spend.cap)}` : ""}`}>
+                Today {formatUsd(spend.spent)}
+                {spend.cap !== null && ` / ${formatUsd(spend.cap)}`}
+              </span>
+              {spend.cap !== null && (
+                <div
+                  className="meter"
+                  role="meter"
+                  aria-label="Spend against daily cap"
+                  aria-valuemin={0}
+                  aria-valuemax={spend.cap}
+                  aria-valuenow={Math.min(spend.spent, spend.cap)}
+                >
+                  <div style={{ width: `${Math.min(100, (spend.spent / spend.cap) * 100)}%` }} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </header>
   );
 }

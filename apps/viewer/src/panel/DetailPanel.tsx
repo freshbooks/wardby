@@ -26,6 +26,8 @@ export interface DetailPanelProps {
   onSelect: (id: string | null) => void;
   /** The trigger or outcome clicked in the graph, highlighted and scrolled into view. */
   focus?: RunFocus | null;
+  /** Open this run's pod on the Infrastructure tab (coding runs only). */
+  onOpenPod?: (runId: string) => void;
 }
 
 interface Loaded {
@@ -92,7 +94,7 @@ function RunLink({
 
 const focusClass = (on: boolean) => (on ? "focus-item focused" : "focus-item");
 
-export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null }: DetailPanelProps) {
+export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null, onOpenPod }: DetailPanelProps) {
   const [loaded, setLoaded] = useState<Loaded>({ id: run.id, detail: null, error: null });
   const seq = useRef(0);
   const panelRef = useRef<HTMLElement>(null);
@@ -264,6 +266,11 @@ export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null }: De
       {run.agentKind === "coding" ? (
         <Section title="ACTIVITY">
           <p>Last activity {relativeTime(run.heartbeatAt, now)}</p>
+          {onOpenPod && (
+            <button type="button" onClick={() => onOpenPod(run.id)}>
+              Pod ↗
+            </button>
+          )}
         </Section>
       ) : (
         <Section title="TURNS">

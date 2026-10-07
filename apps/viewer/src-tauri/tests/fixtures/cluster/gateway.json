@@ -1,0 +1,13 @@
+{
+  "apiVersion": "gateway.networking.k8s.io/v1",
+  "kind": "Gateway",
+  "metadata": {
+    "name": "wardby-gw",
+    "namespace": "wardby",
+    "annotations": { "networking.gke.io/certmap": "your-certmap", "x": "y" }
+  },
+  "spec": {
+    "gatewayClassName": "gke-l7-global-external-managed",
+    "listeners": [{ "name": "https", "port": 443, "protocol": "HTTPS", "hostname": "wardby.example.com" }]
+  }
+}

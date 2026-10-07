@@ -14,6 +14,11 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_store::StoreExt;
 
 use crate::api::{KeychainStore, RefreshStore, Session};
+use crate::cluster::CLUSTER_EVENT;
+use crate::cluster::errors::ClusterError;
+use crate::cluster::kubeconfig::{self, KubeContexts};
+use crate::cluster::model::InfraEvent;
+use crate::cluster::watch;
 use crate::error::AppError;
 use crate::events::{
     EventsConfig, EventsHandle, SessionBuilder, StreamFrame, is_retryable, spawn_events_lazy,
@@ -75,6 +80,22 @@ pub struct AppState {
     cancel_epochs: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     /// Sign-ins in flight, by server URL.
     signins: std::sync::Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// Live cluster watches and the requests that may install one (see
+    /// `Clusters`).
+    clusters: std::sync::Mutex<Clusters>,
+}
+
+/// Cluster watches by server URL, plus the bookkeeping that keeps a slow
+/// `kube_connect` from installing after it was stopped or overtaken. Always
+/// locked briefly, never across an await.
+#[derive(Default)]
+struct Clusters {
+    /// Live watches. Aborting a handle stops every per-kind watch under it.
+    handles: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// The newest generation per server; only a request holding it may
+    /// install. Bumped by every `kube_connect` and every stop.
+    current: HashMap<String, u64>,
+    next_gen: u64,
 }
 
 /// Removes a sign-in's registration (and aborts it if still running) when the
@@ -97,6 +118,52 @@ impl Drop for SignInGuard<'_> {
 }
 
 impl AppState {
+    fn clusters_slot(&self) -> std::sync::MutexGuard<'_, Clusters> {
+        self.clusters.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Registers a `kube_connect` for `url`, superseding any older one. Taken
+    /// BEFORE the request awaits anything.
+    fn begin_cluster(&self, url: &str) -> u64 {
+        let mut cl = self.clusters_slot();
+        cl.next_gen += 1;
+        let gen_ = cl.next_gen;
+        cl.current.insert(url.to_string(), gen_);
+        gen_
+    }
+
+    /// Starts (`start`) and installs a watch only if `gen_` is still the
+    /// newest request for `url`, replacing (aborting) any previous watch.
+    /// Otherwise nothing is started, so a stopped or overtaken request never
+    /// emits a frame. Returns whether it was installed.
+    fn start_cluster(
+        &self,
+        url: &str,
+        gen_: u64,
+        start: impl FnOnce() -> tokio::task::JoinHandle<()>,
+    ) -> bool {
+        let mut cl = self.clusters_slot();
+        if cl.current.get(url) != Some(&gen_) {
+            return false;
+        }
+        if let Some(old) = cl.handles.insert(url.to_string(), start()) {
+            old.abort();
+        }
+        true
+    }
+
+    /// Stops a server's cluster watch, if any, and cancels a `kube_connect`
+    /// still in flight for it.
+    fn stop_cluster(&self, url: &str) {
+        let mut cl = self.clusters_slot();
+        cl.next_gen += 1;
+        let gen_ = cl.next_gen;
+        cl.current.insert(url.to_string(), gen_);
+        if let Some(h) = cl.handles.remove(url) {
+            h.abort();
+        }
+    }
+
     fn events_slot(&self) -> std::sync::MutexGuard<'_, Events> {
         self.events.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -415,6 +482,7 @@ pub struct ServerSummary {
     pub name: String,
     pub url: String,
     pub signed_in: bool,
+    pub kube_context: Option<String>,
 }
 
 fn summaries(list: &[ServerConfig], signed_in: impl Fn(&str) -> bool) -> Vec<ServerSummary> {
@@ -423,6 +491,7 @@ fn summaries(list: &[ServerConfig], signed_in: impl Fn(&str) -> bool) -> Vec<Ser
             name: c.name.clone(),
             url: c.url.clone(),
             signed_in: signed_in(&c.url),
+            kube_context: c.kube_context.clone(),
         })
         .collect()
 }
@@ -462,6 +531,7 @@ fn upsert_server(
             name,
             url,
             client_id,
+            kube_context: None,
         }),
     }
     Ok(())
@@ -475,6 +545,22 @@ fn set_client_id(list: &mut [ServerConfig], url: &str, client_id: &str) -> Resul
         .find(|c| c.url == url)
         .ok_or_else(removed_error)?;
     c.client_id = Some(client_id.to_string());
+    Ok(())
+}
+
+/// Records the kubeconfig context for a saved server; blank clears it.
+fn set_kube_context_in(
+    list: &mut [ServerConfig],
+    url: &str,
+    context: Option<String>,
+) -> Result<(), AppError> {
+    let c = list
+        .iter_mut()
+        .find(|c| c.url == url)
+        .ok_or_else(|| AppError::Protocol("unknown server".to_string()))?;
+    c.kube_context = context
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     Ok(())
 }
 
@@ -685,6 +771,7 @@ pub async fn remove_server(
         Ok(())
     })?;
     state.cancel_sign_in(&url);
+    state.stop_cluster(&url);
     state.end_session(&url, servers::keychain_delete).await
 }
 
@@ -766,6 +853,7 @@ where
 pub async fn sign_out(state: State<'_, AppState>, url: String) -> Result<(), AppError> {
     let url = normalize_server_url(&url)?;
     state.cancel_sign_in(&url);
+    state.stop_cluster(&url);
     sign_out_with(&state, &url, servers::keychain_delete).await
 }
 
@@ -890,6 +978,90 @@ pub async fn fetch_run(
     fetch(&app, &state, &url, &path).await
 }
 
+const INFRA_PATH: &str = "/admin/api/infra";
+
+#[tauri::command]
+pub async fn fetch_infra(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<Value, AppError> {
+    let url = normalize_server_url(&url)?;
+    fetch(&app, &state, &url, INFRA_PATH).await
+}
+
+/// The contexts in the user's kubeconfig (names only, never credentials).
+#[tauri::command]
+pub async fn kube_contexts() -> Result<KubeContexts, ClusterError> {
+    tokio::task::spawn_blocking(kubeconfig::list_contexts)
+        .await
+        .map_err(|_| ClusterError::Other {
+            message: "kubeconfig task failed".to_string(),
+        })?
+}
+
+/// Which kubeconfig context the Infrastructure view uses for a server
+/// (`None` or blank clears it).
+#[tauri::command]
+pub async fn set_kube_context(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    context: Option<String>,
+) -> Result<(), AppError> {
+    let url = normalize_server_url(&url)?;
+    edit_servers(&app, &state, |list| {
+        set_kube_context_in(list, &url, context)
+    })
+}
+
+/// Starts live, read-only watches of `namespace` through `context` for a
+/// server, replacing any it already has. Frames arrive on `CLUSTER_EVENT`.
+#[tauri::command]
+pub async fn kube_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    context: String,
+    namespace: String,
+) -> Result<(), ClusterError> {
+    let url = normalize_server_url(&url).map_err(|e| ClusterError::Other {
+        message: e.to_string(),
+    })?;
+    watch::check_namespace(&namespace)?;
+    // Registered before the await: a stop or a newer connect meanwhile wins.
+    let gen_ = state.begin_cluster(&url);
+    let client = kubeconfig::client_for(&context).await?;
+    let source = Arc::new(watch::KubeSource::new(client));
+    let server = url.clone();
+    state.start_cluster(&url, gen_, || {
+        watch::spawn_cluster(source, namespace, move |frame| {
+            let _ = app.emit(CLUSTER_EVENT, json!({ "server": server, "frame": frame }));
+        })
+    });
+    Ok(())
+}
+
+/// Stops a server's cluster watches.
+#[tauri::command]
+pub async fn kube_disconnect(state: State<'_, AppState>, url: String) -> Result<(), AppError> {
+    state.stop_cluster(&normalize_server_url(&url)?);
+    Ok(())
+}
+
+/// The newest events for one pod.
+#[tauri::command]
+pub async fn kube_pod_events(
+    context: String,
+    namespace: String,
+    pod: String,
+) -> Result<Vec<InfraEvent>, ClusterError> {
+    // Validate before reading the kubeconfig (and running any exec plugin).
+    watch::check_pod_target(&namespace, &pod)?;
+    let client = kubeconfig::client_for(&context).await?;
+    watch::pod_events(client, &namespace, &pod).await
+}
+
 /// The only links the webview may ask the system browser to open: absolute
 /// `https://` URLs with a host and no embedded credentials.
 fn check_open_url(raw: &str) -> Result<url::Url, AppError> {
@@ -936,6 +1108,99 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::events::spawn_events;
+
+    fn pending_watch() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(futures_util::future::pending::<()>())
+    }
+
+    /// Starts a watch the way `kube_connect` would after its await; returns
+    /// the abort handle if it was installed.
+    fn start(st: &AppState, url: &str, gen_: u64) -> Option<tokio::task::AbortHandle> {
+        let mut abort = None;
+        st.start_cluster(url, gen_, || {
+            let h = pending_watch();
+            abort = Some(h.abort_handle());
+            h
+        });
+        abort
+    }
+
+    #[tokio::test]
+    async fn a_cluster_watch_is_stopped_by_replacement_and_by_stop() {
+        let st = AppState::default();
+        let url = "https://wardby.example.com";
+        let g1 = st.begin_cluster(url);
+        let first = start(&st, url, g1).expect("first installs");
+        let g2 = st.begin_cluster(url);
+        let second = start(&st, url, g2).expect("second installs");
+        tokio::task::yield_now().await;
+        assert!(first.is_finished(), "replaced watch keeps running");
+        assert!(!second.is_finished());
+        st.stop_cluster("https://other.example.com");
+        assert!(!second.is_finished(), "another server's stop hit this one");
+        st.stop_cluster(url);
+        tokio::task::yield_now().await;
+        assert!(second.is_finished());
+        assert!(st.clusters_slot().handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disconnect_while_kube_connecting_installs_nothing() {
+        let st = AppState::default();
+        let url = "https://wardby.example.com";
+        let g = st.begin_cluster(url);
+        // kube_disconnect / sign_out / remove_server while client_for awaits.
+        st.stop_cluster(url);
+        assert!(
+            start(&st, url, g).is_none(),
+            "a stopped connect started a watch"
+        );
+        assert!(st.clusters_slot().handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn kube_pod_events_rejects_bad_names_before_reading_the_kubeconfig() {
+        // An unknown context would fail later; the name check must come first.
+        let err = kube_pod_events("no-such-context".into(), "Bad NS".into(), "p".into())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ClusterError::Other {
+                message: "invalid namespace name".into()
+            }
+        );
+        let err = kube_pod_events("no-such-context".into(), "wardby".into(), "a,b".into())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ClusterError::Other {
+                message: "invalid pod name".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn the_newer_kube_connect_wins() {
+        let st = AppState::default();
+        let url = "https://wardby.example.com";
+        // Out of order: the newer connect finishes first.
+        let older = st.begin_cluster(url);
+        let newer = st.begin_cluster(url);
+        let live = start(&st, url, newer).expect("newer installs");
+        assert!(
+            start(&st, url, older).is_none(),
+            "older connect replaced the newer"
+        );
+        tokio::task::yield_now().await;
+        assert!(!live.is_finished());
+        // Another server's connect does not supersede this one.
+        let other = st.begin_cluster("https://other.example.com");
+        assert!(start(&st, "https://other.example.com", other).is_some());
+        assert!(!live.is_finished());
+        assert_eq!(st.clusters_slot().handles.len(), 2);
+    }
 
     /// Installs a stream the way a connect request would.
     fn put(st: &AppState, url: &str, handle: EventsHandle) {
@@ -1190,6 +1455,7 @@ mod tests {
             name: name.into(),
             url: url.into(),
             client_id: id.map(Into::into),
+            kube_context: None,
         }
     }
 
@@ -1261,21 +1527,72 @@ mod tests {
             vec![ServerSummary {
                 name: "a".into(),
                 url: "https://a.example".into(),
-                signed_in: true
+                signed_in: true,
+                kube_context: None,
             }]
         );
         let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v[0].as_object().unwrap().len(), 3);
+        assert_eq!(v[0].as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn kube_context_is_set_and_cleared_per_server() {
+        let mut list = vec![
+            cfg("a", "https://a.example", None),
+            cfg("b", "https://b.example", None),
+        ];
+        set_kube_context_in(&mut list, "https://a.example", Some(" kind-dev ".into())).unwrap();
+        assert_eq!(list[0].kube_context.as_deref(), Some("kind-dev"));
+        assert_eq!(list[1].kube_context, None);
+        let s = summaries(&list, |_| false);
+        assert_eq!(s[0].kube_context.as_deref(), Some("kind-dev"));
+        set_kube_context_in(&mut list, "https://a.example", Some("  ".into())).unwrap();
+        assert_eq!(list[0].kube_context, None);
+        set_kube_context_in(&mut list, "https://a.example", Some("gke".into())).unwrap();
+        set_kube_context_in(&mut list, "https://a.example", None).unwrap();
+        assert_eq!(list[0].kube_context, None);
+        assert!(set_kube_context_in(&mut list, "https://gone.example", None).is_err());
+    }
+
+    #[tokio::test]
+    async fn infra_is_fetched_from_the_admin_api() {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(INFRA_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"namespace": "wardby"})),
+            )
+            .expect(1)
+            .mount(&s)
+            .await;
+        let sess = live_session(&s.uri());
+        assert_eq!(
+            sess.get_json(INFRA_PATH).await.unwrap(),
+            serde_json::json!({"namespace": "wardby"})
+        );
+
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(INFRA_PATH))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&s)
+            .await;
+        let sess = live_session(&s.uri());
+        assert!(matches!(
+            sess.get_json(INFRA_PATH).await,
+            Err(AppError::Forbidden)
+        ));
     }
 
     #[test]
     fn saved_config_has_no_token_field() {
         let v = serde_json::to_value(cfg("a", "https://a.example", Some("c"))).unwrap();
         let keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
-        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.len(), 4);
         assert!(
             keys.iter()
-                .all(|k| ["name", "url", "client_id"].contains(&k.as_str()))
+                .all(|k| ["name", "url", "client_id", "kube_context"].contains(&k.as_str()))
         );
     }
 

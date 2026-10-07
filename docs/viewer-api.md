@@ -83,6 +83,17 @@ One run in full: the graph fields plus the run's final text and error. For
 coding runs, services report the **names** of their environment variables
 only, never values. An unknown id returns `404`.
 
+### `GET /admin/api/infra`
+
+How this deployment runs coding jobs, for clients that show its Kubernetes
+footprint: `launcher` (`local`, `docker` or `kubernetes`) and, for the
+Kubernetes launcher, the namespace, the platform (`KUBERNETES_PLATFORM`), the
+runtime class (or `null`), the coding proxy's Service name, and the labels on
+coding-run pods. `runLabel` holds the first `runLabelHashChars` hex characters
+of the SHA-256 of the run id, so a client can match a pod to a run it already
+knows. The response never includes credentials, the server's kube context, or
+image references. `kubernetes` is `null` for the other launchers.
+
 ### `GET /admin/api/events`
 
 A Server-Sent Events stream (`text/event-stream`) of live changes. Frames:
@@ -128,12 +139,15 @@ client of this API: it signs in with the same flow described under Access,
 draws the graph, and updates it from the event stream. See
 [`apps/viewer/README.md`](https://github.com/wardby/wardby/tree/main/apps/viewer) for prerequisites, running
 it, adding a server, and what an external identity provider client needs.
+Its Infrastructure tab uses `GET /admin/api/infra` to find the server's
+namespace and run labels, then reads that namespace read-only with the
+operator's own kubeconfig; the README lists the Kubernetes Role it needs.
 
 ## Response schemas
 
 JSON Schemas for every response and event are in `src/viewer/schemas/` of the
-source tree (`graph-snapshot.schema.json`, `run-detail.schema.json`,
-`viewer-event.schema.json`). Regenerate them with `npm run build:viewer-schemas`.
+source tree (`graph-snapshot.schema.json`, `infra-info.schema.json`,
+`run-detail.schema.json`, `viewer-event.schema.json`). Regenerate them with `npm run build:viewer-schemas`.
 
 ## Proxies and load balancers
 

@@ -23,6 +23,7 @@ Endpoints, all `GET`:
 
 - `/admin/api/graph?since=1h&limit=500`: a snapshot of runs in a time window.
 - `/admin/api/runs/<id>`: one run in full, including its final text and error.
+- `/admin/api/infra`: how this deployment runs coding jobs (launcher, Kubernetes namespace, platform, run labels).
 - `/admin/api/events`: a Server-Sent Events stream of live changes.
 
 The stream has no replay: open the event stream first, then load the graph,
@@ -34,6 +35,12 @@ A desktop viewer for macOS is included in the source tree (`apps/viewer`). Add
 your server's canonical URI, sign in with an `admin` user in the browser, and it
 shows the live graph. Its README covers setup, and what an external identity
 provider client needs when the server runs in delegating mode.
+
+The Infrastructure tab shows the Kubernetes pods where your deployment runs
+coding jobs, read-only. It uses your kubeconfig (switchable per server) and
+requires a minimal read-only Kubernetes role. See the Infrastructure view
+section of the [viewer README](../apps/viewer/README.md#infrastructure-view) for
+setup.
 
 For parameters, status codes, frame formats and schemas, follow
 [`docs/viewer-api.md`](../docs/viewer-api.md).

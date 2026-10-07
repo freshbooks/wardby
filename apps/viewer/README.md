@@ -76,6 +76,81 @@ enter its client id when adding the server. The client must:
   match everything except the port);
 - be allowed to request the `admin:view` scope for the Wardby resource.
 
+## Infrastructure view
+
+The Infrastructure tab shows the Kubernetes namespace where a server runs coding
+jobs: the control plane, the coding proxy, each run's pod with its containers and
+sandbox, jobs, service accounts and their cloud identities, network policies,
+ingress, and secret stores. **Map** draws them as zones; **Table** lists them
+with status, CPU and memory, and age. Select a pod for its containers and recent
+events; **Open run** jumps to the run that started it, and a coding run's
+**Pod ↗** button jumps back to its pod while it is still running.
+
+The tab has a cluster to show when the server uses the Kubernetes launcher (otherwise it says there is no cluster to show). It reads the
+cluster with your own kubeconfig (`$KUBECONFIG` or `~/.kube/config`), using the
+current context unless you choose another for that server, and it only reads.
+The choice is saved per server. If your kubeconfig has no current context,
+choose one from the context picker.
+When `wardby serve` runs outside the cluster — for example against a local
+[kind](https://kind.sigs.k8s.io/) cluster — the map shows the control plane as
+outside the cluster, at the server's address.
+
+Credential plugins (`exec` entries in your kubeconfig) run with `/opt/homebrew/bin`,
+`/usr/local/bin` and the Google Cloud SDK's `bin` directories added to `PATH`, so
+`gke-gcloud-auth-plugin` (GKE) and the AWS CLI (EKS) are found when installed
+there. Any other plugin must be on the `PATH` the app starts with. If sign-in
+fails, run your cloud's login (for example `gcloud auth login`) and select
+**Retry**.
+
+To grant the viewer read-only Kubernetes access, create a `Role` and
+`RoleBinding`. The following YAML is sufficient:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: wardby-viewer, namespace: wardby-coding }
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, serviceaccounts, events]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies, ingresses]
+    verbs: [get, list, watch]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gateways, httproutes]
+    verbs: [get, list, watch]
+  - apiGroups: [external-secrets.io]
+    resources: [secretstores, externalsecrets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: wardby-viewer, namespace: wardby-coding }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: wardby-viewer }
+subjects:
+  - kind: User
+    name: <you>
+    apiGroup: rbac.authorization.k8s.io
+```
+
+Replace `wardby-coding` with the namespace where your coding runs execute, and
+`<you>` with the user your kubeconfig signs in as (`kubectl auth whoami` shows
+it; on GKE and EKS it is usually your cloud account's email or IAM identity).
+For any resource you can't list, the tab names it: without `pods` the message
+replaces the view, and for any other resource it appears above what the tab
+could read. Without `secrets`, Secret names show as hidden instead.
+
+The Role deliberately omits `secrets`, because Kubernetes RBAC cannot restrict
+access to individual Secret names; Secret names appear as hidden in the
+Infrastructure tab. If you prefer broader access, GKE IAM roles like
+`roles/container.viewer` also work but grant additional permissions.
+
 ## Appearance
 
 The viewer follows the system's light or dark appearance by default. To choose

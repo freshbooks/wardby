@@ -1,0 +1,10 @@
+{
+  "apiVersion": "v1",
+  "kind": "Event",
+  "metadata": { "name": "wardby-run.1", "namespace": "wardby-coding" },
+  "involvedObject": { "kind": "Pod", "name": "wardby-run-0123456789abcdef0123" },
+  "type": "Warning",
+  "reason": "BackOff",
+  "message": "Back-off restarting failed container redis",
+  "lastTimestamp": "2026-10-03T12:05:00Z"
+}

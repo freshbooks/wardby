@@ -27,6 +27,8 @@ export interface UseViewer {
   reconnecting: boolean;
   /** A graph snapshot has been loaded for the current server. */
   loaded: boolean;
+  /** The window (`since`) the latest applied snapshot was fetched for. */
+  loadedSince: string | null;
   /** Refetch the graph now (after a failed load). */
   retry: () => void;
 }
@@ -36,9 +38,16 @@ interface Meta {
   error: AppError | null;
   reconnecting: boolean;
   loaded: boolean;
+  loadedSince: string | null;
 }
 
-const blank = (url: string | null): Meta => ({ url, error: null, reconnecting: false, loaded: false });
+const blank = (url: string | null): Meta => ({
+  url,
+  error: null,
+  reconnecting: false,
+  loaded: false,
+  loadedSince: null,
+});
 
 function toAppError(e: unknown): AppError {
   if (isAppError(e)) return e;
@@ -49,7 +58,7 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
   const [model, dispatch] = useReducer(reduce, initialModel);
   // Keyed by server so a server switch starts fresh without resetting state in an effect.
   const [meta, setMeta] = useState<Meta>(blank(null));
-  const { error, reconnecting, loaded } = meta.url === serverUrl ? meta : blank(serverUrl);
+  const { error, reconnecting, loaded, loadedSince } = meta.url === serverUrl ? meta : blank(serverUrl);
 
   const sinceRef = useRef(since);
   const limitRef = useRef(limit);
@@ -113,11 +122,12 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
       fetchedNeedSeq = needSeq;
       failed = false;
       try {
-        const snapshot = await fetchGraph(serverUrl, sinceRef.current, limitRef.current);
+        const since = sinceRef.current;
+        const snapshot = await fetchGraph(serverUrl, since, limitRef.current);
         // A newer load (window change, resync) supersedes this response.
         if (!active || mine !== seq) return;
         failures = 0;
-        patch({ loaded: true, error: null });
+        patch({ loaded: true, loadedSince: since, error: null });
         dispatch({ type: "snapshot", snapshot });
         // An unknown-run event arrived after this fetch started: it is not in the snapshot.
         if (needSeq > fetchedNeedSeq) schedule(REFETCH_DEBOUNCE_MS, false);
@@ -234,6 +244,7 @@ export function useViewer(serverUrl: string | null, { since, limit }: ViewerOpti
     forbidden: error?.kind === "forbidden",
     reconnecting,
     loaded,
+    loadedSince,
     retry,
   };
 }

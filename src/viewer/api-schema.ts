@@ -187,8 +187,27 @@ export type GraphSnapshot = z.infer<typeof GraphSnapshotSchema>;
 export type RunDetail = z.infer<typeof RunDetailSchema>;
 export type ViewerEvent = z.infer<typeof ViewerEventSchema>;
 
+/** How this deployment runs coding jobs, for the desktop viewer's Infrastructure view (GET /admin/api/infra). */
+export const InfraInfoSchema = z.object({
+  launcher: z.enum(["local", "docker", "kubernetes"]),
+  kubernetes: z
+    .object({
+      namespace: z.string(),
+      platform: z.string(),
+      runtimeClass: z.string().nullable(),
+      proxyService: z.string(),
+      runLabel: z.string(),
+      runLabelHashChars: z.number().int(),
+      componentLabel: z.record(z.string(), z.string()),
+      managedByLabel: z.record(z.string(), z.string()),
+    })
+    .nullable(),
+});
+export type InfraInfo = z.infer<typeof InfraInfoSchema>;
+
 export const VIEWER_SCHEMAS = {
   "graph-snapshot": GraphSnapshotSchema,
   "run-detail": RunDetailSchema,
   "viewer-event": ViewerEventSchema,
+  "infra-info": InfraInfoSchema,
 } as const;

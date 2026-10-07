@@ -1,5 +1,5 @@
 /**
- * Viewer HTTP routes: GET /admin/api/graph, /admin/api/runs/:id and the
+ * Viewer HTTP routes: GET /admin/api/graph, /admin/api/runs/:id, /admin/api/infra and the
  * /admin/api/events SSE stream. Read-only and deployment-wide, so every route
  * authenticates and then requires the privileged `admin:view` scope (admin role
  * only) BEFORE touching the database or the event bus. McpErrors propagate to
@@ -10,6 +10,7 @@ import type { PrismaClient } from "#prisma";
 import type { McpRequestContext } from "../mcp/context.js";
 import { requireScope } from "../mcp/auth/resource-server.js";
 import { sendJson } from "../mcp/transport/streamable-http.js";
+import type { InfraInfo } from "./api-schema.js";
 import { DEFAULT_GRAPH_LIMIT, MAX_GRAPH_LIMIT, loadGraph, parseSince, type IssueSites } from "./graph.js";
 import { loadRunDetail } from "./run-detail.js";
 import type { ViewerEventBus } from "./event-bus.js";
@@ -26,6 +27,8 @@ export interface ViewerApiDeps {
   bus: ViewerEventBus;
   authenticate: (authorization: string | undefined) => Promise<McpRequestContext>;
   canonicalUri: string;
+  /** How this deployment runs coding jobs (built once at startup; GET /admin/api/infra). */
+  infra: InfraInfo;
   /** Issue-tracker site origins by provider, for issue and comment links (empty when none is configured). */
   issueSites?: IssueSites;
   heartbeatMs?: number; // tests
@@ -107,13 +110,19 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
       const runMatch = /^\/admin\/api\/runs\/([^/]*)$/.exec(path);
       const isGraph = path === "/admin/api/graph";
       const isEvents = path === "/admin/api/events";
-      if (!isGraph && !isEvents && !runMatch) return false;
+      const isInfra = path === "/admin/api/infra";
+      if (!isGraph && !isEvents && !isInfra && !runMatch) return false;
 
       const ctx = await deps.authenticate(req.headers.authorization);
       requireScope(ctx, deps.canonicalUri, "admin:view");
 
       if (req.method !== "GET") {
         sendJson(res, 405, { error: "method_not_allowed" }, { allow: "GET" });
+        return true;
+      }
+
+      if (isInfra) {
+        sendJson(res, 200, deps.infra);
         return true;
       }
 

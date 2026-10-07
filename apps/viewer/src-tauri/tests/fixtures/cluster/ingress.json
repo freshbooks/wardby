@@ -1,0 +1,29 @@
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "Ingress",
+  "metadata": {
+    "name": "wardby",
+    "namespace": "wardby",
+    "annotations": {
+      "alb.ingress.kubernetes.io/scheme": "internet-facing",
+      "nginx.ingress.kubernetes.io/rewrite-target": "/"
+    }
+  },
+  "spec": {
+    "ingressClassName": "alb",
+    "rules": [
+      {
+        "host": "wardby.example.com",
+        "http": {
+          "paths": [
+            {
+              "path": "/",
+              "pathType": "Prefix",
+              "backend": { "service": { "name": "wardby", "port": { "number": 80 } } }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

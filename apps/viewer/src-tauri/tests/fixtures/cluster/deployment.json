@@ -1,0 +1,15 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "wardby",
+    "namespace": "wardby",
+    "labels": { "app.kubernetes.io/name": "wardby", "team": "x" }
+  },
+  "spec": {
+    "replicas": 2,
+    "selector": { "matchLabels": { "app.kubernetes.io/name": "wardby" } },
+    "template": { "metadata": {}, "spec": { "containers": [{ "name": "wardby", "image": "x" }] } }
+  },
+  "status": { "replicas": 2, "readyReplicas": 1 }
+}
