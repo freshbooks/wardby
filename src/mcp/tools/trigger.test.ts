@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client, fromJsonSchema } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
@@ -616,5 +620,53 @@ describe("trigger_agent", () => {
       ),
     ).rejects.toThrow();
     await intruderClient.close();
+  });
+});
+
+describe("trigger_agent on a local repository", () => {
+  let root: string;
+  let repo: string;
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "local-trigger-")));
+    repo = root;
+    execFileSync("git", ["-C", repo, "init", "-q", "-b", "main"]);
+    vi.stubEnv("LOCAL_REPO_ROOTS", root);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  async function trigger(db: ReturnType<typeof fakeDb>) {
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+    await client.close();
+    return result;
+  }
+  const codingAgent = (): FakeAgentRow => ({
+    id: "a1",
+    name: "coder",
+    ownerId: "p1",
+    kind: "coding",
+    codingProfile: { provider: "codex", repository: `local:${repo}`, baseRef: "main", allowWebhookTaskOverride: false },
+  });
+
+  it("is refused with local_repo_not_allowed after the roots were narrowed", async () => {
+    vi.stubEnv("LOCAL_REPO_ROOTS", join(tmpdir(), "somewhere-else-entirely"));
+    const db = fakeDb([codingAgent()]);
+    const result = await trigger(db);
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toContain("local_repo_not_allowed");
+    expect((db as any).runs.size).toBe(0);
+  });
+
+  it("warns about uncommitted files in the result", async () => {
+    writeFileSync(join(repo, "dirty.txt"), "x");
+    const result = await trigger(fakeDb([codingAgent()]));
+    expect(result.isError).toBeFalsy();
+    expect(parseText(result as never)).toMatchObject({ warnings: ["1 uncommitted file is not included"] });
   });
 });

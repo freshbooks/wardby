@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import type { RepoAccessDecision, RepoAccessGate } from "../../core/repo-access.js";
 import type { HostPermission } from "../../providers/review-host/types.js";
 import { Prisma } from "#prisma";
@@ -2749,5 +2753,72 @@ describe("codingProfile.services", () => {
     const result = await client.callTool(allow(["postgres"]));
     expect(result.isError).toBe(true);
     await client.close();
+  });
+});
+
+describe("coding agents on local repositories", () => {
+  let root: string;
+  let repo: string;
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "local-agents-")));
+    repo = join(root, "app");
+    mkdirSync(repo);
+    execFileSync("git", ["-C", repo, "init", "-q", "-b", "main"]);
+    vi.stubEnv("LOCAL_REPO_ROOTS", root);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  async function createWith(repository: string) {
+    const db = fakeDb();
+    const gate = gateAt("unlinked");
+    const providers = { repoAccess: gate.gate } as unknown as import("../context.js").McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], [], providers));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "local-coder",
+        systemPrompt: "Make the change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        kind: "coding",
+        codingProfile: { repository },
+      },
+    });
+    await client.close();
+    return { result, gate };
+  }
+
+  it("refuses a repository outside the trusted roots with local_repo_not_allowed", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "outside-")));
+    try {
+      const { result } = await createWith(`local:${outside}`);
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toContain("local_repo_not_allowed");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts one inside the roots, stamps local_root, and needs no GitHub identity", async () => {
+    const { result, gate } = await createWith(`local:${repo}`);
+    expect(result.isError).toBeFalsy();
+    const created = JSON.parse((result.content as { text: string }[])[0].text);
+    expect(created.codingProfile.repository).toBe(`local:${repo}`);
+    expect(created.codingProfile.repositoryAuthorizedVia).toBe("local_root");
+    expect(gate.authorizePrincipal).not.toHaveBeenCalled();
+  });
+
+  it("stores the canonical real path, not a symlinked spelling", async () => {
+    const link = join(root, "link");
+    symlinkSync(repo, link);
+    const { result } = await createWith(`local:${link}`);
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse((result.content as { text: string }[])[0].text).codingProfile.repository).toBe(`local:${repo}`);
   });
 });

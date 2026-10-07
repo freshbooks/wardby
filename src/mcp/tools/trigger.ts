@@ -35,7 +35,9 @@ import {
   RESPONSE_PATH_SNAPSHOT_BUDGET,
   type AttributionIntent,
 } from "../../core/attribution.js";
-import { CodingBaseRefSchema, CodingTaskOverrideSchema } from "../../coding/protocol.js";
+import { CodingBaseRefSchema, CodingTaskOverrideSchema, isLocalRepository } from "../../coding/protocol.js";
+import { loadLocalRepoRoots, resolveLocalRepository, LocalRepoError } from "../../coding/local-repo.js";
+import { localRepoWarnings } from "../../coding/local-repo-status.js";
 import { z } from "zod";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
@@ -139,6 +141,21 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         throw new McpError(400, "Task and baseRef overrides are only valid for coding agents.");
       }
 
+      // A local repository is re-checked against the roots as they are now
+      // (they can narrow after the agent was saved), before any run exists.
+      let warnings: string[] = [];
+      const repository = agent.kind === "coding" ? agent.codingProfile?.repository : undefined;
+      if (repository !== undefined && isLocalRepository(repository)) {
+        try {
+          const resolved = await resolveLocalRepository(repository, loadLocalRepoRoots(process.env).roots);
+          warnings = await localRepoWarnings(resolved.path);
+        } catch (err) {
+          if (err instanceof LocalRepoError) throw new McpError(400, err.message);
+          throw err;
+        }
+      }
+      const withWarnings = <T extends object>(result: T) => (warnings.length > 0 ? { ...result, warnings } : result);
+
       // Refused before any run exists: an invalid or unlinked issue is never
       // silently dropped into an unattributed run.
       let attribution: AttributionIntent | undefined;
@@ -179,15 +196,17 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
 
       if (ctx.clientSupportsTasks) {
         if (!dispatched.task) throw new Error("Run task was not persisted.");
-        return textResult(createTaskResult(dispatched.task, DEFAULT_TASK_TTL_MS));
+        return textResult(withWarnings(createTaskResult(dispatched.task, DEFAULT_TASK_TTL_MS)));
       }
       // A run refused at dispatch (its budget group or run tree is spent), or
       // failed there (a coding agent's model is unavailable), is already
       // terminal: say so now rather than only through get_run.
       if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
-        return textResult({ runId: dispatched.run.id, status: dispatched.run.status, error: dispatched.run.error });
+        return textResult(
+          withWarnings({ runId: dispatched.run.id, status: dispatched.run.status, error: dispatched.run.error }),
+        );
       }
-      return textResult({ runId: dispatched.run.id });
+      return textResult(withWarnings({ runId: dispatched.run.id }));
     },
   });
 
