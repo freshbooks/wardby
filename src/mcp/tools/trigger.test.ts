@@ -22,12 +22,21 @@ interface FakeAgentRow {
   kind?: "native" | "coding";
   codingProfile?: Record<string, unknown> | null;
 }
+interface FakePullRequest {
+  id: string;
+  number: number;
+  repository: string;
+  branch: string;
+  base: string;
+  runId: string | null;
+}
 interface FakeRunRow {
   id: string;
   agentId: string;
   status: string;
   error?: string | null;
   triggeredById?: string | null;
+  taskOverride?: string;
 }
 interface FakeTaskRow {
   id: string;
@@ -44,6 +53,7 @@ function fakeDb(
   agents: FakeAgentRow[],
   grants: FakeGrantSeed[] = [],
   budget: { group?: Record<string, unknown>; groupRuns?: Record<string, unknown>[] } = {},
+  localLinks: Map<string, string[]> = new Map(),
 ) {
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map<string, FakeRunRow>();
@@ -51,9 +61,32 @@ function fakeDb(
   let runCounter = 0;
   let taskCounter = 0;
 
+  const pullRequests: FakePullRequest[] = [];
   const db: any = {
     resourceGrant: fakeResourceGrants(grants),
     runs,
+    pullRequests,
+    agentRepository: {
+      findMany: async ({ where }: { where: { agentId: string; provider: string } }) =>
+        (localLinks.get(where.agentId) ?? []).map((repository) => ({ repository, provider: where.provider })),
+    },
+    localPullRequest: {
+      create: async ({ data }: { data: { repository: string; branch: string; base: string } }) => {
+        const row = { id: `pr_${pullRequests.length + 1}`, number: pullRequests.length + 1, runId: null, ...data };
+        pullRequests.push(row);
+        return row;
+      },
+      update: async ({ where, data }: { where: { id: string }; data: { runId: string } }) => {
+        const row = pullRequests.find((p) => p.id === where.id)!;
+        row.runId = data.runId;
+        return row;
+      },
+      deleteMany: async ({ where }: { where: { id: string } }) => {
+        const i = pullRequests.findIndex((p) => p.id === where.id);
+        if (i >= 0) pullRequests.splice(i, 1);
+        return { count: i >= 0 ? 1 : 0 };
+      },
+    },
     agent: {
       // Prompt discovery runs during MCP connection setup; this stub keeps the
       // focused trigger tests from treating that optional path as a warning.
@@ -68,7 +101,14 @@ function fakeDb(
       create: async ({
         data,
       }: {
-        data: { agentId: string; trigger: string; triggeredById?: string | null; status?: string; error?: string };
+        data: {
+          agentId: string;
+          trigger: string;
+          triggeredById?: string | null;
+          status?: string;
+          error?: string;
+          taskOverride?: string;
+        };
       }) => {
         const row: FakeRunRow = {
           id: `run_${++runCounter}`,
@@ -76,6 +116,7 @@ function fakeDb(
           status: data.status ?? "pending",
           error: data.error ?? null,
           triggeredById: data.triggeredById,
+          taskOverride: data.taskOverride,
         };
         runs.set(row.id, row);
         return row;
@@ -668,5 +709,103 @@ describe("trigger_agent on a local repository", () => {
     const result = await trigger(fakeDb([codingAgent()]));
     expect(result.isError).toBeFalsy();
     expect(parseText(result as never)).toMatchObject({ warnings: ["1 uncommitted file is not included"] });
+  });
+});
+
+describe("trigger_agent review (local repositories)", () => {
+  let root: string;
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "local-review-")));
+    const git = (...a: string[]) => execFileSync("git", ["-C", root, ...a], { encoding: "utf8" });
+    git("init", "-q", "-b", "main");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base");
+    git("branch", "feature");
+    vi.stubEnv("LOCAL_REPO_ROOTS", root);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const head = () => execFileSync("git", ["-C", root, "rev-parse", "feature"], { encoding: "utf8" }).trim();
+  async function review(principal: string, reviewArgs: unknown, links = [`local:${root}`], kind = "native") {
+    const db = fakeDb(
+      [{ id: "a1", name: "reviewer", ownerId: "p1", kind: kind as "native" }],
+      [],
+      {},
+      new Map([["a1", links]]),
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, principal, ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1", review: reviewArgs } });
+    await client.close();
+    return { db: db as any, result };
+  }
+  const text = (r: { content: unknown }) => (r.content as { text: string }[])[0].text;
+
+  it("creates a pull request linked to the dispatched run, with the exact task text", async () => {
+    const { db, result } = await review("p1", { branch: "feature" });
+    expect(result.isError).toBeFalsy();
+    const { runId } = parseText(result as never) as { runId: string };
+    expect(db.pullRequests).toEqual([
+      expect.objectContaining({ number: 1, repository: `local:${root}`, branch: "feature", base: "main", runId }),
+    ]);
+    expect(db.runs.get(runId).taskOverride).toBe(`Review pull request #1 in local:${root} (head ${head()}).`);
+  });
+
+  it("refuses an unknown branch without leaving a row", async () => {
+    const { db, result } = await review("p1", { branch: "nope" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("local_ref_not_found");
+    expect(db.pullRequests).toHaveLength(0);
+    expect(db.runs.size).toBe(0);
+  });
+
+  it("rejects an option-shaped ref", async () => {
+    const { result } = await review("p1", { branch: "--output=x" });
+    expect(text(result)).toContain("local_ref_invalid");
+  });
+
+  it("refuses a non-owner with 403", async () => {
+    const { db, result } = await review("p2", { branch: "feature" });
+    expect(result.isError).toBe(true);
+    expect(db.pullRequests).toHaveLength(0);
+  });
+
+  it("needs review.repository when the agent has no single local link", async () => {
+    const { result } = await review("p1", { branch: "feature" }, []);
+    expect(text(result)).toContain("pass review.repository");
+  });
+
+  it("re-checks the roots before creating anything", async () => {
+    vi.stubEnv("LOCAL_REPO_ROOTS", join(tmpdir(), "elsewhere-entirely"));
+    const { db, result } = await review("p1", { branch: "feature" });
+    expect(text(result)).toContain("local_repo_not_allowed");
+    expect(db.pullRequests).toHaveLength(0);
+  });
+
+  it("removes the pull request when dispatch fails", async () => {
+    const db = fakeDb([{ id: "a1", name: "r", ownerId: "p1" }], [], {}, new Map([["a1", [`local:${root}`]]])) as any;
+    db.run.create = async () => {
+      throw new Error("boom");
+    };
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "trigger_agent",
+      arguments: { agentId: "a1", review: { branch: "feature" } },
+    });
+    await client.close();
+    expect(result.isError).toBe(true);
+    expect(db.pullRequests).toHaveLength(0);
+  });
+
+  it("is refused for a coding agent", async () => {
+    const { result } = await review("p1", { branch: "feature" }, [`local:${root}`], "coding");
+    expect(result.isError).toBe(true);
   });
 });

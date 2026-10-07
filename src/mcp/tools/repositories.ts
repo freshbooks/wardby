@@ -12,15 +12,15 @@
  * See docs/private/2026-09-26-repo-access-authorization-spec-and-plan.md.
  */
 import { Prisma, type PrismaClient } from "#prisma";
-import { normalizeGitHubRepository } from "../../coding/protocol.js";
+import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../../coding/protocol.js";
 import { requireAgentAccess, requireBindingOwner } from "../auth/access.js";
-import { authorizeRepositoryForSet } from "../auth/repo-authorization.js";
+import { authorizeRepositoryForSet, canonicalLocalRepository } from "../auth/repo-authorization.js";
 import { requireScope } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
-const PROVIDERS = ["github"] as const;
+const PROVIDERS = ["github", "local"] as const;
 const TRIGGERS = ["pull_request", "mention", "push", "review_fix"] as const;
 const CHECK_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._/()-]{0,99}$/;
 
@@ -38,6 +38,7 @@ type LinkArgs = {
 
 function normalizeRepository(provider: string, repository: string): string {
   try {
+    if (provider === "local") return normalizeLocalRepository(repository);
     if (provider === "github") return normalizeGitHubRepository(repository);
   } catch {
     // fall through
@@ -92,7 +93,8 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       "review on a pushed head until that head's own CI finishes, instead of racing it; APPROVE is refused while CI on the " +
       "head is failing or still running. Re-linking an already-linked repository replaces its access, triggers, checkName, " +
       "reviewFixMaxRounds, and waitForCi (an omitted field is cleared, not kept) and re-checks access — always send the full " +
-      "desired state.",
+      "desired state. A local repository (local:/abs/path, inside the server's trusted roots) takes no triggers or checkName: " +
+      "it supports manual reviews only (trigger_agent with review).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -143,9 +145,20 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
           "Repository links are for native agents only; coding agents use codingProfile.repository.",
         );
       }
-      const provider = args.provider ?? "github";
-      const repository = normalizeRepository(provider, args.repository);
+      const provider = args.provider ?? (isLocalRepository(args.repository) ? "local" : "github");
+      if ((provider === "local") !== isLocalRepository(args.repository)) {
+        throw new McpError(400, `invalid repository "${args.repository}" for provider ${provider}`);
+      }
+      const repository =
+        provider === "local"
+          ? await canonicalLocalRepository(args.repository)
+          : normalizeRepository(provider, args.repository);
       const triggers = [...new Set(args.triggers ?? [])];
+      if (provider === "local") {
+        if (triggers.length > 0) throw new McpError(400, "local repositories support manual review only");
+        // A check is only published for a dispatched host PR; a local link has none.
+        args = { ...args, checkName: undefined };
+      }
       if (triggers.length > 0 && args.access !== "write") throw new McpError(400, "Event triggers need write access.");
       const checkName = args.checkName ?? null;
       if (triggers.includes("pull_request") && !checkName) {
@@ -228,8 +241,14 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
     handler: async (args: { agentId: string; provider?: string; repository: string }, ctx) => {
       const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
       requireBindingOwner(ctx, agent);
-      const provider = args.provider ?? "github";
-      const repository = normalizeRepository(provider, args.repository);
+      const provider = args.provider ?? (isLocalRepository(args.repository) ? "local" : "github");
+      let repository: string;
+      if (provider === "local") {
+        // The roots may have narrowed since linking; a link must stay removable.
+        repository = await canonicalLocalRepository(args.repository).catch(() =>
+          normalizeRepository(provider, args.repository),
+        );
+      } else repository = normalizeRepository(provider, args.repository);
       const { count } = await ctx.db.agentRepository.deleteMany({
         where: { agentId: args.agentId, provider, repository },
       });

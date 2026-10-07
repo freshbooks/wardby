@@ -54,6 +54,7 @@ export type DispatchTx = Pick<
   | "budgetGroup"
   | "resourceGrant"
   | "workItem"
+  | "localPullRequest"
   | "runAttribution"
   | "$queryRaw"
   | "$executeRawUnsafe"
