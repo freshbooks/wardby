@@ -9,6 +9,8 @@
  *   S3 slots       N concurrent claimProvisioning calls against a cap of K
  *   S4 heartbeat   R active runs heartbeating every 250 ms
  *
+ * LOAD_GROUP_SIZE=15 spreads S2's grouped agents over groups of 15.
+ *
  * Run it through scripts/load/run-level-a.sh, which creates, migrates and
  * drops the database. Refuses any DATABASE_URL whose database name does not
  * contain "load": it creates and deletes rows freely.
@@ -34,6 +36,8 @@ const OWNER = "load-owner";
 /** Comma-separated overrides, e.g. LOAD_DISPATCH_LEVELS=500,1000. LOAD_SCENARIOS=S2,S3 runs a subset. */
 const levels = (name: string, fallback: number[]): number[] =>
   process.env[name] ? process.env[name]!.split(",").map(Number) : fallback;
+/** Agents per budget group in the grouped dispatch runs; 0 (default) puts every agent in one group. */
+const GROUP_SIZE = Number(process.env.LOAD_GROUP_SIZE ?? 0);
 const SCENARIOS = new Set((process.env.LOAD_SCENARIOS ?? "S1,S2,S3,S4").split(","));
 
 const clients: PrismaClient[] = Array.from({ length: REPLICAS }, () => createPrismaClient(url, { poolMax: POOL_MAX }));
@@ -59,7 +63,12 @@ const ms = (v: number) => v.toFixed(1);
 /** Short error class for the notes column: Prisma code or the first words of the message. */
 function errorKind(err: unknown): string {
   const e = err as { code?: string; message?: string };
-  if (e?.code) return e.code;
+  if (e?.code) {
+    // P2010/P2039 wrap a PostgreSQL error: show its SQLSTATE.
+    const cause = (e as { meta?: { driverAdapterError?: { cause?: { originalCode?: string } } } }).meta
+      ?.driverAdapterError?.cause;
+    return cause?.originalCode ? `${e.code}/${cause.originalCode}` : e.code;
+  }
   return (
     (e?.message ?? String(err))
       .split("\n")
@@ -169,12 +178,18 @@ async function scenarioDispatch(): Promise<void> {
   for (const grouped of [false, true]) {
     for (const c of counts) {
       await reset();
-      let groupId: string | null = null;
-      if (grouped) {
-        groupId = (await db.budgetGroup.create({ data: { name: `g-${c}`, ownerId: OWNER, dailyBudgetUsd: 100_000 } }))
-          .id;
+      const size = grouped ? GROUP_SIZE || c : c;
+      const agents: string[] = [];
+      for (let start = 0; start < c; start += size) {
+        let groupId: string | null = null;
+        if (grouped) {
+          const name = `g-${c}-${start}`;
+          groupId = (await db.budgetGroup.create({ data: { name, ownerId: OWNER, dailyBudgetUsd: 100_000 } })).id;
+        }
+        const prefix = `disp-${grouped ? "g" : "u"}-${c}-${start}`;
+        agents.push(...(await codingAgents(prefix, Math.min(size, c - start), groupId)));
       }
-      const agents = await codingAgents(`disp-${grouped ? "g" : "u"}-${c}`, c, groupId);
+      const groups = grouped ? Math.ceil(c / size) : 0;
       const samples: number[] = [];
       let failed = 0;
       const errors = new Map<string, number>();
@@ -194,7 +209,7 @@ async function scenarioDispatch(): Promise<void> {
       const pending = await db.run.count({ where: { status: "pending" } });
       row(
         `S2 dispatch (${grouped ? "grouped: table lock" : "ungrouped"})`,
-        `${c} at once, ${REPLICAS} replicas`,
+        `${c} at once${grouped ? `, ${groups} group${groups === 1 ? "" : "s"}` : ""}, ${REPLICAS} replicas`,
         stats(samples, wall),
         `${pending} persisted, ${failed} errors${failed ? ` (${summarize(errors)})` : ""}; ${((c / wall) * 1000).toFixed(0)}/s`,
       );
