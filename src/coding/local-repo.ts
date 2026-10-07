@@ -4,17 +4,12 @@ import { realpath } from "node:fs/promises";
 import { delimiter, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { cleanGitEnv } from "./local-git.js";
 import { LOCAL_REPO_PREFIX, isLocalRepository, normalizeLocalRepository } from "./protocol.js";
 
 export { LOCAL_REPO_PREFIX, isLocalRepository, normalizeLocalRepository };
 
 const run = promisify(execFile);
-
-function cleanGitEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
-  return env;
-}
 
 export type LocalRepoErrorCode =
   | "local_repo_not_allowed"

@@ -1,4 +1,10 @@
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { GitVcsProvider } from "../providers/vcs/git.js";
+import { LocalRemote } from "../providers/vcs/local-remote.js";
 import type { Executor } from "../providers/executor/types.js";
 import { MAX_CODING_TASK_BYTES } from "../coding/protocol.js";
 import { BUILTIN_CODING_SERVICES } from "../coding/services/builtins.js";
@@ -1536,6 +1542,24 @@ describe("coding-run services", () => {
       "service_declaration_invalid: `.wardby/services.yaml` is invalid: it is larger than 8192 bytes.",
     ],
     [
+      "a local declaration is too large",
+      servicesAgent(),
+      new Error("local_file_too_large"),
+      "service_declaration_invalid: `.wardby/services.yaml` is invalid: it is larger than 8192 bytes.",
+    ],
+    [
+      "a local declaration is not a file",
+      servicesAgent(),
+      new Error("local_file_not_a_file"),
+      "service_declaration_invalid: `.wardby/services.yaml` is invalid: it is not a file.",
+    ],
+    [
+      "a local declaration is not UTF-8",
+      servicesAgent(),
+      new Error("local_file_not_utf8"),
+      "service_declaration_invalid: `.wardby/services.yaml` is invalid: it is not UTF-8 text.",
+    ],
+    [
       "the declaration can't be read",
       servicesAgent(),
       new Error("github_api_error:502"),
@@ -1554,6 +1578,38 @@ describe("coding-run services", () => {
     expect(result?.run).toMatchObject({ status: "refused", error });
     expect(state.codingRuns).toEqual([]);
     expect(start).not.toHaveBeenCalled();
+  });
+
+  it("resolves a local repository's services from its committed base ref", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "wardby-dispatch-local-")));
+    try {
+      const repo = join(root, "repo");
+      await mkdir(repo);
+      const g = (...args: string[]) =>
+        execFileSync("git", ["-c", "commit.gpgSign=false", ...args], {
+          cwd: repo,
+          env: { PATH: process.env.PATH ?? "", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+        });
+      g("init", "--initial-branch=main");
+      g("config", "user.email", "t@example.invalid");
+      g("config", "user.name", "T");
+      await mkdir(join(repo, ".wardby"));
+      await writeFile(join(repo, ".wardby", "services.yaml"), DECLARATION);
+      g("add", ".");
+      g("commit", "-m", "services");
+      const vcs = new GitVcsProvider({ rootDir: join(root, "vcs"), remote: new LocalRemote({ roots: () => [root] }) });
+      const agent = servicesAgent();
+      agent.codingProfile.repository = `local:${repo}`;
+      const state = fakeDb(agent, [], {}, CATALOG);
+      const { executor } = servicesExecutor(null);
+      executor.readCodingServiceDeclaration = (input) =>
+        vcs.readRepositoryFile({ ...input, ref: input.baseRef, path: ".wardby/services.yaml", maxBytes: 8192 });
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run.status).toBe("pending");
+      expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16)]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("still fails over-long instructions with the generic size error when the run has no services", async () => {

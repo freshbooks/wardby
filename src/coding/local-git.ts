@@ -18,29 +18,35 @@ export function cleanGitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+function gitArgs(dir: string, args: string[]): string[] {
+  return [
+    "--literal-pathspecs",
+    "--no-optional-locks",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "log.showSignature=false",
+    "-c",
+    "gpg.program=",
+    "-c",
+    "diff.external=",
+    "-C",
+    dir,
+    ...args,
+  ];
+}
+
 /** Runs git read-only in `dir`. Throws the raw execFile error; callers decide what a failure means. */
 export async function localGit(dir: string, args: string[], maxBuffer = GIT_MAX_BUFFER): Promise<string> {
-  const { stdout } = await run(
-    "git",
-    [
-      "--literal-pathspecs",
-      "--no-optional-locks",
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      "core.hooksPath=/dev/null",
-      "-c",
-      "log.showSignature=false",
-      "-c",
-      "gpg.program=",
-      "-c",
-      "diff.external=",
-      "-C",
-      dir,
-      ...args,
-    ],
-    { env: cleanGitEnv(), maxBuffer, encoding: "utf8" },
-  );
+  const { stdout } = await run("git", gitArgs(dir, args), { env: cleanGitEnv(), maxBuffer, encoding: "utf8" });
+  return stdout;
+}
+
+/** Like localGit, but the raw stdout bytes (for content that must be validated as UTF-8). */
+export async function localGitBytes(dir: string, args: string[], maxBuffer = GIT_MAX_BUFFER): Promise<Buffer> {
+  const { stdout } = await run("git", gitArgs(dir, args), { env: cleanGitEnv(), maxBuffer, encoding: "buffer" });
   return stdout;
 }
 

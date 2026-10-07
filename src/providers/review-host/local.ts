@@ -136,7 +136,6 @@ export class LocalReviewHost implements CodeReviewHost {
   }
 
   /** Rejects anything but a plain branch/tag name before it can reach git as a revision or an option. */
-  /** Rejects anything but a plain branch/tag name before it can reach git as a revision or an option. */
   private async assertRefName(dir: string, name: string): Promise<void> {
     if (!(await isSafeRefName(dir, name))) fail("ref_invalid");
   }

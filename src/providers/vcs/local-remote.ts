@@ -6,7 +6,7 @@ import {
   normalizeLocalRepository,
   resolveLocalRepository,
 } from "../../coding/local-repo.js";
-import { SHA, isSafeRefName, isSafeRepoPath, localGit } from "../../coding/local-git.js";
+import { SHA, isSafeRefName, isSafeRepoPath, localGit, localGitBytes } from "../../coding/local-git.js";
 import type { RepositoryFileInput } from "./github.js";
 import type { GitRemote, PublishInput, PublishResult } from "./remote.js";
 
@@ -87,7 +87,13 @@ export class LocalRemote implements GitRemote {
     const object = `${sha}:${input.path}`;
     const size = Number((await localGit(dir, ["cat-file", "-s", "--end-of-options", object], 64 * 1024)).trim());
     if (!Number.isSafeInteger(size) || size > input.maxBytes) throw new Error("local_file_too_large");
-    return localGit(dir, ["cat-file", "blob", "--end-of-options", object], input.maxBytes * 4 + 1024);
+    const bytes = await localGitBytes(dir, ["cat-file", "blob", "--end-of-options", object], input.maxBytes + 1024);
+    if (bytes.byteLength > input.maxBytes) throw new Error("local_file_too_large");
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error("local_file_not_utf8");
+    }
   }
 
   async publish({ workspace }: PublishInput): Promise<PublishResult> {

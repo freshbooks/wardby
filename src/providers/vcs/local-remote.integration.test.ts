@@ -326,6 +326,16 @@ describe("LocalRemote push guard", () => {
       });
     });
 
+    it("refuses a non-UTF-8 file and a non-file entry", async () => {
+      const f = await fixture();
+      await writeFile(join(f.src, "bin.dat"), Buffer.from([0xff, 0xfe, 0x41]));
+      await symlink("README.md", join(f.src, "link"));
+      await git(f.src, ["add", "bin.dat", "link"]);
+      await git(f.src, ["commit", "-m", "more"]);
+      await expect(read(f, { path: "bin.dat" })).rejects.toThrow("local_file_not_utf8");
+      await expect(read(f, { path: "link" })).rejects.toThrow("local_file_not_a_file");
+    });
+
     it("refuses a file above maxBytes", async () => {
       const f = await fixture();
       await expect(read(f, { path: "README.md", maxBytes: 3 })).rejects.toThrow("local_file_too_large");
