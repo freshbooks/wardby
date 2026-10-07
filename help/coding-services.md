@@ -58,6 +58,10 @@ When upgrading a deployment that delegates to an identity provider, define the
 `services:manage` scope in the provider first; see
 [Configure identity and privileged access](identity-and-access.md).
 
+For a repository on the wardby host (`local:/absolute/path`), the declaration is
+read from the committed file at the run's base ref, never the working tree; see
+[Use local git repositories](local-repositories.md).
+
 If a run is refused or fails over its services, read the page for its code:
 
 - [`service_declaration_invalid`](errors/service-declaration-invalid.md)

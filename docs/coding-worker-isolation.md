@@ -386,6 +386,9 @@ Set `JOB_LAUNCHER=docker`, `CODING_WORKER_IMAGE` to an immutable repository
 digest or Docker local image ID, and `CODING_PROXY_CONTAINER` to the dedicated proxy container name.
 For Claude Code, also set `CODING_CLAUDE_WORKER_IMAGE` and
 `CODING_CLAUDE_TOOL_RUNNER_IMAGE` to their immutable IDs.
+To let agents use git repositories on the control plane's own machine
+(`local:/absolute/path`), also set `LOCAL_REPO_ROOTS` to the trusted folders; see
+[Local repositories](coding-agent-setup.md#local-repositories).
 `VCS_WORK_ROOT`, `CODING_JOB_STATE_ROOT`, and `CODING_ARTIFACT_ROOT` must be
 trusted host-only directories. Resource limits are controlled by
 `CODING_CPUS`, `CODING_MEMORY_MB`, `CODING_PIDS`, and `CODING_DISK_MB`.

@@ -9,36 +9,29 @@ appliesTo: ">=0.5.0"
 
 # Local repository is not in a trusted folder
 
-A run using a local repository (a path starting with `local:`) was refused
-because the repository's real path (after resolving symlinks) is not inside
-any folder listed in the `LOCAL_REPO_ROOTS` environment variable. Wardby
-requires local repositories to live inside explicitly trusted folders to
-prevent accidental access to sensitive directories on the server machine.
+`local_repo_not_allowed` means wardby refused a local repository (a repository
+written `local:/absolute/path`) because its real path, after resolving symlinks,
+is not at or below any folder listed in the `LOCAL_REPO_ROOTS` environment
+variable. If `LOCAL_REPO_ROOTS` is unset, no local repository is allowed.
 
-`LOCAL_REPO_ROOTS` is a colon-delimited list (`:` on macOS and Linux; `;`
-on Windows) of absolute paths. Every local repository must resolve (after
-symlink resolution) to a path that starts with one of these trusted folders.
-If the variable is unset, no local repositories are allowed.
+Wardby checks the folders when you create or update an agent, link a
+repository, trigger a run, and again while a run uses the repository, so a
+narrowed list also refuses agents that were saved earlier.
 
 ## What to do
 
-1. **Add the repository's folder to `LOCAL_REPO_ROOTS`:**
-   - On macOS/Linux, append (or prepend) the folder's absolute path to the
-     environment variable, separated by `:`. For example:
-     ```
-     LOCAL_REPO_ROOTS=/home/user/projects:/var/repos
-     ```
-   - On Windows, use `;` as the separator instead.
-   - Restart the wardby server after editing the variable so it reads the
-     new value.
+1. Add the repository's folder (or a parent folder) to `LOCAL_REPO_ROOTS` on the
+   wardby server. Separate folders with the platform's path delimiter: `:` on
+   macOS and Linux, `;` on Windows. For example:
+   ```
+   LOCAL_REPO_ROOTS=/home/you/projects:/srv/repos
+   ```
+2. Restart the wardby server so it reads the new value.
+3. If you set up wardby with `quickstart`, run it again with
+   `--coding --trust /path/to/folder` (repeat `--trust` for more folders). It
+   keeps the folders already trusted and writes the new list to `.wardby/.env`.
 
-2. **Or run the quickstart again:**
-   - Run `npx @wardby/cli quickstart coding` (the coding setup step) to
-     re-prompt for trusted folders. This saves them to your configuration,
-     and the server reads them at startup.
+If the repository path goes through a symlink, the symlink's target must be
+inside a trusted folder; the link's own location does not count.
 
-Paths are compared after resolving all symlinks. If you use a symlink to
-point to the repository, verify that the **real path** (the target it
-resolves to) is inside a trusted folder, not the symlink's path itself.
-
-Related: [Local git repositories](../local-repositories.md), [Getting started](../getting-started.md).
+Related: [Local git repositories](../local-repositories.md), [Get started](../getting-started.md).

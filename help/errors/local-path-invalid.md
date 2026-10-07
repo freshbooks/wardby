@@ -1,7 +1,7 @@
 ---
 id: errors/local-path-invalid
 title: Invalid file path in local repository read
-summary: A file path given to a repository read was absolute or contained unsafe path segments.
+summary: A file path given to a repository read was absolute or contained empty, dot or dot-dot segments.
 audience: operator
 tags: [error, local-repositories, coding-agents, vcs]
 appliesTo: ">=0.5.0"
@@ -9,53 +9,22 @@ appliesTo: ">=0.5.0"
 
 # Invalid file path in local repository read
 
-A run using a local repository failed because it tried to read a file using
-an invalid path. Wardby only allows repository-relative paths — paths that
-stay within the repository and do not escape it. Absolute paths and paths
-containing unsafe segments like `..` are rejected for security.
+`local_path_invalid` means a read of a file in a local repository (for example
+`repo_read_file` in a review, or wardby reading `.wardby/services.yaml`) used a
+path wardby will not pass to git. Paths must be relative to the repository root.
+A path is rejected when it:
 
-This can happen when:
+- starts with `/`;
+- contains an empty segment (`src//main.ts`), a `.` segment or a `..` segment; or
+- is empty or contains a NUL.
 
-- A run tries to read a file by its absolute path instead of a path relative
-  to the repository root.
-- A file path includes `..` (parent directory references), which could escape
-  the repository.
-- A file path contains empty segments (e.g., `folder//file.txt`).
-- A run tries to read a symlink that points outside the repository.
+Wardby reads files from the committed tree at a ref, so only regular files are
+readable. A symlink, directory or submodule at that path is not.
 
 ## What to do
 
-Always use repository-relative paths when reading from a local repository:
-
-**Incorrect (absolute paths):**
-```
-/home/user/projects/my-repo/src/main.ts
-/var/repos/myapp/README.md
-```
-
-**Correct (repository-relative paths):**
-```
-src/main.ts
-README.md
-docs/guide/setup.md
-src/../main.ts  ← also incorrect (contains ..)
-```
-
-**Incorrect (containing .. or empty segments):**
-```
-src/../docs/README.md  (contains ..)
-src//main.ts  (empty segment)
-./././main.ts  (redundant segments)
-```
-
-**Correct (clean, relative paths):**
-```
-src/main.ts
-docs/README.md
-```
-
-If you need to read a file that is reachable via symlinks, the symlink's
-final target must stay within the repository folder. Symlinks that point
-outside the repository are not allowed.
+Use a clean repository-relative path, such as `src/main.ts` or `docs/README.md`,
+not `/home/you/repo/src/main.ts`, `./src/main.ts` or `src/../src/main.ts`. Use
+`repo_list_files` to see what exists at the ref.
 
 Related: [Local git repositories](../local-repositories.md).

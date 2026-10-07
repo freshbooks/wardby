@@ -1,7 +1,7 @@
 ---
 id: errors/local-ref-invalid
 title: Invalid git branch or ref name
-summary: A branch or ref name was rejected because it does not follow git naming rules.
+summary: A branch or ref name was rejected because it does not follow git's naming rules.
 audience: operator
 tags: [error, local-repositories, coding-agents, vcs]
 appliesTo: ">=0.5.0"
@@ -9,43 +9,28 @@ appliesTo: ">=0.5.0"
 
 # Invalid git branch or ref name
 
-A run using a local repository failed because a branch or ref name it was given
-is not a valid git name. Git has strict rules for branch and ref names — they
-must not start with `-`, and they cannot contain certain characters like
-spaces, control characters, or `..`.
+`local_ref_invalid` means wardby refused a branch or ref name before passing it
+to git. A name is rejected when it:
 
-This error typically occurs when:
+- is empty, starts with `-`, or contains `@{`, a NUL, a space or other
+  non-printable or non-ASCII character;
+- is too long; or
+- is not accepted by `git check-ref-format --branch` (for example it contains
+  `..`, a trailing `.lock`, or characters such as `~`, `^`, `:` or `\`).
 
-- A run is asked to use a branch name that does not conform to git rules.
-- A branch name is constructed dynamically (for example, from user input) and
-  includes invalid characters.
+It can also appear when a review is requested without `base` while the
+repository's HEAD is detached, because there is no checked-out branch to use.
 
 ## What to do
 
-Use a plain, valid git branch name. Valid branch names:
+Use a plain branch name that git accepts. You can check one with:
 
-- Contain only alphanumerics, hyphens, underscores, and slashes (`/`).
-- Do not start with `-` or `.`.
-- Do not contain `..` (double dots).
-- Do not contain spaces.
-- Do not contain special characters like `@`, `!`, or `#` (except in certain
-  contexts like `refs/heads/`).
+```
+git check-ref-format --branch my-branch-name
+```
 
-Examples of valid branch names:
-
-- `feature/add-login`
-- `fix-bug-123`
-- `user_changes_v2`
-- `release-1.0`
-
-Examples of invalid branch names:
-
-- `-feature` (starts with hyphen)
-- `feature branch` (contains space)
-- `feature..fix` (contains `..`)
-- `.backup` (starts with dot)
-
-If the branch name is constructed from user input or external data, sanitize
-it to remove or replace invalid characters before passing it to wardby.
+Valid examples: `feature/add-login`, `fix-123`, `release-1.0`. Invalid examples:
+`-feature`, `feature branch`, `feature..fix`. For the detached HEAD case, pass
+`review.base` explicitly or check out a branch.
 
 Related: [Local git repositories](../local-repositories.md).

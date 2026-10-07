@@ -161,3 +161,30 @@ describe("searchHelp", () => {
     expect(searchHelp(catalog, "parallel delegations")[0]?.page.id).toBe("agent-recipes");
   });
 });
+
+describe("local repositories help", () => {
+  it("is found for the obvious queries, and each error code finds its article", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+
+    for (const query of ["local repo", "worktree", "without github app", "LOCAL_REPO_ROOTS", "trusted folders"]) {
+      const ids = searchHelp(catalog, query).map((result) => result.page.id);
+      expect(ids, query).toContain("local-repositories");
+    }
+
+    for (const code of [
+      "local_repo_not_allowed",
+      "local_repo_not_found",
+      "local_ref_not_found",
+      "local_ref_invalid",
+      "local_path_invalid",
+      "local_branch_conflict",
+    ]) {
+      const id = `errors/${code.replaceAll("_", "-")}`;
+      const results = searchHelp(catalog, code);
+      expect(results[0]?.page.id, code).toBe(id);
+      expect(catalog.pages.find((entry) => entry.id === id)?.markdown, id).toContain(`\`${code}\``);
+    }
+  });
+});

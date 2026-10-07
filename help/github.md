@@ -23,6 +23,9 @@ Workers do not receive the GitHub App private key. A trusted component validates
 the changes, pushes a controlled branch, and opens at most one draft pull
 request. Wardby does not auto-merge coding-agent output.
 
+No GitHub App is needed for a git repository on the wardby host. See
+[Use local git repositories](local-repositories.md).
+
 Read [`docs/coding-agent-setup.md`](../docs/coding-agent-setup.md) for coding
 agent setup and [`docs/code-review-agents.md`](../docs/code-review-agents.md)
 for pull-request review agents and webhook configuration.

@@ -1,7 +1,7 @@
 ---
 id: errors/local-repo-not-found
 title: Local repository path not found or not a git repository
-summary: The repository path does not exist, is not a git work tree, or is not visible to the wardby server.
+summary: The repository path does not exist, is not the top level of a git work tree, or is not visible to the wardby server.
 audience: operator
 tags: [error, local-repositories, coding-agents, vcs]
 appliesTo: ">=0.5.0"
@@ -9,44 +9,29 @@ appliesTo: ">=0.5.0"
 
 # Local repository path not found or not a git repository
 
-A run using a local repository (a path starting with `local:`) failed because
-the path either does not exist, is not the root of a git work tree, or is not
-accessible to the wardby server. Local repositories only work when the wardby
-server runs on the same machine as the repository itself — not inside a
-container or Kubernetes cluster.
+`local_repo_not_found` means wardby could not use a local repository (written
+`local:/absolute/path`) even though the path is inside a trusted folder. One of
+these is true:
 
-Wardby checks for these conditions:
+- the path does not exist (it was moved or deleted);
+- the path is not the top level of a git work tree (it is a subfolder of a
+  repository, a bare repository, or not a repository at all); or
+- the wardby server cannot see the path: it runs in a container, a pod or on
+  another machine, or its user cannot read the folder.
 
-- **Path does not exist:** The folder at the given path has been deleted or
-  moved.
-- **Not a git work tree:** The path exists but is not the root of a git
-  repository (no `.git/` directory).
-- **Not visible to the server:** The wardby server process cannot access the
-  path due to file-system permissions, or the server is running remotely
-  (inside Docker, Kubernetes, or another machine) and cannot reach the local
-  file system.
+Local repositories need the wardby server to run on the same machine as the
+folders, outside a container.
 
 ## What to do
 
-1. **Verify the path exists and is a git repository:**
+1. Check the path from the machine that runs the wardby server:
    ```
-   ls -la /path/to/repo/.git
-   cd /path/to/repo && git status
+   git -C /path/to/repo rev-parse --show-toplevel
    ```
-   If these commands fail, the path is not a valid git work tree.
-
-2. **Ensure the wardby server can see the path:**
-   - If wardby runs locally (on your development machine), verify the folder
-     is readable by the server process.
-   - If wardby runs in Docker or Kubernetes, local repositories are not
-     supported in that deployment. You must use a remote repository (GitHub,
-     GitLab, etc.) or run wardby locally on the machine with the repository.
-
-3. **Check file-system permissions:**
-   - Verify the wardby server has read access to the repository:
-     ```
-     ls -ld /path/to/repo
-     ```
-   - If needed, adjust permissions so the server's user can read the folder.
+   The output must be the path you gave wardby (after symlinks). If it is a
+   parent folder, use that folder instead.
+2. Make sure the server's user can read the folder.
+3. If wardby runs in Docker or Kubernetes, run it directly on the machine with
+   the repository, or use a GitHub repository instead.
 
 Related: [Local git repositories](../local-repositories.md).

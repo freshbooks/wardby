@@ -32,8 +32,11 @@ The guided command:
    at `55432`;
 5. applies Wardby's packaged Prisma migrations;
 6. creates the `hello-wardby` sample agent with a `$1` maximum run budget;
-7. asks before making the billed model request; and
-8. optionally registers the local stdio MCP server with Codex, Claude Code, or
+7. asks before making the billed model request;
+8. optionally sets up coding and review agents against a local git repository
+   (see [Coding agents on a local repository](#coding-agents-on-a-local-repository));
+   and
+9. optionally registers the local stdio MCP server with Codex, Claude Code, or
    both.
 
 Provider credentials and `SECRET_APP_KEY` are written with owner-only file
@@ -115,13 +118,75 @@ agents do not use it.
 ## Coding agents
 
 The first-run demo proves native model routing, budget admission, persistence,
-and accounting. It deliberately does not install a GitHub App or build worker
-images.
+and accounting. It does not install a GitHub App or start any worker.
 
 Coding agents require the stronger boundary described in
-[Coding-agent setup](coding-agent-setup.md): a dedicated GitHub App, immutable
-worker image, trusted coding proxy, and either Docker or Kubernetes as the job
-launcher. Run `wardby coding preflight` before enabling a production repository.
+[Coding-agent setup](coding-agent-setup.md): an immutable worker image, a
+trusted coding proxy, and either Docker or Kubernetes as the job launcher. For
+GitHub repositories they also need a dedicated GitHub App. Run
+`wardby coding preflight` before enabling a production repository.
+
+### Coding agents on a local repository
+
+To try a coding agent and a review agent without a GitHub App, quickstart can
+point them at a git repository on your machine. After the sample agent it asks
+"Set up coding + review agents against a local git repo?"; the default is no.
+This step needs Docker, and an `OPENAI_API_KEY` (Codex) or `ANTHROPIC_API_KEY`
+(Claude Code) for the coding agent. It:
+
+1. asks which folders to trust (it offers the git root of the current
+   directory) and writes them to `.wardby/.env` as `LOCAL_REPO_ROOTS`, together
+   with `JOB_LAUNCHER=docker`;
+2. gets the runtime and worker images (and, for Claude Code, the Claude worker
+   and tool-runner images): pulled by digest from a published release, or built
+   from a wardby source checkout. Set `WARDBY_RUNTIME_IMAGE` and
+   `CODING_WORKER_IMAGE` (and `CODING_CLAUDE_WORKER_IMAGE` plus
+   `CODING_CLAUDE_TOOL_RUNNER_IMAGE` for Claude Code) to use images of your own;
+3. starts the coding proxy and runs the coding preflight;
+4. creates `local-builder` (a coding agent, $2 budget) and `local-reviewer` (a
+   review agent, $1 budget) for a repository inside the trusted folders; and
+5. prints two `trigger_agent` calls: one asks `local-builder` for a change, the
+   other asks `local-reviewer` to review the branch `wardby/run-<run id>` the
+   run pushed into your repository.
+
+**Trust model.** Wardby only touches repositories inside the folders you trust.
+Agents see committed history only: untracked files such as `.env.local` never
+leave your machine. A run never changes your working tree or the branch you have
+checked out; its result is a new branch `wardby/run-<run id>` in the repository,
+and the repository's own receive hooks run when wardby pushes it.
+
+If the repository has no `.wardby/services.yaml`, quickstart offers a starter
+one (PostgreSQL and/or Redis) and commits it to the branch
+`wardby/quickstart-services` without touching your working tree or checked-out
+branch. Merge that branch, or set the agent's `baseRef` to it. "The default
+branch" for these agents is the branch checked out when quickstart runs. If the
+repository already has a services file, quickstart prints what it declares, or
+why it is invalid.
+
+Options for unattended use:
+
+```sh
+OPENAI_API_KEY="..." npx --yes @wardby/cli@latest quickstart \
+  --non-interactive --yes \
+  --coding --trust ~/projects/my-repo \
+  --coding-provider codex \
+  --starter-services postgres
+```
+
+- `--coding` runs the step without asking and `--no-coding` skips it. With
+  `--non-interactive` the step runs only with `--coding`.
+- `--trust <dir>` names a trusted folder; repeat it for several. Folders trusted
+  by an earlier run are kept. Non-interactive runs need at least one.
+- `--coding-provider codex|claude-code` picks the coding agent; by default it
+  uses the provider whose key is available.
+- `--starter-services postgres,redis|none` answers the starter-file question.
+
+`doctor` and `status` then also report the trusted folders, the worker image,
+the coding proxy, and each local agent's repository, and `down` stops the proxy
+along with the database. See
+[Local repositories](coding-agent-setup.md#local-repositories) for what a local
+run does, its requirements (the server must run on the same machine as the
+folders) and its limits (no submodules or Git LFS).
 
 ## Your first agents
 
@@ -140,7 +205,8 @@ builder for this repository"; it follows the `agent-recipes` help article.
 
 - [Agent recipes](agent-recipes.md)
 - [Runtime architecture](architecture-runtime.md)
-- [Coding-agent setup](coding-agent-setup.md)
+- [Coding-agent setup](coding-agent-setup.md) and its
+  [local repositories](coding-agent-setup.md#local-repositories) section
 - [Bring your own identity provider](getting-started-identity-provider.md)
 - [Observability](observability.md)
 - [GKE deployment](getting-started-gke.md)

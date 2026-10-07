@@ -1,109 +1,161 @@
 ---
 id: local-repositories
-title: Local git repositories
-summary: Using local git repositories with wardby coding and review agents — setup, capabilities, and limitations.
+title: Use local git repositories without a GitHub App
+summary: Point coding and review agents at a git folder on the wardby host (local:/abs/path), with no GitHub App and no git worktree. Results land as branches in that repository. Needs LOCAL_REPO_ROOTS trusted folders and the Docker or Kubernetes job launcher.
 audience: operator
-tags: [local-repositories, coding-agents, review-agents, vcs]
+tags: [local, local-repo, worktree, git, quickstart, review, coding, LOCAL_REPO_ROOTS]
 appliesTo: ">=0.5.0"
 ---
 
-# Local git repositories
+# Use local git repositories without a GitHub App
 
-Wardby supports local git repositories for coding and review agents, using
-paths that start with `local:` followed by an absolute file-system path
-(for example, `local:/home/user/projects/myapp`). This allows agents to
-work directly on repositories on the same machine as the wardby server.
+A coding or review agent can work on a git folder on the machine that runs the
+wardby server instead of a GitHub repository. You write the repository as
+`local:/absolute/path`. No GitHub App, GitHub account link or webhook is needed.
 
-## Setup
+- A **coding agent** clones the repository's committed history, works in the
+  sandbox as usual, and wardby pushes the result into your repository as a new
+  branch `wardby/run-<run id>`. Wardby clones; it does not create a git
+  worktree in your repository.
+- A **review agent** reviews a branch of the repository against a base branch
+  when you ask for it with `trigger_agent`.
 
-Local repositories are allowed only inside folders listed in the
-`LOCAL_REPO_ROOTS` environment variable. This is a colon-delimited list
-(`:` on macOS and Linux, `;` on Windows) of absolute trusted folder paths.
+The easiest way to try it is the optional coding step of
+`npx --yes @wardby/cli@latest quickstart` (see
+[Quickstart coding step](#quickstart-coding-step)).
 
-You can set this variable:
+## Requirements
 
-1. **In your environment before starting wardby:**
-   ```bash
-   export LOCAL_REPO_ROOTS=/home/user/projects:/var/repos
-   wardby start
-   ```
+- **Trusted folders.** Set `LOCAL_REPO_ROOTS` on the wardby server to the
+  folders wardby may use, separated by the platform's path delimiter (`:` on
+  macOS and Linux, `;` on Windows). While it is unset, every `local:` repository
+  is refused with `local_repo_not_allowed`. A repository must be a git work tree
+  whose real path (symlinks resolved) is at or below one of the folders.
+  Wardby stores the repository by that real path. It checks the folders again
+  when you create or update an agent, link a repository, trigger a run, and
+  while a run uses the repository. Restart the server after changing the
+  variable.
+- **The Docker or Kubernetes job launcher.** Coding agents run in an isolated
+  worker, so set `JOB_LAUNCHER=docker` (or `kubernetes`). With
+  `JOB_LAUNCHER=local` a coding run ends with "Coding agents need a container
+  executor". Review agents are native agents and need no worker.
+- **The server on the same machine as the folders.** Wardby reads and writes
+  your repository directly. A control plane in a container, a pod or on another
+  machine cannot see the folder and fails with `local_repo_not_found`.
+- **git 2.24 or newer** on the machine that runs the wardby server.
+- **Worker images from this release or later.** An older worker image rejects
+  a `local:` repository and the run fails with `worker_input_failed`. That
+  includes a bring-your-own `workerImageRef` image: rebuild it on a current
+  driver image.
 
-2. **During the quickstart setup:**
-   ```bash
-   npx @wardby/cli quickstart coding
-   ```
-   The coding setup step will prompt you for trusted folders and save them
-   to your configuration.
+## Coding agents
 
-After adding folders to `LOCAL_REPO_ROOTS`, restart the wardby server so
-it reads the new value.
+Create a coding agent with `create_agent` and
+`codingProfile.repository: "local:/abs/path"`, or change an existing agent with
+`update_agent`. Start it with `trigger_agent {agentId, task, baseRef?}`.
+`baseRef` defaults to the profile's base ref.
 
-## How coding agents use local repositories
+What happens:
 
-When you dispatch a coding agent with `local:/path/to/repo`:
+1. Wardby clones the repository's **committed** history. Untracked and
+   uncommitted files, such as a `.env.local`, never leave your machine.
+2. The worker makes its changes in the sandbox, as it does for GitHub.
+3. Wardby validates the result and pushes a single commit to the branch
+   `wardby/run-<run id>` in your repository. Your working tree, index and
+   checked-out branch are never modified.
+4. `get_run` shows `resultBranch` and `baseSha` (the commit the run started
+   from). Merge the branch the way you merge any branch.
 
-1. The server verifies the path is inside a trusted folder (after resolving
-   symlinks).
-2. The server clones (copies) the repository to a temporary working
-   directory.
-3. The agent works in that copy and commits changes to a temporary branch
-   (`wardby/run-<id>`).
-4. The run's commit is **not** pushed back to the original repository.
+Things to know:
 
-If you need to push the work back, fetch the branch and merge it manually:
+- Your repository's own receive-side hooks (for example `pre-receive` and
+  `update`) run when wardby pushes. A hook that rejects the push fails the run.
+- `trigger_agent` returns `warnings` when the repository has uncommitted files,
+  submodules or Git LFS files. The run still starts, but uncommitted files are
+  not included and submodules and LFS are **not supported**: submodules are not
+  initialized and LFS files are not fetched.
+- A run can start from an earlier result: pass `baseRef: "wardby/run-<run id>"`
+  to build on that branch. A continuation of a run (a lead agent revising its
+  earlier work) fast-forwards the same branch. If that branch has moved, or is
+  checked out in your repository, the run fails with `local_branch_conflict`.
+- Wardby never deletes result branches. Remove one you no longer need with
+  `git branch -D wardby/run-<run id>`.
+- `.wardby/services.yaml` works for local runs. It is read from the committed
+  file at the run's base ref, never from your working tree, and fails with the
+  same errors as on GitHub (for example `service_declaration_invalid`). See
+  [Give coding runs the services their tests need](coding-services.md).
 
-```bash
-cd /path/to/repo
-git fetch origin wardby/run-<run-id>
-git merge FETCH_HEAD
-```
+## Review agents
 
-Or check out the branch and push it yourself:
+1. Create a native review agent (a normal agent with a review prompt that uses
+   the `repo_*` tools) and link it with `link_repository` using
+   `provider: "local"`, `repository: "local:/abs/path"` and `access: "write"`
+   (publishing a review needs write). A local link is manual only: give it no
+   `triggers` and no `checkName`.
+2. Start a review with
+   `trigger_agent {agentId, review: {repository?, branch, base?}}`. Only the
+   agent's owner can. `repository` defaults to the agent's only local link, and
+   `base` defaults to the branch checked out in the repository.
+3. The `repo_pr_read`, `repo_read_file`, `repo_list_files`, `repo_publish_review`
+   and `repo_comment` tools work unchanged, reading committed content at the
+   branch and never your working tree.
+4. `get_run` returns the result in `review`: `number`, `branch`, `base` and
+   `reviews`, each with `verdict`, `summary`, `body` and `comments`.
 
-```bash
-git checkout wardby/run-<run-id>
-git push origin wardby/run-<run-id>:my-feature
-```
+There are no check runs and no CI results for a local review, and event
+triggers (`pull_request`, `push`, `mention`, `review_fix`) are rejected for
+local repositories.
 
-## How review agents use local repositories
+A typical loop: trigger the coding agent, read `resultBranch` from `get_run`,
+then trigger the review agent with `review: {branch: "<resultBranch>"}`.
 
-A review agent can inspect branches in a local repository:
+## Quickstart coding step
 
-1. Provide the repository path (`local:/path/to/repo`).
-2. Specify the branch to review and (optionally) the base branch.
-3. The agent examines the differences and reports findings.
+`quickstart` asks "Set up coding + review agents against a local git repo?"
+after the sample agent. It needs Docker and, for the coding provider you
+choose, an `OPENAI_API_KEY` (Codex) or `ANTHROPIC_API_KEY` (Claude Code). It
+then:
 
-Both the branch and the base branch must exist as committed history. The
-agent does not create branches or push changes.
+- asks which folders to trust (offering the git root of the current directory)
+  and writes `LOCAL_REPO_ROOTS` and `JOB_LAUNCHER=docker` to `.wardby/.env`;
+- gets the images: from a release, the runtime and worker images pinned by
+  digest, or built from a wardby source checkout. `WARDBY_RUNTIME_IMAGE` and
+  `CODING_WORKER_IMAGE` (and, for Claude Code, `CODING_CLAUDE_WORKER_IMAGE` plus
+  `CODING_CLAUDE_TOOL_RUNNER_IMAGE`) override them with your own digests;
+- starts the coding proxy and runs the coding preflight;
+- creates `local-builder` (a coding agent, $2 budget) and `local-reviewer`
+  (a review agent, $1 budget) for the repository and prints the two
+  `trigger_agent` calls to try; and
+- if the repository has no `.wardby/services.yaml`, offers a starter one with
+  PostgreSQL and/or Redis. It is committed to the branch
+  `wardby/quickstart-services` without touching your working tree. Merge that
+  branch, or set the agent's `baseRef` to it. When a services file exists
+  already, quickstart shows what it declares or why it is invalid. The "default
+  branch" is whichever branch is checked out when quickstart runs.
 
-## Limitations
+Flags: `--coding` (run the step), `--no-coding` (skip it), `--trust <dir>`
+(repeatable), `--coding-provider codex|claude-code` and
+`--starter-services postgres,redis|none`. In `--non-interactive` mode the step
+only runs with `--coding`, and it needs at least one `--trust`. `doctor` and
+`status` report the trusted folders, worker image, coding proxy and each local
+agent's repository, and `down` stops the proxy with the database.
 
-- **Server locality:** The wardby server must run on the same machine as the
-  repository. Local repositories do not work if wardby is running in a
-  container, Kubernetes cluster, or on a different machine. Use remote
-  repositories (GitHub, GitLab, etc.) for distributed setups.
+## Errors
 
-- **Symlinks:** Paths are compared after resolving all symlinks. The
-  **real path** (the symlink's target) must be inside a trusted folder, not
-  the symlink's path itself.
+- [`local_repo_not_allowed`](errors/local-repo-not-allowed.md): outside every
+  trusted folder, or `LOCAL_REPO_ROOTS` is unset.
+- [`local_repo_not_found`](errors/local-repo-not-found.md): missing, not a git
+  work tree, or not visible to the server.
+- [`local_ref_not_found`](errors/local-ref-not-found.md): the branch or base
+  does not exist.
+- [`local_ref_invalid`](errors/local-ref-invalid.md): not a valid branch name.
+- [`local_path_invalid`](errors/local-path-invalid.md): an unsafe file path in
+  a repository read.
+- [`local_branch_conflict`](errors/local-branch-conflict.md): the result branch
+  moved or is checked out.
 
-- **No automatic push:** Coding runs do not push branches back to the
-  repository. You must push manually, or configure a webhook to fetch and
-  integrate the work.
-
-- **File permissions:** The wardby server process must have read access to
-  the repository folder. If the folder is owned by a different user or has
-  restricted permissions, adjust permissions so the server can read it.
-
-## Error handling
-
-If a run encounters an error with a local repository, check:
-
-- [Local repository is not in a trusted folder](errors/local-repo-not-allowed.md)
-- [Local repository path not found or not a git repository](errors/local-repo-not-found.md)
-- [Git branch or ref does not exist in the local repository](errors/local-ref-not-found.md)
-- [Invalid git branch or ref name](errors/local-ref-invalid.md)
-- [Invalid file path in local repository read](errors/local-path-invalid.md)
-- [Run's branch was modified while the run was working](errors/local-branch-conflict.md)
-
-See [Getting started](getting-started.md) for complete setup instructions.
+Related: [Get started](getting-started.md),
+[Connect GitHub repositories](github.md) (the alternative to a local
+repository), [Run GitHub code-review agents](code-review-agents.md) and
+[Give coding runs the services their tests need](coding-services.md). Operator
+guide: [`docs/coding-agent-setup.md`](../docs/coding-agent-setup.md).

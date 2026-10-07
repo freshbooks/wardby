@@ -9,53 +9,33 @@ appliesTo: ">=0.5.0"
 
 # Git branch or ref does not exist in the local repository
 
-A run using a local repository failed because a branch or ref it needed does
-not exist in that repository. This can happen when:
+`local_ref_not_found` means a branch, base or other ref named in a request does
+not resolve to a commit in the local repository. It comes from:
 
-- A coding run asks to start from a branch (e.g., `branch: feature-x`) that
-  has been deleted or does not exist yet.
-- A review agent is asked to review a branch against a base branch, and either
-  the branch or the base branch is not found.
-- A run asks to reuse an existing branch (e.g., a continuation), but that
-  branch has been deleted since the prior run.
+- a coding run whose `baseRef` (on the agent's profile or in `trigger_agent`)
+  is not a branch of the repository;
+- a continuation or a `baseRef: wardby/run-<run id>` whose result branch was
+  deleted, for example with `git branch -D`; or
+- a review (`trigger_agent` with `review`) whose `branch` or `base` is not a
+  branch of the repository, or a file read at a ref that does not exist.
 
-Only committed history is visible to wardby. Uncommitted changes in a working
-directory are not part of the branch.
+Only committed history counts. Uncommitted changes are not part of any branch.
 
 ## What to do
 
-1. **Check which branches exist:**
+1. List the branches the repository really has:
    ```
-   cd /path/to/repo && git branch -a
+   git -C /path/to/repo branch --all
    ```
-   This lists local and remote-tracking branches.
-
-2. **If the branch needs to be created:**
-   - Create and commit to the branch locally first:
-     ```
-     git checkout -b branch-name
-     # make changes, then:
-     git add .
-     git commit -m "Initial commit"
-     ```
-   - Then re-run the wardby request with the new branch name.
-
-3. **If the branch was deleted:**
-   - If you still have the commit hash, you can recreate it:
-     ```
-     git branch branch-name <commit-hash>
-     ```
-   - Otherwise, ask the run to start from the current default branch instead,
-     or from another branch that still exists.
-
-4. **For review requests:**
-   - Verify both the feature branch and the base branch exist and are spelled
-     correctly:
-     ```
-     git show origin/feature-branch
-     git show origin/main
-     ```
-   - If using a local repository, both branches must have commits; they cannot
-     be created as part of the run.
+2. Fix the name, or commit your work to a branch first:
+   ```
+   git switch -c my-branch
+   git commit -am "Work in progress"
+   ```
+3. If a result branch was deleted and you still have its commit, recreate it
+   with `git branch wardby/run-<run id> <commit>`. Otherwise start from another
+   branch.
+4. For a review, check both `branch` and `base`; `base` defaults to the branch
+   checked out in the repository.
 
 Related: [Local git repositories](../local-repositories.md).
