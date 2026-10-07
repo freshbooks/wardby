@@ -237,7 +237,7 @@ describe("InfraMap", () => {
 
     it("is absent when the namespace has no policies", () => {
       renderMap(describeCluster(genericCluster, genericInfo));
-      expect(screen.queryByText(/NetworkPolicies|NetworkPolicy$/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/\bNetworkPolic(?:y|ies)\b/)).not.toBeInTheDocument();
     });
   });
 });
