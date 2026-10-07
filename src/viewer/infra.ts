@@ -9,7 +9,8 @@ import {
 import type { InfraInfo } from "./api-schema.js";
 
 export function buildInfraInfo(env: NodeJS.ProcessEnv = process.env): InfraInfo {
-  const launcher = loadProviderConfig(env).jobs;
+  const raw = loadProviderConfig(env).jobs;
+  const launcher = raw === "docker" || raw === "kubernetes" ? raw : "local";
   if (launcher !== "kubernetes") return { launcher, kubernetes: null };
   const k8s = loadKubernetesJobConfig(env);
   return {
