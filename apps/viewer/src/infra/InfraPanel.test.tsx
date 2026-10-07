@@ -32,7 +32,9 @@ describe("InfraPanel", () => {
     expect(screen.getByText(/GSA wardby-app@project/)).toBeInTheDocument();
     expect(screen.getByText("node-1")).toBeInTheDocument();
     expect(screen.getByText("cloud-sql-proxy")).toBeInTheDocument();
-    expect(screen.getByText(/gcr\.io\/cloud-sql-connectors\/cloud-sql-proxy:2/)).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes("gcr.io/cloud-sql-connectors/cloud-sql-proxy:2")),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/RUN/)).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /egress/i })).not.toBeInTheDocument();
     await screen.findByText("No recent events");
