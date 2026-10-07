@@ -191,6 +191,20 @@ wardby-coding`) always has **two** containers: `keeper` (seeds the
    If you only ever see one container, you're looking at a canary from a
    `preflight` run, not a triggered agent's run.
 
+## Load testing (contributors)
+
+`manifests/overlays/kind-load` is the kind overlay plus a mock model upstream
+inside the coding proxy: every model request gets a canned answer that ends
+the run with no changes, after `WARDBY_LOAD_MOCK_LATENCY_MS` (default 5000).
+Nothing reaches a model provider and no credentials are sent. Metering, the
+ledger and audit still run; audit events carry `mockUpstream: true`.
+
+The proxy only enables it when both `WARDBY_LOAD_TEST=1` and
+`WARDBY_CODING_PROXY_MOCK_UPSTREAM=1` are set, and refuses to start with only
+one. Never set them on a real deployment. Codex agents only.
+
+Run the load test with `scripts/load/run-level-b.sh` (see its header).
+
 ## What the preflight proves — and what to do if it fails
 
 `wardby coding preflight` (`src/providers/jobs/kubernetes-preflight.ts`) runs
