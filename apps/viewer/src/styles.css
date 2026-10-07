@@ -1163,6 +1163,17 @@ button:disabled {
   font-weight: 600;
 }
 
+/* The name gives way so the status (2/2, Completed, Terminating) always fits. */
+.map-title > :first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.map-title > :last-child:not(:first-child) {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .map-containers {
   display: grid;
   gap: 0.1rem;
@@ -1215,7 +1226,7 @@ button:disabled {
 }
 
 .map-small {
-  grid-template-columns: repeat(auto-fill, minmax(8rem, 12rem));
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 16rem));
 }
 
 .map-sandbox-body {
