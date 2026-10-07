@@ -3,13 +3,9 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-const run = promisify(execFile);
+import { cleanGitEnv } from "./local-git.js";
 
-function cleanGitEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
-  return env;
-}
+const run = promisify(execFile);
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -23,14 +19,25 @@ async function exists(path: string): Promise<boolean> {
 /**
  * Things a clone of a local repository will not carry over, for the caller to
  * see at trigger time: uncommitted changes, submodules, LFS-tracked files.
- * Best effort and read-only: git runs with GIT_* stripped and hooks/fsmonitor off.
+ * Best effort and read-only: git runs with GIT_* stripped, hooks/fsmonitor off,
+ * and --no-optional-locks so status never refreshes (writes) the user's index.
  */
 export async function localRepoWarnings(path: string): Promise<string[]> {
   const warnings: string[] = [];
   try {
     const { stdout } = await run(
       "git",
-      ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", path, "status", "--porcelain"],
+      [
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-C",
+        path,
+        "status",
+        "--porcelain",
+      ],
       { env: cleanGitEnv(), maxBuffer: 16 * 1024 * 1024 },
     );
     const count = stdout.split("\n").filter((line) => line.trim() !== "").length;

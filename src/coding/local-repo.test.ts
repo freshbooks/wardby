@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import * as localGitModule from "./local-git.js";
 import {
   isLocalRepository,
   loadLocalRepoRoots,
@@ -12,6 +13,12 @@ import {
   resolveLocalRepository,
 } from "./local-repo.js";
 import { CodingTaskInputSchema } from "./protocol.js";
+
+// Passthrough spy: every call still runs real git through the hardened helper.
+vi.mock("./local-git.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./local-git.js")>();
+  return { ...actual, localGit: vi.fn(actual.localGit) };
+});
 
 const run = promisify(execFile);
 
@@ -100,6 +107,13 @@ describe("local repositories", () => {
     expect(await codeOf(resolveLocalRepository(`local:${root}/missing`, [root]))).toBe("local_repo_not_found");
     await mkdir(join(root, "repo", "sub"), { recursive: true });
     expect(await codeOf(resolveLocalRepository(`local:${root}/repo/sub`, [root]))).toBe("local_repo_not_found");
+  });
+
+  it("finds the work-tree top level through the hardened git helper", async () => {
+    const localGit = vi.mocked(localGitModule.localGit);
+    localGit.mockClear();
+    await resolveLocalRepository(`local:${join(root, "repo")}`, [root]);
+    expect(localGit).toHaveBeenCalledWith(join(root, "repo"), ["rev-parse", "--show-toplevel"], expect.any(Number));
   });
 
   it("includes the code in the error message", async () => {

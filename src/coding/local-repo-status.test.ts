@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -46,5 +46,14 @@ describe("localRepoWarnings", () => {
     const warnings = await localRepoWarnings(dir);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/LFS/);
+  });
+
+  it("never writes the repository's index, even when its stat cache is stale", async () => {
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(join(dir, "a.txt"), future, future);
+    const index = join(dir, ".git", "index");
+    const before = readFileSync(index);
+    expect(await localRepoWarnings(dir)).toEqual([]);
+    expect(readFileSync(index).equals(before)).toBe(true);
   });
 });

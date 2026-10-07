@@ -1,15 +1,11 @@
-import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { delimiter, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 
-import { cleanGitEnv } from "./local-git.js";
+import { localGit } from "./local-git.js";
 import { LOCAL_REPO_PREFIX, isLocalRepository, normalizeLocalRepository } from "./protocol.js";
 
 export { LOCAL_REPO_PREFIX, isLocalRepository, normalizeLocalRepository };
-
-const run = promisify(execFile);
 
 export type LocalRepoErrorCode =
   | "local_repo_not_allowed"
@@ -70,9 +66,7 @@ export async function resolveLocalRepository(
   }
   let top: string;
   try {
-    const { stdout } = await run("git", ["-C", target, "rev-parse", "--show-toplevel"], {
-      env: cleanGitEnv(),
-    });
+    const stdout = await localGit(target, ["rev-parse", "--show-toplevel"], 64 * 1024);
     top = await realpath(stdout.trim());
   } catch {
     throw new LocalRepoError("local_repo_not_found", "path is not a git work tree");
