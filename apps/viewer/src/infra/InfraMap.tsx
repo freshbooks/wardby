@@ -154,12 +154,28 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
             </div>
           </div>
         )}
-        {(headroom.length > 0 || jobs.length > 0) && (
+        {headroom.length > 0 && (
           <div className="map-pods map-small">
-            {[...headroom, ...jobs].map((p) => (
+            {headroom.map((p) => (
               <PodCard key={p.name} pod={p} compact selected={selected === p.name} onSelect={() => onSelect(p.name)} />
             ))}
           </div>
+        )}
+        {jobs.length > 0 && (
+          <>
+            <span className="map-zone-label">jobs</span>
+            <div className="map-pods map-small">
+              {jobs.map((p) => (
+                <PodCard
+                  key={p.name}
+                  pod={p}
+                  compact
+                  selected={selected === p.name}
+                  onSelect={() => onSelect(p.name)}
+                />
+              ))}
+            </div>
+          </>
         )}
       </div>
 
