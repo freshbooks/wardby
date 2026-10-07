@@ -20,6 +20,14 @@ function withKind(state: ClusterState, kind: ClusterKind, map: Map<string, unkno
   return { ...state, objects: { ...state.objects, [kind]: map } };
 }
 
+/** A frame for `kind` arrived, so its watch is flowing again: drop its error. */
+function recovered(state: ClusterState, kind: ClusterKind): ClusterState {
+  if (!(kind in state.kindErrors)) return state;
+  const kindErrors = { ...state.kindErrors };
+  delete kindErrors[kind];
+  return { ...state, kindErrors };
+}
+
 /** Pure reducer over cluster frames; malformed frames return `state` unchanged. */
 export function reduceCluster(state: ClusterState, frame: ClusterFrame): ClusterState {
   if (typeof frame !== "object" || frame === null) return state;
@@ -33,22 +41,22 @@ export function reduceCluster(state: ClusterState, frame: ClusterFrame): Cluster
       if (!isKind(frame.kind) || !Array.isArray(frame.items)) return state;
       const map = new Map<string, unknown>();
       for (const item of frame.items) if (hasName(item)) map.set(item.name, item);
-      const kindErrors = { ...state.kindErrors };
-      delete kindErrors[frame.kind];
-      return { ...withKind(state, frame.kind, map), kindErrors, podsSynced: state.podsSynced || frame.kind === "pod" };
+      const next = recovered(state, frame.kind);
+      return { ...withKind(next, frame.kind, map), podsSynced: state.podsSynced || frame.kind === "pod" };
     }
     case "applied": {
       if (!isKind(frame.kind) || !hasName(frame.item)) return state;
       const map = new Map<string, unknown>(state.objects[frame.kind]);
       map.set(frame.item.name, frame.item);
-      return withKind(state, frame.kind, map);
+      return withKind(recovered(state, frame.kind), frame.kind, map);
     }
     case "deleted": {
       if (!isKind(frame.kind) || typeof frame.name !== "string") return state;
-      if (!state.objects[frame.kind].has(frame.name)) return state;
-      const map = new Map<string, unknown>(state.objects[frame.kind]);
+      const next = recovered(state, frame.kind);
+      if (!next.objects[frame.kind].has(frame.name)) return next;
+      const map = new Map<string, unknown>(next.objects[frame.kind]);
       map.delete(frame.name);
-      return withKind(state, frame.kind, map);
+      return withKind(next, frame.kind, map);
     }
     case "kind_error":
       if (!isKind(frame.kind) || typeof frame.error !== "object" || frame.error === null) return state;

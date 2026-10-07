@@ -25,6 +25,21 @@ describe("reduceCluster", () => {
     expect(s.objects.pod.get("b")!.phase).toBe("Succeeded");
   });
 
+  it("an applied or deleted frame clears that kind's error (the watch is flowing again)", () => {
+    const down = { kind: "unreachable" as const, message: "connection refused" };
+    let s = apply([
+      { type: "snapshot", kind: "pod", items: [pod("a")] },
+      { type: "kind_error", kind: "pod", error: down },
+      { type: "kind_error", kind: "job", error: down },
+    ]);
+    s = reduceCluster(s, { type: "applied", kind: "pod", item: pod("b") });
+    expect(s.kindErrors.pod).toBeUndefined();
+    expect(s.kindErrors.job).toEqual(down);
+    s = reduceCluster(s, { type: "kind_error", kind: "pod", error: down });
+    s = reduceCluster(s, { type: "deleted", kind: "pod", name: "a" });
+    expect(s.kindErrors.pod).toBeUndefined();
+  });
+
   it("updates one kind with a new Map and leaves the others shared", () => {
     const s = reduceCluster(initialCluster, { type: "applied", kind: "pod", item: pod("a") });
     expect(s.objects.pod).not.toBe(initialCluster.objects.pod);
