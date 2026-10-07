@@ -297,6 +297,68 @@ describe("codingStep (non-interactive)", () => {
     expect(env.CODING_WORKER_IMAGE).toBe(BUILT_ID);
   });
 
+  it("pulls the packaged Claude Code images by digest and writes them for claude-code", async () => {
+    const claudeWorker = `ghcr.io/wardby/wardby-claude-coding-worker@sha256:${"4".repeat(64)}`;
+    const claudeToolRunner = `ghcr.io/wardby/wardby-claude-tool-runner@sha256:${"5".repeat(64)}`;
+    writeFileSync(
+      join(packageRoot, "dist", "quickstart-images.json"),
+      JSON.stringify({ runtime: RUNTIME, worker: WORKER, claudeWorker, claudeToolRunner }),
+    );
+    writeQuickstartEnv(paths(), { ANTHROPIC_API_KEY: "sk-ant" });
+    const { deps, calls } = harness();
+    await codingStep(
+      paths(),
+      state,
+      { nonInteractive: true, coding: true, trust: [repoA], provider: "claude-code" },
+      deps,
+    );
+    const pulled = calls.filter((call) => call[1] === "pull").map((call) => call[2]);
+    expect(pulled).toEqual(expect.arrayContaining([claudeWorker, claudeToolRunner]));
+    const env = readQuickstartEnv(paths());
+    expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(claudeWorker);
+    expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(claudeToolRunner);
+  });
+
+  it("does not pull Claude Code images when the provider is codex", async () => {
+    writeFileSync(
+      join(packageRoot, "dist", "quickstart-images.json"),
+      JSON.stringify({
+        runtime: RUNTIME,
+        worker: WORKER,
+        claudeWorker: `ghcr.io/wardby/wardby-claude-coding-worker@sha256:${"4".repeat(64)}`,
+        claudeToolRunner: `ghcr.io/wardby/wardby-claude-tool-runner@sha256:${"5".repeat(64)}`,
+      }),
+    );
+    writeQuickstartEnv(paths(), { OPENAI_API_KEY: "sk-test" });
+    const { deps, calls } = harness();
+    await codingStep(paths(), state, { nonInteractive: true, coding: true, trust: [repoA] }, deps);
+    expect(calls.some((call) => call.join(" ").includes("claude"))).toBe(false);
+    expect(readQuickstartEnv(paths()).CODING_CLAUDE_WORKER_IMAGE).toBeUndefined();
+  });
+
+  it("builds the Claude Code images from a source checkout, pinned by local image id", async () => {
+    rmSync(join(packageRoot, "dist", "quickstart-images.json"));
+    mkdirSync(join(packageRoot, "deploy"));
+    writeFileSync(join(packageRoot, "deploy", "Dockerfile"), "FROM scratch\n");
+    mkdirSync(join(packageRoot, "src", "coding-worker"), { recursive: true });
+    writeFileSync(join(packageRoot, "src", "coding-worker", "Dockerfile"), "FROM scratch\n");
+    writeQuickstartEnv(paths(), { ANTHROPIC_API_KEY: "sk-ant" });
+    const { deps, calls } = harness();
+    await codingStep(
+      paths(),
+      state,
+      { nonInteractive: true, coding: true, trust: [repoA], provider: "claude-code" },
+      deps,
+    );
+    const tags = calls.filter((call) => call[1] === "build").map((call) => call[call.indexOf("--tag") + 1]);
+    expect(tags).toEqual(
+      expect.arrayContaining(["wardby-claude-coding-worker:local", "wardby-claude-tool-runner:local"]),
+    );
+    const env = readQuickstartEnv(paths());
+    expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(BUILT_ID);
+    expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(BUILT_ID);
+  });
+
   it("skips Claude Code when its images are not available", async () => {
     writeQuickstartEnv(paths(), { ANTHROPIC_API_KEY: "sk-ant" });
     const before = readFileSync(paths().envFile, "utf8");

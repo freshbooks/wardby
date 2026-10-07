@@ -55,10 +55,12 @@ export function prepareImages(
     build(deps, "src/coding-worker/Dockerfile", resolved.worker);
     const images: PreparedImages = { runtime: resolved.runtime, worker: imageId(deps, resolved.worker) };
     if (provider === "claude-code") {
-      build(deps, "src/claude-coding-worker/Dockerfile", "wardby-claude-coding-worker:local");
-      build(deps, "src/claude-tool-runner/Dockerfile", "wardby-claude-tool-runner:local");
-      images.claudeWorker = imageId(deps, "wardby-claude-coding-worker:local");
-      images.claudeToolRunner = imageId(deps, "wardby-claude-tool-runner:local");
+      const claudeWorker = resolved.claudeWorker ?? "wardby-claude-coding-worker:local";
+      const claudeToolRunner = resolved.claudeToolRunner ?? "wardby-claude-tool-runner:local";
+      build(deps, "src/claude-coding-worker/Dockerfile", claudeWorker);
+      build(deps, "src/claude-tool-runner/Dockerfile", claudeToolRunner);
+      images.claudeWorker = imageId(deps, claudeWorker);
+      images.claudeToolRunner = imageId(deps, claudeToolRunner);
     }
     return images;
   }
@@ -67,11 +69,16 @@ export function prepareImages(
   }
   const images: PreparedImages = { runtime: resolved.runtime, worker: resolved.worker };
   if (provider === "claude-code") {
-    const claudeWorker = deps.env.CODING_CLAUDE_WORKER_IMAGE || config.CODING_CLAUDE_WORKER_IMAGE;
-    const claudeToolRunner = deps.env.CODING_CLAUDE_TOOL_RUNNER_IMAGE || config.CODING_CLAUDE_TOOL_RUNNER_IMAGE;
+    const claudeWorker = resolved.claudeWorker || config.CODING_CLAUDE_WORKER_IMAGE;
+    const claudeToolRunner = resolved.claudeToolRunner || config.CODING_CLAUDE_TOOL_RUNNER_IMAGE;
     if (!claudeWorker || !claudeToolRunner) {
       throw new CodingSkip(
-        "Claude Code needs CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE, which this version does not publish; choose Codex, set both, or run quickstart from a clone of the wardby repository",
+        "Claude Code needs CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE, which this version of @wardby/cli was published without; upgrade @wardby/cli, choose Codex, set both, or run quickstart from a clone of the wardby repository",
+      );
+    }
+    if (!isImmutableDockerImage(claudeWorker) || !isImmutableDockerImage(claudeToolRunner)) {
+      throw new CodingSkip(
+        "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be immutable digests (repo@sha256:...) or local image ids",
       );
     }
     Object.assign(images, { claudeWorker, claudeToolRunner });
