@@ -79,6 +79,8 @@ export const PROXY_POD_LABEL = { "app.kubernetes.io/name": "wardby-coding-proxy"
  * Single source: `runLabels` stamps it, `readProxyWitness` checks the proxy admits it.
  */
 export const RUN_COMPONENT_LABEL = { "wardby.io/component": "coding-run" } as const;
+/** Kubernetes managed-by label on every run pod. */
+export const RUN_MANAGED_BY_LABEL = { "app.kubernetes.io/managed-by": "wardby" } as const;
 /** Label on every coding-run pod/Job: the first 40 hex chars of sha256(runId). */
 export const RUN_SHA_LABEL = "wardby.io/run-sha256";
 export const RUN_SHA_CHARS = 40;
@@ -179,7 +181,7 @@ export function kubernetesRunNames(runId: string): KubernetesRunNames {
 
 export function runLabels(runId: string): Record<string, string> {
   return {
-    "app.kubernetes.io/managed-by": "wardby",
+    ...RUN_MANAGED_BY_LABEL,
     ...RUN_COMPONENT_LABEL,
     [RUN_SHA_LABEL]: kubernetesRunNames(runId).runSha,
   };
