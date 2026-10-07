@@ -228,6 +228,18 @@ describe("LocalRemote (real git, no Docker)", { timeout: 20_000 }, () => {
     expect(await git(f.src, ["rev-parse", "wardby/run-r1"])).toBe(workspace.baseCommit);
   });
 
+  it("refuses to push a branch that is checked out in a linked worktree of the source repository", async () => {
+    const f = await fixture();
+    const workspace = await prepareAndChange(f);
+    const linked = join(f.root, "linked-worktree");
+    await git(f.src, ["worktree", "add", "-b", "wardby/run-r1", linked, "main"]);
+    const error = await f.provider.finalizeChanges(workspace).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "local_branch_conflict" });
+    expect((error as Error).message).toContain("checked out");
+    expect(await git(f.src, ["rev-parse", "wardby/run-r1"])).toBe(workspace.baseCommit);
+    expect(await git(linked, ["status", "--porcelain"])).toBe("");
+  });
+
   it("refuses a repository outside the roots, and roots that changed before finalize", async () => {
     const f = await fixture();
     const outside = join(f.root, "elsewhere", "other");

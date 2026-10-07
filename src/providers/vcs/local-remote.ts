@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import {
   LOCAL_REPO_PREFIX,
@@ -114,20 +113,13 @@ export class LocalRemote implements GitRemote {
 
   /**
    * receive.denyCurrentBranch=updateInstead (a user setting) would rewrite the
-   * user's working tree when the pushed branch is the one checked out there,
-   * so refuse before pushing.
+   * working tree of whichever worktree has the pushed branch checked out --
+   * the main checkout or any linked worktree -- so refuse before pushing.
    */
   async beforePush(repository: string, headRef: string): Promise<void> {
     const path = normalizeLocalRepository(repository).slice(LOCAL_REPO_PREFIX.length);
-    const checkedOut = await new Promise<string>((resolvePromise) => {
-      execFile(
-        "git",
-        ["-C", path, "-c", "core.fsmonitor=false", "symbolic-ref", "-q", "HEAD"],
-        { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" } },
-        (error, stdout) => resolvePromise(error ? "" : stdout.trim()),
-      );
-    });
-    if (checkedOut === `refs/heads/${headRef}`) {
+    const listing = await localGit(path, ["worktree", "list", "--porcelain"], 1024 * 1024);
+    if (listing.split("\n").some((line) => line.trim() === `branch refs/heads/${headRef}`)) {
       throw new LocalRepoError("local_branch_conflict", `branch ${headRef} is checked out in the local repository`);
     }
   }
