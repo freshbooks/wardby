@@ -78,6 +78,13 @@ export function TopBar(props: Props) {
     <header className="topbar">
       <div className="topbar-row">
         <span className="brand">wardby</span>
+        <div className="tabs" role="group" aria-label="View">
+          {(["runs", "infra"] as const).map((t) => (
+            <button key={t} type="button" aria-pressed={tab === t} onClick={() => props.onTabChange?.(t)}>
+              {t === "runs" ? "Runs" : "Infrastructure"}
+            </button>
+          ))}
+        </div>
         <label className="inline">
           <span className="sr-only">Server</span>
           <select
@@ -103,15 +110,6 @@ export function TopBar(props: Props) {
         >
           {badge}
         </span>
-      </div>
-      <div className="topbar-row">
-        <div className="tabs" role="group" aria-label="View">
-          {(["runs", "infra"] as const).map((t) => (
-            <button key={t} type="button" aria-pressed={tab === t} onClick={() => props.onTabChange?.(t)}>
-              {t === "runs" ? "Runs" : "Infrastructure"}
-            </button>
-          ))}
-        </div>
       </div>
       {tab === "infra" ? (
         infra && (
