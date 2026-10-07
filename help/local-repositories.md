@@ -26,6 +26,12 @@ The easiest way to try it is the optional coding step of
 
 ## Requirements
 
+- **A single-user or personal server.** Set `LOCAL_REPO_ROOTS` only on a
+  server that you alone use. Every principal who can create or update agents
+  or link repositories can use every repository under the trusted folders:
+  its committed code is sent to the model, and runs push `wardby/run-*`
+  branches into it. Anyone with execute access to a local coding agent can
+  trigger such pushes.
 - **Trusted folders.** Set `LOCAL_REPO_ROOTS` on the wardby server to the
   folders wardby may use, separated by the platform's path delimiter (`:` on
   macOS and Linux, `;` on Windows). While it is unset, every `local:` repository
@@ -41,7 +47,9 @@ The easiest way to try it is the optional coding step of
   executor". Review agents are native agents and need no worker.
 - **The server on the same machine as the folders.** Wardby reads and writes
   your repository directly. A control plane in a container, a pod or on another
-  machine cannot see the folder and fails with `local_repo_not_found`.
+  machine cannot see the folder: it ignores a trusted folder that does not
+  exist, so the repository fails with `local_repo_not_allowed`, and `doctor`
+  reports the folder as missing.
 - **git 2.24 or newer** on the machine that runs the wardby server.
 - **Worker images from this release or later.** An older worker image rejects
   a `local:` repository and the run fails with `worker_input_failed`. That
@@ -143,9 +151,10 @@ agent's repository, and `down` stops the proxy with the database.
 ## Errors
 
 - [`local_repo_not_allowed`](errors/local-repo-not-allowed.md): outside every
-  trusted folder, or `LOCAL_REPO_ROOTS` is unset.
+  trusted folder, `LOCAL_REPO_ROOTS` is unset, or the server cannot see the
+  trusted folder.
 - [`local_repo_not_found`](errors/local-repo-not-found.md): missing, not a git
-  work tree, or not visible to the server.
+  work tree, or not readable by the server.
 - [`local_ref_not_found`](errors/local-ref-not-found.md): the branch or base
   does not exist.
 - [`local_ref_invalid`](errors/local-ref-invalid.md): not a valid branch name.
@@ -153,6 +162,9 @@ agent's repository, and `down` stops the proxy with the database.
   a repository read.
 - [`local_branch_conflict`](errors/local-branch-conflict.md): the result branch
   moved or is checked out.
+- [`vcs_github_not_configured`](errors/vcs-github-not-configured.md): a coding
+  agent uses a GitHub repository on a server with only local repositories
+  configured.
 
 Related: [Get started](getting-started.md),
 [Connect GitHub repositories](github.md) (the alternative to a local

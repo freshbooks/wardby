@@ -14,6 +14,12 @@ written `local:/absolute/path`) because its real path, after resolving symlinks,
 is not at or below any folder listed in the `LOCAL_REPO_ROOTS` environment
 variable. If `LOCAL_REPO_ROOTS` is unset, no local repository is allowed.
 
+A trusted folder that does not exist where the wardby server runs is ignored.
+This is the usual cause when the server runs in a container, a pod or on
+another machine: it cannot see the folder, so every repository under it is
+refused with this error. `doctor` lists each trusted folder and reports a
+missing one.
+
 Wardby checks the folders when you create or update an agent, link a
 repository, trigger a run, and again while a run uses the repository, so a
 narrowed list also refuses agents that were saved earlier.
@@ -30,6 +36,9 @@ narrowed list also refuses agents that were saved earlier.
 3. If you set up wardby with `quickstart`, run it again with
    `--coding --trust /path/to/folder` (repeat `--trust` for more folders). It
    keeps the folders already trusted and writes the new list to `.wardby/.env`.
+
+4. Run the wardby server directly on the machine that holds the folders, not
+   in a container.
 
 If the repository path goes through a symlink, the symlink's target must be
 inside a trusted folder; the link's own location does not count.

@@ -70,7 +70,13 @@ A coding agent (or a review agent) can work on a git repository on the same
 machine as the wardby server instead of a GitHub repository. Write the
 repository as `local:/absolute/path`. No GitHub App, GitHub account link or
 webhook is involved, and no extra role is required: the trusted folders below
-are the boundary.
+are the only boundary.
+
+Set `LOCAL_REPO_ROOTS` only on a single-user or personal server. Every
+principal who can create or update agents or link repositories can use every
+repository under the trusted folders: its committed code is sent to the model,
+and runs push `wardby/run-*` branches into it. Anyone with execute access to a
+local coding agent can trigger such pushes.
 
 Set these on the control plane:
 
@@ -93,7 +99,9 @@ JOB_LAUNCHER=docker
   native agents and do not need a worker.
 - **The server runs on the host.** Wardby reads and writes the repository
   directly, so the control plane must not run in a container, a pod or on
-  another machine (`local_repo_not_found`). The machine needs git 2.24 or newer.
+  another machine. A trusted folder the server cannot see is ignored, so its
+  repositories fail with `local_repo_not_allowed`, and `doctor` reports the
+  folder as missing. The machine needs git 2.24 or newer.
 - **Worker images.** Use worker images from the same release as the control
   plane. An older worker image rejects `local:` repositories (the run fails with
   `worker_input_failed`), including a bring-your-own `workerImageRef` image,
