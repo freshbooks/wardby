@@ -50,6 +50,7 @@ import { ROLE_NAMES, SCOPES_SUPPORTED, authenticate } from "./auth/resource-serv
 import { canonicalUrl } from "./transport/http-limits.js";
 import { createViewerApi } from "../viewer/http.js";
 import { createViewerEventBus } from "../viewer/event-bus.js";
+import { buildInfraInfo } from "../viewer/infra.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerServiceTools } from "./tools/services.js";
 import { registerBudgetGroupTools } from "./tools/budget-groups.js";
@@ -398,6 +399,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
         authenticate: (authorization) =>
           authenticate({ authorization }, { authProvider, db: prisma, providers, canonicalUri: canonicalHref }),
         canonicalUri: canonicalHref,
+        infra: buildInfraInfo(),
         issueSites: jiraConfig ? { jira: jiraConfig.siteUrl } : {},
       })
     : undefined;

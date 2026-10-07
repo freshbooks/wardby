@@ -5,7 +5,7 @@ import type { PrismaClient } from "#prisma";
 import { McpError } from "../mcp/errors.js";
 import type { McpRequestContext } from "../mcp/context.js";
 import { requireScope } from "../mcp/auth/resource-server.js";
-import type { ViewerEvent } from "./api-schema.js";
+import type { ViewerEvent, InfraInfo } from "./api-schema.js";
 import type { ViewerEventBus } from "./event-bus.js";
 
 vi.mock("./graph.js", async (importOriginal) => ({
@@ -31,6 +31,19 @@ const RUN_EVENT: ViewerEvent = {
   costUsd: 0.01,
   finishedAt: null,
 };
+const INFRA = {
+  launcher: "kubernetes",
+  kubernetes: {
+    namespace: "wardby-coding",
+    platform: "gke-autopilot",
+    runtimeClass: "gvisor",
+    proxyService: "wardby-coding-proxy",
+    runLabel: "wardby.io/run-sha256",
+    runLabelHashChars: 40,
+    componentLabel: { "wardby.io/component": "coding-run" },
+    managedByLabel: { "app.kubernetes.io/managed-by": "wardby" },
+  },
+} as const satisfies InfraInfo;
 
 function fakeBus(initiallyLive = true) {
   const listeners = new Set<(e: ViewerEvent) => void>();
@@ -80,6 +93,7 @@ async function start(
       return ctx;
     },
     canonicalUri: URI,
+    infra: INFRA,
     heartbeatMs: opts.heartbeatMs,
     maxBufferedBytes: opts.maxBufferedBytes,
   });
@@ -137,6 +151,25 @@ describe("viewer api auth", () => {
     const res = await fetch(`${base}/admin/api/graph`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(SNAPSHOT);
+  });
+});
+
+describe("viewer api infra", () => {
+  it("serves the deployment's infra description to an admin", async () => {
+    const { base } = await start(admin());
+    const res = await fetch(`${base}/admin/api/infra`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(INFRA);
+  });
+
+  it("requires admin:view and GET", async () => {
+    const denied = await start({ scopes: new Set(), roles: [] } as unknown as McpRequestContext);
+    expect((await fetch(`${denied.base}/admin/api/infra`)).status).toBe(403);
+    await new Promise<void>((r) => server!.close(() => r()));
+    const { base } = await start(admin());
+    const res = await fetch(`${base}/admin/api/infra`, { method: "POST" });
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("GET");
   });
 });
 

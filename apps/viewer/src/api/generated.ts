@@ -247,3 +247,21 @@ export type ViewerEvent =
       runId: string;
       source: "pull_request" | "host_status" | "issue_status" | "host_check";
     };
+
+export interface InfraInfo {
+  launcher: "local" | "docker" | "kubernetes";
+  kubernetes: {
+    namespace: string;
+    platform: string;
+    runtimeClass: string | null;
+    proxyService: string;
+    runLabel: string;
+    runLabelHashChars: number;
+    componentLabel: {
+      [k: string]: string | undefined;
+    };
+    managedByLabel: {
+      [k: string]: string | undefined;
+    };
+  } | null;
+}
