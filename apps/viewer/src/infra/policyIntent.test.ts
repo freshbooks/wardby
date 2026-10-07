@@ -92,7 +92,7 @@ suite("NetworkPolicy intent sentences", () => {
         "Nothing can connect to the control plane (other policies may allow it). The control plane can look up DNS names and reach Cloud SQL (10.23.0.3:3307), the GKE metadata server and the internet over HTTPS.",
       "wardby-control-plane-lb": "Only Google's load balancer can connect to the control plane, on port 8080.",
       "wardby-migrate":
-        "Nothing can connect to the migrate. The migrate can look up DNS names and reach Cloud SQL (10.23.0.3:3307), the GKE metadata server and the internet over HTTPS.",
+        "Nothing can connect to migrations. Migrations can look up DNS names and reach Cloud SQL (10.23.0.3:3307), the GKE metadata server and the internet over HTTPS.",
     });
   });
 

@@ -357,6 +357,8 @@ export function podsName(labels: Record<string, string>): string {
   if (entries.length === 0) return "every pod";
   if (entries.length === 1) {
     const [k, v] = entries[0];
+    // The migrate Job's pods read better as what they are.
+    if (k === "app.kubernetes.io/name" && v === "wardby-migrate") return "migrations";
     if (k === "app.kubernetes.io/name" && v.startsWith("wardby-") && v.length > "wardby-".length)
       return `the ${v.slice("wardby-".length).replace(/-/g, " ")}`;
     if (k === "wardby.io/component" && v === "coding-run") return "coding runs";
