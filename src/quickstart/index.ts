@@ -22,6 +22,10 @@ import {
   type QuickstartProvider,
   type QuickstartState,
 } from "./config.js";
+import { codingStep, quickstartComposeFiles, type CodingDeps, type CodingStepOptions } from "./coding.js";
+import { prismaCatalogImages, prismaLocalAgents, prismaSeedCodingAgents } from "./coding-db.js";
+import { codingDoctorLines } from "./coding-doctor.js";
+import { parseStarterChoice } from "./starter-services.js";
 import {
   FETCH_NOTICE,
   migrateFailureReason,
@@ -31,7 +35,6 @@ import {
 } from "./migrate.js";
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
-const composeFile = join(packageRoot, "deploy/local/docker-compose.yml");
 const wardbyBin = join(packageRoot, "bin/wardby.js");
 const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { version: string };
 const DEMO_AGENT = "hello-wardby";
@@ -71,17 +74,10 @@ function runtimeEnv(paths: QuickstartPaths, values = readQuickstartEnv(paths)): 
   return { ...process.env, ...values, WARDBY_PROJECT_DIR: paths.projectDir };
 }
 
+/** The coding proxy's compose file joins once the coding step configured it, so ps/logs/down cover it too. */
 function composeArgs(paths: QuickstartPaths, state: QuickstartState, args: string[]): string[] {
-  return [
-    "compose",
-    "--project-name",
-    state.composeProject,
-    "--env-file",
-    paths.envFile,
-    "--file",
-    composeFile,
-    ...args,
-  ];
+  const files = quickstartComposeFiles(packageRoot, readQuickstartEnv(paths)).flatMap((file) => ["--file", file]);
+  return ["compose", "--project-name", state.composeProject, "--env-file", paths.envFile, ...files, ...args];
 }
 
 function runCompose(
@@ -133,7 +129,7 @@ async function startPostgres(
   config: Record<string, string>,
 ): Promise<void> {
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const up = runCompose(paths, state, ["up", "--detach", "--wait", "--wait-timeout", "90"]);
+    const up = runCompose(paths, state, ["up", "--detach", "--wait", "--wait-timeout", "90", "postgres"]);
     if (up.status === 0) return;
 
     const output = `${up.stderr}\n${up.stdout}`;
@@ -215,6 +211,40 @@ function parseProvider(value: string | undefined): QuickstartProvider | undefine
     throw new Error(`--provider must be openai or anthropic; got "${value}".`);
   }
   return value;
+}
+
+function parseCodingProvider(value: string | undefined): CodingStepOptions["provider"] {
+  if (value === undefined) return undefined;
+  if (value !== "codex" && value !== "claude-code") {
+    throw new Error(`--coding-provider must be codex or claude-code; got "${value}".`);
+  }
+  return value;
+}
+
+function codingDeps(paths: QuickstartPaths): CodingDeps {
+  return {
+    run: runCommand,
+    prompts: { line: promptLine, yesNo: promptYesNo, secret: promptSecret },
+    log: (line) => console.log(line),
+    cwd: process.cwd(),
+    env: process.env,
+    packageRoot,
+    seed: (input) => prismaSeedCodingAgents(paths, input),
+    catalogImages: (services) => prismaCatalogImages(paths, services),
+  };
+}
+
+async function codingSection(paths: QuickstartPaths): Promise<string[]> {
+  return await codingDoctorLines(readQuickstartEnv(paths), {
+    run: runCommand,
+    listLocalAgents: async () => {
+      try {
+        return await prismaLocalAgents(paths);
+      } catch {
+        return [];
+      }
+    },
+  });
 }
 
 function parseClient(value: string | undefined): McpClient | undefined {
@@ -361,7 +391,12 @@ async function chooseClient(nonInteractive: boolean): Promise<McpClient> {
 export async function quickstartCommand(args: string[]): Promise<void> {
   const { values } = parseArgs({
     args,
+    allowNegative: true,
     options: {
+      coding: { type: "boolean" },
+      trust: { type: "string", multiple: true },
+      "coding-provider": { type: "string" },
+      "starter-services": { type: "string" },
       provider: { type: "string" },
       model: { type: "string" },
       budget: { type: "string" },
@@ -372,6 +407,14 @@ export async function quickstartCommand(args: string[]): Promise<void> {
     },
   });
   const nonInteractive = values["non-interactive"] ?? false;
+  const codingOptions: CodingStepOptions = {
+    nonInteractive,
+    coding: values.coding,
+    trust: values.trust ?? [],
+    provider: parseCodingProvider(values["coding-provider"]),
+    starterServices:
+      values["starter-services"] === undefined ? undefined : parseStarterChoice(values["starter-services"]),
+  };
   const skipDemo = values["skip-demo"] ?? false;
   const budget = values.budget === undefined ? 1 : Number(values.budget);
   if (!Number.isFinite(budget) || budget <= 0) throw new Error(`--budget must be positive; got "${values.budget}".`);
@@ -445,6 +488,8 @@ export async function quickstartCommand(args: string[]): Promise<void> {
     if (approved) runDemo(paths);
     else console.log(`Skipped the billed run. Start it later with: npx @wardby/cli@latest run ${DEMO_AGENT}`);
   }
+
+  await codingStep(paths, state, codingOptions, codingDeps(paths));
 
   const client = parseClient(values.client) ?? (await chooseClient(nonInteractive));
   const mcpConfigured = client !== "none" && configureMcpClients(client, paths);
@@ -532,6 +577,10 @@ export async function doctorCommand(args: string[]): Promise<void> {
     failed ||= !ok;
     console.log(`${ok ? "✓" : "✗"} ${name}${detail ? ` (${detail})` : ""}`);
   }
+  for (const line of await codingSection(paths)) {
+    failed ||= line.startsWith("✗");
+    console.log(line);
+  }
   if (failed) process.exitCode = 1;
 }
 
@@ -549,6 +598,8 @@ export async function statusCommand(args: string[]): Promise<void> {
   process.stdout.write(ps.stdout);
   const healthy = await databaseHealthy(paths);
   console.log(`database: ${healthy ? "healthy" : "unavailable"}`);
+  const coding = healthy ? await codingSection(paths) : [];
+  if (coding.length > 0) console.log(["coding:", ...coding.map((line) => `  ${line}`)].join("\n"));
   if (!healthy) process.exitCode = 1;
 }
 

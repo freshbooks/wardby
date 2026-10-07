@@ -50,6 +50,46 @@ export async function localGitBytes(dir: string, args: string[], maxBuffer = GIT
   return stdout;
 }
 
+/**
+ * The only variables a write may add back after GIT_* is stripped: a scratch
+ * index and an explicit identity, so no user configuration is needed.
+ */
+const WRITE_ENV = new Set([
+  "GIT_INDEX_FILE",
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_AUTHOR_DATE",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_COMMITTER_DATE",
+]);
+
+/**
+ * Runs git in `dir` with the same hardening as localGit, plus optional stdin
+ * and a few allow-listed GIT_* variables (WRITE_ENV). For plumbing that
+ * writes objects and refs only; it never touches the caller's index or work
+ * tree unless the arguments do.
+ */
+export async function localGitWrite(
+  dir: string,
+  args: string[],
+  options: { input?: string; env?: Record<string, string> } = {},
+): Promise<string> {
+  const extra = options.env ?? {};
+  for (const key of Object.keys(extra)) {
+    if (!WRITE_ENV.has(key)) throw new Error(`localGitWrite: ${key} is not an allowed git variable`);
+  }
+  return await new Promise<string>((resolve, reject) => {
+    const child = execFile(
+      "git",
+      gitArgs(dir, args),
+      { env: { ...cleanGitEnv(), ...extra }, maxBuffer: GIT_MAX_BUFFER, encoding: "utf8" },
+      (error: Error | null, stdout: string) => (error ? reject(error) : resolve(stdout)),
+    );
+    child.stdin?.end(options.input ?? "");
+  });
+}
+
 /** True for a plain branch/tag name that cannot read as an option or revision expression. */
 export async function isSafeRefName(dir: string, name: string): Promise<boolean> {
   if (

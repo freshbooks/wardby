@@ -30,7 +30,7 @@ import {
   loadProviderConfig,
 } from "./config/providers.js";
 import { drainCodingQueue } from "./core/coding-queue.js";
-import { isImmutableDockerImage } from "./providers/jobs/docker-isolation.js";
+import { dockerCodingPreflight } from "./coding/docker-preflight.js";
 import { ClientNodeKubernetesApi } from "./providers/jobs/kubernetes-client.js";
 import { describePreflightFailure, kubernetesPreflight } from "./providers/jobs/kubernetes-preflight.js";
 import {
@@ -692,14 +692,15 @@ async function codingOps(args: string[]): Promise<void> {
   }
 
   if (operation === "preflight") {
-    if (!isImmutableDockerImage(container.workerImage)) {
-      fail("CODING_WORKER_IMAGE must use an immutable repository digest or local image ID.");
-    }
-    try {
-      await execFile("docker", ["image", "inspect", container.workerImage], { maxBuffer: 1024 * 1024 });
-    } catch {
-      fail(`Docker cannot inspect coding worker image "${container.workerImage}".`);
-    }
+    const failure = await dockerCodingPreflight(container, async (image) => {
+      try {
+        await execFile("docker", ["image", "inspect", image], { maxBuffer: 1024 * 1024 });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (failure) fail(failure);
     console.log(`coding preflight passed for ${container.workerImage}`);
     return;
   }
