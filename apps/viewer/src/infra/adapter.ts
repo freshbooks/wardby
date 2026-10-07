@@ -45,12 +45,21 @@ export interface PodView {
   identity: string | null;
   containers: InfraContainer[];
   runSha: string | null;
+  /** The pod's page in the cloud console, when the platform has one. */
+  console: { url: string; label: string } | null;
   /** Egress rules of the NetworkPolicies that select this pod. */
   egress: string[];
   /** Names of the NetworkPolicies that select this pod. */
   policies: string[];
   requests: { cpuMillis: number; memoryMiB: number };
   startedAt: string | null;
+}
+export interface PolicyView {
+  name: string;
+  /** "all pods" or the pod selector as k=v pairs. */
+  selects: string;
+  /** e.g. "denies all", "ingress: 2 rules", "egress: <rule>, …". */
+  rules: string[];
 }
 export interface DataStoreView {
   label: string;
@@ -65,7 +74,7 @@ export interface InfraModel {
     egressRules: string[];
     sandbox: string | null;
     /** Every NetworkPolicy in the namespace; `defaultDeny` when one selects all pods and allows nothing. */
-    policies: { count: number; defaultDeny: boolean };
+    policies: { count: number; defaultDeny: boolean; list: PolicyView[] };
   };
   dataStores: DataStoreView[];
   /** `names` is null when they can't be read; `forbidden` says that is for lack of access. */
@@ -113,6 +122,22 @@ interface PlatformRules {
   database(alwaysOn: PodView[]): DataStoreView;
   secrets(stores: InfraSecretStore[]): string | null;
   sandbox(runtimeClass: string | null): string | null;
+  /** A link to the pod in the provider's console; `context` is the kube context name. */
+  podConsole(context: string | null | undefined, namespace: string, pod: string): { url: string; label: string } | null;
+}
+
+/** gcloud names GKE contexts `gke_<project>_<location>_<cluster>` (none of the parts contain `_`). */
+const GKE_CONTEXT = /^gke_([^_]+)_([^_]+)_([^_]+)$/;
+
+function gkePodConsole(context: string | null | undefined, namespace: string, pod: string) {
+  const m = context ? GKE_CONTEXT.exec(context) : null;
+  if (!m || !namespace) return null;
+  const [, project, location, cluster] = m.map(encodeURIComponent);
+  const path = [location, cluster, encodeURIComponent(namespace), encodeURIComponent(pod)].join("/");
+  return {
+    url: `https://console.cloud.google.com/kubernetes/pod/${path}/details?project=${project}`,
+    label: "Open in Google Cloud console",
+  };
 }
 
 const GENERIC_EDGE_LABELS: Record<string, string> = {
@@ -185,6 +210,7 @@ const GENERIC_RULES: PlatformRules = {
   database: genericDatabase,
   secrets: (stores) => (stores.length ? "External Secrets" : null),
   sandbox: (rc) => rc,
+  podConsole: () => null,
 };
 
 const RULES: Record<Platform, PlatformRules> = {
@@ -196,6 +222,7 @@ const RULES: Record<Platform, PlatformRules> = {
     secrets: (stores) =>
       stores.some((s) => s.provider === "gcpsm") ? "Secret Manager" : stores.length ? "External Secrets" : null,
     sandbox: (rc) => rc,
+    podConsole: gkePodConsole,
   },
   kind: { ...GENERIC_RULES, sandbox: (rc) => rc ?? "none (container runtime)" },
   // PR 3 adds EKS; platformOf never returns it until then.
@@ -277,6 +304,25 @@ function deniesAll(np: InfraNetworkPolicy): boolean {
   return types.every((t) => (t === "Ingress" ? np.ingressRules === 0 : t === "Egress" ? np.egress.length === 0 : true));
 }
 
+function policyView(np: InfraNetworkPolicy): PolicyView {
+  const selects = np.selectsAll
+    ? "all pods"
+    : Object.entries(np.podSelector)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ") || "all pods";
+  const rules: string[] = [];
+  if (deniesAll(np)) rules.push("denies all");
+  else {
+    if (np.policyTypes.includes("Ingress"))
+      rules.push(
+        np.ingressRules === 0 ? "ingress: none" : `ingress: ${np.ingressRules} rule${np.ingressRules === 1 ? "" : "s"}`,
+      );
+    if (np.policyTypes.includes("Egress"))
+      rules.push(np.egress.length ? `egress: ${np.egress.join(", ")}` : "egress: none");
+  }
+  return { name: np.name, selects, rules };
+}
+
 export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeOpts = {}): InfraModel {
   const platform = platformOf(info, cluster, opts);
   const rules = RULES[platform];
@@ -303,6 +349,7 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
       identity: rules.identity(sa),
       containers: p.containers,
       runSha: group === "coding_run" && k8s ? (p.labels[k8s.runLabel] ?? null) : null,
+      console: rules.podConsole(opts.context, k8s?.namespace ?? "", p.name),
       egress: unique(policies.filter((np) => selects(np, p.labels)).flatMap((np) => np.egress)),
       policies: policies.filter((np) => selects(np, p.labels)).map((np) => np.name),
       requests: {
@@ -361,7 +408,7 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
     isolation: {
       egressRules,
       sandbox: rules.sandbox(runtimeName(k8s?.runtimeClass ?? null)),
-      policies: { count: policies.length, defaultDeny: policies.some(deniesAll) },
+      policies: { count: policies.length, defaultDeny: policies.some(deniesAll), list: policies.map(policyView) },
     },
     dataStores: [rules.database(alwaysOn)],
     secrets: {

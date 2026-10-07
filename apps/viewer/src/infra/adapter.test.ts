@@ -320,12 +320,13 @@ suite("kind and out-of-cluster control planes", () => {
   it("summarizes NetworkPolicies and detects a default deny", () => {
     const iso = (policies: InfraNetworkPolicy[]) =>
       describe(clusterOf({ network_policy: policies }), genericInfo).isolation.policies;
-    expect(iso([])).toEqual({ count: 0, defaultDeny: false });
-    expect(iso([netpol()])).toEqual({ count: 1, defaultDeny: true });
-    expect(iso([netpol(), netpol({ name: "b", selectsAll: false, podSelector: { a: "b" } })])).toEqual({
-      count: 2,
-      defaultDeny: true,
-    });
+    expect(iso([])).toMatchObject({ count: 0, defaultDeny: false, list: [] });
+    expect(iso([netpol()])).toMatchObject({ count: 1, defaultDeny: true });
+    const two = iso([netpol(), netpol({ name: "b", selectsAll: false, podSelector: { a: "b" } })]);
+    expect(two).toMatchObject({ count: 2, defaultDeny: true });
+    // One line per policy: what it selects and what it allows.
+    expect(two.list[0]).toMatchObject({ selects: "all pods", rules: ["denies all"] });
+    expect(two.list[1]).toMatchObject({ name: "b", selects: "a=b" });
     // An empty selector that allows something is not a deny; neither is a labelled selector.
     expect(iso([netpol({ ingressRules: 1 })]).defaultDeny).toBe(false);
     expect(iso([netpol({ egress: ["any"] })]).defaultDeny).toBe(false);
@@ -339,5 +340,20 @@ suite("kind and out-of-cluster control planes", () => {
     const m = describe(kindCluster, kindInfo);
     expect(m.groups.codingRuns[0].policies).toEqual(["default-deny", "wardby-run-egress"]);
     expect(m.groups.alwaysOn[0].policies).toEqual(["default-deny"]);
+  });
+
+  suite("pod console links", () => {
+    it("links each pod to the Google Cloud console from a gcloud-style GKE context", () => {
+      const m = describe(gkeCluster, gkeInfo, { context: "gke_my-proj_us-central1_my-cluster" });
+      const run = m.groups.codingRuns[0];
+      expect(run.console?.url).toBe(
+        `https://console.cloud.google.com/kubernetes/pod/us-central1/my-cluster/${gkeInfo.kubernetes!.namespace}/${run.name}/details?project=my-proj`,
+      );
+    });
+
+    it("has no link for a renamed context or a non-GKE platform", () => {
+      expect(describe(gkeCluster, gkeInfo, { context: "prod" }).groups.alwaysOn[0].console).toBeNull();
+      expect(describe(kindCluster, kindInfo, { context: "kind-dev" }).groups.alwaysOn[0].console).toBeNull();
+    });
   });
 });

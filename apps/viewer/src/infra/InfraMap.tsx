@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { InfraModel, PodView } from "./adapter";
 import { containerDot, podReadiness } from "./format";
+import { openUrl } from "../api/client";
 import { useEndedRuns, type EndedRun } from "./endedRuns";
 import { visibleJobs } from "./jobs";
 
@@ -46,19 +47,39 @@ function PodCard({
   compact?: boolean;
 }) {
   return (
+    <div className={`map-card-wrap${pod.console ? " has-console" : ""}`}>
+      <button
+        type="button"
+        className={`map-card map-pod${compact ? " compact" : ""}`}
+        aria-pressed={selected}
+        title={pod.name}
+        onClick={onSelect}
+      >
+        <span className="map-title">
+          <span>{pod.title}</span>
+          <Readiness pod={pod} />
+        </span>
+        {!compact && <Containers pod={pod} />}
+        {!compact && pod.identity && <span className="muted map-identity">{pod.identity}</span>}
+      </button>
+      <ConsoleLink pod={pod} />
+    </div>
+  );
+}
+
+/** Opens the pod in the cloud console; sits in the card's corner (a link can't nest in the card's button). */
+function ConsoleLink({ pod }: { pod: PodView }) {
+  if (!pod.console) return null;
+  const { url, label } = pod.console;
+  return (
     <button
       type="button"
-      className={`map-card map-pod${compact ? " compact" : ""}`}
-      aria-pressed={selected}
-      title={pod.name}
-      onClick={onSelect}
+      className="map-console-link"
+      aria-label={`${label}: ${pod.title}`}
+      title={label}
+      onClick={() => void openUrl(url).catch(() => {})}
     >
-      <span className="map-title">
-        <span>{pod.title}</span>
-        <Readiness pod={pod} />
-      </span>
-      {!compact && <Containers pod={pod} />}
-      {!compact && pod.identity && <span className="muted map-identity">{pod.identity}</span>}
+      ↗
     </button>
   );
 }
@@ -88,19 +109,22 @@ function Sandbox({
     <div className={className} role="group" aria-label={label}>
       <span className="map-zone-label">{label}</span>
       <div className="map-sandbox-body">
-        <button
-          type="button"
-          className={`map-card map-pod${active ? " pulse" : ""}`}
-          aria-pressed={selected}
-          title={pod.name}
-          onClick={onSelect}
-        >
-          <span className="map-title">
-            <span>{pod.title}</span>
-            {ended ? <span className="muted">Ended</span> : <Readiness pod={pod} />}
-          </span>
-          <Containers pod={pod} ended={!!ended} />
-        </button>
+        <div className={`map-card-wrap${pod.console && !ended ? " has-console" : ""}`}>
+          <button
+            type="button"
+            className={`map-card map-pod${active ? " pulse" : ""}`}
+            aria-pressed={selected}
+            title={pod.name}
+            onClick={onSelect}
+          >
+            <span className="map-title">
+              <span>{pod.title}</span>
+              {ended ? <span className="muted">Ended</span> : <Readiness pod={pod} />}
+            </span>
+            <Containers pod={pod} ended={!!ended} />
+          </button>
+          {!ended && <ConsoleLink pod={pod} />}
+        </div>
         {ended && onClose && (
           <button
             type="button"
@@ -120,7 +144,7 @@ function Sandbox({
             title="Open run"
             onClick={() => onOpenRun(sha)}
           >
-            ↗
+            Run ↗
           </button>
         )}
       </div>
@@ -201,12 +225,24 @@ export function InfraMap({
       <div className="map-zone map-namespace">
         {namespace && <span className="map-zone-label">namespace {namespace}</span>}
         {model.isolation.policies.count > 0 && (
-          <span className="map-zone-label">
-            {model.isolation.policies.count === 1
-              ? "1 NetworkPolicy"
-              : `${model.isolation.policies.count} NetworkPolicies`}
-            {model.isolation.policies.defaultDeny && " · default deny"}
-          </span>
+          <details className="map-policies">
+            <summary className="map-zone-label">
+              {model.isolation.policies.count === 1
+                ? "1 NetworkPolicy"
+                : `${model.isolation.policies.count} NetworkPolicies`}
+              {model.isolation.policies.defaultDeny && " · default deny"}
+            </summary>
+            <ul>
+              {model.isolation.policies.list.map((np) => (
+                <li key={np.name}>
+                  <span className="map-policy-name">{np.name}</span>
+                  <span className="muted">
+                    {np.selects} · {np.rules.join(" · ")}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
         <div className="map-pods">
           {main.map((p) => (

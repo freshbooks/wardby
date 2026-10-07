@@ -1206,6 +1206,60 @@ button:disabled {
   font-weight: 600;
 }
 
+/* The namespace's NetworkPolicies: a count that expands to one line per policy. */
+.map-policies summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+.map-policies ul {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0.25rem 0 0.5rem;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8rem;
+}
+
+.map-policies li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.5rem;
+}
+
+.map-policy-name {
+  font-weight: 600;
+}
+
+/* A card with a console link: the link sits in the corner and the status shifts left. */
+.map-card-wrap {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+
+.map-card-wrap.has-console .map-title {
+  padding-right: 1.6rem;
+}
+
+.map-console-link {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.map-console-link:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 /* The name gives way so the status (2/2, Completed, Terminating) always fits. */
 .map-title > :first-child {
   min-width: 0;
@@ -1278,7 +1332,8 @@ button:disabled {
   align-items: flex-start;
 }
 
-.map-sandbox-body .map-card {
+.map-sandbox-body .map-card,
+.map-sandbox-body .map-card-wrap {
   flex: 1;
 }
 
