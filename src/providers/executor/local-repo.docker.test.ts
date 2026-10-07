@@ -20,14 +20,14 @@ import { LocalRemote } from "../vcs/local-remote.js";
  * a local repository, with the same scripted model proxy the Claude Docker
  * acceptance test uses (no API key, no network). Gated like that test.
  *
- * Run: WARDBY_LOCAL_REPO_DOCKER_TEST=1 WARDBY_CLAUDE_WORKER_IMAGE=sha256:<id>
+ * Run: WARDBY_CLAUDE_DOCKER_TEST=1 WARDBY_CLAUDE_WORKER_IMAGE=sha256:<id>
  * WARDBY_CLAUDE_TOOL_RUNNER_IMAGE=sha256:<id> npx vitest run <this file>
- * (needs DATABASE_URL for the review half). The images must be built from this
+ * (the whole describe is skipped when DATABASE_URL is unset, since the review half needs it). The images must be built from this
  * checkout (src/claude-coding-worker/Dockerfile, src/claude-tool-runner/Dockerfile):
  * a worker built before `local:` support rejects the task input.
  */
 const execute = promisify(execFile);
-const enabled = process.env.WARDBY_LOCAL_REPO_DOCKER_TEST === "1";
+const enabled = process.env.WARDBY_CLAUDE_DOCKER_TEST === "1";
 const agentImage = process.env.WARDBY_CLAUDE_WORKER_IMAGE ?? "";
 const toolImage = process.env.WARDBY_CLAUDE_TOOL_RUNNER_IMAGE ?? "";
 const token = `${process.pid}-${Date.now()}`;
@@ -142,14 +142,13 @@ describe.skipIf(!enabled || !agentImage || !toolImage || !process.env.DATABASE_U
   () => {
     let root: string | undefined;
     const db = createPrismaClient();
+    let prId: string | undefined;
 
     afterAll(async () => {
       await sweep(runId);
       await cleanup(["container", "rm", "--force", proxy]);
       if (root) await rm(root, { recursive: true, force: true });
-      await db.localPullRequest.deleteMany({
-        where: { repository: { startsWith: `local:${root ?? "/nonexistent"}` } },
-      });
+      if (prId) await db.localPullRequest.deleteMany({ where: { id: prId } });
       await db.$disconnect();
     }, 60_000);
 
@@ -293,10 +292,11 @@ describe.skipIf(!enabled || !agentImage || !toolImage || !process.env.DATABASE_U
         ),
       ).toBe(false);
 
-      // Review half: a stub engine drives the review tools over the produced branch.
+      // Review half: no engine: the repo_* review tools are driven directly over the produced branch.
       const pr = await db.localPullRequest.create({
         data: { repository: `local:${src}`, branch: `wardby/run-${runId}`, base: "main" },
       });
+      prId = pr.id;
       const agentId = `local-repo-docker-reviewer-${token}`;
       const ctx: ReviewToolContext = {
         agentId,
