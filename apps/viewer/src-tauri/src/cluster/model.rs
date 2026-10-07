@@ -123,6 +123,54 @@ pub struct InfraNetworkPolicy {
     pub selects_all: bool,
     pub ingress_rules: usize,
     pub egress: Vec<String>,
+    /// Structured ingress rules, for the plain-English intent sentences.
+    pub ingress: Vec<InfraPolicyRule>,
+    /// Structured egress rules; `egress` keeps the one-line summaries.
+    pub egress_rules: Vec<InfraPolicyRule>,
+}
+
+/// One ingress or egress rule: traffic from/to any of `peers` on any of `ports`
+/// (no ports means every port).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InfraPolicyRule {
+    pub peers: Vec<InfraPolicyPeer>,
+    pub ports: Vec<InfraPolicyPort>,
+}
+
+/// Crosses to the webview as `{ "kind": "<snake_case>", ...camelCase fields }`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum InfraPolicyPeer {
+    /// An empty `from`/`to`: any source or destination.
+    Any,
+    /// Pods by label; `namespace_labels` is set when a namespace selector is present.
+    Pods {
+        pod_labels: BTreeMap<String, String>,
+        namespace_labels: Option<BTreeMap<String, String>>,
+    },
+    Ip {
+        cidr: String,
+        except: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InfraPolicyPort {
+    pub port: Option<PolicyPortValue>,
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum PolicyPortValue {
+    Number(i32),
+    Name(String),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -644,8 +692,61 @@ fn port_summary(p: &NetworkPolicyPort) -> Option<String> {
     ))
 }
 
+fn policy_peer(p: &NetworkPolicyPeer) -> InfraPolicyPeer {
+    if let Some(block) = &p.ip_block {
+        return InfraPolicyPeer::Ip {
+            cidr: block.cidr.clone(),
+            except: block.except.clone().unwrap_or_default(),
+        };
+    }
+    if p.pod_selector.is_none() && p.namespace_selector.is_none() {
+        return InfraPolicyPeer::Any;
+    }
+    let labels = |s: &LabelSelector| s.match_labels.clone().unwrap_or_default();
+    InfraPolicyPeer::Pods {
+        pod_labels: p.pod_selector.as_ref().map(labels).unwrap_or_default(),
+        namespace_labels: p.namespace_selector.as_ref().map(labels),
+    }
+}
+
+fn policy_port(p: &NetworkPolicyPort) -> InfraPolicyPort {
+    InfraPolicyPort {
+        port: p.port.as_ref().map(|v| match v {
+            IntOrString::Int(i) => PolicyPortValue::Number(*i),
+            IntOrString::String(s) => PolicyPortValue::Name(s.clone()),
+        }),
+        protocol: p.protocol.clone().unwrap_or_else(|| "TCP".into()),
+    }
+}
+
+fn policy_rule(
+    peers: Option<&[NetworkPolicyPeer]>,
+    ports: Option<&[NetworkPolicyPort]>,
+) -> InfraPolicyRule {
+    let peers = match peers {
+        Some(p) if !p.is_empty() => p.iter().map(policy_peer).collect(),
+        _ => vec![InfraPolicyPeer::Any],
+    };
+    InfraPolicyRule {
+        peers,
+        ports: ports.unwrap_or_default().iter().map(policy_port).collect(),
+    }
+}
+
 pub fn network_policy_from(np: &NetworkPolicy) -> InfraNetworkPolicy {
     let spec = np.spec.as_ref();
+    let ingress = spec
+        .and_then(|s| s.ingress.as_ref())
+        .into_iter()
+        .flatten()
+        .map(|r| policy_rule(r.from.as_deref(), r.ports.as_deref()))
+        .collect();
+    let egress_rules = spec
+        .and_then(|s| s.egress.as_ref())
+        .into_iter()
+        .flatten()
+        .map(|r| policy_rule(r.to.as_deref(), r.ports.as_deref()))
+        .collect();
     let egress = spec
         .and_then(|s| s.egress.as_ref())
         .into_iter()
@@ -686,6 +787,8 @@ pub fn network_policy_from(np: &NetworkPolicy) -> InfraNetworkPolicy {
             }),
         ingress_rules: spec.and_then(|s| s.ingress.as_ref()).map_or(0, Vec::len),
         egress,
+        ingress,
+        egress_rules,
     }
 }
 
@@ -992,5 +1095,78 @@ mod tests {
         assert_eq!(deny.policy_types, vec!["Ingress", "Egress"]);
         let run = network_policy_from(&fixture("networkpolicy-run-egress"));
         assert!(!run.selects_all);
+    }
+
+    #[test]
+    fn network_policy_carries_structured_rules() {
+        let np = network_policy_from(&fixture("networkpolicy-coding-proxy"));
+        let v = serde_json::to_value(&np).unwrap();
+        assert_eq!(
+            v["ingress"],
+            serde_json::json!([{
+                "peers": [{
+                    "kind": "pods",
+                    "podLabels": {"wardby.io/component": "coding-run"},
+                    "namespaceLabels": null
+                }],
+                "ports": [
+                    {"port": 8787, "protocol": "TCP"},
+                    {"port": 8788, "protocol": "TCP"}
+                ]
+            }])
+        );
+        assert_eq!(
+            v["egressRules"][0],
+            serde_json::json!({
+                "peers": [{
+                    "kind": "pods",
+                    "podLabels": {"k8s-app": "kube-dns"},
+                    "namespaceLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                }],
+                "ports": [
+                    {"port": 53, "protocol": "UDP"},
+                    {"port": 53, "protocol": "TCP"}
+                ]
+            })
+        );
+        assert_eq!(
+            v["egressRules"][1]["peers"],
+            serde_json::json!([{"kind": "ip", "cidr": "0.0.0.0/0", "except": ["10.0.0.0/8"]}])
+        );
+        // A named port with no protocol defaults to TCP; an empty selector has no labels.
+        assert_eq!(
+            v["egressRules"][2],
+            serde_json::json!({
+                "peers": [{"kind": "pods", "podLabels": {}, "namespaceLabels": null}],
+                "ports": [{"port": "metrics", "protocol": "TCP"}]
+            })
+        );
+        // No `to` means anyone.
+        assert_eq!(
+            v["egressRules"][3]["peers"],
+            serde_json::json!([{"kind": "any"}])
+        );
+        assert_eq!(np.egress.len(), 4);
+    }
+
+    #[test]
+    fn network_policy_without_rules_has_empty_structured_lists() {
+        let deny = network_policy_from(&fixture("networkpolicy-default-deny"));
+        assert!(deny.ingress.is_empty());
+        assert!(deny.egress_rules.is_empty());
+        let v = serde_json::to_value(&deny).unwrap();
+        assert_eq!(v["ingress"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn port_without_number_serializes_as_null() {
+        let p = policy_port(&NetworkPolicyPort {
+            protocol: Some("UDP".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            serde_json::to_value(p).unwrap(),
+            serde_json::json!({"port": null, "protocol": "UDP"})
+        );
     }
 }
