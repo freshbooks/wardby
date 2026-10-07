@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createMockUpstream, extractRunId } from "./mock-upstream.js";
+import { DEFAULT_MOCK_UPSTREAM, createMockUpstream, extractRunId, mockUpstreamFromEnv } from "./mock-upstream.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
 import { CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
@@ -137,5 +137,55 @@ describe("CodingProxy with createMockUpstream", () => {
       status: "completed",
       usage: { inputTokens: 1200, outputTokens: 80 },
     });
+  });
+});
+
+describe("mockUpstreamFromEnv (guard)", () => {
+  it("is off when neither variable is set", () => expect(mockUpstreamFromEnv({})).toBeNull());
+  it.each([
+    [{ WARDBY_LOAD_TEST: "1" }],
+    [{ WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1" }],
+    [{ WARDBY_LOAD_TEST: "true", WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1" }],
+    [{ WARDBY_LOAD_TEST: "1", WARDBY_CODING_PROXY_MOCK_UPSTREAM: "yes" }],
+    [{ WARDBY_LOAD_TEST: "", WARDBY_CODING_PROXY_MOCK_UPSTREAM: "" }],
+    [{ WARDBY_LOAD_TEST: "0", WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1" }],
+  ])("refuses a partial or malformed setting %j", (env) => {
+    expect(() => mockUpstreamFromEnv(env)).toThrow(/^mock_upstream_guard:/);
+  });
+  it("is on only with both set to 1, reading latency and jitter", () => {
+    expect(
+      mockUpstreamFromEnv({
+        WARDBY_LOAD_TEST: "1",
+        WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1",
+        WARDBY_LOAD_MOCK_LATENCY_MS: "250",
+        WARDBY_LOAD_MOCK_JITTER_MS: "50",
+      }),
+    ).toMatchObject({ latencyMs: 250, jitterMs: 50 });
+  });
+  it("uses the default latency and jitter when unset", () => {
+    expect(mockUpstreamFromEnv({ WARDBY_LOAD_TEST: "1", WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1" })).toEqual(
+      DEFAULT_MOCK_UPSTREAM,
+    );
+  });
+  it.each(["-1", "1.5", "abc", "1e400", "0x10", " 5", "1e3", "99999999999999999999"])(
+    "rejects a non-integer or negative latency %s",
+    (value) => {
+      expect(() =>
+        mockUpstreamFromEnv({
+          WARDBY_LOAD_TEST: "1",
+          WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1",
+          WARDBY_LOAD_MOCK_LATENCY_MS: value,
+        }),
+      ).toThrow(/^mock_upstream_guard:/);
+    },
+  );
+  it("rejects a malformed jitter", () => {
+    expect(() =>
+      mockUpstreamFromEnv({
+        WARDBY_LOAD_TEST: "1",
+        WARDBY_CODING_PROXY_MOCK_UPSTREAM: "1",
+        WARDBY_LOAD_MOCK_JITTER_MS: "-5",
+      }),
+    ).toThrow(/^mock_upstream_guard:/);
   });
 });

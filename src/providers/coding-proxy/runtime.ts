@@ -1,9 +1,11 @@
 import type { PrismaClient } from "#prisma";
+import { logger } from "../../core/logger.js";
 import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
 import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
 import { startDenyPortListener, type DenyPortListenerHandle } from "./deny-port.js";
 import { EnvironmentCredentialResolver } from "./environment-credentials.js";
+import { createMockUpstream, mockUpstreamFromEnv } from "./mock-upstream.js";
 import { CodingProxy } from "./proxy.js";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
 import { OsvAudit } from "./registry/audit.js";
@@ -71,10 +73,22 @@ export interface CodingProxyRuntimeOptions {
 /** Starts the trusted proxy with the fixed worker-only Docker endpoint, plus the deny port the enforcement witness probes. */
 export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOptions): Promise<CodingProxyServerHandle> {
   const env = options.env ?? process.env;
+  // Throws (mock_upstream_guard) on a partial or malformed setting, before anything listens.
+  const mock = mockUpstreamFromEnv(env);
+  if (mock) {
+    logger.warn(
+      { module: "coding-proxy-runtime", event: "proxy.mock_upstream_enabled" },
+      "coding proxy: MOCK MODEL UPSTREAM ENABLED (load test). No request reaches a model provider; never use this on a real deployment.",
+    );
+  }
+  const audit: ProxyAuditSink | undefined = mock
+    ? (event) => options.audit?.({ ...event, mockUpstream: true })
+    : options.audit;
   const proxy = new CodingProxy({
     ledger: new PrismaProxyLedger(options.db),
     credentials: new EnvironmentCredentialResolver(env),
-    audit: options.audit,
+    audit,
+    ...(mock ? { fetch: createMockUpstream(mock) } : {}),
   });
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
   const upstreamHosts = [...new Set([...REGISTRY_ADAPTERS.values()].flatMap((adapter) => adapter.upstreamHosts))];

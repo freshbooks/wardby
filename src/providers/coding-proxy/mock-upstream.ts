@@ -106,3 +106,39 @@ export function createMockUpstream(
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
   };
 }
+
+const FLAG_LOAD = "WARDBY_LOAD_TEST";
+const FLAG_MOCK = "WARDBY_CODING_PROXY_MOCK_UPSTREAM";
+
+function nonNegativeInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  // Plain decimal digits only: no sign, hex, exponent, or whitespace.
+  const n = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 0) {
+    throw new Error(`mock_upstream_guard: ${name} must be a non-negative integer`);
+  }
+  return n;
+}
+
+/**
+ * The mock model upstream is a load-test seam inside a production binary, so
+ * it needs two deliberate switches: WARDBY_LOAD_TEST=1 and
+ * WARDBY_CODING_PROXY_MOCK_UPSTREAM=1. One without the other, or any other
+ * value, refuses to start the proxy rather than silently picking a side.
+ */
+export function mockUpstreamFromEnv(env: NodeJS.ProcessEnv): MockUpstreamConfig | null {
+  const load = env[FLAG_LOAD];
+  const mock = env[FLAG_MOCK];
+  if (load === undefined && mock === undefined) return null;
+  if (load !== "1" || mock !== "1") {
+    throw new Error(
+      `mock_upstream_guard: set both ${FLAG_LOAD}=1 and ${FLAG_MOCK}=1 to use the mock upstream, or neither`,
+    );
+  }
+  return {
+    ...DEFAULT_MOCK_UPSTREAM,
+    latencyMs: nonNegativeInt(env, "WARDBY_LOAD_MOCK_LATENCY_MS", DEFAULT_MOCK_UPSTREAM.latencyMs),
+    jitterMs: nonNegativeInt(env, "WARDBY_LOAD_MOCK_JITTER_MS", DEFAULT_MOCK_UPSTREAM.jitterMs),
+  };
+}
