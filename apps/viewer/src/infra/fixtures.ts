@@ -15,7 +15,7 @@ export const gkeInfo: InfraInfo = {
   launcher: "kubernetes",
   kubernetes: {
     namespace: "wardby",
-    platform: "gke",
+    platform: "gke-autopilot",
     runtimeClass: "gvisor",
     proxyService: "wardby-coding-proxy",
     runLabel: "wardby.io/run-sha256",

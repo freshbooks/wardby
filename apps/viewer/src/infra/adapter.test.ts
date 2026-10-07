@@ -86,6 +86,14 @@ suite("describe", () => {
     expect(platformOf(gkeInfo, gkeCluster)).toBe("gke");
     expect(platformOf(genericInfo, genericCluster)).toBe("generic");
   });
+
+  it("detects gke-autopilot by platform without the SA annotation", () => {
+    expect(platformOf(gkeInfo, genericCluster)).toBe("gke");
+  });
+
+  it("detects GKE by the SA annotation when platform is generic", () => {
+    expect(platformOf(genericInfo, gkeCluster)).toBe("gke");
+  });
 });
 
 suite("quantities", () => {

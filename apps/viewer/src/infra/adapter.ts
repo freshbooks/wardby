@@ -136,14 +136,15 @@ const RULES: Record<Platform, PlatformRules> = {
     database: gkeDatabase,
     secrets: (stores) =>
       stores.some((s) => s.provider === "gcpsm") ? "Secret Manager" : stores.length ? "External Secrets" : null,
-    sandbox: (rc) => (rc === "gvisor" ? "gVisor" : rc),
+    sandbox: (rc) => rc,
   },
   // PR 3 adds EKS; platformOf never returns it until then.
   eks: undefined as never,
 };
 
 export function platformOf(info: InfraInfo, cluster: ClusterState): Platform {
-  if (info.kubernetes?.platform === "gke") return "gke";
+  // The server reports "generic" or "gke-autopilot"; other GKE (Standard) is detected only via the SA fallback below.
+  if (info.kubernetes?.platform.startsWith("gke")) return "gke";
   for (const sa of cluster.objects.service_account.values()) {
     if ("iam.gke.io/gcp-service-account" in sa.identity) return "gke";
   }
@@ -242,7 +243,7 @@ export function describe(cluster: ClusterState, info: InfraInfo): InfraModel {
     platform,
     edge: edges.map(rules.edge),
     groups: { alwaysOn, codingRuns, jobs },
-    isolation: { egressRules, sandbox: rules.sandbox(k8s?.runtimeClass ?? null) },
+    isolation: { egressRules, sandbox: rules.sandbox(runtimeName(k8s?.runtimeClass ?? null)) },
     dataStores: [rules.database(alwaysOn)],
     secrets: {
       source: rules.secrets(stores),
