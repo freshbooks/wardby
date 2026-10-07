@@ -103,3 +103,83 @@ describe("TopBar truncated window total", () => {
     expect(el.getAttribute("title")).toContain("Only the most recent 500 runs are loaded");
   });
 });
+
+describe("TopBar tabs", () => {
+  const props = {
+    servers: [],
+    selectedUrl: null,
+    onSelectServer: vi.fn(),
+    onAddServer: vi.fn(),
+    onSignOut: vi.fn(),
+    onRemoveServer: vi.fn(),
+    live: true,
+    reconnecting: false,
+    filters: initialFilters,
+    onFiltersChange: vi.fn(),
+    agents: [],
+    spend: null,
+    windowSpendUsd: 0,
+    rangeRunCount: 0,
+    onClearRange: vi.fn(),
+  };
+
+  it("shows Runs | Infrastructure and keeps the runs controls on Runs", () => {
+    const onTabChange = vi.fn();
+    render(<TopBar {...props} tab="runs" onTabChange={onTabChange} />);
+    expect(screen.getByRole("button", { name: "Runs" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Infrastructure" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByLabelText("Search runs")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Infrastructure" }));
+    expect(onTabChange).toHaveBeenCalledWith("infra");
+  });
+
+  it("replaces the filter row with Map | Table, the cluster line and a context picker on Infrastructure", () => {
+    const onModeChange = vi.fn();
+    const onContextChange = vi.fn();
+    render(
+      <TopBar
+        {...props}
+        tab="infra"
+        onTabChange={vi.fn()}
+        infra={{
+          mode: "table",
+          onModeChange,
+          context: "ctx-a",
+          contexts: ["ctx-a", "ctx-b"],
+          onContextChange,
+          platformLabel: "GKE Autopilot",
+          namespace: "wardby",
+          watching: true,
+        }}
+      />,
+    );
+    expect(screen.queryByLabelText("Search runs")).not.toBeInTheDocument();
+    expect(screen.getByText("ctx-a · GKE Autopilot · ns wardby · ● watching")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Table" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Map" }));
+    expect(onModeChange).toHaveBeenCalledWith("map");
+    fireEvent.change(screen.getByLabelText("Kube context"), { target: { value: "ctx-b" } });
+    expect(onContextChange).toHaveBeenCalledWith("ctx-b");
+  });
+
+  it("shows disconnected when the watch is down", () => {
+    render(
+      <TopBar
+        {...props}
+        tab="infra"
+        onTabChange={vi.fn()}
+        infra={{
+          mode: "table",
+          onModeChange: vi.fn(),
+          context: "c",
+          contexts: ["c"],
+          onContextChange: vi.fn(),
+          platformLabel: "Kubernetes",
+          namespace: "w",
+          watching: false,
+        }}
+      />,
+    );
+    expect(screen.getByText("c · Kubernetes · ns w · ○ disconnected")).toBeInTheDocument();
+  });
+});

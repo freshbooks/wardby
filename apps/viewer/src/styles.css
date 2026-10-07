@@ -964,3 +964,125 @@ button:disabled {
 .react-flow__edge.chain-edge .react-flow__edge-textbg {
   fill: var(--bg);
 }
+
+/* Tabs and the Infrastructure view */
+.tabs {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.tabs button[aria-pressed="true"],
+.infra-row[aria-pressed="true"] {
+  border-color: var(--accent);
+}
+
+.infra-workspace {
+  min-width: 0;
+}
+
+.infra-main {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 0.5rem 0.75rem;
+}
+
+.infra-message {
+  padding: 1rem 0.75rem;
+  display: grid;
+  gap: 0.5rem;
+  justify-items: start;
+}
+
+.infra-head,
+.infra-row {
+  display: grid;
+  grid-template-columns: minmax(12rem, 2fr) minmax(8rem, 2fr) minmax(8rem, 1fr) 8rem 4rem;
+  gap: 0.75rem;
+  text-align: left;
+}
+
+.infra-head {
+  padding: 0.25rem 0.5rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.infra-row-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.infra-row {
+  flex: 1;
+  min-width: 0;
+  align-items: baseline;
+}
+
+.infra-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.infra-group {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.infra-container {
+  margin-right: 0.6rem;
+}
+
+.infra-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.3rem;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.infra-dot.ok {
+  background: var(--ok);
+}
+
+.infra-dot.warn {
+  background: var(--warn);
+}
+
+.infra-dot.bad {
+  background: var(--bad);
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.warn {
+  color: var(--warn);
+}
+
+.status.bad {
+  color: var(--bad);
+}
+
+.infra-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.75rem;
+  margin: 0.5rem 0 0;
+}
+
+.infra-facts dt {
+  color: var(--muted);
+}
+
+.infra-facts dd {
+  margin: 0;
+}

@@ -7,7 +7,8 @@ import { ErrorLine } from "./chrome/ErrorLine";
 import { ServerDialog } from "./chrome/ServerDialog";
 import { ServerMenu } from "./chrome/ServerMenu";
 import { SignInGate } from "./chrome/SignInGate";
-import { TopBar } from "./chrome/TopBar";
+import { TopBar, type InfraBar, type Tab } from "./chrome/TopBar";
+import { InfraScreen } from "./infra/InfraScreen";
 import { windowSpend } from "./format/spend";
 import { FlowCanvas } from "./graph/FlowCanvas";
 import type { RunFocus } from "./graph/selection";
@@ -38,6 +39,9 @@ function Dashboard({
   onChecked,
 }: DashboardProps) {
   const [filters, setFilters] = useState<Filters>(initialFilters);
+  const [tab, setTab] = useState<Tab>("runs");
+  // Bumped by Retry to restart the cluster watch.
+  const [infraEpoch, setInfraEpoch] = useState(0);
   // The canvas highlights this run and the detail panel shows it.
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const viewer = useViewer(server.url, { since: filters.window, limit: GRAPH_LIMIT });
@@ -86,26 +90,51 @@ function Dashboard({
   }, [timelineRuns, view.timeRange]);
   const setRange = useCallback((timeRange: Filters["timeRange"]) => setFilters((f) => ({ ...f, timeRange })), []);
 
+  const topBar = (infra?: InfraBar) => (
+    <TopBar
+      tab={tab}
+      onTabChange={setTab}
+      infra={infra}
+      servers={servers}
+      selectedUrl={server.url}
+      onSelectServer={onSelectServer}
+      onAddServer={onAddServer}
+      onSignOut={onSignOut}
+      onRemoveServer={onRemoveServer}
+      live={model.live}
+      reconnecting={viewer.reconnecting}
+      filters={view}
+      onFiltersChange={(next) => setFilters((prev) => changeFilters(prev, next))}
+      agents={agents}
+      spend={model.spend}
+      windowSpendUsd={totalSpend}
+      windowSpendTruncated={model.truncated}
+      rangeRunCount={rangeRunCount}
+      onClearRange={() => setRange(null)}
+    />
+  );
+
+  if (tab === "infra") {
+    return (
+      <div className="app">
+        <InfraScreen
+          key={infraEpoch}
+          server={server}
+          runs={runs}
+          topBar={topBar}
+          onOpenRun={(id) => {
+            setTab("runs");
+            selectPanel(id);
+          }}
+          onRetry={() => setInfraEpoch((n) => n + 1)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
-      <TopBar
-        servers={servers}
-        selectedUrl={server.url}
-        onSelectServer={onSelectServer}
-        onAddServer={onAddServer}
-        onSignOut={onSignOut}
-        onRemoveServer={onRemoveServer}
-        live={model.live}
-        reconnecting={viewer.reconnecting}
-        filters={view}
-        onFiltersChange={(next) => setFilters((prev) => changeFilters(prev, next))}
-        agents={agents}
-        spend={model.spend}
-        windowSpendUsd={totalSpend}
-        windowSpendTruncated={model.truncated}
-        rangeRunCount={rangeRunCount}
-        onClearRange={() => setRange(null)}
-      />
+      {topBar()}
       <main className="main">
         {viewer.needsSignIn ? (
           <SignInGate
