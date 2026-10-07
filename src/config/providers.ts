@@ -61,6 +61,9 @@ function optionalPositiveInteger(value: string | undefined, name: string): numbe
   return parsed;
 }
 
+/** Trusted roots for `local:` repositories (LOCAL_REPO_ROOTS, path-delimiter separated); unset = local repositories disabled. */
+export { loadLocalRepoRoots } from "../coding/local-repo.js";
+
 export function loadGitHubVcsConfig(env: NodeJS.ProcessEnv = process.env): GitHubVcsConfig {
   return {
     appId: env.GITHUB_APP_ID,

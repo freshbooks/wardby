@@ -486,3 +486,10 @@ describe("loadJiraConfig", () => {
     );
   });
 });
+
+describe("loadLocalRepoRoots (via providers config)", () => {
+  it("is empty when LOCAL_REPO_ROOTS is unset", async () => {
+    const { loadLocalRepoRoots } = await import("./providers.js");
+    expect(loadLocalRepoRoots({})).toEqual({ roots: [], missing: [] });
+  });
+});

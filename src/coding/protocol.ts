@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isLocalRepository, normalizeLocalRepository } from "./local-repo.js";
 
 export const CODING_PROTOCOL_VERSION = 1 as const;
 /** The code host every coding run's repository and pull request live on (see pullRequestUrlSchema); the one place to change when another is added. */
@@ -215,10 +216,24 @@ function isGitRef(value: string): boolean {
   }
 }
 
+function isCodingRepository(value: string): boolean {
+  if (!isLocalRepository(value)) return isGitHubRepository(value);
+  try {
+    normalizeLocalRepository(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCodingRepository(value: string): string {
+  return isLocalRepository(value) ? normalizeLocalRepository(value) : normalizeGitHubRepository(value);
+}
+
 const repositorySchema = z
   .string()
-  .refine(isGitHubRepository, "must be a canonical name or uncredentialed github.com repository")
-  .transform(normalizeGitHubRepository);
+  .refine(isCodingRepository, "must be a canonical name or uncredentialed github.com repository")
+  .transform(normalizeCodingRepository);
 
 export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe branch ref").transform(normalizeGitRef);
 
