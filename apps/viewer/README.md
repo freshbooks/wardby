@@ -89,6 +89,8 @@ events; **Open run** jumps to the run that started it, and a coding run's
 The tab appears when the server uses the Kubernetes launcher. It reads the
 cluster with your own kubeconfig (`$KUBECONFIG` or `~/.kube/config`), using the
 current context unless you choose another for that server, and it only reads.
+The choice is saved per server. If your kubeconfig has no current context,
+choose one from the context picker.
 When `wardby serve` runs outside the cluster — for example against a local
 [kind](https://kind.sigs.k8s.io/) cluster — the map shows the control plane as
 outside the cluster, at the server's address.
@@ -140,7 +142,9 @@ subjects:
 Replace `wardby-coding` with the namespace where your coding runs execute, and
 `<you>` with the user your kubeconfig signs in as (`kubectl auth whoami` shows
 it; on GKE and EKS it is usually your cloud account's email or IAM identity).
-Without access the tab names the resource it couldn't list.
+For any resource you can't list, the tab names it: without `pods` the message
+replaces the view, and for any other resource it appears above what the tab
+could read. Without `secrets`, Secret names show as hidden instead.
 
 The Role deliberately omits `secrets`, because Kubernetes RBAC cannot restrict
 access to individual Secret names; Secret names appear as hidden in the
