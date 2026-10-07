@@ -1,2 +1,10 @@
-{"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"wardby-route","namespace":"wardby"},
-"spec":{"parentRefs":[{"name":"wardby-gw"}],"hostnames":["wardby.example.com","www.example.com"],"rules":[{"backendRefs":[{"name":"wardby","port":80}]}]}}
+{
+  "apiVersion": "gateway.networking.k8s.io/v1",
+  "kind": "HTTPRoute",
+  "metadata": { "name": "wardby-route", "namespace": "wardby" },
+  "spec": {
+    "parentRefs": [{ "name": "wardby-gw" }],
+    "hostnames": ["wardby.example.com", "www.example.com"],
+    "rules": [{ "backendRefs": [{ "name": "wardby", "port": 80 }] }]
+  }
+}

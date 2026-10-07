@@ -1,3 +1,15 @@
-{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":"wardby-run-egress","namespace":"wardby-coding"},
-"spec":{"podSelector":{"matchLabels":{"wardby.io/component":"coding-run"}},"policyTypes":["Egress"],
-"egress":[{"to":[{"podSelector":{"matchLabels":{"app.kubernetes.io/name":"wardby-coding-proxy"}}}],"ports":[{"protocol":"TCP","port":8080}]}]}}
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": { "name": "wardby-run-egress", "namespace": "wardby-coding" },
+  "spec": {
+    "podSelector": { "matchLabels": { "wardby.io/component": "coding-run" } },
+    "policyTypes": ["Egress"],
+    "egress": [
+      {
+        "to": [{ "podSelector": { "matchLabels": { "app.kubernetes.io/name": "wardby-coding-proxy" } } }],
+        "ports": [{ "protocol": "TCP", "port": 8080 }]
+      }
+    ]
+  }
+}
