@@ -31,6 +31,7 @@ import { DEFAULT_KNOWLEDGE_BUNDLE_PATH } from "../knowledge/concept.js";
 import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
+import { CONTENDED_TX_MAX_WAIT_MS } from "./timing.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
 
 const dispatchLog = logger.child({ module: "dispatch" });
@@ -189,6 +190,16 @@ export function isSerializationConflict(err: unknown): boolean {
 }
 
 /**
+ * Prisma's interactive-transaction error (P2028): no pooled connection within
+ * `maxWait` ("Unable to start a transaction in the given time"), or the
+ * transaction outlived its timeout. Either way nothing was committed, so the
+ * caller can retry or queue.
+ */
+export function isTransactionUnavailable(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && (err as { code?: unknown }).code === "P2028");
+}
+
+/**
  * Record an executor-level failure on a run that never reached a terminal
  * state itself. Deliberately idempotent: the same failure can arrive twice —
  * DbosExecutor.start() calls this when the workflow handle rejects, and
@@ -267,7 +278,8 @@ async function reserveCodingBudget(
 
 /**
  * Attempts for the persist transaction, and the jittered backoff between
- * them, for serialization failures and deadlocks.
+ * them, for serialization failures, deadlocks and transactions that could
+ * not start in time (P2028).
  *
  * @internal Exported only for the real-PostgreSQL tests.
  */
@@ -772,7 +784,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           : undefined;
         return { run, task };
       },
-      { isolationLevel: "Serializable" },
+      { isolationLevel: "Serializable", maxWait: CONTENDED_TX_MAX_WAIT_MS },
     );
 
   let persisted: DispatchRunResult | null = null;
@@ -781,7 +793,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       persisted = await persistOnce();
       break;
     } catch (err) {
-      if (!isSerializationConflict(err) || attempt === PERSIST_ATTEMPTS - 1) throw err;
+      const retryable = isSerializationConflict(err) || isTransactionUnavailable(err);
+      if (!retryable || attempt === PERSIST_ATTEMPTS - 1) throw err;
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
     }
   }
