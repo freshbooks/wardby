@@ -3,11 +3,14 @@ import { resolve } from "node:path";
 import type { GitHubVcsConfig, ProviderConfig } from "../../config/providers.js";
 import { GitHubAppClient } from "./github.js";
 import { GitVcsProvider } from "./git.js";
+import { GitHubRemote } from "./github-remote.js";
 import type { VcsProvider } from "./types.js";
 
 export * from "./types.js";
 export { GitHubAppClient } from "./github.js";
 export { GitVcsProvider, NodeGitCommandRunner } from "./git.js";
+export { GitHubRemote } from "./github-remote.js";
+export type { GitRemote, PublishInput, PublishResult } from "./remote.js";
 
 export function buildVcsProvider(providerConfig: Pick<ProviderConfig, "vcs">, config: GitHubVcsConfig): VcsProvider {
   if (providerConfig.vcs !== "github") throw new Error(`VCS_PROVIDER=${String(providerConfig.vcs)} is not supported.`);
@@ -22,7 +25,7 @@ export function buildVcsProvider(providerConfig: Pick<ProviderConfig, "vcs">, co
   });
   return new GitVcsProvider({
     rootDir,
-    github,
+    remote: new GitHubRemote({ github }),
     maxChangedFiles: config.maxChangedFiles,
     maxDiffBytes: config.maxDiffBytes,
   });

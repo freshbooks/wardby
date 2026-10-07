@@ -12,7 +12,6 @@ import {
 } from "../../coding/protected-paths.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { globRegex } from "../../core/glob.js";
-import { logger } from "../../core/logger.js";
 import type { Writable } from "node:stream";
 import {
   MAX_REDACTED_SPAN,
@@ -20,14 +19,8 @@ import {
   normalizeGitHubRepository,
   normalizeGitRef,
 } from "../../coding/protocol.js";
-import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
-import {
-  isLockfilePath,
-  isSafeGitHubInstallationToken,
-  type GitHubRepositoryAccess,
-  type PullRequestResult,
-  type RepositoryFileInput,
-} from "./github.js";
+import { isSafeGitHubInstallationToken, type RepositoryFileInput } from "./github.js";
+import type { GitRemote } from "./remote.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -203,18 +196,12 @@ export class NodeGitCommandRunner implements GitCommandRunner {
 
 export interface GitVcsProviderOptions {
   rootDir: string;
-  github: GitHubRepositoryAccess;
+  /** Where repositories are cloned from and pushed to (GitHubRemote in production). */
+  remote: GitRemote;
   git?: GitCommandRunner;
   maxChangedFiles?: number;
   maxDiffBytes?: number;
-  /** Test-only transport override; production composition always uses github.com. */
-  cloneUrlForRepository?: (repository: string) => string;
-  /** Test-only delay override for assertContinuationOpen's single retry wait. */
-  sleep?: (milliseconds: number) => Promise<void>;
 }
-
-/** How long assertContinuationOpen waits before its single retry on a transient open-PR check failure. */
-const CONTINUATION_OPEN_RETRY_DELAY_MS = 1_000;
 
 /** Validates one protectedPaths entry; a leading "!" makes it an exception (see protectedPathMatcher). */
 function validateProtectedPath(value: string): string {
@@ -254,7 +241,7 @@ export function protectedPathMatcher(patterns: readonly string[]): (path: string
   };
 }
 
-function validateChangedPath(path: string): string {
+export function validateChangedPath(path: string): string {
   if (
     !path ||
     isAbsolute(path) ||
@@ -276,20 +263,14 @@ function directChild(root: string, child: string): boolean {
   return child.startsWith(`${root}${sep}`) && !child.slice(root.length + 1).includes(sep);
 }
 
-/** Human-readable label for continuation status notifications -- falls back to the opaque run id alone when no agent name is known. */
-function runLabel(agentName: string | undefined, runId: string): string {
-  return agentName ? `${agentName} (wardby run ${runId})` : `wardby run ${runId}`;
-}
-
 export class GitVcsProvider implements VcsProvider {
   private readonly rootDir: string;
   private readonly git: GitCommandRunner;
   private readonly maxChangedFiles: number;
   private readonly maxDiffBytes: number;
-  private readonly cloneUrlForRepository: (repository: string) => string;
-  private readonly sleep: (milliseconds: number) => Promise<void>;
+  private readonly remote: GitRemote;
 
-  constructor(private readonly options: GitVcsProviderOptions) {
+  constructor(options: GitVcsProviderOptions) {
     this.rootDir = resolve(options.rootDir);
     if (this.rootDir === resolve("/")) throw new Error("vcs_root_invalid");
     this.git = options.git ?? new NodeGitCommandRunner({ homeDir: resolve(this.rootDir, ".home") });
@@ -303,15 +284,12 @@ export class GitVcsProvider implements VcsProvider {
     ) {
       throw new Error("vcs_limits_invalid");
     }
-    this.cloneUrlForRepository =
-      options.cloneUrlForRepository ?? ((repository) => `https://github.com/${repository}.git`);
-    this.sleep =
-      options.sleep ?? ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
+    this.remote = options.remote;
   }
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
     const normalized = this.validateInput(input);
-    await this.assertContinuationOpen(normalized);
+    await this.remote.assertContinuationOpen(normalized);
     await ensurePrivateDirectory(this.rootDir);
     await mkdir(resolve(this.rootDir, ".home"), { recursive: true, mode: 0o700 });
     const runRoot = resolve(this.rootDir, normalized.runId);
@@ -324,10 +302,9 @@ export class GitVcsProvider implements VcsProvider {
     }
     const workspacePath = resolve(runRoot, "workspace");
     const gitMetadataPath = resolve(runRoot, "git");
-    const cloneUrl = this.cloneUrlForRepository(normalized.repository);
-    if (!this.options.cloneUrlForRepository && cloneUrl !== `https://github.com/${normalized.repository}.git`) {
-      throw new Error("vcs_remote_invalid");
-    }
+    // The remote validates its own URL (GitHubRemote: vcs_remote_invalid
+    // unless it is exactly github.com's, outside the test-only override).
+    const cloneUrl = this.remote.cloneUrl(normalized.repository);
     // Revision-in-place: a continuation clones the EXISTING headRef branch
     // directly (its current tip becomes baseCommit below) instead of
     // baseRef -- everything after this line (branch/checkout/reset, and
@@ -337,10 +314,11 @@ export class GitVcsProvider implements VcsProvider {
     const cloneBranch = normalized.continuation ? normalized.headRef : normalized.baseRef;
 
     try {
-      await this.options.github.withRepositoryToken(normalized.repository, async (token) => {
+      await this.remote.withAccess(normalized.repository, async (token) => {
         await this.git.run(
           [
             ...HARDENED_GIT_CONFIG,
+            ...this.remote.gitConfig,
             "clone",
             "--no-checkout",
             "--single-branch",
@@ -358,7 +336,7 @@ export class GitVcsProvider implements VcsProvider {
             cloneUrl,
             workspacePath,
           ],
-          { cwd: runRoot, authToken: token },
+          { cwd: runRoot, ...(token !== undefined ? { authToken: token } : {}) },
         );
       });
       await rm(resolve(workspacePath, ".git"), { force: true });
@@ -521,31 +499,10 @@ export class GitVcsProvider implements VcsProvider {
       commitSha = currentHead;
     }
 
-    await this.assertContinuationOpen(prepared);
+    await this.remote.assertContinuationOpen(prepared);
     await this.pushOnce(prepared, commitSha);
-    // Revision-in-place: identify the PR by the run that originally opened
-    // it (createOrFindDraftPullRequest's marker-based lookup keys on that
-    // run's id), not this run's own -- this finds the existing open PR and
-    // returns it rather than creating a new one, since headRef/baseRef
-    // already match it exactly. No other change needed here: pushing a new
-    // commit onto that branch already updates the PR natively -- which is
-    // also why a PR a person has since marked ready for review is accepted
-    // (acceptReadyForReview) rather than failing an already-pushed run.
-    const pullRequest = await this.options.github.createOrFindDraftPullRequest({
-      runId: prepared.continuation?.rootRunId ?? prepared.runId,
-      ...(prepared.continuation ? { acceptReadyForReview: true } : {}),
-      repository: prepared.repository,
-      baseRef: prepared.baseRef,
-      headRef: prepared.headRef,
-      summary: details?.summary,
-      tests: details?.tests,
-      tag: details?.tag,
-      packages: details?.packages,
-      packageRefusals: details?.packageRefusals,
-      changedLockfiles: changed.filter(isLockfilePath),
-      ...(details?.issue ? { issue: details.issue } : {}),
-      ...(details?.related ? { related: details.related } : {}),
-    });
+    const published = await this.remote.publish({ workspace: prepared, details, changedPaths: changed });
+    if (published.kind !== "pull_request") throw new Error("vcs_publish_kind_unsupported");
     return {
       outcome: prepared.continuation ? "pull_request_updated" : "pull_request_opened",
       repository: prepared.repository,
@@ -553,8 +510,8 @@ export class GitVcsProvider implements VcsProvider {
       baseCommit: prepared.baseCommit,
       headRef: prepared.headRef,
       commitSha,
-      pullRequestNumber: pullRequest.number,
-      pullRequestUrl: pullRequest.url,
+      pullRequestNumber: published.number,
+      pullRequestUrl: published.url,
     };
   }
 
@@ -571,99 +528,34 @@ export class GitVcsProvider implements VcsProvider {
   }
 
   /**
-   * Best-effort "wardby is working on this PR" signal (see VcsProvider) --
-   * whole body wrapped so this can NEVER throw or otherwise affect the
-   * real coding run, mirroring docker.ts's readWorkerFailureDiagnostic
-   * ("diagnostics are optional and must never affect terminal cleanup").
-   * No-op for a fresh (non-continuation) workspace: there's no PR to
-   * attach anything to until its one commit lands.
+   * Best-effort "wardby is working on this PR" signal (see VcsProvider),
+   * delegated to the remote; a remote without one is a no-op. Wrapped so
+   * this can NEVER throw or otherwise affect the real coding run.
    */
   async notifyContinuationStarted(workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
-    if (!workspace.continuation) return;
     try {
-      const identity = {
-        runId: workspace.runId,
-        rootRunId: workspace.continuation.rootRunId,
-        repository: workspace.repository,
-        baseRef: workspace.baseRef,
-        headRef: workspace.headRef,
-      };
-      await Promise.allSettled([
-        this.options.github.upsertContinuationStatusComment({
-          ...identity,
-          body: `🔄 ${runLabel(details?.agentName, workspace.runId)} is working on this PR...`,
-        }),
-        this.options.github.createContinuationCheckRun({
-          repository: workspace.repository,
-          headSha: workspace.baseCommit,
-          runId: workspace.runId,
-        }),
-      ]);
+      await this.remote.notifyContinuationStarted?.(workspace, details);
     } catch {
       // Best-effort observability only -- must never affect the real run.
     }
   }
 
-  /**
-   * Companion to notifyContinuationStarted -- finds and updates whatever
-   * that call created, never creates fresh state itself (see
-   * upsertContinuationStatusComment vs updateContinuationStatusComment,
-   * and createContinuationCheckRun vs completeContinuationCheckRun in
-   * github.ts). Safe to call more than once for the same run. Same
-   * never-throw contract as notifyContinuationStarted.
-   */
+  /** Companion to notifyContinuationStarted, delegated to the remote under the same never-throw contract. */
   async notifyContinuationFinished(
     workspace: PreparedWorkspace,
     outcome: ContinuationOutcome,
     details?: ContinuationFinishedDetails,
   ): Promise<void> {
-    if (!workspace.continuation) return;
     try {
-      const identity = {
-        runId: workspace.runId,
-        rootRunId: workspace.continuation.rootRunId,
-        repository: workspace.repository,
-        baseRef: workspace.baseRef,
-        headRef: workspace.headRef,
-      };
-      const label = runLabel(details?.agentName, workspace.runId);
-      const summarySuffix = details?.summary ? `\n\n${details.summary}` : "";
-      const budgetSuffix = details?.budgetSentence ? ` ${details.budgetSentence}` : "";
-      const body =
-        outcome === "succeeded"
-          ? `✅ ${label} finished.${summarySuffix}`
-          : outcome === "budget_exhausted"
-            ? `❌ ${label} ran out of budget.${budgetSuffix}${summarySuffix}`
-            : details?.serviceSentence
-              ? `❌ ${label} could not start: ${details.serviceSentence}${summarySuffix}`
-              : details?.providerSentence
-                ? `❌ ${label} could not run: ${details.providerSentence}${summarySuffix}`
-                : details?.protectedPathSentence
-                  ? `❌ ${label} could not open its changes: ${details.protectedPathSentence}${summarySuffix}`
-                  : `❌ ${label} failed.${summarySuffix}`;
-      await Promise.allSettled([
-        this.options.github.updateContinuationStatusComment({ ...identity, body }),
-        this.options.github.completeContinuationCheckRun({
-          repository: workspace.repository,
-          headSha: workspace.baseCommit,
-          runId: workspace.runId,
-          outcome: outcome === "succeeded" ? "succeeded" : "failed",
-        }),
-      ]);
+      await this.remote.notifyContinuationFinished?.(workspace, outcome, details);
     } catch {
       // Best-effort observability only -- must never affect the real run.
     }
   }
 
   async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {
-    const github = this.options.github;
-    if (!github.readFileAtRef) throw new Error("vcs_read_file_unsupported");
-    return github.readFileAtRef({
-      repository: normalizeGitHubRepository(input.repository),
-      ref: normalizeGitRef(input.ref),
-      path: validateChangedPath(input.path),
-      maxBytes: input.maxBytes,
-    });
+    if (!this.remote.readRepositoryFile) throw new Error("vcs_read_file_unsupported");
+    return this.remote.readRepositoryFile(input);
   }
 
   private validateInput(
@@ -773,7 +665,7 @@ export class GitVcsProvider implements VcsProvider {
   }
 
   private async assertRemote(workspace: PreparedWorkspace): Promise<void> {
-    const expectedUrl = this.cloneUrlForRepository(workspace.repository);
+    const expectedUrl = this.remote.cloneUrl(workspace.repository);
     const remotes = (await this.gitFor(workspace, ["remote"])).stdout.trim().split("\n").filter(Boolean);
     const fetchUrls = (await this.gitFor(workspace, ["remote", "get-url", "--all", "origin"])).stdout
       .trim()
@@ -819,77 +711,36 @@ export class GitVcsProvider implements VcsProvider {
     }
   }
 
-  /**
-   * A continuation never pushes to a pull request that is no longer open.
-   * Fresh runs (no `continuation`) skip this, and so does a GitHub client
-   * that exposes no `findOpenPullRequest` (optional on GitHubRepositoryAccess).
-   *
-   * GitHub's answer is trusted only when it is definite: a found open PR
-   * proceeds normally, and a confirmed "no open PR" (a successful call that
-   * returns null) refuses outright with CONTINUATION_CLOSED_ERROR. A
-   * transient failure -- network error, 5xx, timeout, rate limit, anything
-   * that makes the call itself throw rather than answer -- is retried once;
-   * if it throws again, this proceeds as if the pull request were still
-   * open and logs a warning, rather than failing the run on an unconfirmed
-   * answer (especially not here, right before the push, after all the
-   * work is already done).
-   */
-  private async assertContinuationOpen(input: {
-    repository: string;
-    baseRef: string;
-    headRef: string;
-    continuation?: { rootRunId: string };
-  }): Promise<void> {
-    if (!input.continuation || !this.options.github.findOpenPullRequest) return;
-    const request = {
-      runId: input.continuation.rootRunId,
-      repository: input.repository,
-      baseRef: input.baseRef,
-      headRef: input.headRef,
-    };
-    let open: PullRequestResult | null;
-    try {
-      open = await this.options.github.findOpenPullRequest(request);
-    } catch {
-      await this.sleep(CONTINUATION_OPEN_RETRY_DELAY_MS);
-      try {
-        open = await this.options.github.findOpenPullRequest(request);
-      } catch (error) {
-        logger.warn(
-          { err: error, runId: request.runId, repository: request.repository },
-          "continuation open-PR check failed twice in a row; proceeding as if the pull request is still open",
-        );
-        return;
-      }
-    }
-    if (!open) throw new Error(CONTINUATION_CLOSED_ERROR);
-  }
-
   private async pushOnce(workspace: PreparedWorkspace, commitSha: string): Promise<void> {
-    await this.options.github.withRepositoryToken(workspace.repository, async (token) => {
-      const remote = await this.remoteHead(workspace, token);
+    await this.remote.withAccess(workspace.repository, async (token) => {
+      const auth = token !== undefined ? { authToken: token } : {};
+      const remote = await this.remoteHead(workspace, auth);
       if (remote === commitSha) return;
       // A continuation's remote branch legitimately already sits at
       // baseCommit (that's the tip we cloned and committed on top of) --
       // that's the expected fast-forward pre-push state, not a conflict.
       // Any OTHER non-null value means something else moved the branch
       // since we cloned (a human push, a race), which is a real conflict.
-      if (remote && remote !== workspace.baseCommit) throw new Error("vcs_head_ref_conflict");
+      if (remote && remote !== workspace.baseCommit) throw this.remote.conflictError();
       try {
-        await this.gitFor(workspace, ["push", "origin", `${commitSha}:refs/heads/${workspace.headRef}`], {
-          authToken: token,
-        });
+        await this.gitFor(
+          workspace,
+          [...this.remote.gitConfig, "push", "origin", `${commitSha}:refs/heads/${workspace.headRef}`],
+          auth,
+        );
       } catch (error) {
-        if ((await this.remoteHead(workspace, token)) === commitSha) return;
+        if ((await this.remoteHead(workspace, auth)) === commitSha) return;
         throw error;
       }
     });
   }
 
-  private async remoteHead(workspace: PreparedWorkspace, token: string): Promise<string | null> {
-    const result = await this.gitFor(workspace, ["ls-remote", "--heads", "origin", `refs/heads/${workspace.headRef}`], {
-      authToken: token,
-    });
+  private async remoteHead(workspace: PreparedWorkspace, auth: { authToken?: string }): Promise<string | null> {
+    const result = await this.gitFor(
+      workspace,
+      [...this.remote.gitConfig, "ls-remote", "--heads", "origin", `refs/heads/${workspace.headRef}`],
+      auth,
+    );
     const line = result.stdout.trim();
     if (!line) return null;
     const [sha, ref, ...rest] = line.split(/\s+/);

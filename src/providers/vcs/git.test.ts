@@ -23,6 +23,7 @@ import {
   type GitCommandResult,
   type GitCommandRunner,
 } from "./git.js";
+import { GitHubRemote } from "./github-remote.js";
 import type { VcsPrepareInput } from "./types.js";
 import { collectExclusions, gitExcludePathspecs } from "../../coding/collect-exclude.js";
 
@@ -188,12 +189,14 @@ async function harness(overrides: Partial<ConstructorParameters<typeof GitVcsPro
   const sleeps: number[] = [];
   const provider = new GitVcsProvider({
     rootDir,
-    github,
+    remote: new GitHubRemote({
+      github,
+      // No-op by default: a test asserting the real retry delay overrides this.
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    }),
     git,
-    // No-op by default: a test asserting the real retry delay overrides this.
-    sleep: async (ms) => {
-      sleeps.push(ms);
-    },
     ...overrides,
   });
   const input: VcsPrepareInput = {
