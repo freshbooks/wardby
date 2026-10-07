@@ -9,7 +9,7 @@ import {
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
 } from "../coding/services/wording.js";
 import type { AttributionIntent } from "./attribution.js";
-import { dispatchRun, isSerializationConflict, type DispatchDb } from "./dispatch.js";
+import { dispatchRun, isSerializationConflict, isTransactionUnavailable, type DispatchDb } from "./dispatch.js";
 import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../providers/llm/catalog-store.js";
 import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
 import type { SelfDefectSink } from "./self-defects.js";
@@ -1381,6 +1381,23 @@ describe("isSerializationConflict", () => {
     ["another error carrying 40001", { name: "Error", cause: { originalCode: "40001" } }],
   ])("does not retry %s", (_label, err) => {
     expect(isSerializationConflict(err)).toBe(false);
+  });
+});
+
+describe("isTransactionUnavailable", () => {
+  it("recognises Prisma's transaction API error (P2028)", () => {
+    const err = Object.assign(new Error("Transaction API error: Unable to start a transaction in the given time."), {
+      code: "P2028",
+    });
+    expect(isTransactionUnavailable(err)).toBe(true);
+  });
+
+  it.each([
+    ["null", null],
+    ["a serialization failure", { code: "P2034" }],
+    ["a plain error", new Error("P2028")],
+  ])("is false for %s", (_label, err) => {
+    expect(isTransactionUnavailable(err)).toBe(false);
   });
 });
 
