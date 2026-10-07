@@ -153,4 +153,41 @@ suite("kind and out-of-cluster control planes", () => {
     });
     expect(m.controlPlane).toEqual({ inCluster: false, location: "wardby.internal:8443" });
   });
+
+  it("does not call mismatched node names kind", () => {
+    const withNodes = (...nodes: string[]) => clusterOf({ pod: nodes.map((n, i) => pod(`p${i}`, { node: n })) });
+    expect(platformOf(genericInfo, withNodes("prod-worker1"), {})).toBe("generic");
+    expect(platformOf(genericInfo, withNodes("k8s-control-plane", "node-a", "node-b"), {})).toBe("generic");
+    expect(platformOf(genericInfo, withNodes("a-control-plane", "b-worker"), {})).toBe("generic");
+    expect(platformOf(genericInfo, withNodes("dev-control-plane", "dev-worker", "dev-worker2"), {})).toBe("kind");
+  });
+
+  it("never reports kind on a gke-autopilot server", () => {
+    expect(platformOf(gkeInfo, kindCluster, { context: "kind-x" })).toBe("gke");
+  });
+
+  it("treats a kind- context as decisive on a generic server", () => {
+    expect(platformOf(genericInfo, genericCluster, { context: "kind-x" })).toBe("kind");
+  });
+
+  it("marks sandboxed pods and labels an unsandboxed coding run", () => {
+    expect(describe(gkeCluster, gkeInfo).groups.codingRuns[0].sandboxed).toBe(true);
+    const run = describe(kindCluster, kindInfo).groups.codingRuns[0];
+    expect(run.sandboxed).toBe(false);
+    expect(run.runtime).toBe("none (container runtime)");
+  });
+
+  it("handles a missing, invalid and IPv6 server URL", () => {
+    const loc = (serverUrl?: string) => describe(kindCluster, kindInfo, { serverUrl }).controlPlane;
+    expect(loc()).toEqual({ inCluster: false, location: null });
+    expect(loc("not a url")).toEqual({ inCluster: false, location: null });
+    expect(loc("http://[::1]:18080/mcp")).toEqual({ inCluster: false, location: "[::1]:18080" });
+  });
+
+  it("keeps the control plane in-cluster until pods have synced", () => {
+    const unsynced = { ...kindCluster, podsSynced: false };
+    expect(describe(unsynced, kindInfo, { serverUrl: "http://127.0.0.1:1/" }).controlPlane).toEqual({
+      inCluster: true,
+    });
+  });
 });

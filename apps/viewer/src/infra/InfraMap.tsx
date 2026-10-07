@@ -68,7 +68,7 @@ function Sandbox({
   onSelect: () => void;
   onOpenRun: (sha: string) => void;
 }) {
-  const label = `${pod.runtime && !pod.runtime.startsWith("none") ? pod.runtime : "Pod"} sandbox · ${pod.name}`;
+  const label = `${pod.sandboxed && pod.runtime ? pod.runtime : "Pod"} sandbox · ${pod.name}`;
   const sha = pod.runSha;
   return (
     <div className="map-sandbox" role="group" aria-label={label}>
@@ -135,8 +135,10 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
           <>
             <div className="map-card map-static map-flow">
               <span className="map-title">
-                {`Control plane · outside the cluster · ${model.controlPlane.location}`}
+                {`Control plane · outside the cluster${model.controlPlane.location ? ` · ${model.controlPlane.location}` : ""}`}
               </span>
+              <span className="map-arrow">▼ coding proxy</span>
+              <span className="map-arrow">▼ run zone</span>
             </div>
             {model.edge.length === 0 && (
               <div className="map-card map-static">

@@ -107,6 +107,13 @@ describe("InfraMap", () => {
     expect(screen.getByText("Control plane · outside the cluster · 127.0.0.1:18080")).toBeInTheDocument();
     expect(screen.getByText("Local — no ingress")).toBeInTheDocument();
     expect(screen.queryByText("Internet")).not.toBeInTheDocument();
+    expect(screen.getByText("▼ coding proxy")).toBeInTheDocument();
+    expect(screen.getByText("▼ run zone")).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Pod sandbox · wardby-run-abc123" })).toBeInTheDocument();
+  });
+
+  it("hides the location when the server URL is unknown", () => {
+    renderMap(describeCluster(kindCluster, kindInfo));
+    expect(screen.getByText("Control plane · outside the cluster")).toBeInTheDocument();
   });
 });

@@ -59,7 +59,7 @@ export function InfraPanel({ pod, egressRules, context, namespace, onOpenRun, on
         )}
       </p>
       <dl className="infra-facts">
-        {pod.runtime && (
+        {pod.group === "coding_run" && pod.runtime && (
           <>
             <dt>Runtime</dt>
             <dd>{pod.runtime}</dd>

@@ -1231,3 +1231,12 @@ button:disabled {
     content: none;
   }
 }
+
+.infra-row-span .infra-cell {
+  grid-column: 1 / -1;
+}
+
+.map-arrow {
+  font-size: 0.7rem;
+  color: var(--muted);
+}

@@ -43,7 +43,9 @@ function Row({
         </span>
         <span className={`infra-cell status ${statusKind(pod)}`} role="cell">
           {pod.status}
-          {pod.runtime && <span className="muted"> · {pod.runtime}</span>}
+          {pod.group === "coding_run" && pod.sandboxed && pod.runtime && (
+            <span className="muted"> · {pod.runtime}</span>
+          )}
         </span>
         <span className="infra-cell" role="cell">
           {podUsage(pod)}
@@ -104,12 +106,10 @@ export function InfraTable({ model, selected, onSelect, onOpenRun, jobFinishedAt
           <div role="rowgroup">
             <h3 className="infra-group">OUTSIDE THE CLUSTER</h3>
             <div className="infra-row-wrap" role="row">
-              <div className="infra-row">
+              <div className="infra-row infra-row-span">
                 <span className="infra-cell pod-name" role="cell">
                   control-plane
-                </span>
-                <span className="infra-cell muted" role="cell">
-                  {model.controlPlane.location}
+                  {model.controlPlane.location && <span className="muted"> · {model.controlPlane.location}</span>}
                 </span>
               </div>
             </div>

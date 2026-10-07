@@ -27,7 +27,10 @@ export interface PodView {
   title: string;
   status: string;
   ready: boolean;
+  /** Runtime class label; for a coding run without a sandbox, "none (container runtime)". */
   runtime: string | null;
+  /** The pod runs in a sandbox runtime class (gVisor, Kata, ...). */
+  sandboxed: boolean;
   node: string | null;
   identity: string | null;
   containers: InfraContainer[];
@@ -41,7 +44,7 @@ export interface DataStoreView {
 }
 export interface InfraModel {
   platform: Platform;
-  controlPlane: { inCluster: true } | { inCluster: false; location: string };
+  controlPlane: { inCluster: true } | { inCluster: false; location: string | null };
   edge: EdgeView[];
   groups: { alwaysOn: PodView[]; codingRuns: PodView[]; jobs: PodView[] };
   isolation: { egressRules: string[]; sandbox: string | null };
@@ -128,14 +131,16 @@ const gkeDatabase = (alwaysOn: PodView[]): DataStoreView =>
     ? { label: "Cloud SQL", detail: ["via Auth Proxy", "IAM login"] }
     : genericDatabase();
 
+const GENERIC_RULES: PlatformRules = {
+  edge: genericEdge,
+  identity: (sa) => (sa ? `SA ${sa.name}` : null),
+  database: genericDatabase,
+  secrets: (stores) => (stores.length ? "External Secrets" : null),
+  sandbox: (rc) => rc,
+};
+
 const RULES: Record<Platform, PlatformRules> = {
-  generic: {
-    edge: genericEdge,
-    identity: (sa) => (sa ? `SA ${sa.name}` : null),
-    database: genericDatabase,
-    secrets: (stores) => (stores.length ? "External Secrets" : null),
-    sandbox: (rc) => rc,
-  },
+  generic: GENERIC_RULES,
   gke: {
     edge: gkeEdge,
     identity: gkeIdentity,
@@ -144,16 +149,27 @@ const RULES: Record<Platform, PlatformRules> = {
       stores.some((s) => s.provider === "gcpsm") ? "Secret Manager" : stores.length ? "External Secrets" : null,
     sandbox: (rc) => rc,
   },
-  kind: {
-    edge: genericEdge,
-    identity: (sa) => (sa ? `SA ${sa.name}` : null),
-    database: genericDatabase,
-    secrets: (stores) => (stores.length ? "External Secrets" : null),
-    sandbox: (rc) => rc ?? "none (container runtime)",
-  },
+  kind: { ...GENERIC_RULES, sandbox: (rc) => rc ?? "none (container runtime)" },
   // PR 3 adds EKS; platformOf never returns it until then.
   eks: undefined as never,
 };
+
+const KIND_NODE = /^(.+)-(control-plane|worker\d*)$/;
+
+/** kind names every node `<cluster>-control-plane` / `<cluster>-worker[N]`, all with one cluster prefix. */
+function looksLikeKindNodes(cluster: ClusterState): boolean {
+  const nodes = new Set<string>();
+  for (const p of cluster.objects.pod.values()) if (p.node) nodes.add(p.node);
+  const prefixes = new Set<string>();
+  let control = false;
+  for (const n of nodes) {
+    const m = KIND_NODE.exec(n);
+    if (!m) return false;
+    prefixes.add(m[1]);
+    if (m[2] === "control-plane") control = true;
+  }
+  return control && prefixes.size === 1;
+}
 
 export function platformOf(info: InfraInfo, cluster: ClusterState, opts: DescribeOpts = {}): Platform {
   // The server reports "generic" or "gke-autopilot"; other GKE (Standard) is detected only via the SA fallback below.
@@ -161,19 +177,17 @@ export function platformOf(info: InfraInfo, cluster: ClusterState, opts: Describ
   for (const sa of cluster.objects.service_account.values()) {
     if ("iam.gke.io/gcp-service-account" in sa.identity) return "gke";
   }
+  if (info.kubernetes?.platform !== "generic") return "generic";
   if (opts.context?.startsWith("kind-")) return "kind";
-  for (const p of cluster.objects.pod.values()) {
-    if (p.node && (p.node.endsWith("-control-plane") || /-worker\d*$/.test(p.node))) return "kind";
-  }
-  return "generic";
+  return looksLikeKindNodes(cluster) ? "kind" : "generic";
 }
 
-function hostPort(url: string | undefined): string {
-  if (!url) return "unknown";
+function hostPort(url: string | undefined): string | null {
+  if (!url) return null;
   try {
-    return new URL(url).host || url;
+    return new URL(url).host || null;
   } catch {
-    return url;
+    return null;
   }
 }
 
@@ -219,7 +233,8 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
       title,
       status: podStatus(p),
       ready: p.ready,
-      runtime: rules.sandbox(runtimeName(p.runtimeClass)),
+      runtime: group === "coding_run" ? rules.sandbox(runtimeName(p.runtimeClass)) : runtimeName(p.runtimeClass),
+      sandboxed: p.runtimeClass !== null,
       node: p.node,
       identity: rules.identity(sa),
       containers: p.containers,
@@ -267,9 +282,10 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
 
   return {
     platform,
-    controlPlane: alwaysOn.some((p) => p.title === "control-plane")
-      ? { inCluster: true }
-      : { inCluster: false, location: hostPort(opts.serverUrl) },
+    controlPlane:
+      alwaysOn.some((p) => p.title === "control-plane") || !cluster.podsSynced // unknown until the pod snapshot arrives
+        ? { inCluster: true }
+        : { inCluster: false, location: hostPort(opts.serverUrl) },
     edge: edges.map(rules.edge),
     groups: { alwaysOn, codingRuns, jobs },
     isolation: { egressRules, sandbox: rules.sandbox(runtimeName(k8s?.runtimeClass ?? null)) },

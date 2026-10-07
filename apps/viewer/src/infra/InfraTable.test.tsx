@@ -78,7 +78,11 @@ describe("InfraTable", () => {
     const kind = describeCluster(kindCluster, kindInfo, { serverUrl: "http://127.0.0.1:18080/mcp" });
     render(<InfraTable model={kind} selected={null} onSelect={vi.fn()} onOpenRun={vi.fn()} />);
     expect(screen.getByText("OUTSIDE THE CLUSTER")).toBeInTheDocument();
-    expect(screen.getByText("127.0.0.1:18080")).toBeInTheDocument();
-    expect(screen.queryByText("OUTSIDE THE CLUSTER")).toBeInTheDocument();
+    expect(screen.getByText(/127\.0\.0\.1:18080/)).toBeInTheDocument();
+  });
+
+  it("has no OUTSIDE THE CLUSTER group on GKE", () => {
+    render(<InfraTable model={model} selected={null} onSelect={vi.fn()} onOpenRun={vi.fn()} />);
+    expect(screen.queryByText("OUTSIDE THE CLUSTER")).not.toBeInTheDocument();
   });
 });
