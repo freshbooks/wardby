@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAppError, listServers, removeServer, signOut, type AppError, type ServerSummary } from "./api/client";
 import { BottomBar } from "./chrome/BottomBar";
 import { ConfirmDialog } from "./chrome/ConfirmDialog";
@@ -9,6 +9,7 @@ import { ServerMenu } from "./chrome/ServerMenu";
 import { SignInGate } from "./chrome/SignInGate";
 import { TopBar, type InfraBar, type Tab } from "./chrome/TopBar";
 import { InfraScreen } from "./infra/InfraScreen";
+import { runSha } from "./infra/runSha";
 import { windowSpend } from "./format/spend";
 import { FlowCanvas } from "./graph/FlowCanvas";
 import type { RunFocus } from "./graph/selection";
@@ -46,6 +47,8 @@ function Dashboard({
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const viewer = useViewer(server.url, { since: filters.window, limit: GRAPH_LIMIT });
   const { model } = viewer;
+  // A run whose pod the Infrastructure tab should select (by the run's sha).
+  const [pendingRunSha, setPendingRunSha] = useState<string | null>(null);
   const selectedRun = selectedRunId ? model.runs.get(selectedRunId) : undefined;
 
   // A clicked trigger or outcome: highlighted in the panel of the run it belongs to.
@@ -60,6 +63,24 @@ function Dashboard({
   const selectPanel = useCallback((id: string | null) => {
     setFocus(null);
     setSelectedRunId(id);
+  }, []);
+
+  const openPod = useCallback((runId: string) => {
+    void runSha(runId).then((sha) => {
+      setPendingRunSha(sha);
+      setTab("infra");
+    });
+  }, []);
+  const clearPendingRunSha = useCallback(() => setPendingRunSha(null), []);
+  // Pod -> run beyond the window: widen to 7d (the caller waits for the reload).
+  const windowRef = useRef(filters.window);
+  useEffect(() => {
+    windowRef.current = filters.window;
+  });
+  const widenWindow = useCallback(() => {
+    if (windowRef.current === "7d") return false;
+    setFilters((f) => changeFilters(f, { ...f, window: "7d" }));
+    return true;
   }, []);
 
   const runs = useMemo(() => [...model.runs.values()], [model.runs]);
@@ -127,6 +148,9 @@ function Dashboard({
             selectPanel(id);
           }}
           onRetry={() => setInfraEpoch((n) => n + 1)}
+          pendingRunSha={pendingRunSha}
+          onPendingRunSha={clearPendingRunSha}
+          widenWindow={widenWindow}
         />
       </div>
     );
@@ -181,6 +205,7 @@ function Dashboard({
                     runs={model.runs}
                     focus={focus}
                     onSelect={selectPanel}
+                    onOpenPod={openPod}
                   />
                 )}
               </div>

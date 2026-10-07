@@ -267,3 +267,32 @@ describe("DetailPanel", () => {
     btn.remove();
   });
 });
+
+describe("DetailPanel pod link", () => {
+  it("shows Pod for coding runs and calls onOpenPod with the run id", () => {
+    api.fetchRun.mockResolvedValue(makeDetail());
+    const onOpenPod = vi.fn();
+    render(
+      <DetailPanel serverUrl="https://w" run={makeRun()} runs={new Map()} onSelect={vi.fn()} onOpenPod={onOpenPod} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Pod/ }));
+    expect(onOpenPod).toHaveBeenCalledWith("run_abcdef123456");
+  });
+
+  it("hides Pod for non-coding runs and without a handler", () => {
+    api.fetchRun.mockResolvedValue(makeDetail());
+    const { unmount } = render(
+      <DetailPanel
+        serverUrl="https://w"
+        run={makeRun({ agentKind: "native" })}
+        runs={new Map()}
+        onSelect={vi.fn()}
+        onOpenPod={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /Pod/ })).not.toBeInTheDocument();
+    unmount();
+    render(<DetailPanel serverUrl="https://w" run={makeRun()} runs={new Map()} onSelect={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /Pod/ })).not.toBeInTheDocument();
+  });
+});
