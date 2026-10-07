@@ -160,7 +160,8 @@ suite("describe", () => {
       ],
     });
     const m = describe(c, genericInfo);
-    expect(m.totals).toMatchObject({ pods: 2, codingRuns: 1, readyContainers: 3, cpuMillis: 2500, memoryMiB: 4608 });
+    // Like kubectl's READY, the one-shot init container counts toward neither readiness nor requests.
+    expect(m.totals).toMatchObject({ pods: 2, codingRuns: 1, readyContainers: 2, cpuMillis: 2500, memoryMiB: 4608 });
   });
 
   it("platformOf never returns eks", () => {

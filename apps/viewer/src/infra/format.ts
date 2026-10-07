@@ -1,5 +1,5 @@
 import type { InfraInfo } from "../api/types";
-import { parseCpu, parseMemory, type Platform, type PodView } from "./adapter";
+import { countsTowardReady, parseCpu, parseMemory, type Platform, type PodView } from "./adapter";
 
 export function platformLabel(platform: Platform, info: InfraInfo | null): string {
   if (platform === "gke") return info?.kubernetes?.platform === "gke-autopilot" ? "GKE Autopilot" : "GKE";
@@ -38,10 +38,12 @@ export function resources(r: { cpu: string | null; memory: string | null }): str
 
 export type DotKind = "ok" | "warn" | "bad" | "idle";
 export function containerDot(
-  c: { ready: boolean; state: string; reason: string | null },
+  c: { ready: boolean; state: string; reason: string | null; role?: string },
   /** A terminating pod's containers are shutting down, which is not a problem. */
   terminating = false,
 ): DotKind {
+  // A finished setup step is done, not "ready".
+  if (c.role === "init" && c.state === "terminated" && c.reason === "Completed") return "idle";
   if (c.ready) return "ok";
   if (terminating) return "idle";
   if (c.state === "terminated") return c.reason === "Completed" ? "idle" : "bad";
@@ -62,5 +64,6 @@ export function podReadiness(p: PodView): { text: string; className: string } {
   if (p.terminating) return { text: "Terminating", className: "muted" };
   if (p.phase === "Succeeded") return { text: "Completed", className: "muted" };
   if (p.phase === "Failed") return { text: "Failed", className: "status bad" };
-  return { text: `${p.containers.filter((c) => c.ready).length}/${p.containers.length}`, className: "muted" };
+  const counted = p.containers.filter(countsTowardReady);
+  return { text: `${counted.filter((c) => c.ready).length}/${counted.length}`, className: "muted" };
 }

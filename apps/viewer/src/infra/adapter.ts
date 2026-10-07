@@ -12,6 +12,11 @@ import type {
   KindItem,
 } from "./types";
 
+/** Like kubectl's READY: one-shot init containers are setup steps, not part of the count. */
+export function countsTowardReady(c: { role: string }): boolean {
+  return c.role !== "init";
+}
+
 export type Platform = "gke" | "eks" | "kind" | "generic";
 
 export interface DescribeOpts {
@@ -367,7 +372,7 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
     totals: {
       pods: all.length,
       codingRuns: codingRuns.length,
-      readyContainers: all.reduce((s, p) => s + p.containers.filter((c) => c.ready).length, 0),
+      readyContainers: all.reduce((s, p) => s + p.containers.filter((c) => c.ready && countsTowardReady(c)).length, 0),
       cpuMillis: all.reduce((s, p) => s + p.requests.cpuMillis, 0),
       memoryMiB: all.reduce((s, p) => s + p.requests.memoryMiB, 0),
     },
