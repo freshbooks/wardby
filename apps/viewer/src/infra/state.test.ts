@@ -12,6 +12,7 @@ const pod = (name: string, phase = "Running"): InfraPod => ({
   serviceAccount: null,
   startedAt: null,
   ready: true,
+  terminating: false,
   containers: [],
 });
 const apply = (frames: ClusterFrame[]) => frames.reduce(reduceCluster, initialCluster);

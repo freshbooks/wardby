@@ -125,6 +125,9 @@ rules:
   - apiGroups: [gateway.networking.k8s.io]
     resources: [gateways, httproutes]
     verbs: [get, list, watch]
+  - apiGroups: [networking.gke.io] # GKE only: shows Cloud Armor on the Gateway
+    resources: [gcpbackendpolicies]
+    verbs: [get, list, watch]
   - apiGroups: [external-secrets.io]
     resources: [secretstores, externalsecrets]
     verbs: [get, list, watch]
@@ -144,7 +147,9 @@ Replace `wardby-coding` with the namespace where your coding runs execute, and
 it; on GKE and EKS it is usually your cloud account's email or IAM identity).
 For any resource you can't list, the tab names it: without `pods` the message
 replaces the view, and for any other resource it appears above what the tab
-could read. Without `secrets`, Secret names show as hidden instead.
+could read. Without `secrets`, Secret names show as hidden instead. The `networking.gke.io`
+rule applies to GKE only, and is optional: without it the tab just omits the
+Cloud Armor detail.
 
 The Role deliberately omits `secrets`, because Kubernetes RBAC cannot restrict
 access to individual Secret names; Secret names appear as hidden in the

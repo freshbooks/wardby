@@ -10,6 +10,7 @@ export type ClusterKind =
   | "ingress"
   | "gateway"
   | "http_route"
+  | "backend_policy"
   | "secret_store"
   | "external_secret"
   | "secret";
@@ -24,6 +25,7 @@ export const CLUSTER_KINDS: readonly ClusterKind[] = [
   "ingress",
   "gateway",
   "http_route",
+  "backend_policy",
   "secret_store",
   "external_secret",
   "secret",
@@ -92,6 +94,8 @@ export interface InfraPod {
   serviceAccount: string | null;
   startedAt: string | null;
   ready: boolean;
+  /** The pod has a deletion timestamp: it is shutting down. */
+  terminating: boolean;
   containers: InfraContainer[];
 }
 export interface InfraDeployment {
@@ -115,6 +119,19 @@ export interface InfraEdge {
   class: string | null;
   hosts: string[];
   annotations: Record<string, string>;
+  /** An HTTPRoute whose rules only redirect (no backends). */
+  redirectOnly: boolean;
+  redirectScheme: string | null;
+  /** Service names an HTTPRoute sends traffic to. */
+  backends: string[];
+}
+
+/** A GKE GCPBackendPolicy: what it targets and its Cloud Armor policy. */
+export interface InfraBackendPolicy {
+  name: string;
+  targetKind: string | null;
+  targetName: string | null;
+  securityPolicy: string | null;
 }
 export interface InfraService {
   name: string;
@@ -131,6 +148,9 @@ export interface InfraNetworkPolicy {
   name: string;
   podSelector: Record<string, string>;
   policyTypes: string[];
+  /** The pod selector is empty, so the policy selects every pod. */
+  selectsAll: boolean;
+  ingressRules: number;
   egress: string[];
 }
 export interface InfraSecretStore {
@@ -162,6 +182,7 @@ export interface KindItems {
   ingress: InfraEdge;
   gateway: InfraEdge;
   http_route: InfraEdge;
+  backend_policy: InfraBackendPolicy;
   secret_store: InfraSecretStore;
   external_secret: InfraExternalSecret;
   secret: InfraSecretName;

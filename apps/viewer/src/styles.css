@@ -131,6 +131,27 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+/* The infra row never wraps: the context picker shrinks (with an ellipsis) instead. */
+.infra-row {
+  flex-wrap: nowrap;
+}
+
+.infra-status {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.kube-context {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.kube-context select {
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
 .brand {
   font-weight: 700;
 }
@@ -1083,6 +1104,10 @@ button:disabled {
 
 .status.bad {
   color: var(--bad);
+}
+
+.status.idle {
+  color: var(--muted);
 }
 
 .infra-facts {

@@ -159,4 +159,15 @@ describe("InfraView", () => {
     expect(screen.getByText("Internet")).toBeInTheDocument();
     expect(screen.queryByText("ALWAYS ON")).not.toBeInTheDocument();
   });
+
+  it("stays quiet about a GCPBackendPolicy the Role cannot list, since it is optional", () => {
+    renderView(
+      withErrors({
+        backend_policy: { kind: "forbidden", resource: "gcpbackendpolicies" },
+        job: { kind: "forbidden", resource: "jobs" },
+      }),
+    );
+    expect(screen.queryByText(/gcpbackendpolicies/)).not.toBeInTheDocument();
+    expect(screen.getByText(/can't list jobs/)).toBeInTheDocument();
+  });
 });

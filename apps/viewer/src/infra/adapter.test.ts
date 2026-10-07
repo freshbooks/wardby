@@ -12,6 +12,35 @@ import {
   pod,
   twoRunsCluster,
 } from "./fixtures";
+import type { InfraBackendPolicy, InfraEdge, InfraNetworkPolicy } from "./types";
+
+const route = (over: Partial<InfraEdge> = {}): InfraEdge => ({
+  kind: "httproute",
+  name: "r",
+  class: null,
+  hosts: ["app.example.com"],
+  annotations: {},
+  redirectOnly: false,
+  redirectScheme: null,
+  backends: ["web"],
+  ...over,
+});
+const policy = (over: Partial<InfraBackendPolicy> = {}): InfraBackendPolicy => ({
+  name: "p",
+  targetKind: "Gateway",
+  targetName: "wardby-gateway",
+  securityPolicy: "armor-1",
+  ...over,
+});
+const netpol = (over: Partial<InfraNetworkPolicy> = {}): InfraNetworkPolicy => ({
+  name: "np",
+  podSelector: {},
+  policyTypes: ["Ingress", "Egress"],
+  selectsAll: true,
+  ingressRules: 0,
+  egress: [],
+  ...over,
+});
 
 suite("describe", () => {
   it("labels a GKE footprint", () => {
@@ -47,7 +76,16 @@ suite("describe", () => {
           name: "lb",
           serviceType: "LoadBalancer",
           ports: ["80/TCP"],
-          edge: { kind: "loadbalancer", name: "lb", class: null, hosts: ["203.0.113.1"], annotations: {} },
+          edge: {
+            kind: "loadbalancer",
+            name: "lb",
+            class: null,
+            hosts: ["203.0.113.1"],
+            annotations: {},
+            redirectOnly: false,
+            redirectScheme: null,
+            backends: [],
+          },
         },
         { name: "internal", serviceType: "ClusterIP", ports: [], edge: null },
       ],
@@ -222,5 +260,83 @@ suite("kind and out-of-cluster control planes", () => {
     expect(describe(unsynced, kindInfo, { serverUrl: "http://127.0.0.1:1/" }).controlPlane).toEqual({
       inCluster: true,
     });
+  });
+
+  it("shows an HTTPRoute's hostnames, and names a redirect-only route", () => {
+    const c = clusterOf({
+      http_route: [
+        route({ name: "main" }),
+        route({ name: "redirect", redirectOnly: true, redirectScheme: "https", backends: [] }),
+        route({ name: "other-redirect", redirectOnly: true, redirectScheme: "http", backends: [] }),
+      ],
+    });
+    const edges = describe(c, genericInfo).edge;
+    expect(edges.map((e) => e.detail)).toEqual([["app.example.com"], ["HTTP → HTTPS redirect"], ["Redirect"]]);
+    expect(edges.every((e) => e.label === "HTTPRoute")).toBe(true);
+  });
+
+  it("adds Cloud Armor from a GCPBackendPolicy targeting the Gateway (GKE only)", () => {
+    const gw = { ...gkeCluster.objects.gateway.get("wardby-gateway")!, annotations: {} };
+    const c = clusterOf({ gateway: [gw], backend_policy: [policy()] });
+    expect(describe(c, gkeInfo).edge[0].detail).toEqual(["Cloud Armor armor-1", "TLS"]);
+    // A policy without a securityPolicy, or aimed at another target, adds nothing.
+    const none = clusterOf({
+      gateway: [gw],
+      backend_policy: [policy({ securityPolicy: null }), policy({ name: "q", targetName: "elsewhere" })],
+    });
+    expect(describe(none, gkeInfo).edge[0].detail).toEqual(["TLS"]);
+    // Other platforms ignore the CRD.
+    expect(describe(c, genericInfo).edge[0].detail).toEqual([]);
+  });
+
+  it("adds Cloud Armor to the HTTPRoute behind a Service that a policy targets", () => {
+    const c = clusterOf({
+      http_route: [route({ name: "main" }), route({ name: "other", backends: ["api"] })],
+      backend_policy: [policy({ targetKind: "Service", targetName: "web" })],
+    });
+    const [main, other] = describe(c, gkeInfo).edge;
+    expect(main.detail).toEqual(["app.example.com", "Cloud Armor armor-1"]);
+    expect(other.detail).toEqual(["app.example.com"]);
+  });
+
+  it("labels completed, failed and terminating pods", () => {
+    const owner = { kind: "ReplicaSet", name: "wardby-control-plane-1" };
+    const c = clusterOf({
+      pod: [
+        pod("wardby-control-plane-1-a", { owner, terminating: true, ready: false }),
+        pod("wardby-migrate-1", { owner: { kind: "Job", name: "wardby-migrate" }, phase: "Succeeded", ready: false }),
+        pod("wardby-migrate-2", { owner: { kind: "Job", name: "wardby-migrate2" }, phase: "Failed", ready: false }),
+      ],
+    });
+    const m = describe(c, genericInfo);
+    expect(m.groups.alwaysOn[0]).toMatchObject({ status: "Terminating", terminating: true });
+    expect(m.groups.jobs.map((p) => [p.status, p.phase])).toEqual([
+      ["Completed", "Succeeded"],
+      ["Failed", "Failed"],
+    ]);
+  });
+
+  it("summarizes NetworkPolicies and detects a default deny", () => {
+    const iso = (policies: InfraNetworkPolicy[]) =>
+      describe(clusterOf({ network_policy: policies }), genericInfo).isolation.policies;
+    expect(iso([])).toEqual({ count: 0, defaultDeny: false });
+    expect(iso([netpol()])).toEqual({ count: 1, defaultDeny: true });
+    expect(iso([netpol(), netpol({ name: "b", selectsAll: false, podSelector: { a: "b" } })])).toEqual({
+      count: 2,
+      defaultDeny: true,
+    });
+    // An empty selector that allows something is not a deny; neither is a labelled selector.
+    expect(iso([netpol({ ingressRules: 1 })]).defaultDeny).toBe(false);
+    expect(iso([netpol({ egress: ["any"] })]).defaultDeny).toBe(false);
+    expect(iso([netpol({ selectsAll: false, podSelector: { a: "b" } })]).defaultDeny).toBe(false);
+    // Unspecified policyTypes default to Ingress (plus Egress when it has egress rules).
+    expect(iso([netpol({ policyTypes: [] })]).defaultDeny).toBe(true);
+    expect(iso([netpol({ policyTypes: ["Egress"], ingressRules: 2 })]).defaultDeny).toBe(true);
+  });
+
+  it("lists the NetworkPolicies that select a pod, including select-all ones", () => {
+    const m = describe(kindCluster, kindInfo);
+    expect(m.groups.codingRuns[0].policies).toEqual(["default-deny", "wardby-run-egress"]);
+    expect(m.groups.alwaysOn[0].policies).toEqual(["default-deny"]);
   });
 });

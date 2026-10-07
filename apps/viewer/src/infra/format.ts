@@ -37,16 +37,30 @@ export function resources(r: { cpu: string | null; memory: string | null }): str
 }
 
 export type DotKind = "ok" | "warn" | "bad" | "idle";
-export function containerDot(c: { ready: boolean; state: string; reason: string | null }): DotKind {
+export function containerDot(
+  c: { ready: boolean; state: string; reason: string | null },
+  /** A terminating pod's containers are shutting down, which is not a problem. */
+  terminating = false,
+): DotKind {
   if (c.ready) return "ok";
+  if (terminating) return "idle";
   if (c.state === "terminated") return c.reason === "Completed" ? "idle" : "bad";
   if (c.state === "waiting") return c.reason && /Error|BackOff|Invalid/.test(c.reason) ? "bad" : "warn";
   return "warn";
 }
 
 export function statusKind(p: PodView): DotKind {
-  if (p.status === "Succeeded") return "idle";
+  if (p.terminating || p.phase === "Succeeded") return "idle";
+  if (p.phase === "Failed") return "bad";
   if (p.ready || p.status === "Running") return p.ready ? "ok" : "warn";
   if (/Error|BackOff|Failed|Invalid|OOM/.test(p.status)) return "bad";
   return "warn";
+}
+
+/** The ready count shown on a pod card: "2/2", or its end state in place of a misleading "0/2". */
+export function podReadiness(p: PodView): { text: string; className: string } {
+  if (p.terminating) return { text: "Terminating", className: "muted" };
+  if (p.phase === "Succeeded") return { text: "Completed", className: "muted" };
+  if (p.phase === "Failed") return { text: "Failed", className: "status bad" };
+  return { text: `${p.containers.filter((c) => c.ready).length}/${p.containers.length}`, className: "muted" };
 }

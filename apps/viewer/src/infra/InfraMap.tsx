@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { InfraModel, PodView } from "./adapter";
-import { containerDot } from "./format";
+import { containerDot, podReadiness } from "./format";
 import { visibleJobs } from "./jobs";
 
 interface Props {
@@ -13,14 +13,17 @@ interface Props {
   now?: number;
 }
 
-const readyCount = (p: PodView) => `${p.containers.filter((c) => c.ready).length}/${p.containers.length}`;
+function Readiness({ pod }: { pod: PodView }) {
+  const r = podReadiness(pod);
+  return <span className={r.className}>{r.text}</span>;
+}
 
 function Containers({ pod }: { pod: PodView }) {
   return (
     <span className="map-containers">
       {pod.containers.map((c) => (
         <span key={c.name} className="map-container" title={`${c.name}: ${c.reason ?? c.state}`}>
-          <span className={`infra-dot ${containerDot(c)}`} aria-hidden="true" />
+          <span className={`infra-dot ${containerDot(c, pod.terminating)}`} aria-hidden="true" />
           {c.name}
         </span>
       ))}
@@ -49,7 +52,7 @@ function PodCard({
     >
       <span className="map-title">
         <span>{pod.title}</span>
-        <span className="muted">{readyCount(pod)}</span>
+        <Readiness pod={pod} />
       </span>
       {!compact && <Containers pod={pod} />}
       {!compact && pod.identity && <span className="muted map-identity">{pod.identity}</span>}
@@ -77,7 +80,7 @@ function Sandbox({
         <button type="button" className="map-card map-pod" aria-pressed={selected} title={pod.name} onClick={onSelect}>
           <span className="map-title">
             <span>{pod.title}</span>
-            <span className="muted">{readyCount(pod)}</span>
+            <Readiness pod={pod} />
           </span>
           <Containers pod={pod} />
         </button>
@@ -157,6 +160,14 @@ export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobF
 
       <div className="map-zone map-namespace">
         {namespace && <span className="map-zone-label">namespace {namespace}</span>}
+        {model.isolation.policies.count > 0 && (
+          <span className="map-zone-label">
+            {model.isolation.policies.count === 1
+              ? "1 NetworkPolicy"
+              : `${model.isolation.policies.count} NetworkPolicies`}
+            {model.isolation.policies.defaultDeny && " · default deny"}
+          </span>
+        )}
         <div className="map-pods">
           {main.map((p) => (
             <PodCard key={p.name} pod={p} selected={selected === p.name} onSelect={() => onSelect(p.name)} />

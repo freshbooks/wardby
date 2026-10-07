@@ -2,8 +2,10 @@ import type { InfraInfo } from "../api/types";
 import type {
   ClusterKind,
   ClusterState,
+  InfraBackendPolicy,
   InfraContainer,
   InfraEdge,
+  InfraNetworkPolicy,
   InfraPod,
   InfraSecretStore,
   InfraServiceAccount,
@@ -25,7 +27,10 @@ export interface PodView {
   name: string;
   group: "always_on" | "coding_run" | "job";
   title: string;
+  /** What to show for the pod: Terminating, Completed, a container problem, or its phase. */
   status: string;
+  phase: string;
+  terminating: boolean;
   ready: boolean;
   /** Runtime class label; for a coding run without a sandbox, "none (container runtime)". */
   runtime: string | null;
@@ -37,6 +42,8 @@ export interface PodView {
   runSha: string | null;
   /** Egress rules of the NetworkPolicies that select this pod. */
   egress: string[];
+  /** Names of the NetworkPolicies that select this pod. */
+  policies: string[];
   requests: { cpuMillis: number; memoryMiB: number };
   startedAt: string | null;
 }
@@ -49,7 +56,12 @@ export interface InfraModel {
   controlPlane: { inCluster: true } | { inCluster: false; location: string | null };
   edge: EdgeView[];
   groups: { alwaysOn: PodView[]; codingRuns: PodView[]; jobs: PodView[] };
-  isolation: { egressRules: string[]; sandbox: string | null };
+  isolation: {
+    egressRules: string[];
+    sandbox: string | null;
+    /** Every NetworkPolicy in the namespace; `defaultDeny` when one selects all pods and allows nothing. */
+    policies: { count: number; defaultDeny: boolean };
+  };
   dataStores: DataStoreView[];
   /** `names` is null when they can't be read; `forbidden` says that is for lack of access. */
   secrets: { source: string | null; names: string[] | null; forbidden: boolean };
@@ -86,8 +98,12 @@ export function parseMemory(q: string | null | undefined): number {
   return Number.isFinite(n) ? (n * MEM_UNITS[m[2] ?? ""]) / 1024 ** 2 : 0;
 }
 
+interface EdgeContext {
+  backendPolicies: InfraBackendPolicy[];
+}
+
 interface PlatformRules {
-  edge(e: InfraEdge): EdgeView;
+  edge(e: InfraEdge, ctx: EdgeContext): EdgeView;
   identity(sa: InfraServiceAccount | null): string | null;
   database(alwaysOn: PodView[]): DataStoreView;
   secrets(stores: InfraSecretStore[]): string | null;
@@ -102,23 +118,47 @@ const GENERIC_EDGE_LABELS: Record<string, string> = {
   loadbalancer: "Load Balancer",
 };
 
+const isRoute = (e: InfraEdge) => e.kind === "httproute" || e.kind === "http_route";
+
+/** A route's detail: its hostnames, or what a redirect-only route does. */
+function routeDetail(e: InfraEdge): string[] {
+  if (e.redirectOnly) return [e.redirectScheme === "https" ? "HTTP → HTTPS redirect" : "Redirect"];
+  return e.hosts.length ? [e.hosts.join(", ")] : [];
+}
+
 const genericEdge = (e: InfraEdge): EdgeView => ({
   label: GENERIC_EDGE_LABELS[e.kind] ?? e.kind,
-  detail: [],
+  detail: isRoute(e) ? routeDetail(e) : [],
   hosts: e.hosts,
 });
 
+/** Cloud Armor policy names a GCPBackendPolicy attaches to a Gateway or to the Services a route sends traffic to. */
+function armorPolicies(e: InfraEdge, ctx: EdgeContext): string[] {
+  const names = ctx.backendPolicies.flatMap((p) => {
+    if (!p.securityPolicy || !p.targetName) return [];
+    if (e.kind === "gateway" && p.targetKind === "Gateway" && p.targetName === e.name) return [p.securityPolicy];
+    if (isRoute(e) && p.targetKind === "Service" && e.backends.includes(p.targetName)) return [p.securityPolicy];
+    return [];
+  });
+  return [...new Set(names)];
+}
+
 const genericDatabase = (): DataStoreView => ({ label: "Postgres (external)", detail: [] });
 
-const gkeEdge = (e: InfraEdge): EdgeView => {
-  if (e.kind !== "gateway") return genericEdge(e);
+const gkeEdge = (e: InfraEdge, ctx: EdgeContext): EdgeView => {
+  if (e.kind !== "gateway") {
+    const view = genericEdge(e);
+    return { ...view, detail: [...view.detail, ...armorPolicies(e, ctx).map((n) => `Cloud Armor ${n}`)] };
+  }
   const detail: string[] = [];
   const armor = Object.entries(e.annotations).some(
     ([k, v]) =>
       (k.startsWith("networking.gke.io/") || k.startsWith("cloud.google.com/")) &&
       /armor|security[-_ ]?policy/i.test(`${k} ${v}`),
   );
-  if (armor) detail.push("Cloud Armor");
+  const named = armorPolicies(e, ctx);
+  if (named.length) detail.push(...named.map((n) => `Cloud Armor ${n}`));
+  else if (armor) detail.push("Cloud Armor");
   if (e.hosts.length) detail.push("TLS");
   return { label: "Gateway", detail, hosts: e.hosts };
 };
@@ -211,6 +251,8 @@ function runtimeName(rc: string | null): string | null {
 }
 
 function podStatus(p: InfraPod): string {
+  if (p.terminating) return "Terminating";
+  if (p.phase === "Succeeded") return "Completed";
   const bad = p.containers.find((c) => !c.ready && c.reason && c.state !== "terminated");
   return bad?.reason ?? p.phase;
 }
@@ -218,6 +260,16 @@ function podStatus(p: InfraPod): string {
 function matches(selector: Record<string, string | undefined>, labels: Record<string, string>): boolean {
   const entries = Object.entries(selector);
   return entries.length > 0 && entries.every(([k, v]) => labels[k] === v);
+}
+
+const selects = (np: InfraNetworkPolicy, labels: Record<string, string>) =>
+  np.selectsAll || matches(np.podSelector, labels);
+
+/** An empty-selector policy that allows nothing for each direction it declares. */
+function deniesAll(np: InfraNetworkPolicy): boolean {
+  if (!np.selectsAll) return false;
+  const types = np.policyTypes.length ? np.policyTypes : ["Ingress", ...(np.egress.length ? ["Egress"] : [])];
+  return types.every((t) => (t === "Ingress" ? np.ingressRules === 0 : t === "Egress" ? np.egress.length === 0 : true));
 }
 
 export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeOpts = {}): InfraModel {
@@ -237,6 +289,8 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
       group,
       title,
       status: podStatus(p),
+      phase: p.phase,
+      terminating: p.terminating,
       ready: p.ready,
       runtime: group === "coding_run" ? rules.sandbox(runtimeName(p.runtimeClass)) : runtimeName(p.runtimeClass),
       sandboxed: p.runtimeClass !== null,
@@ -244,7 +298,8 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
       identity: rules.identity(sa),
       containers: p.containers,
       runSha: group === "coding_run" && k8s ? (p.labels[k8s.runLabel] ?? null) : null,
-      egress: unique(policies.filter((np) => matches(np.podSelector, p.labels)).flatMap((np) => np.egress)),
+      egress: unique(policies.filter((np) => selects(np, p.labels)).flatMap((np) => np.egress)),
+      policies: policies.filter((np) => selects(np, p.labels)).map((np) => np.name),
       requests: {
         cpuMillis: main.reduce((s, c) => s + parseCpu(c.requests.cpu), 0),
         memoryMiB: Math.round(main.reduce((s, c) => s + parseMemory(c.requests.memory), 0)),
@@ -296,9 +351,13 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
       alwaysOn.some((p) => p.title === "control-plane") || !cluster.podsSynced // unknown until the pod snapshot arrives
         ? { inCluster: true }
         : { inCluster: false, location: hostPort(opts.serverUrl) },
-    edge: edges.map(rules.edge),
+    edge: edges.map((e) => rules.edge(e, { backendPolicies: values(cluster, "backend_policy") })),
     groups: { alwaysOn, codingRuns, jobs },
-    isolation: { egressRules, sandbox: rules.sandbox(runtimeName(k8s?.runtimeClass ?? null)) },
+    isolation: {
+      egressRules,
+      sandbox: rules.sandbox(runtimeName(k8s?.runtimeClass ?? null)),
+      policies: { count: policies.length, defaultDeny: policies.some(deniesAll) },
+    },
     dataStores: [rules.database(alwaysOn)],
     secrets: {
       source: rules.secrets(stores),

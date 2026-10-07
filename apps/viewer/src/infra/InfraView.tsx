@@ -42,6 +42,8 @@ function notices(cluster: UseCluster["cluster"], blocking: unknown, namespace: s
     if (!e || e === blocking) continue;
     // The map shows forbidden Secrets as "Secret names hidden (no access)".
     if (kind === "secret" && e.kind === "forbidden") continue;
+    // GCPBackendPolicy only adds Cloud Armor detail; a Role without it just loses that.
+    if (kind === "backend_policy" && e.kind === "forbidden") continue;
     out.add(errorText(e, namespace));
   }
   return [...out];

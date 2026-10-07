@@ -2,13 +2,16 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { describe as describeCluster } from "./adapter";
 import {
+  clusterOf,
   genericCluster,
   genericInfo,
   gkeCluster,
   gkeInfo,
   kindCluster,
   kindInfo,
+  pod,
   RUN_SHA,
+  statesCluster,
   twoRunsCluster,
 } from "./fixtures";
 import { InfraMap } from "./InfraMap";
@@ -142,5 +145,65 @@ describe("InfraMap", () => {
   it("hides the location when the server URL is unknown", () => {
     renderMap(describeCluster(kindCluster, kindInfo));
     expect(screen.getByText("Control plane · outside the cluster")).toBeInTheDocument();
+  });
+
+  describe("pod state", () => {
+    const model = describeCluster(statesCluster, gkeInfo);
+    const card = (name: RegExp) => screen.getByRole("button", { name });
+
+    it("shows Completed (muted) instead of 0/n for a finished job pod", () => {
+      renderMap(model);
+      const c = card(/^wardby-migrateCompleted/);
+      const label = within(c).getByText("Completed");
+      expect(label).toHaveClass("muted");
+      expect(within(c).queryByText(/\d\/\d/)).not.toBeInTheDocument();
+    });
+
+    it("shows Failed in red", () => {
+      renderMap(model);
+      expect(within(card(/^wardby-migrate2Failed/)).getByText("Failed")).toHaveClass("status", "bad");
+    });
+
+    it("labels a terminating pod and does not colour its containers as problems", () => {
+      renderMap(model);
+      const old = screen
+        .getAllByRole("button", { name: /control-plane/ })
+        .find((b) => within(b).queryByText("Terminating"))!;
+      expect(within(old).getByText("Terminating")).toHaveClass("muted");
+      const dot = within(old).getByText("cloud-sql-proxy").querySelector(".infra-dot")!;
+      expect(dot).not.toHaveClass("bad");
+      expect(dot).not.toHaveClass("warn");
+    });
+  });
+
+  describe("NetworkPolicy line", () => {
+    it("always shows a namespace line with the policy count and default deny", () => {
+      renderMap(describeCluster(kindCluster, kindInfo));
+      expect(screen.getByText("2 NetworkPolicies · default deny")).toBeInTheDocument();
+    });
+
+    it("shows the line without any coding run or egress rule, singular for one policy", () => {
+      const c = clusterOf({
+        pod: [pod("wardby-headroom-1-a", { owner: { kind: "ReplicaSet", name: "wardby-headroom-1" } })],
+        network_policy: [
+          {
+            name: "p",
+            podSelector: { app: "x" },
+            policyTypes: ["Ingress"],
+            selectsAll: false,
+            ingressRules: 1,
+            egress: [],
+          },
+        ],
+      });
+      renderMap(describeCluster(c, gkeInfo));
+      expect(screen.getByText("1 NetworkPolicy")).toBeInTheDocument();
+      expect(document.querySelector(".map-fence")).toBeNull();
+    });
+
+    it("is absent when the namespace has no policies", () => {
+      renderMap(describeCluster(genericCluster, genericInfo));
+      expect(screen.queryByText(/NetworkPolicies|NetworkPolicy$/)).not.toBeInTheDocument();
+    });
   });
 });

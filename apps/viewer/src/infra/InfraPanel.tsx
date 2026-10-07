@@ -86,6 +86,16 @@ export function InfraPanel({ pod, context, namespace, onOpenRun, onClose }: Prop
           </ul>
         </section>
       )}
+      {pod.policies.length > 0 && (
+        <section className="panel-section">
+          <h3>NETWORK POLICIES</h3>
+          <ul className="panel-list">
+            {pod.policies.map((n) => (
+              <li key={n}>{n}</li>
+            ))}
+          </ul>
+        </section>
+      )}
       <section className="panel-section">
         <h3>CONTAINERS</h3>
         <ul className="panel-list">
