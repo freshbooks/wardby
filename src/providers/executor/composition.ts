@@ -154,7 +154,8 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
-    repoAccess: options.repoAccess ?? createRepoAccessGate({ db: options.db, hosts: buildReviewHosts(env) }),
+    repoAccess:
+      options.repoAccess ?? createRepoAccessGate({ db: options.db, hosts: buildReviewHosts(env, options.db) }),
     issueUrl: (provider, key) => (provider === "jira" ? issueTrackers.jira?.issueUrl(key) : undefined),
     registryReport: async (runId) => {
       const rows = await options.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });

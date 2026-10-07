@@ -614,7 +614,15 @@ async function run(name: string | undefined): Promise<void> {
   try {
     run = await runAgent(
       name,
-      { llm, engine, datastore, secrets, memory, reviewHosts: buildReviewHosts(), issueTrackers: buildIssueTrackers() },
+      {
+        llm,
+        engine,
+        datastore,
+        secrets,
+        memory,
+        reviewHosts: buildReviewHosts(process.env, prisma),
+        issueTrackers: buildIssueTrackers(),
+      },
       prisma,
       (delta) => {
         process.stdout.write(delta);
@@ -781,7 +789,7 @@ async function scheduler(args: string[]): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory();
-  const reviewHosts = buildReviewHosts();
+  const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   // One repository-access gate (and cache) for native repo_* calls and coding runs.
   const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });

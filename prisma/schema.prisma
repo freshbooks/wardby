@@ -355,6 +355,8 @@ model Run {
   attribution      RunAttribution?
   modelUsage       RunModelUsage[]
   serviceStatuses  CodingRunServiceStatus[]
+  /// A manual review of a local branch: this run is the review run dispatched for it.
+  localPullRequest LocalPullRequest?
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -1428,4 +1430,41 @@ model ModelCatalogEntry {
   updatedAt          DateTime @updatedAt
 
   @@id([provider, modelId])
+}
+
+/// A local "pull request": a branch compared against a base in a local:
+/// repository (git folder on the wardby host), keyed by a durable number so
+/// the repo_* review tools work against it like a GitHub pull request.
+model LocalPullRequest {
+  id         String        @id @default(cuid())
+  number     Int           @unique @default(autoincrement())
+  /// "local:/abs/path"
+  repository String
+  branch     String
+  base       String
+  /// The review run dispatched for this pull request.
+  runId      String?       @unique
+  run        Run?          @relation(fields: [runId], references: [id], onDelete: SetNull)
+  createdAt  DateTime      @default(now())
+  reviews    LocalReview[]
+
+  @@index([repository, branch])
+}
+
+/// A review (or a plain comment, verdict COMMENT) published on a LocalPullRequest.
+model LocalReview {
+  id            String           @id @default(cuid())
+  pullRequestId String
+  pullRequest   LocalPullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+  agentId       String
+  headSha       String
+  /// APPROVE | CHANGES_REQUESTED | COMMENT
+  verdict       String
+  summary       String
+  body          String
+  /// [{path, line, side, severity, body}]
+  comments      Json
+  createdAt     DateTime         @default(now())
+
+  @@index([pullRequestId, createdAt])
 }
