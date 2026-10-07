@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import type { ServerSummary } from "../api/client";
 import type { GraphRun } from "../api/types";
 import type { InfraBar } from "../chrome/TopBar";
-import { describe, platformOf } from "./adapter";
+import { describe, platformOf, type PodView } from "./adapter";
+import { useEndedRuns } from "./endedRuns";
 import { platformLabel } from "./format";
 import { InfraFooter } from "./InfraFooter";
 import { InfraView, type InfraMode } from "./InfraView";
@@ -35,6 +36,8 @@ interface Props {
 }
 
 /** The Infrastructure tab: owns the cluster watch, so it only runs while the tab is open. */
+const NO_PODS: PodView[] = [];
+
 export function InfraScreen({
   server,
   runs,
@@ -63,6 +66,8 @@ export function InfraScreen({
     [cluster.cluster, cluster.error, info, opts],
   );
   const platform = info ? platformOf(info, cluster.cluster, opts) : "generic";
+  // Kept here, not in the Map, so an ended run survives the Map remounting (Map/Table, reconnects).
+  const endedRuns = useEndedRuns(model?.groups.codingRuns ?? NO_PODS, !!model && cluster.cluster.podsSynced);
 
   const findRun = useCallback(
     async (sha: string, chars: number) => {
@@ -144,6 +149,7 @@ export function InfraScreen({
         <InfraView
           cluster={cluster}
           model={model}
+          endedRuns={endedRuns}
           mode={mode}
           selectedPod={selectedPod}
           onSelectPod={setSelectedPod}

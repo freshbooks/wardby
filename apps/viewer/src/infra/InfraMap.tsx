@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { InfraModel, PodView } from "./adapter";
 import { containerDot, podReadiness } from "./format";
-import { useEndedRuns } from "./endedRuns";
+import { useEndedRuns, type EndedRun } from "./endedRuns";
 import { visibleJobs } from "./jobs";
 
 interface Props {
@@ -12,6 +12,8 @@ interface Props {
   namespace?: string;
   jobFinishedAt?: ReadonlyMap<string, string | null>;
   now?: number;
+  /** Ended coding runs from the screen (see endedRuns.ts). */
+  endedRuns?: { ended: EndedRun[]; dismiss: (name: string) => void };
 }
 
 function Readiness({ pod }: { pod: PodView }) {
@@ -126,14 +128,25 @@ function Sandbox({
   );
 }
 
-export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobFinishedAt, now: fixedNow }: Props) {
+export function InfraMap({
+  model,
+  selected,
+  onSelect,
+  onOpenRun,
+  namespace,
+  jobFinishedAt,
+  now: fixedNow,
+  endedRuns,
+}: Props) {
   const [clock, setClock] = useState(Date.now);
   useEffect(() => {
     const id = setInterval(() => setClock(Date.now()), 30_000);
     return () => clearInterval(id);
   }, []);
   const { alwaysOn, codingRuns } = model.groups;
-  const { ended, dismiss } = useEndedRuns(codingRuns);
+  // Owned by InfraScreen in the app; the local fallback keeps the Map usable on its own.
+  const local = useEndedRuns(codingRuns, !endedRuns);
+  const { ended, dismiss } = endedRuns ?? local;
   const jobs = visibleJobs(model.groups.jobs, jobFinishedAt, fixedNow ?? clock);
   const hosts = [...new Set(model.edge.flatMap((e) => e.hosts))];
   const main = alwaysOn.filter((p) => p.title !== "headroom");

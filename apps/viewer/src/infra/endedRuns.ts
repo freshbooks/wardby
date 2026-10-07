@@ -14,7 +14,12 @@ export interface EndedRun {
   leaving: boolean;
 }
 
-export function useEndedRuns(live: readonly PodView[]): {
+/** `enabled` is false while the pod list isn't trustworthy (not yet synced, reconnecting),
+ *  so an empty list then doesn't mark every run as ended. */
+export function useEndedRuns(
+  live: readonly PodView[],
+  enabled = true,
+): {
   ended: EndedRun[];
   dismiss: (name: string) => void;
 } {
@@ -46,6 +51,7 @@ export function useEndedRuns(live: readonly PodView[]): {
   );
 
   useEffect(() => {
+    if (!enabled) return;
     const now = Date.now();
     const liveNames = new Set(live.map((p) => p.name));
     const gone = [...lastSeen.current.values()].filter((p) => !liveNames.has(p.name));
@@ -63,7 +69,7 @@ export function useEndedRuns(live: readonly PodView[]): {
       clearTimeout(timers.current.get(name));
       timers.current.delete(name);
     }
-  }, [live, schedule, dismiss]);
+  }, [live, enabled, schedule, dismiss]);
 
   useEffect(() => {
     const all = timers.current;

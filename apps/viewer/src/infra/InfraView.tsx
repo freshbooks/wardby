@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { AppError } from "../api/client";
 import type { InfraModel } from "./adapter";
+import type { EndedRun } from "./endedRuns";
 import { InfraMap } from "./InfraMap";
 import { InfraPanel } from "./InfraPanel";
 import { InfraTable } from "./InfraTable";
@@ -53,6 +54,8 @@ interface Props {
   cluster: UseCluster;
   /** The described cluster (computed once by the screen); null until there is one. */
   model: InfraModel | null;
+  /** Coding runs whose pods are gone, kept by the screen until closed. */
+  endedRuns?: { ended: EndedRun[]; dismiss: (name: string) => void };
   mode: InfraMode;
   selectedPod: string | null;
   onSelectPod: (pod: string | null) => void;
@@ -60,7 +63,7 @@ interface Props {
   onRetry: () => void;
 }
 
-export function InfraView({ cluster: c, model, mode, selectedPod, onSelectPod, onOpenRun, onRetry }: Props) {
+export function InfraView({ cluster: c, model, endedRuns, mode, selectedPod, onSelectPod, onOpenRun, onRetry }: Props) {
   const { info, cluster, context } = c;
   const jobFinishedAt = useMemo(
     () => new Map([...cluster.objects.job.values()].map((j) => [j.name, j.finishedAt])),
@@ -129,6 +132,7 @@ export function InfraView({ cluster: c, model, mode, selectedPod, onSelectPod, o
             onOpenRun={onOpenRun}
             namespace={namespace}
             jobFinishedAt={jobFinishedAt}
+            endedRuns={endedRuns}
           />
         ) : (
           <InfraTable

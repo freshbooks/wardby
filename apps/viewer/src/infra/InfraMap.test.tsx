@@ -54,6 +54,17 @@ describe("InfraMap", () => {
     expect(screen.getByRole("button", { name: /control-plane/ })).not.toHaveClass("pulse");
   });
 
+  it("keeps an ended coding run on the map, marked Ended, with a close button", () => {
+    const props = { selected: null, onSelect: vi.fn(), onOpenRun: vi.fn() };
+    const { rerender } = render(<InfraMap model={gke} {...props} />);
+    const withoutRun = { ...gke, groups: { ...gke.groups, codingRuns: [] } };
+    rerender(<InfraMap model={withoutRun} {...props} />);
+    const sandbox = screen.getByRole("group", { name: "gVisor sandbox · wardby-run-abc123" });
+    expect(sandbox).toHaveClass("ended");
+    expect(within(sandbox).getByText("Ended")).toBeInTheDocument();
+    expect(within(sandbox).getByRole("button", { name: /Close/ })).toBeInTheDocument();
+  });
+
   it("lists always-on pods with ready counts, containers and identity", () => {
     renderMap();
     const card = screen.getByRole("button", { name: /control-plane/ });
