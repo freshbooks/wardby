@@ -86,7 +86,7 @@ with status, CPU and memory, and age. Select a pod for its containers and recent
 events; **Open run** jumps to the run that started it, and a coding run's
 **Pod ↗** button jumps back to its pod while it is still running.
 
-The tab appears when the server uses the Kubernetes launcher. It reads the
+The tab has a cluster to show when the server uses the Kubernetes launcher (otherwise it says there is no cluster to show). It reads the
 cluster with your own kubeconfig (`$KUBECONFIG` or `~/.kube/config`), using the
 current context unless you choose another for that server, and it only reads.
 The choice is saved per server. If your kubeconfig has no current context,
