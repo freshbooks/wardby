@@ -528,8 +528,9 @@ async function executeTrackedRun(
       where: { parentAgentId: agent.id },
       select: { boundName: true, childAgentId: true },
     });
-    // Only queried when a review host is configured, so deployments without
-    // a GitHub App (and tests) never touch the table.
+    // Only queried when the runner was given review hosts. buildReviewHosts
+    // always includes the local host, so a configured server always queries;
+    // only a runner built without hosts (as in many tests) skips the table.
     const repositoryLinks: RepositoryLink[] = reviewHosts
       ? (await db.agentRepository.findMany({ where: { agentId: agent.id } })).map((l) => ({
           provider: l.provider as RepositoryLink["provider"],
