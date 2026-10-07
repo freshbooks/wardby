@@ -52,7 +52,7 @@ describe("InfraMap", () => {
 
   it("opens the run from the sandbox arrow without selecting", () => {
     const { onOpenRun, onSelect } = renderMap();
-    fireEvent.click(screen.getByRole("button", { name: "Open run" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open run wardby-run-abc123" }));
     expect(onOpenRun).toHaveBeenCalledWith(RUN_SHA);
     expect(onSelect).not.toHaveBeenCalled();
   });
@@ -67,5 +67,37 @@ describe("InfraMap", () => {
     expect(screen.getByText("Ingress")).toBeInTheDocument();
     expect(screen.getByText("Postgres (external)")).toBeInTheDocument();
     expect(screen.queryByText(/NetworkPolicy/)).not.toBeInTheDocument();
+  });
+
+  it("shows the namespace header and hides jobs finished over an hour ago, like the Table", () => {
+    const now = Date.parse("2026-10-01T12:00:00Z");
+    const old = new Map([["wardby-migrate", "2026-10-01T09:00:00Z"]]);
+    const fresh = new Map([["wardby-migrate", "2026-10-01T11:30:00Z"]]);
+    const { rerender } = render(
+      <InfraMap
+        model={gke}
+        selected={null}
+        onSelect={vi.fn()}
+        onOpenRun={vi.fn()}
+        namespace="wardby"
+        jobFinishedAt={old}
+        now={now}
+      />,
+    );
+    expect(screen.getByText("namespace wardby")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /wardby-migrate/ })).not.toBeInTheDocument();
+    rerender(
+      <InfraMap
+        model={gke}
+        selected={null}
+        onSelect={vi.fn()}
+        onOpenRun={vi.fn()}
+        namespace="wardby"
+        jobFinishedAt={fresh}
+        now={now}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /wardby-migrate/ })).toBeInTheDocument();
+    expect(screen.getByText("jobs")).toBeInTheDocument();
   });
 });

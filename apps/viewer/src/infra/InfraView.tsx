@@ -75,7 +75,14 @@ export function InfraView({ cluster: c, mode, selectedPod, onSelectPod, onOpenRu
     <div className="workspace infra-workspace">
       <div className="infra-main">
         {mode === "map" ? (
-          <InfraMap model={model} selected={selectedPod} onSelect={select} onOpenRun={onOpenRun} />
+          <InfraMap
+            model={model}
+            selected={selectedPod}
+            onSelect={select}
+            onOpenRun={onOpenRun}
+            namespace={namespace}
+            jobFinishedAt={jobFinishedAt}
+          />
         ) : (
           <InfraTable
             model={model}

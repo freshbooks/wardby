@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import type { InfraModel, PodView } from "./adapter";
+import { visibleJobs } from "./jobs";
 import { containerDot, formatAge, podUsage, statusKind } from "./format";
-
-const HOUR_MS = 3_600_000;
 
 interface Props {
   model: InfraModel;
@@ -78,14 +77,10 @@ export function InfraTable({ model, selected, onSelect, onOpenRun, jobFinishedAt
   const [filter, setFilter] = useState("");
   const q = filter.trim().toLowerCase();
   const keep = (p: PodView) => !q || `${p.name} ${p.title} ${p.status}`.toLowerCase().includes(q);
-  const recentJob = (p: PodView) => {
-    const finished = jobFinishedAt?.get(p.title);
-    return !finished || now - Date.parse(finished) <= HOUR_MS;
-  };
   const sections: [string, PodView[]][] = [
     ["ALWAYS ON", model.groups.alwaysOn],
     ["CODING RUNS", model.groups.codingRuns],
-    ["JOBS", model.groups.jobs.filter(recentJob)],
+    ["JOBS", visibleJobs(model.groups.jobs, jobFinishedAt, now)],
   ];
 
   return (

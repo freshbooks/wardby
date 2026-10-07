@@ -1115,6 +1115,7 @@ button:disabled {
 
 .map-pod[aria-pressed="true"] {
   border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 .map-title {
@@ -1189,7 +1190,7 @@ button:disabled {
   flex: 1;
 }
 
-/* Arrows between columns: a short line with a head, hidden when the grid wraps. */
+/* Arrows between columns: a down arrow under each edge card; the column arrows are hidden when the grid wraps. */
 .map-flow:not(:last-child)::after {
   content: "▼";
   position: absolute;

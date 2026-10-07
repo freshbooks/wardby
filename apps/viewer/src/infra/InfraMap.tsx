@@ -1,11 +1,16 @@
+import { useEffect, useState } from "react";
 import type { InfraModel, PodView } from "./adapter";
 import { containerDot } from "./format";
+import { visibleJobs } from "./jobs";
 
 interface Props {
   model: InfraModel;
   selected: string | null;
   onSelect: (pod: string) => void;
   onOpenRun: (runSha: string) => void;
+  namespace?: string;
+  jobFinishedAt?: ReadonlyMap<string, string | null>;
+  now?: number;
 }
 
 const readyCount = (p: PodView) => `${p.containers.filter((c) => c.ready).length}/${p.containers.length}`;
@@ -80,7 +85,7 @@ function Sandbox({
           <button
             type="button"
             className="infra-open-run"
-            aria-label="Open run"
+            aria-label={`Open run ${pod.title}`}
             title="Open run"
             onClick={() => onOpenRun(sha)}
           >
@@ -92,8 +97,14 @@ function Sandbox({
   );
 }
 
-export function InfraMap({ model, selected, onSelect, onOpenRun }: Props) {
-  const { alwaysOn, codingRuns, jobs } = model.groups;
+export function InfraMap({ model, selected, onSelect, onOpenRun, namespace, jobFinishedAt, now: fixedNow }: Props) {
+  const [clock, setClock] = useState(Date.now);
+  useEffect(() => {
+    const id = setInterval(() => setClock(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+  const { alwaysOn, codingRuns } = model.groups;
+  const jobs = visibleJobs(model.groups.jobs, jobFinishedAt, fixedNow ?? clock);
   const hosts = [...new Set(model.edge.flatMap((e) => e.hosts))];
   const main = alwaysOn.filter((p) => p.title !== "headroom");
   const headroom = alwaysOn.filter((p) => p.title === "headroom");
@@ -120,6 +131,7 @@ export function InfraMap({ model, selected, onSelect, onOpenRun }: Props) {
       </div>
 
       <div className="map-zone map-namespace">
+        {namespace && <span className="map-zone-label">namespace {namespace}</span>}
         <div className="map-pods">
           {main.map((p) => (
             <PodCard key={p.name} pod={p} selected={selected === p.name} onSelect={() => onSelect(p.name)} />
