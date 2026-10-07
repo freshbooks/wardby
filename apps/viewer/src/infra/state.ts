@@ -8,6 +8,7 @@ export const initialCluster: ClusterState = {
   error: null,
   objects: emptyObjects(),
   kindErrors: {},
+  podsSynced: false,
 };
 
 const KINDS = new Set<string>(CLUSTER_KINDS);
@@ -34,7 +35,7 @@ export function reduceCluster(state: ClusterState, frame: ClusterFrame): Cluster
       for (const item of frame.items) if (hasName(item)) map.set(item.name, item);
       const kindErrors = { ...state.kindErrors };
       delete kindErrors[frame.kind];
-      return { ...withKind(state, frame.kind, map), kindErrors };
+      return { ...withKind(state, frame.kind, map), kindErrors, podsSynced: state.podsSynced || frame.kind === "pod" };
     }
     case "applied": {
       if (!isKind(frame.kind) || !hasName(frame.item)) return state;

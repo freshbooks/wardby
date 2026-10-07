@@ -65,10 +65,19 @@ function Dashboard({
     setSelectedRunId(id);
   }, []);
 
+  const tabRef = useRef(tab);
+  useEffect(() => {
+    tabRef.current = tab;
+  });
+  const changeTab = useCallback((next: Tab) => {
+    if (next !== "infra") setPendingRunSha(null);
+    setTab(next);
+  }, []);
   const openPod = useCallback((runId: string) => {
+    setTab("infra");
     void runSha(runId).then((sha) => {
-      setPendingRunSha(sha);
-      setTab("infra");
+      // Skip when the user already left the tab before the hash resolved.
+      if (tabRef.current === "infra") setPendingRunSha(sha);
     });
   }, []);
   const clearPendingRunSha = useCallback(() => setPendingRunSha(null), []);
@@ -114,7 +123,7 @@ function Dashboard({
   const topBar = (infra?: InfraBar) => (
     <TopBar
       tab={tab}
-      onTabChange={setTab}
+      onTabChange={changeTab}
       infra={infra}
       servers={servers}
       selectedUrl={server.url}
@@ -144,13 +153,15 @@ function Dashboard({
           runs={runs}
           topBar={topBar}
           onOpenRun={(id) => {
-            setTab("runs");
+            changeTab("runs");
             selectPanel(id);
           }}
           onRetry={() => setInfraEpoch((n) => n + 1)}
           pendingRunSha={pendingRunSha}
           onPendingRunSha={clearPendingRunSha}
           widenWindow={widenWindow}
+          loadedWindow={viewer.loadedSince}
+          loadError={viewer.error !== null}
         />
       </div>
     );

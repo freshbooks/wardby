@@ -44,6 +44,8 @@ const renderScreen = (props: Partial<React.ComponentProps<typeof InfraScreen>> =
       pendingRunSha={null}
       onPendingRunSha={vi.fn()}
       widenWindow={() => false}
+      loadedWindow="1h"
+      loadError={false}
       {...props}
     />,
   );
@@ -74,6 +76,8 @@ describe("InfraScreen run -> pod", () => {
         pendingRunSha={RUN_SHA}
         onPendingRunSha={cleared}
         widenWindow={() => false}
+        loadedWindow="1h"
+        loadError={false}
       />,
     );
     expect(await screen.findByRole("heading", { name: "wardby-run-abc123" })).toBeInTheDocument();
@@ -85,6 +89,24 @@ describe("InfraScreen run -> pod", () => {
     renderScreen({ pendingRunSha: "f".repeat(40), onPendingRunSha: cleared });
     expect(await screen.findByText(NOTE)).toBeInTheDocument();
     expect(cleared).toHaveBeenCalled();
+  });
+});
+
+describe("InfraScreen empty namespace", () => {
+  it("notes no pod once the pods snapshot arrived empty", async () => {
+    const cleared = vi.fn();
+    hook.value = live({ cluster: { ...initialCluster, connected: true, podsSynced: true } });
+    renderScreen({ pendingRunSha: RUN_SHA, onPendingRunSha: cleared });
+    expect(await screen.findByText(NOTE)).toBeInTheDocument();
+    expect(cleared).toHaveBeenCalled();
+  });
+
+  it("waits while the pods snapshot has not arrived", () => {
+    const cleared = vi.fn();
+    hook.value = live({ cluster: { ...initialCluster, connected: true } });
+    renderScreen({ pendingRunSha: RUN_SHA, onPendingRunSha: cleared });
+    expect(cleared).not.toHaveBeenCalled();
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
   });
 });
 
@@ -134,8 +156,15 @@ describe("InfraScreen pod -> run", () => {
       },
     });
     const props = { topBar: () => null, server, onRetry: vi.fn(), onOpenRun, widenWindow: widen };
-    const el = (runs: GraphRun[]) => (
-      <InfraScreen {...props} runs={runs} pendingRunSha={null} onPendingRunSha={vi.fn()} />
+    const el = (runs: GraphRun[], loadedWindow = "1h", loadError = false) => (
+      <InfraScreen
+        {...props}
+        runs={runs}
+        pendingRunSha={null}
+        onPendingRunSha={vi.fn()}
+        loadedWindow={loadedWindow}
+        loadError={loadError}
+      />
     );
     const { rerender } = render(el([]));
     screen.getByRole("button", { name: /^wardby-run-abc123/ }).click();
@@ -144,23 +173,55 @@ describe("InfraScreen pod -> run", () => {
     await waitFor(() => expect(widen).toHaveBeenCalled());
     expect(onOpenRun).not.toHaveBeenCalled();
     expect(screen.queryByText(/not in the selected time window/)).not.toBeInTheDocument();
-    await act(async () => rerender(el([run(id)])));
+    await act(async () => rerender(el([run("live-event")])));
+    expect(onOpenRun).not.toHaveBeenCalled();
+    expect(screen.queryByText(/not in the selected time window/)).not.toBeInTheDocument();
+    await act(async () => rerender(el([run(id)], "7d")));
     await waitFor(() => expect(onOpenRun).toHaveBeenCalledWith(id));
   });
 
   it("keeps the muted note when the widened load still lacks the run", async () => {
     const widen = vi.fn(() => true);
     const props = { topBar: () => null, server, onRetry: vi.fn(), onOpenRun: vi.fn(), widenWindow: widen };
-    const el = (runs: GraphRun[]) => (
-      <InfraScreen {...props} runs={runs} pendingRunSha={null} onPendingRunSha={vi.fn()} />
+    const el = (runs: GraphRun[], loadedWindow = "1h", loadError = false) => (
+      <InfraScreen
+        {...props}
+        runs={runs}
+        pendingRunSha={null}
+        onPendingRunSha={vi.fn()}
+        loadedWindow={loadedWindow}
+        loadError={loadError}
+      />
     );
     const { rerender } = render(el([]));
     screen.getByRole("button", { name: /^wardby-run-abc123/ }).click();
     await screen.findByRole("heading", { name: "wardby-run-abc123" });
     screen.getByRole("button", { name: /RUN/ }).click();
     await waitFor(() => expect(widen).toHaveBeenCalled());
-    await act(async () => rerender(el([run("other")])));
+    await act(async () => rerender(el([run("other")], "7d")));
     expect(await screen.findByText(/not in the selected time window/)).toBeInTheDocument();
     expect(props.onOpenRun).not.toHaveBeenCalled();
+  });
+
+  it("shows the note and gives up when the wider load fails", async () => {
+    const widen = vi.fn(() => true);
+    const props = { topBar: () => null, server, onRetry: vi.fn(), onOpenRun: vi.fn(), widenWindow: widen };
+    const el = (loadError: boolean) => (
+      <InfraScreen
+        {...props}
+        runs={[]}
+        pendingRunSha={null}
+        onPendingRunSha={vi.fn()}
+        loadedWindow="1h"
+        loadError={loadError}
+      />
+    );
+    const { rerender } = render(el(false));
+    screen.getByRole("button", { name: /^wardby-run-abc123/ }).click();
+    await screen.findByRole("heading", { name: "wardby-run-abc123" });
+    screen.getByRole("button", { name: /RUN/ }).click();
+    await waitFor(() => expect(widen).toHaveBeenCalled());
+    await act(async () => rerender(el(true)));
+    expect(await screen.findByText(/not in the selected time window/)).toBeInTheDocument();
   });
 });

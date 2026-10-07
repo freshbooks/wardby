@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ServerSummary } from "../api/client";
 import type { GraphRun } from "../api/types";
 import type { InfraBar } from "../chrome/TopBar";
@@ -27,6 +27,10 @@ interface Props {
   onPendingRunSha: () => void;
   /** Widen the Runs window to 7d; false when it already covers that much. */
   widenWindow: () => boolean;
+  /** The window the latest runs snapshot was fetched for. */
+  loadedWindow: string | null;
+  /** Loading the runs failed. */
+  loadError: boolean;
 }
 
 /** The Infrastructure tab: owns the cluster watch, so it only runs while the tab is open. */
@@ -39,6 +43,8 @@ export function InfraScreen({
   pendingRunSha,
   onPendingRunSha,
   widenWindow,
+  loadedWindow,
+  loadError,
 }: Props) {
   const cluster = useCluster(server);
   const [mode, setMode] = useState<InfraMode>("map");
@@ -46,7 +52,7 @@ export function InfraScreen({
   // A note under the tab: that run is not loaded, or that run has no pod.
   const [note, setNote] = useState<string | null>(null);
   // Set after widening the window: the run to open once the wider load has arrived.
-  const [waiting, setWaiting] = useState<{ sha: string; chars: number; base: readonly GraphRun[] } | null>(null);
+  const [waiting, setWaiting] = useState<{ sha: string; chars: number } | null>(null);
 
   const { info } = cluster;
   const model = useMemo(
@@ -72,17 +78,22 @@ export function InfraScreen({
         onOpenRun(id);
       } else if (widenWindow()) {
         setNote(null);
-        setWaiting({ sha, chars, base: runs });
+        setWaiting({ sha, chars });
       } else {
         setNote(RUN_NOTE);
       }
     },
-    [info, runs, findRun, onOpenRun, widenWindow],
+    [info, findRun, onOpenRun, widenWindow],
   );
 
-  // The wider load replaced the runs: open the run if it is there now, else keep the note.
+  // Wait for the 7d snapshot itself (live events also change `runs`); give up if the load failed.
+  if (waiting && loadError) {
+    setWaiting(null);
+    setNote(RUN_NOTE);
+  }
   useEffect(() => {
-    if (!waiting || runs === waiting.base) return;
+    if (!waiting) return;
+    if (loadedWindow !== "7d") return;
     let active = true;
     void findRun(waiting.sha, waiting.chars).then((id) => {
       if (!active) return;
@@ -93,11 +104,11 @@ export function InfraScreen({
     return () => {
       active = false;
     };
-  }, [waiting, runs, findRun, onOpenRun]);
+  }, [waiting, loadedWindow, findRun, onOpenRun]);
 
   // Run -> pod: select the coding-run pod for the pending run once the pods have loaded.
   const runPods = model?.groups.codingRuns;
-  const loadedPods = Boolean(model) && cluster.cluster.connected && model!.totals.pods > 0;
+  const loadedPods = Boolean(model) && cluster.cluster.connected && cluster.cluster.podsSynced;
   const [handled, setHandled] = useState<string | null>(null);
   if (!pendingRunSha && handled) setHandled(null);
   if (pendingRunSha && pendingRunSha !== handled && runPods && loadedPods) {
@@ -109,13 +120,6 @@ export function InfraScreen({
   useEffect(() => {
     if (pendingRunSha && pendingRunSha === handled) onPendingRunSha();
   }, [pendingRunSha, handled, onPendingRunSha]);
-
-  // Leaving the tab abandons an unresolved request.
-  const clearPending = useRef(onPendingRunSha);
-  useEffect(() => {
-    clearPending.current = onPendingRunSha;
-  });
-  useEffect(() => () => clearPending.current(), []);
 
   return (
     <>

@@ -183,4 +183,6 @@ export interface ClusterState {
   /** Objects by kind, keyed by name. */
   objects: { [K in ClusterKind]: Map<string, KindItem<K>> };
   kindErrors: Partial<Record<ClusterKind, ClusterError>>;
+  /** The pod list's initial snapshot has arrived on this connection (so an empty pod map is real). */
+  podsSynced: boolean;
 }

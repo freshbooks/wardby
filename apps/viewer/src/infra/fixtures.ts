@@ -66,7 +66,13 @@ export function clusterOf(items: { [K in ClusterKind]?: KindItems[K][] }): Clust
   for (const [kind, list] of Object.entries(items)) {
     objects[kind] = new Map((list as { name: string }[]).map((i) => [i.name, i]));
   }
-  return { ...initialCluster, connected: true, objects: objects as ClusterState["objects"], kindErrors: {} };
+  return {
+    ...initialCluster,
+    connected: true,
+    podsSynced: true,
+    objects: objects as ClusterState["objects"],
+    kindErrors: {},
+  };
 }
 
 const gateway: InfraEdge = {

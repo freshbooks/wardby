@@ -78,4 +78,15 @@ describe("reduceCluster", () => {
     expect(reduceCluster(initialCluster, { type: "applied", kind: "pod", item: 3 } as never)).toBe(initialCluster);
     expect(reduceCluster(initialCluster, null as never)).toBe(initialCluster);
   });
+
+  it("podsSynced follows the pod snapshot and resets on reconnect", () => {
+    let s = reduceCluster(initialCluster, { type: "status", connected: true, error: null });
+    expect(s.podsSynced).toBe(false);
+    s = reduceCluster(s, { type: "snapshot", kind: "service_account", items: [] });
+    expect(s.podsSynced).toBe(false);
+    s = reduceCluster(s, { type: "snapshot", kind: "pod", items: [] });
+    expect(s.podsSynced).toBe(true);
+    s = reduceCluster(s, { type: "status", connected: true, error: null });
+    expect(s.podsSynced).toBe(false);
+  });
 });
