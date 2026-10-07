@@ -40,6 +40,9 @@ pub fn run() {
             commands::fetch_infra,
             commands::kube_contexts,
             commands::set_kube_context,
+            commands::kube_connect,
+            commands::kube_disconnect,
+            commands::kube_pod_events,
             commands::open_url,
         ])
         .run(tauri::generate_context!())

@@ -18,6 +18,9 @@
     "allow-fetch-infra",
     "allow-kube-contexts",
     "allow-set-kube-context",
+    "allow-kube-connect",
+    "allow-kube-disconnect",
+    "allow-kube-pod-events",
     "allow-open-url"
   ]
 }

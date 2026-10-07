@@ -14,8 +14,11 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_store::StoreExt;
 
 use crate::api::{KeychainStore, RefreshStore, Session};
+use crate::cluster::CLUSTER_EVENT;
 use crate::cluster::errors::ClusterError;
 use crate::cluster::kubeconfig::{self, KubeContexts};
+use crate::cluster::model::InfraEvent;
+use crate::cluster::watch;
 use crate::error::AppError;
 use crate::events::{
     EventsConfig, EventsHandle, SessionBuilder, StreamFrame, is_retryable, spawn_events_lazy,
@@ -77,6 +80,9 @@ pub struct AppState {
     cancel_epochs: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     /// Sign-ins in flight, by server URL.
     signins: std::sync::Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// Live cluster watches, by server URL. Aborting a handle stops every
+    /// per-kind watch under it.
+    clusters: std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 /// Removes a sign-in's registration (and aborts it if still running) when the
@@ -99,6 +105,30 @@ impl Drop for SignInGuard<'_> {
 }
 
 impl AppState {
+    /// Installs a server's cluster watch, stopping any previous one.
+    fn put_cluster(&self, url: String, handle: tokio::task::JoinHandle<()>) {
+        let old = self
+            .clusters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(url, handle);
+        if let Some(old) = old {
+            old.abort();
+        }
+    }
+
+    /// Stops a server's cluster watch, if any.
+    fn stop_cluster(&self, url: &str) {
+        let handle = self
+            .clusters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(url);
+        if let Some(h) = handle {
+            h.abort();
+        }
+    }
+
     fn events_slot(&self) -> std::sync::MutexGuard<'_, Events> {
         self.events.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -706,6 +736,7 @@ pub async fn remove_server(
         Ok(())
     })?;
     state.cancel_sign_in(&url);
+    state.stop_cluster(&url);
     state.end_session(&url, servers::keychain_delete).await
 }
 
@@ -787,6 +818,7 @@ where
 pub async fn sign_out(state: State<'_, AppState>, url: String) -> Result<(), AppError> {
     let url = normalize_server_url(&url)?;
     state.cancel_sign_in(&url);
+    state.stop_cluster(&url);
     sign_out_with(&state, &url, servers::keychain_delete).await
 }
 
@@ -948,6 +980,48 @@ pub async fn set_kube_context(
     })
 }
 
+/// Starts live, read-only watches of `namespace` through `context` for a
+/// server, replacing any it already has. Frames arrive on `CLUSTER_EVENT`.
+#[tauri::command]
+pub async fn kube_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    context: String,
+    namespace: String,
+) -> Result<(), ClusterError> {
+    let url = normalize_server_url(&url).map_err(|e| ClusterError::Other {
+        message: e.to_string(),
+    })?;
+    watch::check_namespace(&namespace)?;
+    let client = kubeconfig::client_for(&context).await?;
+    let source = Arc::new(watch::KubeSource::new(client));
+    let server = url.clone();
+    let handle = watch::spawn_cluster(source, namespace, move |frame| {
+        let _ = app.emit(CLUSTER_EVENT, json!({ "server": server, "frame": frame }));
+    });
+    state.put_cluster(url, handle);
+    Ok(())
+}
+
+/// Stops a server's cluster watches.
+#[tauri::command]
+pub async fn kube_disconnect(state: State<'_, AppState>, url: String) -> Result<(), AppError> {
+    state.stop_cluster(&normalize_server_url(&url)?);
+    Ok(())
+}
+
+/// The newest events for one pod.
+#[tauri::command]
+pub async fn kube_pod_events(
+    context: String,
+    namespace: String,
+    pod: String,
+) -> Result<Vec<InfraEvent>, ClusterError> {
+    let client = kubeconfig::client_for(&context).await?;
+    watch::pod_events(client, &namespace, &pod).await
+}
+
 /// The only links the webview may ask the system browser to open: absolute
 /// `https://` URLs with a host and no embedded credentials.
 fn check_open_url(raw: &str) -> Result<url::Url, AppError> {
@@ -994,6 +1068,31 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::events::spawn_events;
+
+    #[tokio::test]
+    async fn a_cluster_watch_is_stopped_by_replacement_and_by_stop() {
+        let st = AppState::default();
+        let url = "https://wardby.example.com";
+        let pending = || tokio::spawn(futures_util::future::pending::<()>());
+        let first = pending();
+        let first_abort = first.abort_handle();
+        st.put_cluster(url.into(), first);
+        let second = pending();
+        let second_abort = second.abort_handle();
+        st.put_cluster(url.into(), second);
+        tokio::task::yield_now().await;
+        assert!(first_abort.is_finished(), "replaced watch keeps running");
+        assert!(!second_abort.is_finished());
+        st.stop_cluster("https://other.example.com");
+        assert!(
+            !second_abort.is_finished(),
+            "another server's stop hit this one"
+        );
+        st.stop_cluster(url);
+        tokio::task::yield_now().await;
+        assert!(second_abort.is_finished());
+        assert!(st.clusters.lock().unwrap().is_empty());
+    }
 
     /// Installs a stream the way a connect request would.
     fn put(st: &AppState, url: &str, handle: EventsHandle) {

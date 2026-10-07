@@ -5,3 +5,8 @@
 pub mod errors;
 pub mod kubeconfig;
 pub mod model;
+pub mod watch;
+
+/// Tauri event that carries every cluster frame to the UI, as
+/// `{ "server": <url>, "frame": ClusterFrame }`.
+pub const CLUSTER_EVENT: &str = "viewer://cluster";

@@ -16,6 +16,9 @@ fn main() {
             "fetch_infra",
             "kube_contexts",
             "set_kube_context",
+            "kube_connect",
+            "kube_disconnect",
+            "kube_pod_events",
             "open_url",
         ]),
     ))
