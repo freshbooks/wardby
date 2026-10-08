@@ -65,8 +65,8 @@
  * silently restore the corruption — the price of fixing this with a dispatcher
  * instead of owning the fetch stack. Nothing in the runtime image does that
  * today: the only other `setGlobalDispatcher` call in the tree is
- * `node-fetch-native` under the `prisma` CLI, which `deploy/Dockerfile:25`
- * asserts is absent from the runtime image. (Prisma 7's client runtime and
+ * `node-fetch-native` under the `prisma` CLI, which the runtime stage of
+ * `deploy/Dockerfile` asserts is absent. (Prisma 7's client runtime and
  * `@prisma/adapter-pg` contain none; Prisma 6's `runtime/binary.*` did.)
  *
  * Restoring Node's OWN dispatcher instead is not possible, though not for the

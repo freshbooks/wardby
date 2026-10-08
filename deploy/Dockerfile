@@ -44,10 +44,18 @@ WORKDIR /app
 # machine, where git is simply present.
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates git && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
+# openai@7 ships its TypeScript sources (src/, ~5.7 MB) and source maps (*.map,
+# ~10 MB) inside the package. Neither is loaded at runtime: the package's
+# exports map resolves only the compiled .js/.mjs files, nothing outside src/
+# imports from src/, and the control plane runs without --enable-source-maps.
+# Pruning them in the same layer as the install keeps them out of the image
+# entirely (a later RUN would only hide them under a whiteout).
 RUN npm pkg delete dependencies.prisma devDependencies scripts \
     && npm install --package-lock-only --omit=peer --ignore-scripts \
     && npm ci --omit=peer --ignore-scripts \
-    && npm cache clean --force
+    && npm cache clean --force \
+    && rm -rf node_modules/openai/src \
+    && find node_modules/openai -type f -name '*.map' -delete
 # The generated Prisma client is part of dist/ (dist/generated/prisma, reached
 # through package.json's "#prisma" import); only @prisma/client's runtime and
 # the pg adapter come from node_modules.
@@ -63,7 +71,10 @@ COPY --from=build /app/dist ./dist
 # a runtime image.
 COPY --from=build /app/scripts/git-askpass.sh ./scripts/git-askpass.sh
 RUN test -x scripts/git-askpass.sh && test ! -d node_modules/prisma && test ! -d node_modules/@prisma/config && test ! -d node_modules/deepmerge-ts && test ! -d node_modules/mysql2 \
-    && test -f dist/generated/prisma/client.js && test -d node_modules/@prisma/adapter-pg
+    && test -f dist/generated/prisma/client.js && test -d node_modules/@prisma/adapter-pg \
+    && test -f node_modules/openai/index.mjs && test ! -d node_modules/openai/src \
+    && test -z "$(find node_modules/openai -name '*.map' -print -quit)" \
+    && node --input-type=module -e 'import OpenAI from "openai"; new OpenAI({ apiKey: "build-check" });'
 USER node
 ENV NODE_ENV=production
 # The complete process: MCP + scheduler + reconciler. A deployment that
