@@ -660,6 +660,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             agentId: agent.id,
             trigger: options.trigger ?? "manual",
             executionManaged: true,
+            // Fixed for the run's life: the executor routes on this, never on the agent's current setting.
+            nativeExecutionMode: agent.kind === "native" ? agent.nativeExecutionMode : null,
             parentRunId: options.parentRunId,
             grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],
             taskOverride: options.taskOverride,

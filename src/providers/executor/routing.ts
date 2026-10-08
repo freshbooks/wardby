@@ -1,62 +1,100 @@
-import type { CodingImageSelector, Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
 import type { CodingProvider } from "../../coding/provider.js";
+import type { CodingImageSelector, Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
+
+/**
+ * Which executor owns a run: a coding run, a native run in the control plane
+ * (in-process or DBOS), or a native run in an isolated sandbox worker. Read
+ * from the run's own row (agent kind plus Run.nativeExecutionMode), never from
+ * the agent's current setting, so a setting change reaches only later runs.
+ */
+export type ExecutionTarget = "native" | "native-sandbox" | "coding";
 
 export interface ExecutionKindResolver {
-  kindForRun(runId: string): Promise<"native" | "coding" | null>;
+  kindForRun(runId: string): Promise<ExecutionTarget | null>;
 }
 
-/** Keeps native execution unchanged while routing coding runs to isolation. */
+/**
+ * Keeps native execution unchanged while routing coding runs to isolation and
+ * sandbox-mode native runs to the native sandbox executor.
+ *
+ * With no sandbox executor composed in, a sandbox run goes to the native
+ * executor, whose runner refuses to execute it (executeRun fails it before
+ * any spend, closing its host check and status comments): fail closed through
+ * the one path that already finishes a run properly, never a silent run in
+ * the control plane.
+ */
 export class RoutingExecutor implements Executor {
   constructor(
     private readonly resolver: ExecutionKindResolver,
     private readonly native: Executor,
     private readonly coding: Executor,
+    private readonly sandbox?: Executor,
   ) {}
 
+  private async route(runId: string): Promise<{ target: ExecutionTarget; executor: Executor } | null> {
+    const target = await this.resolver.kindForRun(runId);
+    if (target === "native") return { target, executor: this.native };
+    if (target === "native-sandbox") return { target, executor: this.sandbox ?? this.native };
+    if (target === "coding") return { target, executor: this.coding };
+    return null;
+  }
+
   async start(runId: string): Promise<void> {
-    const kind = await this.resolver.kindForRun(runId);
-    if (kind === "native") return this.native.start(runId);
-    if (kind === "coding") return this.coding.start(runId);
-    throw new Error("executor_run_not_found");
+    const routed = await this.route(runId);
+    if (!routed) throw new Error("executor_run_not_found");
+    return routed.executor.start(runId);
   }
 
   async stop(runId: string, reason?: string): Promise<void> {
-    const kind = await this.resolver.kindForRun(runId);
-    if (kind === "native") return this.native.stop(runId, reason);
-    if (kind === "coding") return this.coding.stop(runId, reason);
+    const routed = await this.route(runId);
+    if (routed) return routed.executor.stop(runId, reason);
   }
 
   /**
-   * Recovery is routed by the run's agent kind, exactly like start/stop: a
-   * native run's handle belongs to the native executor (e.g. a DBOS
-   * workflow handle), a coding run's to the container executor. Routing by
-   * handle backend would need this class to know every backend name.
+   * Recovery is routed by the run's target, exactly like start/stop: a native
+   * run's handle belongs to the native executor (e.g. a DBOS workflow handle),
+   * a sandbox run's to the sandbox executor, a coding run's to the container
+   * executor. Routing by handle backend would need this class to know every
+   * backend name.
    */
   async recover(handle: PersistedExecutionHandle): Promise<ExecutionRecoveryResult> {
-    const kind = await this.resolver.kindForRun(handle.runId);
-    if (kind === "native") {
-      if (!this.native.recover) return { state: "lost", reason: "native_recovery_unavailable" };
-      return this.native.recover(handle);
+    const routed = await this.route(handle.runId);
+    const target = routed?.target ?? "coding";
+    const executor = routed?.executor ?? this.coding;
+    if (!executor.recover) {
+      const reason =
+        target === "native"
+          ? "native_recovery_unavailable"
+          : target === "native-sandbox" && this.sandbox
+            ? "native_sandbox_recovery_unavailable"
+            : target === "native-sandbox"
+              ? "native_recovery_unavailable"
+              : "coding_recovery_unavailable";
+      return { state: "lost", reason };
     }
-    if (!this.coding.recover) return { state: "lost", reason: "coding_recovery_unavailable" };
-    return this.coding.recover(handle);
+    return executor.recover(handle);
   }
 
-  /** Lifecycle fans out to both executors; each is optional on the seam. */
+  /** Each distinct executor once, in a fixed order: native, coding, sandbox. */
+  private distinct(): Executor[] {
+    return [this.native, this.coding, this.sandbox].filter(
+      (executor, index, all): executor is Executor => executor !== undefined && all.indexOf(executor) === index,
+    );
+  }
+
+  /** Lifecycle fans out to every distinct executor; each hook is optional on the seam. */
   async launch(): Promise<void> {
-    await this.native.launch?.();
-    await this.coding.launch?.();
+    for (const executor of this.distinct()) await executor.launch?.();
   }
 
-  /** Fans out to both executors, like `launch`; each is optional on the seam. */
+  /** Fans out like `launch`. */
   async warmUp(): Promise<void> {
-    await this.native.warmUp?.();
-    await this.coding.warmUp?.();
+    for (const executor of this.distinct()) await executor.warmUp?.();
   }
 
+  /** Reverse of `launch`. */
   async close(): Promise<void> {
-    await this.coding.close?.();
-    await this.native.close?.();
+    for (const executor of this.distinct().reverse()) await executor.close?.();
   }
 
   resolveCodingWorkerImage(selector: CodingImageSelector): string {
@@ -95,17 +133,20 @@ export class PrismaExecutionKindResolver implements ExecutionKindResolver {
       run: {
         findUnique(input: {
           where: { id: string };
-          select: { agent: { select: { kind: true } } };
-        }): Promise<{ agent: { kind: string } } | null>;
+          select: { nativeExecutionMode: true; agent: { select: { kind: true } } };
+        }): Promise<{ nativeExecutionMode: string | null; agent: { kind: string } } | null>;
       };
     },
   ) {}
 
-  async kindForRun(runId: string): Promise<"native" | "coding" | null> {
+  async kindForRun(runId: string): Promise<ExecutionTarget | null> {
     const run = await this.db.run.findUnique({
       where: { id: runId },
-      select: { agent: { select: { kind: true } } },
+      select: { nativeExecutionMode: true, agent: { select: { kind: true } } },
     });
-    return run?.agent.kind === "native" || run?.agent.kind === "coding" ? run.agent.kind : null;
+    if (run?.agent.kind === "coding") return "coding";
+    if (run?.agent.kind !== "native") return null;
+    // Null = a run from before the snapshot existed: the control plane, as it always ran.
+    return run.nativeExecutionMode === "sandbox" ? "native-sandbox" : "native";
   }
 }

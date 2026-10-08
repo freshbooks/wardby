@@ -78,6 +78,12 @@ model Agent {
   /// Null = the provider's default.
   effort String?
 
+  /// Native agents only: where their runs execute. control-plane (default) =
+  /// in this server process (in-process or DBOS); sandbox = an isolated,
+  /// single-use worker container/pod. Each Run snapshots this at creation
+  /// (Run.nativeExecutionMode), so a change reaches only later runs.
+  nativeExecutionMode NativeExecutionMode @default(control_plane)
+
   /// Un-phased: sub-agent composition edges (see AgentSubAgent below). An
   /// agent can be a parent (has children it can delegate to) and/or a
   /// child (is delegated to by others) independently.
@@ -132,6 +138,12 @@ model BudgetGroup {
 enum AgentKind {
   native
   coding
+}
+
+/// Where a native agent's runs execute (Agent.nativeExecutionMode).
+enum NativeExecutionMode {
+  control_plane @map("control-plane")
+  sandbox
 }
 
 enum RunStatus {
@@ -348,6 +360,10 @@ model Run {
   /// in-process runs. The reconciler consults the backend before declaring a
   /// stale run lost, and can adopt one orphaned by a dead instance.
   executionBackend String?
+  /// The agent's nativeExecutionMode when this run was created, fixed for the
+  /// run's life and what the executor routes on. Null for coding runs and for
+  /// native runs from before the field existed, which run in the control plane.
+  nativeExecutionMode NativeExecutionMode?
   codingRun        CodingRun?
   hostCheck        RunHostCheck?
   hostStatus       RunHostStatus?

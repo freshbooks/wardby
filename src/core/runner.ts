@@ -288,6 +288,17 @@ async function finishRunClaimed(
 }
 
 /**
+ * Why a sandbox-mode native run is not executed here. The runner only ever
+ * executes native runs in the control plane; a run whose snapshot says
+ * `sandbox` reaches it only when no native sandbox executor is composed in
+ * (RoutingExecutor sends it to the native executor), and must fail closed
+ * rather than run unisolated.
+ */
+export const NATIVE_SANDBOX_NOT_CONFIGURED =
+  "native_sandbox_unavailable: This agent runs with nativeExecutionMode=sandbox, but this deployment has no native " +
+  "sandbox executor configured, so the run was not started. Switch the agent back to control-plane mode to run it here.";
+
+/**
  * Why a coding run cannot start in this process: runs reach the runner only
  * when no container executor is composed in (JOB_LAUNCHER=local, e.g. every
  * Cloud Run deployment today). Names the cause and the fix; the old wording
@@ -303,6 +314,13 @@ const CODING_EXECUTOR_NOT_CONFIGURED =
  * write the terminal row, and the queue timeout only fires on a drain tick.
  */
 export const CODING_CHILD_WAIT_GRACE_SEC = 60;
+
+/**
+ * How long a parent waits for a sandbox-mode native child before stopping it. Native runs have
+ * no run timeout of their own; until the sandbox executor brings a per-run deadline, this bounds
+ * a parent left waiting on a child that never finishes.
+ */
+export const SANDBOX_CHILD_WAIT_SEC = 60 * 60;
 
 export type CodingChildWaitOutcome =
   { kind: "terminal"; run: Run } | { kind: "timed_out" } | { kind: "parent_cancelled" };
@@ -433,7 +451,11 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
   if (agent.kind === "coding") {
     throw new Error(CODING_EXECUTOR_NOT_CONFIGURED);
   }
-  return db.run.create({ data: { agentId: agent.id, trigger } });
+  // Refused here, before any row: a foreground run executes inline, never in a sandbox.
+  if (agent.nativeExecutionMode === "sandbox") {
+    throw new Error(NATIVE_SANDBOX_NOT_CONFIGURED);
+  }
+  return db.run.create({ data: { agentId: agent.id, trigger, nativeExecutionMode: agent.nativeExecutionMode } });
 }
 
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
@@ -477,6 +499,23 @@ async function executeTrackedRun(
     ? (providers.repoAccess ?? createRepoAccessGate({ db, hosts: reviewHosts }))
     : undefined;
   const issueTrackers = configuredIssueTrackers(providers.issueTrackers);
+
+  // Fails a run that ends before its engine starts, closing what its trigger opened (the review
+  // check, the host and issue status comments) exactly as the normal and catch paths below do.
+  // Deliberately no self-defect: every caller is a configuration state, not this run's defect (an
+  // admin disabled or removed the model, or this deployment has no coding or native sandbox
+  // executor), and filing would open one defect per affected agent rather than describe a failure
+  // of that agent.
+  const finishEarly = async (error: string): Promise<Run> => {
+    const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
+    await closeOpenHostCheck(db, finished, reviewHosts);
+    await completeHostStatus(db, finished, reviewHosts);
+    await completeIssueStatus(db, finished, issueTrackers);
+    return finished;
+  };
+  // Decided by the run's own snapshot, before any work or spend (no pricing pin, no engine): a
+  // sandbox-mode run never executes in the control plane.
+  if (existingRun.nativeExecutionMode === "sandbox") return finishEarly(NATIVE_SANDBOX_NOT_CONFIGURED);
 
   // Pinned in one checkpointed step: on replay after a crash, the agent row
   // or its budget group may have changed since first execution. The
@@ -647,18 +686,6 @@ async function executeTrackedRun(
     }
     throw err;
   });
-  // Fails a run that ends before its engine starts, closing what its trigger opened (the review
-  // check, the host and issue status comments) exactly as the normal and catch paths below do.
-  // Deliberately no self-defect: both callers are configuration states, not this run's defect (an
-  // admin disabled or removed the model, or this deployment has no coding executor), and filing
-  // would open one defect per affected agent rather than describe a failure of that agent.
-  const finishEarly = async (error: string): Promise<Run> => {
-    const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
-    await closeOpenHostCheck(db, finished, reviewHosts);
-    await completeHostStatus(db, finished, reviewHosts);
-    await completeIssueStatus(db, finished, issueTrackers);
-    return finished;
-  };
   if ("unavailable" in loadedOrUnavailable) return finishEarly(loadedOrUnavailable.unavailable);
   const loaded = loadedOrUnavailable;
 
@@ -856,6 +883,7 @@ async function executeTrackedRun(
                 budgetGroupId: true,
                 budgetUsd: true,
                 ownerId: true,
+                nativeExecutionMode: true,
                 codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true } },
               },
             }),
@@ -1057,6 +1085,85 @@ async function executeTrackedRun(
             : args.task.trim() !== ""
               ? args.task
               : undefined;
+
+          if (childAgent.nativeExecutionMode === "sandbox") {
+            // A sandbox-mode child must run where its snapshot says, so it goes through
+            // dispatchRun and the Executor (RoutingExecutor sends it to the sandbox executor),
+            // exactly like a coding child — never inline in this process.
+            if (!providers.executor) {
+              return JSON.stringify({
+                error: "sandbox_dispatch_unavailable",
+                message:
+                  "This execution context has no Executor wired in, so a sandbox-mode sub-agent cannot be dispatched.",
+              });
+            }
+            const dispatched = await dispatchRun({
+              db,
+              executor: providers.executor,
+              selfDefects: { db, issueTrackers },
+              agentId: edge.childAgentId,
+              trigger: "subagent",
+              taskOverride,
+              grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
+              parentRunId: runId,
+              triggeredById: existingRun.triggeredById,
+              awaitExecution: true,
+              onPersisted: (persistedRun) => {
+                if (persistedRun.status !== "refused" && persistedRun.status !== "failed") {
+                  finishSibling = delegationSiblings.start();
+                }
+                release();
+              },
+            });
+            if (!dispatched) {
+              return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
+            }
+            const childRunId = dispatched.run.id;
+            const startedAt = Date.now();
+            runnerLog.info({ runId, childRunId, boundName, kind: "native-sandbox" }, "delegation started");
+            // Executor.start may resolve before the child is terminal, so wait on the row like a coding child.
+            const waited = await waitForCodingChild({
+              db,
+              executor: providers.executor,
+              childRunId,
+              parentRunId: runId,
+              boundMs: SANDBOX_CHILD_WAIT_SEC * 1000,
+            });
+            finishSibling();
+            runnerLog.info(
+              {
+                runId,
+                childRunId,
+                boundName,
+                outcome: waited.kind === "terminal" ? waited.run.status : waited.kind,
+                durationMs: Date.now() - startedAt,
+              },
+              "delegation finished",
+            );
+            if (waited.kind === "timed_out") {
+              return JSON.stringify({
+                error: "subagent_wait_timed_out",
+                runId: childRunId,
+                message: "The sandbox sub-agent did not finish in time; it was stopped and produced no result.",
+              });
+            }
+            if (waited.kind === "parent_cancelled") {
+              return JSON.stringify({
+                error: "parent_cancelled",
+                runId: childRunId,
+                message: "This run was cancelled while waiting for the sandbox sub-agent; the sub-agent was stopped.",
+              });
+            }
+            return JSON.stringify({
+              status: waited.run.status,
+              finalText: waited.run.finalText,
+              costUsd: Number(waited.run.costUsd),
+              tokensIn: waited.run.tokensIn,
+              tokensOut: waited.run.tokensOut,
+              ...(waited.run.error ? { error: waited.run.error } : {}),
+            });
+          }
+
           const childRun = await db.run.create({
             data: {
               agentId: edge.childAgentId,
@@ -1065,6 +1172,7 @@ async function executeTrackedRun(
               grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
               taskOverride,
               triggeredById: existingRun.triggeredById,
+              nativeExecutionMode: childAgent.nativeExecutionMode,
             },
           });
           finishSibling = delegationSiblings.start();
