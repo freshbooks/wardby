@@ -43,17 +43,17 @@ posts a parent message naming the issue or pull request; every later event
 for the same card is a reply in that thread, and the parent is kept updated
 with a short status line. The statuses are:
 
-| Status                 | Set by                                                         |
-| ---------------------- | -------------------------------------------------------------- |
-| `picked up`            | `issue_picked_up`                                              |
-| `PR open`              | `pr_opened`                                                    |
-| `changes requested`    | a `CHANGES_REQUESTED` review                                   |
-| `approved`             | an `APPROVE` review                                            |
-| `fixing`               | a fix round starting (the round number is in the thread reply) |
-| `fix rounds exhausted` | fix rounds reaching the cap with changes still requested       |
-| `merged ✅`            | the pull request merged                                        |
-| `closed`               | the pull request closed without merging                        |
-| `failed ❌`            | `run_failed`                                                   |
+| Status                 | Set by                                                           |
+| ---------------------- | ---------------------------------------------------------------- |
+| `picked up`            | `issue_picked_up` on a new thread, or after `merged ✅`/`closed` |
+| `PR open`              | `pr_opened`                                                      |
+| `changes requested`    | a `CHANGES_REQUESTED` review                                     |
+| `approved`             | an `APPROVE` review                                              |
+| `fixing`               | a fix round starting (the round number is in the thread reply)   |
+| `fix rounds exhausted` | fix rounds reaching the cap with changes still requested         |
+| `merged ✅`            | the pull request merged                                          |
+| `closed`               | the pull request closed without merging                          |
+| `failed ❌`            | `run_failed`                                                     |
 
 A `COMMENT` review leaves the status as it was. `merged ✅` and `closed` stick:
 a late review, fix round, failure, or repeated close does not change them.

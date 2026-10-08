@@ -187,7 +187,9 @@ When it is in Secret Manager, `up.sh` syncs it into a separate Secret,
 `wardby-slack-env`, that only the control plane reads; when it is not, it
 leaves that Secret out and Slack stays off. `WARDBY_SLACK_CUSTOMIZE` and
 `WARDBY_SLACK_API_BASE_URL` are not secrets and are not seeded: add them to the
-control plane's `env` in the same `control-plane.yaml` if you need them.
+control plane's `env` in the same `control-plane.yaml` if you need them. If you
+later remove the bot token, remove these two entries too: the control plane
+refuses to start with either one set and no token.
 
 Generate `SECRET_APP_KEY` with:
 
