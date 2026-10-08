@@ -397,6 +397,7 @@ export async function quickstartCommand(args: string[]): Promise<void> {
       trust: { type: "string", multiple: true },
       "coding-provider": { type: "string" },
       "starter-services": { type: "string" },
+      "allow-repo-packages": { type: "boolean" },
       provider: { type: "string" },
       model: { type: "string" },
       budget: { type: "string" },
@@ -414,6 +415,7 @@ export async function quickstartCommand(args: string[]): Promise<void> {
     provider: parseCodingProvider(values["coding-provider"]),
     starterServices:
       values["starter-services"] === undefined ? undefined : parseStarterChoice(values["starter-services"]),
+    allowRepoPackages: values["allow-repo-packages"],
   };
   const skipDemo = values["skip-demo"] ?? false;
   const budget = values.budget === undefined ? 1 : Number(values.budget);

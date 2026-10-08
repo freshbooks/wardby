@@ -919,3 +919,134 @@ describe("codingStep with a Python repository", () => {
     expect(seeds[0].toolchain ?? "node").toBe("node");
   });
 });
+
+describe("codingStep offers the repository's declared packages", () => {
+  function commitFiles(files: Record<string, string>): void {
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(repoA, name), text);
+    gitIn(repoA, "add", ...Object.keys(files));
+    gitIn(repoA, "commit", "-q", "-m", "manifests");
+  }
+  const MANIFESTS = {
+    "requirements.txt": "Flask>=3\npytest\n",
+    "package.json": JSON.stringify({ dependencies: { express: "^4" }, devDependencies: { vitest: "^3" } }),
+  };
+  const nonInteractive = (deps: CodingDeps, allowRepoPackages?: boolean) =>
+    codingStep(
+      paths(),
+      state,
+      { nonInteractive: true, coding: true, trust: [repoA], provider: "codex", allowRepoPackages },
+      deps,
+    );
+  function interactive(allowAnswer: boolean | undefined, allowRepoPackages?: boolean) {
+    const questions: string[] = [];
+    const answers = new Map<RegExp, string | boolean>([
+      [/Set up coding/, true],
+      [/Remove any/, ""],
+      [/Trust/, true],
+      [/Add another/, ""],
+      [/services\.yaml/, "n"],
+    ]);
+    if (allowAnswer !== undefined) answers.set(/Allow local-builder to install/, allowAnswer);
+    const answer = (question: string) => {
+      questions.push(question);
+      for (const [pattern, value] of answers) if (pattern.test(question)) return value;
+      throw new Error(`unexpected question: ${question}`);
+    };
+    const h = harness({
+      prompts: {
+        line: async (question) => answer(question) as string,
+        yesNo: async (question) => answer(question) as boolean,
+        secret: async () => "unused",
+      },
+    });
+    const run = () =>
+      codingStep(paths(), state, { nonInteractive: false, trust: [], provider: "codex", allowRepoPackages }, h.deps);
+    return { ...h, questions, run };
+  }
+  beforeEach(() => writeQuickstartEnv(paths(), { OPENAI_API_KEY: "sk-test" }));
+
+  it("non-interactive: allows none without --allow-repo-packages and says how", async () => {
+    commitFiles(MANIFESTS);
+    const { deps, seeds, logs } = harness();
+    await nonInteractive(deps);
+    expect(seeds[0].packageAllowlist).toBeUndefined();
+    expect(logs.join("\n")).toMatch(/--allow-repo-packages/);
+    expect(logs.join("\n")).toMatch(/update_agent with codingProfile\.packageAllowlist/);
+  });
+
+  it("non-interactive: --allow-repo-packages allows the declared packages, Node and Python alike", async () => {
+    commitFiles(MANIFESTS);
+    const { deps, seeds, logs } = harness();
+    await nonInteractive(deps, true);
+    expect(seeds[0].packageAllowlist).toEqual({ npm: ["express", "vitest"], pypi: ["flask", "pytest"] });
+    expect(logs).toContain("Packages declared on main: 2 npm, 2 PyPI");
+    expect(logs.some((line) => line.startsWith("✓ local-builder may install"))).toBe(true);
+  });
+
+  it("a Node-only repository gets its npm packages", async () => {
+    commitFiles({ "package.json": MANIFESTS["package.json"] });
+    const { deps, seeds } = harness();
+    await nonInteractive(deps, true);
+    expect(seeds[0].packageAllowlist).toEqual({ npm: ["express", "vitest"] });
+  });
+
+  it("interactive: lists the packages and asks; yes allows them", async () => {
+    commitFiles(MANIFESTS);
+    const { seeds, logs, questions, run } = interactive(true);
+    await run();
+    expect(questions).toContain("Allow local-builder to install these packages through Wardby's registry?");
+    expect(logs).toContain("  npm: express, vitest");
+    expect(logs).toContain("  PyPI: flask, pytest");
+    expect(seeds[0].packageAllowlist).toEqual({ npm: ["express", "vitest"], pypi: ["flask", "pytest"] });
+  });
+
+  it("interactive: no leaves the allowlist empty and says how to add packages later", async () => {
+    commitFiles(MANIFESTS);
+    const { seeds, logs, run } = interactive(false);
+    await run();
+    expect(seeds[0].packageAllowlist).toBeUndefined();
+    expect(logs.join("\n")).toMatch(/update_agent with codingProfile\.packageAllowlist/);
+  });
+
+  it("interactive: --allow-repo-packages / --no-allow-repo-packages answer without asking", async () => {
+    commitFiles(MANIFESTS);
+    const yes = interactive(undefined, true);
+    await yes.run();
+    expect(yes.seeds[0].packageAllowlist).toEqual({ npm: ["express", "vitest"], pypi: ["flask", "pytest"] });
+    const no = interactive(undefined, false);
+    await no.run();
+    expect(no.seeds[0].packageAllowlist).toBeUndefined();
+  });
+
+  it("shows about a dozen names and counts the rest", async () => {
+    const names = Array.from({ length: 15 }, (_, i) => `pkg-${String(i).padStart(2, "0")}`);
+    commitFiles({ "requirements.txt": names.join("\n") });
+    const { deps, logs } = harness();
+    await nonInteractive(deps, true);
+    expect(logs).toContain(`  PyPI: ${names.slice(0, 12).join(", ")}`);
+    expect(logs).toContain("  … and 3 more");
+  });
+
+  it("asks nothing and says nothing about packages when the repository declares none", async () => {
+    const { seeds, logs, questions, run } = interactive(undefined);
+    await run();
+    expect(questions.some((question) => /install/.test(question))).toBe(false);
+    expect(logs.some((line) => /[Pp]ackages/.test(line))).toBe(false);
+    expect(seeds[0].packageAllowlist).toBeUndefined();
+  });
+
+  it("ignores manifests that are only in the working tree", async () => {
+    for (const [name, text] of Object.entries(MANIFESTS)) writeFileSync(join(repoA, name), text);
+    const { deps, seeds } = harness();
+    await nonInteractive(deps, true);
+    expect(seeds[0].packageAllowlist).toBeUndefined();
+  });
+
+  it("prints a manifest it could not read and offers the rest", async () => {
+    commitFiles({ "pyproject.toml": "[project]\ndependencies = [\n", "requirements.txt": "flask\n" });
+    const { deps, seeds, logs } = harness();
+    await nonInteractive(deps, true);
+    expect(logs.some((line) => line.startsWith("! Could not read the dependencies in pyproject.toml"))).toBe(true);
+    expect(seeds[0].packageAllowlist).toEqual({ pypi: ["flask"] });
+  });
+});

@@ -97,6 +97,38 @@ describe("seedCodingAgents", () => {
     expect(profiles.get(id)).toMatchObject({ toolchain: "node", toolchainVersion: null });
   });
 
+  it("writes the package allowlist, and a re-run sets it to the current set (empty when none)", async () => {
+    const { db, agents, profiles } = memoryDb();
+    await seedCodingAgents(db, { ...input, packageAllowlist: { npm: ["express"], pypi: ["flask", "pytest"] } });
+    const id = agents.get(BUILDER_AGENT)!.id;
+    expect(profiles.get(id)).toMatchObject({ packageAllowlist: { npm: ["express"], pypi: ["flask", "pytest"] } });
+    await seedCodingAgents(db, { ...input, packageAllowlist: { pypi: ["flask"] } });
+    expect(profiles.get(id)!.packageAllowlist).toEqual({ pypi: ["flask"] });
+    await seedCodingAgents(db, input);
+    expect(profiles.get(id)!.packageAllowlist).toEqual({});
+  });
+
+  it("does not write a package allowlist onto an agent quickstart did not create", async () => {
+    const { db, profiles } = memoryDb();
+    await db.createAgent({
+      name: BUILDER_AGENT,
+      kind: "coding",
+      model: "m",
+      budgetUsd: 9,
+      systemPrompt: "mine",
+      maxTurns: 1,
+      ownerId: "someone",
+    });
+    const result = await seedCodingAgents(db, { ...input, packageAllowlist: { npm: ["express"] } });
+    expect(result.builder.status).toBe("skipped");
+    expect(profiles.size).toBe(0);
+  });
+
+  it("refuses an allowlist the coding profile would reject", async () => {
+    const { db } = memoryDb();
+    await expect(seedCodingAgents(db, { ...input, packageAllowlist: { cargo: ["serde"] } })).rejects.toThrow();
+  });
+
   it("is idempotent: a second run updates in place without duplicating agents or links", async () => {
     const { db, agents, links } = memoryDb();
     const first = await seedCodingAgents(db, input);

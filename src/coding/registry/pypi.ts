@@ -47,6 +47,10 @@ function uploadTime(file: SimpleFile): Date | null {
  *  `.`, `_` and `-` allowed only between them. */
 const PROJECT_NAME = /^(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9])$/;
 
+export function isPypiProjectName(name: string): boolean {
+  return PROJECT_NAME.test(name);
+}
+
 function decoded(segment: string): string {
   try {
     return decodeURIComponent(segment);
