@@ -366,6 +366,17 @@ Reply with one line: what you started and why, or "No action: <reason>".
 If the delegate call returns a failure, reply with a line beginning FAILED:.
 ```
 
+## Architecture agents on a local repository
+
+For a `local:` repository (no GitHub App), such as the one the quickstart's
+coding step sets up, the `architecture-agent` help article has a "Local
+repository (no GitHub App)" section: the keeper is a scheduled coding agent
+whose runs push knowledge updates to `wardby/run-<run id>` branches, and the
+reviewer is a native agent linked with `link_repository` (`provider: "local"`)
+that you start with `trigger_agent` and `review: {branch}`. There is no merge
+watcher (the `push` trigger needs GitHub), and the schedule fires only while a
+Wardby scheduler (`wardby scheduler` or `wardby serve`) is running.
+
 ## Reviewer step
 
 Add this section to the system prompt of a code-review agent (see

@@ -14,7 +14,13 @@ compiled Node.js coding-worker driver, `git`, `ca-certificates`, and the
 `wardby` user (uid/gid 10001) — nothing language-specific. It's built from
 `src/coding-worker/Dockerfile.driver` and published on `driver-vN` git tags;
 each release's GitHub Release notes carry the resolved
-`@sha256:...` digest to pin.
+`@sha256:...` digest to pin. `wardby doctor` prints the digest your installed
+version's own workers are built on ("Base image for your own worker images:
+…"); build on that one so your image matches the run input your Wardby sends.
+
+An MCP assistant connected to Wardby can do the whole procedure for you: the
+`build-worker-image` help article walks it through finding the toolchain,
+writing and checking the Dockerfile, and setting `workerImageRef`.
 
 The image deliberately stops before setting `USER`, `WORKDIR`, or
 `ENTRYPOINT`, and before any of the hardened binary-absence checks wardby's
@@ -54,7 +60,14 @@ own READMEs tell it to — reports a failed command even when the suite is
 green. `Dockerfile.node-python` symlinks `python` to `python3` for exactly
 that reason, and asserts both work.
 
-Build it, push it to your own registry, and note the resulting digest —
+Remember the run's filesystem: the root filesystem is read-only, and `/tmp`
+and `/home/wardby` are empty `noexec` scratch mounts (anything the image put
+there is hidden). Workers reach no package registry except Wardby's npm and
+PyPI proxy, so bake other dependencies into the image.
+
+On a local quickstart install with the Docker launcher, `workerImageRef` can be
+the local image ID (`docker image inspect --format '{{.Id}}' <your-tag>`).
+Otherwise, build it, push it to your own registry, and note the resulting digest —
 `docker inspect --format '{{index .RepoDigests 0}}' <your-tag>` after a push,
 or read it straight from `docker buildx build --push`'s output.
 

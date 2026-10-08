@@ -49,11 +49,12 @@ The quickstart's sample agent is a native agent: it calls a model and nothing
 else. To have agents write code or review it, pick the path that matches what
 you have:
 
-| You want                                          | You need                                                           | Path                                              |
-| ------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------- |
-| A coding agent and a review agent, tried locally  | Docker, an OpenAI **or** Anthropic key, a git repository on disk   | [A](#path-a-local-repository-no-github-app)       |
-| A coding agent that opens pull requests on GitHub | Path A's setup, plus a GitHub App installed on the repository      | [B](#path-b-coding-agent-on-a-github-repository)  |
-| A review agent that reviews GitHub pull requests  | A GitHub App with webhooks, and Wardby reachable over public HTTPS | [C](#path-c-review-agent-on-github-pull-requests) |
+| You want                                                | You need                                                           | Path                                               |
+| ------------------------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------- |
+| A coding agent and a review agent, tried locally        | Docker, an OpenAI **or** Anthropic key, a git repository on disk   | [A](#path-a-local-repository-no-github-app)        |
+| A coding agent that opens pull requests on GitHub       | Path A's setup, plus a GitHub App installed on the repository      | [B](#path-b-coding-agent-on-a-github-repository)   |
+| A review agent that reviews GitHub pull requests        | A GitHub App with webhooks, and Wardby reachable over public HTTPS | [C](#path-c-review-agent-on-github-pull-requests)  |
+| A coding agent for a language other than Node or Python | Path A's setup with Codex, and Docker to build an image            | [D](#path-d-another-language-build-your-own-image) |
 
 Codex agents need only an OpenAI key and Claude Code agents only an Anthropic
 key; you don't need both.
@@ -155,6 +156,26 @@ or another host with a public URL.
 
 To try reviews before you have a public URL, use path A's `local-reviewer` on
 any local branch.
+
+### Path D: another language: build your own image
+
+Wardby's worker images have Node, or Node and Python 3.12. For a Go, Java, Rust
+or other project, build a worker image with that toolchain on Wardby's driver
+base image, and point the builder at it with `codingProfile.workerImageRef`.
+This works for **Codex** agents only today: a Claude Code agent runs its
+commands in its tool runner, which a custom worker image does not change.
+
+1. Complete path A with Codex (`--coding-provider codex`).
+2. Run `npx @wardby/cli@latest doctor`. It prints the base image to build on:
+   "Base image for your own worker images: …@sha256:…".
+3. Write and build the Dockerfile as described in
+   [Bring-your-own worker images](coding-worker-byo-images.md), then set the
+   builder's `codingProfile.workerImageRef` with `update_agent` to the image's
+   local ID (`docker image inspect --format '{{.Id}}' <image>`).
+
+Your MCP assistant can do these steps for you: ask it "Help me build a Wardby
+worker image for Go" (or your language). It follows the `build-worker-image`
+help article, checks the image, and runs a test task with it.
 
 ## Unattended setup
 
@@ -273,6 +294,14 @@ This step needs Docker, and an `OPENAI_API_KEY` (Codex) or `ANTHROPIC_API_KEY`
    other asks `local-reviewer` to review the branch `wardby/run-<run id>` the
    run pushed into your repository.
 
+`local-reviewer` uses a thorough, repository-agnostic review prompt: it checks
+correctness, security against the OWASP Top 10, performance, duplication,
+modularity, AI-generated slop, code quality, test coverage and process, cites
+your `docs/knowledge/` concepts when you have them, and ends with APPROVE or
+CHANGES_REQUESTED. The prompt is quoted in the `architecture-agent` help
+article. A re-run of quickstart moves a reviewer created by an earlier version
+onto it; a `local-reviewer` you changed yourself is left alone.
+
 **Trust model.** Wardby only touches repositories inside the folders you trust.
 Agents see committed history only: untracked files such as `.env.local` never
 leave your machine. A run never changes your working tree or the branch you have
@@ -314,6 +343,7 @@ Python tests. Upgrade, or set the variable above.
 
 Other languages (Go, Rust, Java and so on) are not detected. Use a
 bring-your-own image through `workerImageRef`; see
+[Path D](#path-d-another-language-build-your-own-image) and
 [Bring-your-own worker images](coding-worker-byo-images.md). That is Codex-only
 today: a Claude Code agent cannot use a custom toolchain yet.
 
@@ -394,9 +424,25 @@ and need the GitHub App, worker image, and job launcher from
 [Coding-agent setup](coding-agent-setup.md). Their event triggers need GitHub to
 reach your instance at a public HTTPS URL.
 
-The assistant the quickstart connected can walk you through either recipe. Ask it
-"Set up the Wardby architecture keeper for this repository" or "Set up a Wardby
-builder for this repository"; it follows the `agent-recipes` help article.
+The quickstart ends with a short menu of things to ask the assistant it
+connected, each with the help article the assistant follows:
+
+1. "Run local-builder with a task, then have local-reviewer review the branch"
+   (`local-repositories`; shown only when the coding step ran).
+2. "Let local-builder install more packages" (`coding-packages`).
+3. "Help me build a Wardby worker image for Go (or Java, Rust…)"
+   (`build-worker-image`).
+4. "Set up a scheduled Wardby agent" (`creating-agents`).
+5. "Set up a Wardby architecture reviewer and keeper for this repo"
+   (`architecture-agent`, which has a local-repository variant).
+6. "Help me plan out a GKE deployment" (`deploy-gke` and
+   `deployment-targets`).
+
+Without an MCP client, read an article with
+`npx @wardby/cli@latest help open <article>`. The GitHub setups above are not
+in the menu; ask for one directly, for example "Set up the Wardby architecture
+keeper for this repository", and the assistant follows the `agent-recipes`
+help article.
 
 ## Next steps
 

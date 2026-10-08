@@ -47,6 +47,20 @@ Claude Code. Run `wardby doctor` afterwards to verify the local installation.
   with webhooks, link a native agent to the repository with the `pull_request`
   trigger, and open a pull request. See [Code review agents](code-review-agents.md).
 
+- **D. Another language (Go, Java, Rust…).** Do A with Codex, then build a
+  worker image with that toolchain on the base image `wardby doctor` prints,
+  and set the builder's `codingProfile.workerImageRef`. Ask your assistant
+  "Help me build a Wardby worker image for Go"; it follows
+  [Build a custom worker image](build-worker-image.md). Codex agents only.
+
+The quickstart ends with a menu of next steps to ask your assistant: run the
+builder and reviewer, allow more packages, build a worker image, schedule an
+agent, set up an architecture reviewer and keeper (see
+[Set up an architecture agent](architecture-agent.md), which has a
+local-repository variant), or plan a GKE deployment
+([Deploy on GKE](deploy-gke.md)). Each names the help article the assistant
+follows.
+
 The full step-by-step guide is "Choose what to set up next" in
 [`docs/getting-started.md`](../docs/getting-started.md).
 

@@ -164,8 +164,9 @@ then:
   the repository declares now. A manifest quickstart cannot read is skipped
   with a note. See [Approve packages for coding agents](coding-packages.md);
 - creates `local-builder` (a coding agent, $2 budget) and `local-reviewer`
-  (a review agent, $1 budget) for the repository and prints the two
-  `trigger_agent` calls to try; and
+  (a review agent, $1 budget, with the thorough review prompt quoted in
+  [Set up an architecture agent](architecture-agent.md#reviewer-system-prompt))
+  for the repository and prints the two `trigger_agent` calls to try; and
 - if the repository has no `.wardby/services.yaml`, offers a starter one with
   PostgreSQL and/or Redis. It is committed to the branch
   `wardby/quickstart-services` without touching your working tree. Merge that
@@ -179,7 +180,9 @@ Flags: `--coding` (run the step), `--no-coding` (skip it), `--trust <dir>`
 `--no-allow-repo-packages`). In `--non-interactive` mode the step
 only runs with `--coding`, and it needs at least one `--trust`. `doctor` and
 `status` report the trusted folders, worker image, coding proxy and each local
-agent's repository, and `down` stops the proxy with the database.
+agent's repository, and `down` stops the proxy with the database. Quickstart
+ends with a menu of next things to ask your assistant, each naming the help
+article it follows; see [Get started](getting-started.md).
 
 ## Errors
 
