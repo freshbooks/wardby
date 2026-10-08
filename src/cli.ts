@@ -8,6 +8,7 @@
  *   wardby run <name>
  *   wardby runs [--agent <name>] [--limit N] [--status <s>]
  *   wardby scheduler [--scope default]
+ *   wardby native-gateway   (the native sandbox gateway only; NATIVE_GATEWAY_LISTEN)
  *   wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport; authoring/
  *                control is MCP-first from here — this floor keeps working
  *                before/without an MCP client)
@@ -49,7 +50,8 @@ import {
 } from "./providers/llm/index.js";
 import { startModelCatalog, type CatalogStore } from "./providers/llm/catalog-store.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
-import { drainDeferredRuns } from "./providers/executor/deferred.js";
+import { DeferredExecutor, drainDeferredRuns } from "./providers/executor/deferred.js";
+import { parseGatewayListen, startGatewayServer } from "./native-worker/http-server.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
 import { PostgresAgentMemory } from "./providers/memory/index.js";
@@ -867,6 +869,50 @@ async function scheduler(args: string[]): Promise<void> {
   });
 }
 
+/**
+ * The native sandbox gateway on its own (docs/native-sandbox.md): only the internal listener
+ * sandbox workers call, on NATIVE_GATEWAY_LISTEN (default 0.0.0.0:8790). It never starts or
+ * stops a run itself — workers can reach it, so it holds no Docker socket or cluster
+ * credential: a delegation it makes is started by the scheduler leader (DeferredExecutor).
+ * It needs the server's database and LLM/integration settings, nothing more.
+ */
+async function nativeGateway(): Promise<void> {
+  const listen = parseGatewayListen(process.env.NATIVE_GATEWAY_LISTEN) ?? { host: "0.0.0.0", port: 8790 };
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  const secrets = buildSecrets();
+  const reviewHosts = buildReviewHosts(process.env, prisma);
+  const providers: NativeRunProviders = {
+    llm: buildLlmProvider(),
+    engine: buildEngine(),
+    datastore: buildDatastore(secrets),
+    secrets,
+    memory: buildMemory(),
+    reviewHosts,
+    issueTrackers: buildIssueTrackers(),
+    repoAccess: createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
+    // Coding resolution only (worker image, service declaration): never started or stopped here.
+    executor: new DeferredExecutor(prisma, buildConfiguredExecutor({ native: noopExecutor(), db: prisma })),
+  };
+  const server = await startGatewayServer(listen, { db: prisma, providers });
+  console.error(`wardby native-gateway listening on ${listen.host}:${listen.port}. Press Ctrl+C to stop.`);
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      server.close(() => {
+        modelCatalog.close();
+        resolve();
+      });
+      server.closeIdleConnections();
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+}
+
 async function mcp(): Promise<void> {
   const handle = await startMcp();
   // startMcp() resolves once the transport is up (bound/listening), not
@@ -974,6 +1020,8 @@ async function main(): Promise<void> {
       await codingOps(rest);
     } else if (command === "scheduler") {
       await scheduler(rest);
+    } else if (command === "native-gateway") {
+      await nativeGateway();
     } else if (command === "mcp") {
       await mcp();
     } else if (command === "serve") {

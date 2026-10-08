@@ -23,6 +23,7 @@ export const CLI_USAGE = `usage:
   wardby coding preflight   (JOB_LAUNCHER=docker or kubernetes)
   wardby coding cleanup --run-id <id>
   wardby scheduler [--scope default]
+  wardby native-gateway   (the native sandbox gateway only; NATIVE_GATEWAY_LISTEN, default 0.0.0.0:8790)
   wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport)
   wardby serve [--scope default]   (mcp + scheduler + reconciler in one process; http only)
   wardby grants migration-report [--json]
