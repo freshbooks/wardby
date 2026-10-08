@@ -42,6 +42,8 @@ export type GatewayErrorCode =
   | "invalid_request"
   /** A privileged bridge failed; `message` is what the tool sees, as in-process. */
   | "bridge_error"
+  /** The run's budget cannot cover another model call (the gateway's reservation was refused). */
+  | "budget_exhausted"
   | "internal";
 
 export class GatewayError extends Error {
@@ -148,6 +150,15 @@ export const WorkerInputSchema = z
     runsConcurrently: z.array(z.string()),
     /** The run's pinned catalog entry, so the engine's local budget checks price without a network call. */
     pricing: PricingSchema,
+    /**
+     * Where and how to reach the HTTP gateway. Absent: the gateway is on this process's stdio.
+     * The capability is given once, here, on the worker's stdin; it is never in its environment,
+     * argv, or the server's stored snapshot (only its hash is stored).
+     */
+    gateway: z
+      .object({ url: z.string().url(), capability: z.string().min(32).max(256) })
+      .strict()
+      .optional(),
   })
   .strict();
 export type WorkerInput = z.infer<typeof WorkerInputSchema>;

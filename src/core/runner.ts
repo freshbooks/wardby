@@ -17,6 +17,7 @@
  * reasons about cost, not one here plus one in the engine.
  */
 
+import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { Prisma, PrismaClient, Run, RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
@@ -1282,8 +1283,14 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
    * consented capabilities. Undefined for a name that is not an attached user tool. In-process it
    * serves the sandbox directly; the native sandbox gateway serves a worker's bridge calls with it.
    */
-  const scopedHost = (name: string, tool: LoadedUserTool, signal: AbortSignal): PrivilegedHost =>
+  const scopedHost = (
+    name: string,
+    tool: LoadedUserTool,
+    signal: AbortSignal,
+    redactSecretValues?: readonly string[],
+  ): PrivilegedHost =>
     createPrivilegedHost({
+      redactSecretValues,
       agentId: loaded.agentId,
       datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
       sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
@@ -1292,9 +1299,21 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
       logTag: name,
       signal,
     });
-  const privilegedHostFor = (name: string, signal: AbortSignal): PrivilegedHost | undefined => {
+  const privilegedHostFor = (
+    name: string,
+    signal: AbortSignal,
+    redactSecretValues?: readonly string[],
+  ): PrivilegedHost | undefined => {
     const tool = toolsByName.get(name);
-    return tool ? scopedHost(name, tool, signal) : undefined;
+    return tool ? scopedHost(name, tool, signal, redactSecretValues) : undefined;
+  };
+  /** Every secret value the user tool `name` may read, for console redaction by a stateless gateway. */
+  const readableSecretValues = async (name: string): Promise<string[]> => {
+    const tool = toolsByName.get(name);
+    if (!tool) return [];
+    const scoped = scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets);
+    const values = await Promise.all(tool.allowedSecrets.map((secret) => scoped.get(secret).catch(() => undefined)));
+    return values.filter((value): value is string => typeof value === "string");
   };
 
   const runUserTool = async (name: string, argsJson: string): Promise<string> => {
@@ -1313,7 +1332,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     return builtin ? builtin(argsJson) : runUserTool(name, argsJson);
   };
 
-  return { toolsByName, builtinHandler, privilegedHostFor, runUserTool, runSandboxTool };
+  return { toolsByName, builtinHandler, privilegedHostFor, readableSecretValues, runUserTool, runSandboxTool };
 }
 
 /**
@@ -1401,7 +1420,7 @@ export async function failNativeRun(ctx: NativeRunFinishContext, err: unknown): 
 }
 
 /** Where a run stands for the native gateway: still drivable, cancelled (its task), or otherwise ended. */
-async function runDrivability(db: RunnerDb, runId: string): Promise<RunDrivability> {
+export async function runDrivability(db: RunnerDb, runId: string): Promise<RunDrivability> {
   const run = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
   if (!run || !DRIVABLE.includes(run.status as (typeof DRIVABLE)[number])) {
     return run?.status === "cancelled" ? "cancelled" : "ended";
@@ -1415,7 +1434,7 @@ async function runDrivability(db: RunnerDb, runId: string): Promise<RunDrivabili
  * (served by the gateway), and each user tool's code and schema only — never its capabilities,
  * secret names, or values, which stay with the gateway's privileged host.
  */
-function sandboxWorkerInput(
+export function sandboxWorkerInput(
   runId: string,
   loaded: LoadedNativeRun,
   tools: Pick<ReturnType<typeof createNativeRunTools>, "builtinHandler" | "toolsByName">,
@@ -1652,6 +1671,116 @@ export async function durableDelegate(
     if (remaining <= 0) return { pending: true };
     await sleep(Math.min(ctx.pollIntervalMs ?? 1_000, remaining));
   }
+}
+
+/** The integrations a native run uses, as executeRun derives them from its providers. */
+export function nativeRunIntegrations(providers: NativeRunProviders, db: RunnerDb) {
+  const reviewHosts = configuredReviewHosts(providers.reviewHosts);
+  const repoAccess = reviewHosts
+    ? (providers.repoAccess ?? createRepoAccessGate({ db, hosts: reviewHosts }))
+    : undefined;
+  return { reviewHosts, repoAccess, issueTrackers: configuredIssueTrackers(providers.issueTrackers) };
+}
+
+/** How long a sandbox run's gateway session (and so its capability) stays valid. */
+export const SANDBOX_RUN_MAX_SEC = SANDBOX_CHILD_WAIT_SEC;
+
+/** What a sandbox session pins: the worker's input (without its capability) and the trusted load. */
+export interface SandboxSessionSnapshot {
+  input: WorkerInput;
+  loaded: LoadedNativeRun;
+}
+
+export type SandboxSessionOutcome =
+  | { kind: "started"; input: WorkerInput; capability: string; sessionId: string }
+  /** The run ended before a worker was needed (already terminal, or failed at load). */
+  | { kind: "ended"; run: Run };
+
+/**
+ * Starts a sandbox-mode run's trusted half: loads and pins the run, marks it running, records its
+ * gateway session (capability hash, deadline, budget, snapshot), and records `native-sandbox` as
+ * its execution backend — all before any worker exists. The caller launches the worker with the
+ * returned input, which carries the gateway URL and the one-time capability.
+ */
+export async function createSandboxSession(options: {
+  runId: string;
+  providers: NativeRunProviders;
+  db: RunnerDb;
+  ledger: Pick<PrismaGatewayLedger, "createSession">;
+  gatewayUrl: string;
+  now?: Date;
+}): Promise<SandboxSessionOutcome> {
+  const { runId, providers, db, ledger } = options;
+  const now = options.now ?? new Date();
+  const existingRun = await db.run.findUnique({ where: { id: runId } });
+  if (!existingRun) throw new Error(`Unknown run "${runId}".`);
+  if (!DRIVABLE.includes(existingRun.status as (typeof DRIVABLE)[number])) return { kind: "ended", run: existingRun };
+  if (existingRun.nativeExecutionMode !== "sandbox") throw new Error(`Run "${runId}" is not a sandbox-mode run.`);
+
+  const { reviewHosts, repoAccess, issueTrackers } = nativeRunIntegrations(providers, db);
+  const finishContext: NativeRunFinishContext = { runId, db, providers, reviewHosts, repoAccess, issueTrackers };
+  const loadedOrUnavailable = await loadNativeRun({
+    runId,
+    existingRun,
+    providers,
+    db,
+    step: runStepInline,
+    reviewHosts,
+    issueTrackers,
+  });
+  if ("unavailable" in loadedOrUnavailable) {
+    return { kind: "ended", run: await failNativeRun(finishContext, new Error(loadedOrUnavailable.unavailable)) };
+  }
+  const loaded = loadedOrUnavailable;
+  if (loaded.kind === "coding") {
+    return { kind: "ended", run: await failNativeRun(finishContext, new Error(CODING_EXECUTOR_NOT_CONFIGURED)) };
+  }
+  const tools = createNativeRunTools({
+    runId,
+    existingRun,
+    loaded,
+    providers,
+    db,
+    reviewHosts,
+    repoAccess,
+    issueTrackers,
+  });
+  let input: WorkerInput;
+  try {
+    input = sandboxWorkerInput(runId, loaded, tools);
+  } catch (err) {
+    return { kind: "ended", run: await failNativeRun(finishContext, err) };
+  }
+
+  await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data: { status: "running" } });
+  const capability = randomBytes(32).toString("base64url");
+  const snapshot: SandboxSessionSnapshot = { input, loaded };
+  const session = await ledger.createSession({
+    runId,
+    capabilityHash: sandboxCapabilityHash(capability),
+    deadlineAt: new Date(now.getTime() + SANDBOX_RUN_MAX_SEC * 1000),
+    budgetUsd: loaded.agent.budgetUsd,
+    snapshot: snapshot as unknown as Prisma.InputJsonValue,
+  });
+  // The handle exists before any worker does, so the reconciler routes a stale run to the sandbox executor.
+  await db.run.updateMany({
+    where: { id: runId, executionBackend: null },
+    data: { executionBackend: NATIVE_SANDBOX_BACKEND },
+  });
+  return {
+    kind: "started",
+    sessionId: session.id,
+    capability,
+    input: { ...input, gateway: { url: options.gatewayUrl, capability } },
+  };
+}
+
+/** Run.executionBackend for a sandbox-mode run whose worker is (or was) launched. */
+export const NATIVE_SANDBOX_BACKEND = "native-sandbox";
+
+/** The stored form of a sandbox capability: never the token itself. */
+export function sandboxCapabilityHash(capability: string): string {
+  return createHash("sha256").update(capability).digest("hex");
 }
 
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
