@@ -763,7 +763,46 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Launch
 
-  /** Memoized: the preflight (or, without one, a single proxy-witness read) runs once per launcher. */
+  /**
+   * Starts the memoized cluster preflight (`runPreflight`) right away, instead of waiting for the
+   * first `launch()`, so a long-running server process's own start-up pays the preflight's cost (a
+   * canary pod on `kind`: ~20s) rather than that process's first coding run. Never throws: it only
+   * reports the outcome (an info line on success, a warning naming the failure code otherwise) so
+   * an operator sees a misconfigured cluster at boot. Any `launch()` already awaiting this same
+   * attempt (concurrent with this call) still fails exactly as it does today when the preflight
+   * failed — it shares the same rejected promise. But unlike a preflight `launch()` starts on its
+   * own, a start-up failure here is **not** left stuck memoized: a transient cluster problem at
+   * process start must not fail every coding run until restart, so the failed attempt is cleared
+   * (only if nothing has already started a newer one — compared by identity, never by state) and
+   * the *next* `launch()` runs the preflight fresh. A successful warm-up stays memoized as always.
+   */
+  async warmUp(): Promise<void> {
+    const attempt = this.runPreflight();
+    try {
+      await attempt;
+      kubernetesLog.info("kubernetes_preflight_warm_up_succeeded: cluster preflight passed at start-up");
+    } catch (error) {
+      // Only clear the memo if it still holds this exact attempt: a concurrent launch() or warmUp()
+      // may have already seen this same rejection and started a fresh one (which must survive), and
+      // nothing else could have replaced this attempt with anything but a newer one, since
+      // runPreflight() never overwrites an already-set, still-pending-or-resolved promise.
+      if (this.preflightResult === attempt) this.preflightResult = undefined;
+      // Same code-only convention as every other failure this launcher logs (e.g. launch()'s
+      // kubernetes_spec_rejected above): the error's own message is the fixed reason code set by
+      // runPreflight's errorWithCode (KUBERNETES_ISOLATION_ERROR) — never the raw cause, which could
+      // carry cluster detail.
+      const code = error instanceof Error ? error.message : String(error);
+      this.warn(`kubernetes_preflight_warm_up_failed: ${code}`);
+    }
+  }
+
+  /**
+   * Memoized: the preflight (or, without one, a single proxy-witness read) runs once per launcher —
+   * including its failure, which stays memoized and fails every subsequent `launch()` immediately,
+   * for a preflight `launch()` itself started (there was no `warmUp()`, or `warmUp()`'s own failed
+   * attempt was already cleared). `warmUp()` is the one caller that clears a failed attempt instead
+   * of leaving it stuck; see its own doc comment.
+   */
   private runPreflight(): Promise<KubernetesClusterInfo> {
     this.preflightResult ??= (async () => {
       try {

@@ -243,6 +243,24 @@ async function closeQuietly(promise: Promise<void> | undefined, what: string): P
   }
 }
 
+/**
+ * Fire-and-forget: starts the executor's start-up warm-up (e.g. KubernetesJobLauncher's memoized
+ * cluster preflight, via RoutingExecutor -> ContainerExecutor -> the job launcher's own `warmUp`)
+ * right when a long-running server process starts, so its first coding run doesn't pay for it.
+ * Never awaited by its caller and never throws: `warmUp()` on every implementation already swallows
+ * its own failure (logging it instead), but this still guards the call site against a surprise
+ * rejection, since nothing here may block or fail server start-up. Called from `startMcp` below —
+ * i.e. from `wardby mcp` (stdio and HTTP) and from `wardby serve`, which shares this same start-up
+ * path — and, separately, from `cli.ts`'s `scheduler()` (`wardby scheduler`), which dispatches
+ * scheduled coding runs through its own Kubernetes executor but never starts an MCP server. Never
+ * called from a one-shot CLI command (`wardby run`, `coding preflight`, migrations, imports).
+ */
+export function warmUpExecutor(executor: Pick<McpProviders["executor"], "warmUp">): void {
+  void executor.warmUp?.()?.catch((err: unknown) => {
+    mcpLog.warn({ err }, "executor warm-up failed unexpectedly");
+  });
+}
+
 /** The real CLI entry point: `wardby mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
 export async function startMcp(options: StartMcpOptions = {}): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
@@ -258,6 +276,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const modelCatalog = await startModelCatalog(prisma);
   const providers = options.providers ?? buildMcpProviders().providers;
   await providers.executor.launch?.();
+  warmUpExecutor(providers.executor);
   if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
 
   if (mcpConfig.transport === "stdio") {

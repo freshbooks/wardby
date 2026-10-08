@@ -48,6 +48,12 @@ export class RoutingExecutor implements Executor {
     await this.coding.launch?.();
   }
 
+  /** Fans out to both executors, like `launch`; each is optional on the seam. */
+  async warmUp(): Promise<void> {
+    await this.native.warmUp?.();
+    await this.coding.warmUp?.();
+  }
+
   async close(): Promise<void> {
     await this.coding.close?.();
     await this.native.close?.();

@@ -79,7 +79,7 @@ import {
   type AuthorizeTool,
 } from "./core/tool-admin.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
-import { startMcp } from "./mcp/index.js";
+import { startMcp, warmUpExecutor } from "./mcp/index.js";
 import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
 import { hostAccountCommand } from "./mcp/auth/host-account-cli.js";
@@ -816,6 +816,7 @@ async function scheduler(args: string[]): Promise<void> {
   );
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config, repoAccess });
   await executor.launch?.();
+  warmUpExecutor(executor);
   const reconciler = startReconciler({
     db: prisma,
     executor,

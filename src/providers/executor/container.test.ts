@@ -235,6 +235,13 @@ class FakeJobs implements WorkspaceJobLauncher {
   supportsServicesFor(provider: CodingProvider): boolean {
     return this.serviceProviders.includes(provider);
   }
+  warmUps = 0;
+  /** Set to make warmUp() throw, the way a launcher's own warmUp never does (it swallows its own failure). */
+  warmUpError?: Error;
+  async warmUp(): Promise<void> {
+    this.warmUps += 1;
+    if (this.warmUpError) throw this.warmUpError;
+  }
   result: JobResult = {
     exitCode: 0,
     reason: "completed",
@@ -604,6 +611,18 @@ describe("ContainerExecutor", () => {
       (created.jobs as { supportsServicesFor?: unknown }).supportsServicesFor = undefined;
       expect(created.executor.supportsCodingServices("codex")).toBe(false);
       expect(created.executor.supportsCodingServices("claude-code")).toBe(false);
+    });
+
+    it("delegates warmUp to its job launcher", async () => {
+      const created = await harness();
+      await created.executor.warmUp();
+      expect(created.jobs.warmUps).toBe(1);
+    });
+
+    it("does nothing for warmUp when the job launcher has none", async () => {
+      const created = await harness();
+      (created.jobs as { warmUp?: unknown }).warmUp = undefined;
+      await expect(created.executor.warmUp()).resolves.toBeUndefined();
     });
 
     const claudeRun = { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const;

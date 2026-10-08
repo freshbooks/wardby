@@ -90,6 +90,15 @@ export interface JobLauncher {
    * itself stays the authority.
    */
   hasCapacityFor?: (spec: JobSpec) => Promise<boolean>;
+  /**
+   * Starts any one-time start-up check (e.g. Kubernetes's memoized cluster preflight) right away,
+   * instead of waiting for the first `launch()`. Never throws — a failure is only logged — and
+   * `launch()` still runs and reports the same check itself, memoized exactly as if this had never
+   * been called. Composition roots call this, fire-and-forget, only from a long-running server
+   * process's own start-up (`wardby serve`, the MCP server, `wardby scheduler`); never from a
+   * one-shot CLI command. Absent on a launcher with nothing to warm up (e.g. Docker).
+   */
+  warmUp?: () => Promise<void>;
   launch: (spec: JobSpec) => Promise<JobHandle>;
   status: (handle: JobHandle) => Promise<JobStatus>;
   collect: (handle: JobHandle) => Promise<JobResult>;
