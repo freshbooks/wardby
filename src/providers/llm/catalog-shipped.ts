@@ -16,7 +16,7 @@
 import type { CatalogEntry } from "./catalog-types.js";
 import type { LlmEffort } from "./types.js";
 
-export const SHIPPED_CATALOG_VERSION = "2026-10-03";
+export const SHIPPED_CATALOG_VERSION = "2026-10-08";
 
 const ALL_EFFORTS: readonly LlmEffort[] = ["low", "medium", "high", "xhigh", "max"];
 
@@ -85,7 +85,7 @@ export const SHIPPED_CATALOG: readonly CatalogEntry[] = [
     outputPerMTok: 50.0,
     cachedInputPerMTok: 1.0,
     cacheWritePerMTok: 12.5,
-    efforts: [],
+    efforts: ALL_EFFORTS,
     thinkingMode: "none",
   },
   {
@@ -96,7 +96,7 @@ export const SHIPPED_CATALOG: readonly CatalogEntry[] = [
     outputPerMTok: 20.0,
     cachedInputPerMTok: 0.4,
     cacheWritePerMTok: 5.0,
-    efforts: [],
+    efforts: ALL_EFFORTS,
     thinkingMode: "none",
   },
   {
@@ -107,7 +107,7 @@ export const SHIPPED_CATALOG: readonly CatalogEntry[] = [
     outputPerMTok: 12.0,
     cachedInputPerMTok: 0.2,
     cacheWritePerMTok: 2.5,
-    efforts: [],
+    efforts: ALL_EFFORTS,
     thinkingMode: "none",
   },
   {
@@ -118,7 +118,7 @@ export const SHIPPED_CATALOG: readonly CatalogEntry[] = [
     outputPerMTok: 1.2,
     cachedInputPerMTok: 0.02,
     cacheWritePerMTok: 0.25,
-    efforts: [],
+    efforts: ALL_EFFORTS,
     thinkingMode: "none",
   },
   // Anthropic (direct API)

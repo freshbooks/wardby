@@ -273,7 +273,7 @@ describe("dispatchRun", () => {
     };
     const state = fakeDb(agent);
     await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id });
-    expect(state.runs[0].pricingVersion).toBe("shipped:2026-10-03");
+    expect(state.runs[0].pricingVersion).toBe("shipped:2026-10-08");
     expect(state.runs[0].pricingSnapshot.modelId).toBe(agent.model);
   });
 

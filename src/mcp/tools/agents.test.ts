@@ -2017,8 +2017,20 @@ describe("agent CRUD tools", () => {
       await client.close();
     });
 
+    it("create_agent accepts effort on an OpenAI reasoning model", async () => {
+      const client = await setup();
+      const result = await client.callTool({
+        name: "create_agent",
+        arguments: { ...base, model: "gpt-5.6-luna", effort: "low" },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(body(result).effort).toBe("low");
+      await client.close();
+    });
+
     it.each([
       { model: "claude-haiku-4-5", effort: "low" },
+      { model: "gpt-4o", effort: "low" },
       { model: "gpt-4o", effort: "high" },
     ])("create_agent rejects effort $effort on $model", async ({ model, effort }) => {
       const client = await setup();
