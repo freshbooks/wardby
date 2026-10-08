@@ -56,6 +56,12 @@ export interface HostFunctionOptions {
   parserPool?: ParserWorkerPool;
   /** Hosts this specific tool attachment may fetch. Omitted/empty = no outbound fetch at all; a literal "*" element lifts the restriction. Either way this list only narrows egress: private/link-local destinations need the operator's WARDBY_FETCH_ALLOWED_HOSTS, and cloud metadata is always blocked. */
   allowedFetchHosts?: string[];
+  /**
+   * Secret values to redact from console output even if this host never fetched them: a stateless
+   * gateway serving one call of an invocation can't know what an earlier call on another replica
+   * fetched, so it passes every value the attachment may read. Never logged or returned.
+   */
+  redactSecretValues?: readonly string[];
 }
 
 function args<T extends unknown[]>(argsJson: string): T {
@@ -115,7 +121,7 @@ export function createPrivilegedHost(options: PrivilegedHostOptions): Privileged
   // that logs a secret it never fetched has nothing to redact, and one that
   // fetches but doesn't log it costs nothing extra. Fresh per invocation
   // (one privileged host per sandbox context, one per tool call).
-  const fetchedSecretValues = new Set<string>();
+  const fetchedSecretValues = new Set<string>(options.redactSecretValues ?? []);
   function redactSecrets(text: string): string {
     let out = text;
     for (const value of fetchedSecretValues) {

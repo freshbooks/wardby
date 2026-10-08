@@ -28,6 +28,9 @@ export interface GatewayTransport {
   stream(request: GatewayRequest): AsyncIterable<LlmStreamEvent>;
 }
 
+const isPending = (value: unknown): boolean =>
+  typeof value === "object" && value !== null && (value as { pending?: unknown }).pending === true;
+
 /** Runs one native run to its result and reports it with `finish`. Resolves when done. */
 export async function runNativeWorker(input: WorkerInput, transport: GatewayTransport): Promise<void> {
   let sequence = 0;
@@ -42,8 +45,19 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
   const call = <M extends GatewayMethod>(method: M, params: GatewayParams<M>) =>
     transport.call(request(method, params));
 
+  // Set when the gateway refuses a model call for budget: the run ends budget_exhausted, as in
+  // process, not failed.
+  let budgetRefused = false;
   const llm: LlmProvider = {
-    stream: (req) => transport.stream(request("llm.stream", { request: req })),
+    stream: (req) =>
+      (async function* () {
+        try {
+          yield* transport.stream(request("llm.stream", { request: req }));
+        } catch (err) {
+          if (err instanceof GatewayError && err.code === "budget_exhausted") budgetRefused = true;
+          throw err;
+        }
+      })(),
     countTokens: async (model, messages, tools) =>
       (await call("llm.countTokens", {
         model,
@@ -76,7 +90,14 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
   };
 
   const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
-    if (builtins.has(name)) return (await call("builtin.call", { name, argsJson })) as string;
+    if (builtins.has(name)) {
+      // A long-running built-in (a delegation) answers `pending`; ask again with the same callId,
+      // which the gateway resumes wherever it got to — on any replica.
+      const builtinRequest = request("builtin.call", { name, argsJson });
+      let result = await transport.call(builtinRequest);
+      while (isPending(result)) result = await transport.call(builtinRequest);
+      return result as string;
+    }
     const tool = input.userTools[name];
     if (!tool) {
       return JSON.stringify({ error: "unknown_tool", message: `No tool named "${name}" is attached to this agent.` });
@@ -105,7 +126,7 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
 
   const result = await new NativeEngine().run(ctx);
   await call("finish", {
-    status: result.status,
+    status: budgetRefused && result.status === "failed" ? "budget_exhausted" : result.status,
     finalText: result.finalText,
     turns: result.turns,
     ...(result.error !== undefined ? { error: result.error } : {}),

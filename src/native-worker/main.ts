@@ -6,6 +6,7 @@
  */
 
 import { parseMessage, WorkerInputSchema } from "./protocol.js";
+import { createHttpTransport } from "./http-transport.js";
 import { createStdioTransport } from "./stdio.js";
 import { runNativeWorker } from "./worker.js";
 
@@ -26,10 +27,12 @@ function firstLine(): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  // The transport listens from the start, so no answer that follows the input line is missed;
-  // it ignores the input line itself (no request id).
-  const transport = createStdioTransport(process.stdin, process.stdout);
   const input = parseMessage(await firstLine(), WorkerInputSchema);
+  // The gateway answers only after the worker asks, so choosing the transport after the input
+  // line misses nothing.
+  const transport = input.gateway
+    ? createHttpTransport({ url: input.gateway.url, capability: input.gateway.capability })
+    : createStdioTransport(process.stdin, process.stdout);
   await runNativeWorker(input, transport);
 }
 
