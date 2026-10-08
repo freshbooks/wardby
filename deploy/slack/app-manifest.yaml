@@ -1,0 +1,22 @@
+# Slack app manifest for wardby workflow notifications (outbound only).
+# Create the app at https://api.slack.com/apps → Create New App → From a manifest.
+display_information:
+  name: wardby
+  description: Workflow updates from wardby agents
+features:
+  bot_user:
+    display_name: wardby
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - chat:write.public
+      - channels:read
+      - groups:read
+      # Optional: per-agent names/icons (also set WARDBY_SLACK_CUSTOMIZE=true)
+      # - chat:write.customize
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

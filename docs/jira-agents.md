@@ -478,6 +478,10 @@ What happens:
   [`code-review-agents.md`](code-review-agents.md)). Without them the pull
   request is still linked, but the issue is not updated on merge.
 
+To mirror this lifecycle in Slack — picked up, pull request open, review
+verdict, merge — link a channel to the project or agent; see
+[Send workflow updates to Slack](slack-notifications.md).
+
 ## Recipe: scheduled JQL sweeps
 
 An agent linked to a project can also run on a schedule with no issue event:

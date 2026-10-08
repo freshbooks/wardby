@@ -543,6 +543,19 @@ bound connection pools and concurrent invocations, and review a cancellable
 database adapter or isolated worker if strict immediate termination is required.
 Do not claim these per-invocation caps establish a whole-process memory ceiling.
 
+## Slack workflow notifications
+
+Optional Slack workflow notifications add no inbound endpoint: wardby only
+ever calls out to Slack's `chat.postMessage`/`chat.update`/`conversations.info`,
+and the app manifest requests no event subscriptions or interactivity, so
+nothing posted in Slack can start or affect a run. What reaches Slack is
+limited to issue keys/titles and their links, pull request numbers and
+links, agent names, review verdicts, fix-round numbers, and (only when a
+link opts in) the run's spend line — never code, diffs, review bodies, or
+run output. The bot token is a provider credential like any other and never
+reaches a sandboxed tool or coding-run worker. See
+[Send workflow updates to Slack](slack-notifications.md).
+
 ## Coding runs on Kubernetes
 
 `JOB_LAUNCHER=kubernetes` runs each coding agent in its own pod instead of a
