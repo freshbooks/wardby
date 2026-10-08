@@ -158,10 +158,11 @@ export class NativeSandboxExecutor implements Executor {
   }
 
   async stop(runId: string, reason?: string): Promise<void> {
-    const sessionId = await this.endSession(runId, "cancelled");
-    // Recorded before the kill: the exit watcher then finds the run already ended and leaves it
-    // cancelled, instead of recording the killed worker's exit as a failure.
+    // Recorded first, before the session ends or the worker is killed: either of those makes the
+    // worker exit, and its exit watcher must then find the run already ended (and leave it
+    // cancelled) rather than record the exit as a failure.
     await failNativeRun(this.finishContext(runId), new RunCancelledError(reason ?? "The run was cancelled."));
+    const sessionId = await this.endSession(runId, "cancelled");
     await this.options.launcher.kill(runId).catch(() => {});
     if (sessionId) {
       // Its delegations' children belong to the server's executor; a child left running would
