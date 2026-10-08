@@ -8,7 +8,8 @@
  * instead of crashing the run or the host process.
  */
 
-import { installHostFunctions } from "./host-functions.js";
+import { createPrivilegedHost, installSandboxApi, type PrivilegedHost } from "./host-functions.js";
+import type { ParserWorkerPool } from "./parser-worker/pool.js";
 import { SANDBOX_PRELUDE } from "./prelude.js";
 import { evalToJson, NON_SERIALIZABLE_MARKER, type SandboxLimits, type SandboxResult } from "./eval-core.js";
 import type { Datastore } from "../providers/datastore/types.js";
@@ -39,7 +40,19 @@ export interface SandboxInvocation {
   allowedFetchHosts?: string[];
 }
 
-export async function runInSandbox(invocation: SandboxInvocation): Promise<SandboxResult> {
+/** Tool code plus whichever privileged host serves its bridges (in-process, or a gateway). */
+export interface ToolCodeInvocation {
+  /** The tool body source. Runs as an async function body receiving `params`. */
+  code: string;
+  params: unknown;
+  limits?: Partial<SandboxLimits>;
+  /** Built once per invocation, with that invocation's abort signal (fetch needs it). */
+  privileged: (signal: AbortSignal) => PrivilegedHost;
+  parserPool?: ParserWorkerPool;
+}
+
+/** Evaluates one tool body in a fresh QuickJS context against the given privileged host. */
+export async function runToolCode(invocation: ToolCodeInvocation): Promise<SandboxResult> {
   let params: string;
   try {
     boundedString(invocation.code, BRIDGE_INPUT_BYTES);
@@ -66,15 +79,33 @@ export async function runInSandbox(invocation: SandboxInvocation): Promise<Sandb
 })()`;
 
   return evalToJson(code, invocation.limits, (context, runtime, signal) => {
-    installHostFunctions(context, runtime, {
-      agentId: invocation.agentId,
-      datastore: invocation.datastore,
-      sharedDatastore: invocation.sharedDatastore,
-      logTag: invocation.toolName,
-      secrets: invocation.secrets,
-      logger: invocation.logger,
-      allowedFetchHosts: invocation.allowedFetchHosts,
+    installSandboxApi(context, runtime, {
+      privileged: invocation.privileged(signal),
       signal,
+      parserPool: invocation.parserPool,
     });
+  });
+}
+
+/** The in-process privileged host for a sandbox invocation. */
+export function privilegedHostFor(invocation: SandboxInvocation, signal: AbortSignal): PrivilegedHost {
+  return createPrivilegedHost({
+    agentId: invocation.agentId,
+    datastore: invocation.datastore,
+    sharedDatastore: invocation.sharedDatastore,
+    logTag: invocation.toolName,
+    secrets: invocation.secrets,
+    logger: invocation.logger,
+    allowedFetchHosts: invocation.allowedFetchHosts,
+    signal,
+  });
+}
+
+export async function runInSandbox(invocation: SandboxInvocation): Promise<SandboxResult> {
+  return runToolCode({
+    code: invocation.code,
+    params: invocation.params,
+    limits: invocation.limits,
+    privileged: (signal) => privilegedHostFor(invocation, signal),
   });
 }
