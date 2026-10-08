@@ -4,15 +4,25 @@
  * Skipped without DATABASE_URL.
  */
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "./db.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("workflow notification schema (database)", () => {
   const db = createPrismaClient();
   const s = randomUUID();
+  const owner = `wfn-owner-${s}`;
+  const agentId = `wfn-agent-${s}`;
+  beforeAll(async () => {
+    await db.principal.create({ data: { id: owner, subject: owner } });
+    await db.agent.create({
+      data: { id: agentId, name: agentId, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner },
+    });
+  });
   afterAll(async () => {
     await db.workflowEvent.deleteMany({ where: { dedupeKey: { endsWith: s } } });
     await db.notificationChannel.deleteMany({ where: { channelId: { endsWith: s.toUpperCase() } } });
+    await db.agent.deleteMany({ where: { id: agentId } });
+    await db.principal.deleteMany({ where: { id: owner } });
     await db.$disconnect();
   });
 
@@ -24,11 +34,19 @@ describe.skipIf(!process.env.DATABASE_URL)("workflow notification schema (databa
           channelId: `C1${s.toUpperCase()}`,
           issueProvider: "jira",
           projectKey: "PAY",
-          agentId: "nope",
+          agentId,
           authorizedById: "admin",
         },
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/NotificationChannel_one_subject/);
+  });
+
+  it("rejects a link with no subject", async () => {
+    await expect(
+      db.notificationChannel.create({
+        data: { provider: "slack", channelId: `C2${s.toUpperCase()}`, authorizedById: "admin" },
+      }),
+    ).rejects.toThrow(/NotificationChannel_one_subject/);
   });
 
   it("dedupes events by dedupeKey and deliveries by (event, channel)", async () => {
