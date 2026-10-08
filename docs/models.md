@@ -130,7 +130,23 @@ and must match what that exact model actually accepts:
 - `manual` — a fixed thinking budget (`{"type": "enabled", "budget_tokens": …}`)
   and no effort level at all. Some smaller Claude models reject `adaptive`
   entirely.
-- `none` — no thinking parameter is sent. Non-Claude models.
+- `none` — no thinking parameter is sent. Non-Claude models, including OpenAI.
+
+OpenAI models always use `none`; their reasoning is controlled by `efforts`
+alone. Native agents call OpenAI's Responses API, and when the agent has an
+`effort` that the model's `efforts` lists, wardby sends it as
+`reasoning.effort`. An empty `efforts` means no reasoning parameter is sent,
+and an agent with no `effort` gets OpenAI's default. The shipped reasoning
+models (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`) list
+`low`, `medium`, `high`, `xhigh`, and `max`; the older models (`gpt-4o`,
+`gpt-4o-mini`, the `gpt-4.1` family) list none. A model with no `efforts` also
+receives the agent's `temperature`; a model with `efforts` does not, because
+reasoning models reject it. Requests are sent with `store: false`, so OpenAI
+does not retain the conversation. The Responses API has no stop sequences, so
+none are sent. Reasoning tokens are billed as output tokens; they are only
+known when a model call finishes, so a call's reasoning is charged at its end
+(the budget is still reserved per call). OpenAI cache-write tokens are billed
+at the catalog's `cacheWritePerMTok`.
 
 Setting the wrong `thinkingMode` (or listing `efforts` a model doesn't
 actually accept) does not fail at `set_model` time — it fails when a coding
@@ -219,3 +235,9 @@ shipped values automatically. `list_models`/`get_model`'s `shippedDiffers`
 field tells you when your override and the current shipped entry disagree,
 so you can decide whether to `reset_model` back to the shipped values or
 leave your override in place.
+
+This matters when a release changes `efforts`: a database override replaces
+the shipped entry wholesale, so an override of an OpenAI reasoning model
+created before the release keeps its stored `efforts` (typically empty) and the
+agent's effort is not sent. Run `reset_model` on the id, or `set_model` again
+with the new `efforts`, to pick up the shipped levels.
