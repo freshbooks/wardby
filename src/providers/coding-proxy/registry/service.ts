@@ -316,7 +316,7 @@ function versionDependencies(adapter: RegistryAdapter, meta: PackageMetadata, ve
 function isPackageName(adapter: RegistryAdapter, name: string): boolean {
   try {
     const entry = adapter.parseAllowlistEntry(name);
-    return !entry.wildcard && entry.range === undefined && entry.name === name;
+    return !entry.wildcard && entry.range === undefined && entry.extras === undefined && entry.name === name;
   } catch {
     return false;
   }
@@ -1207,6 +1207,18 @@ export class RegistryService {
     else this.inFlight.set(runId, slot);
   }
 
+  /** The extras the run allows for `name`: those its allowlist entries name
+   *  plus those a served parent's dependency line asked of it. They decide
+   *  which of the package's extra-gated dependencies its files allow. */
+  private async allowedExtras(adapter: RegistryAdapter, context: RegistryRunContext, name: string): Promise<string[]> {
+    const entries = parseAllowlist(context.allowlist, this.options.adapters).get(adapter.id) ?? [];
+    const extras = new Set(
+      entries.flatMap((entry) => (!entry.wildcard && entry.name === name ? (entry.extras ?? []) : [])),
+    );
+    for (const extra of await this.options.store.allowedExtras(context.runId, adapter.id, name)) extras.add(extra);
+    return [...extras].sort();
+  }
+
   private async download(
     adapter: RegistryAdapter,
     context: RegistryRunContext,
@@ -1350,12 +1362,16 @@ export class RegistryService {
             served.bytes += bytes;
             if (adapter.dependenciesFromFile && buffered.length > 0) {
               const body = Buffer.concat(buffered);
-              const names = await adapter.dependenciesFromFile(route, body).catch(() => []);
+              const extras = await this.allowedExtras(adapter, context, name);
+              const dependencies = (await adapter.dependenciesFromFile(route, body, extras).catch(() => [])).map(
+                (dependency) => ({ name: adapter.normalizeName(dependency.name), extras: dependency.extras }),
+              );
               await store.addAllowances(
                 context.runId,
                 adapter.id,
-                names.map((dependency) => adapter.normalizeName(dependency)),
+                dependencies.map((dependency) => dependency.name),
               );
+              await store.addExtraAllowances(context.runId, adapter.id, dependencies);
             }
             controller.close();
           } catch (error) {

@@ -2,7 +2,8 @@
  * Pure readers for a repository's declared dependencies, used by the
  * quickstart to offer them as local-builder's package allowlist:
  * `pyproject.toml`, `requirements*.txt` and `package.json`. Each returns bare
- * top-level names as written; repo-packages.ts validates, normalizes,
+ * top-level names as written (a Python requirement keeps the extras it names,
+ * also as written: `psycopg[binary]`); repo-packages.ts validates, normalizes,
  * de-duplicates and caps them.
  *
  * pyproject.toml is read by a deliberately narrow TOML scanner (no new
@@ -29,6 +30,22 @@ export function requirementName(spec: string): string | null {
   return rest === "" || /^[[(;<>=!~,]/.test(rest) ? match[1] : null;
 }
 
+/**
+ * A PEP 508 requirement's name with the extras it names, as written
+ * ("psycopg[binary]" from "psycopg[binary]>=3.2"), or just the name when it
+ * names none; null when requirementName is. The extras are not validated here.
+ */
+export function requirementSpec(spec: string): string | null {
+  const name = requirementName(spec);
+  if (name === null) return null;
+  const extras = spec
+    .trim()
+    .slice(name.length)
+    .trimStart()
+    .match(/^\[([^\]]*)\]/);
+  return extras ? `${name}[${extras[1].trim()}]` : name;
+}
+
 /** Names from a pip requirements file; options (`-r`, `-c`, `-e`, `--…`), URLs and paths are skipped. */
 export function requirementsNames(text: string): string[] {
   const names: string[] = [];
@@ -40,7 +57,7 @@ export function requirementsNames(text: string): string[] {
       .replace(/\s+--[A-Za-z].*$/, "")
       .trim();
     if (!line || line.startsWith("-")) continue;
-    const name = requirementName(line);
+    const name = requirementSpec(line);
     if (name) names.push(name);
   }
   return names;
@@ -371,7 +388,7 @@ function requirementList(value: Value | undefined, where: string): string[] {
   const names: string[] = [];
   for (const item of value) {
     if (typeof item !== "string") throw new TomlScanError(`${where} holds a non-string entry`);
-    const name = requirementName(item);
+    const name = requirementSpec(item);
     if (name) names.push(name);
   }
   return names;
@@ -386,12 +403,23 @@ function poetryFromRegistry(value: Value): boolean {
   return true;
 }
 
+/** The `extras = [...]` a Poetry dependency table (or each table of a
+ *  multiple-constraints list) names; anything but a list of strings is ignored. */
+function poetryExtras(value: Value): string[] {
+  if (Array.isArray(value)) return value.flatMap(poetryExtras);
+  if (!(value instanceof Table)) return [];
+  const extras = value.entries.get("extras");
+  return Array.isArray(extras) && extras.every((item) => typeof item === "string") ? extras : [];
+}
+
 function poetryNames(value: Value | undefined): string[] {
   if (!(value instanceof Table)) return [];
   const names: string[] = [];
   for (const [key, spec] of value.entries) {
     if (key.toLowerCase() === "python" || !poetryFromRegistry(spec)) continue;
-    if (requirementName(key) === key) names.push(key);
+    if (requirementName(key) !== key) continue;
+    const extras = [...new Set(poetryExtras(spec))];
+    names.push(extras.length > 0 ? `${key}[${extras.join(",")}]` : key);
   }
   return names;
 }

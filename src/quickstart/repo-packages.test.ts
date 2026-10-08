@@ -66,8 +66,19 @@ describe("readRepoPackages", () => {
     // PyPI names are PEP 503-normalized, so Flask/flask and pytest/PyTest are one entry each.
     expect(allowlist).toEqual({
       npm: ["@types/node", "express"],
-      pypi: ["flask", "pytest", "pytest-cov", "requests", "setuptools", "wheel", "zope-interface"],
+      pypi: ["flask", "pytest", "pytest-cov", "requests[socks]", "setuptools", "wheel", "zope-interface"],
     });
+    expect(() => CodingProfileSchema.parse({ repository: "org/repo", packageAllowlist: allowlist })).not.toThrow();
+  });
+
+  it("keeps a package's extras, merged across manifests and normalized", async () => {
+    commit({
+      "pyproject.toml": `[project]\nname = "a"\ndependencies = ["psycopg[binary]>=3.2", "uvicorn[Standard]"]\n[build-system]\nrequires = ["hatchling"]\n`,
+      "requirements.txt": "psycopg\npsycopg[Pool]\nbad[b@d]\n",
+    });
+    const { allowlist } = await readRepoPackages(repo, head());
+    // An invalid extras list drops the extras, never the package.
+    expect(allowlist).toEqual({ pypi: ["bad", "hatchling", "psycopg[binary,pool]", "uvicorn[standard]"] });
     expect(() => CodingProfileSchema.parse({ repository: "org/repo", packageAllowlist: allowlist })).not.toThrow();
   });
 

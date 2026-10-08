@@ -3,11 +3,13 @@
  * package allowlist. Reads the manifests at the root of the base commit
  * (never the working tree) with the hardened git helpers, keeps the bare
  * top-level names that are valid in their ecosystem, normalizes PyPI names
- * (PEP 503), de-duplicates, and caps each ecosystem at MAX_REPO_PACKAGES.
+ * (PEP 503) and the extras they name (PEP 685), de-duplicates (merging a
+ * package's extras into one entry), and caps each ecosystem at
+ * MAX_REPO_PACKAGES.
  */
 import { localGitBytes } from "../coding/local-git.js";
 import { npmAdapter } from "../coding/registry/npm.js";
-import { isPypiProjectName, normalizePypiName } from "../coding/registry/pypi.js";
+import { isPypiProjectName, MAX_EXTRAS, normalizePypiName, parseExtras } from "../coding/registry/pypi.js";
 import { packageJsonNames, pyprojectNames, requirementsNames } from "./manifests.js";
 import { rootEntries } from "./python-detect.js";
 
@@ -38,10 +40,28 @@ function manifestFor(name: string): Manifest | null {
   return null;
 }
 
-/** The name as it goes on the allowlist, or null when it is not a valid bare name in its ecosystem. */
-function allowlistName(ecosystem: Ecosystem, name: string): string | null {
+/** The longest allowlist entry the coding profile accepts. */
+const MAX_ENTRY_LENGTH = 256;
+
+/** A PyPI requirement as read ("Psycopg[Binary]"): its normalized name and
+ *  extras, or null when the name is not valid. An invalid extras list drops
+ *  the extras, never the package. */
+function pypiRequirement(spec: string): { name: string; extras: string[] } | null {
+  const match = spec.match(/^([^[]*)(?:\[(.*)\])?$/);
+  if (!match || match[1].length > 214 || !isPypiProjectName(match[1])) return null;
+  return { name: normalizePypiName(match[1]), extras: match[2] === undefined ? [] : (parseExtras(match[2]) ?? []) };
+}
+
+/** The allowlist entry for a PyPI package and the extras found for it. */
+function pypiEntry(name: string, extras: ReadonlySet<string>): string {
+  const sorted = [...extras].sort().slice(0, MAX_EXTRAS);
+  const entry = sorted.length > 0 ? `${name}[${sorted.join(",")}]` : name;
+  return entry.length <= MAX_ENTRY_LENGTH ? entry : name;
+}
+
+/** The npm name as it goes on the allowlist, or null when it is not a valid bare npm name. */
+function npmAllowlistName(name: string): string | null {
   if (name.length > 214) return null;
-  if (ecosystem === "pypi") return isPypiProjectName(name) ? normalizePypiName(name) : null;
   try {
     const entry = npmAdapter.parseAllowlistEntry(name);
     return !entry.wildcard && entry.range === undefined && entry.name === name ? name : null;
@@ -69,6 +89,8 @@ export async function readRepoPackages(dir: string, sha: string): Promise<RepoPa
     return { allowlist: {}, notes: [] };
   }
   const found: Record<Ecosystem, Set<string>> = { npm: new Set(), pypi: new Set() };
+  /** PyPI name -> the extras any manifest names for it. */
+  const pypiExtras = new Map<string, Set<string>>();
   const notes: string[] = [];
   const manifests = entries
     .filter((entry) => entry.type === "blob" && REGULAR_FILE.test(entry.mode) && OBJECT_ID.test(entry.object))
@@ -86,8 +108,17 @@ export async function readRepoPackages(dir: string, sha: string): Promise<RepoPa
       continue;
     }
     for (const name of names) {
-      const kept = allowlistName(manifest.ecosystem, name);
-      if (kept) found[manifest.ecosystem].add(kept);
+      if (manifest.ecosystem === "pypi") {
+        const requirement = pypiRequirement(name);
+        if (!requirement) continue;
+        found.pypi.add(requirement.name);
+        const extras = pypiExtras.get(requirement.name) ?? new Set<string>();
+        for (const extra of requirement.extras) extras.add(extra);
+        pypiExtras.set(requirement.name, extras);
+        continue;
+      }
+      const kept = npmAllowlistName(name);
+      if (kept) found.npm.add(kept);
     }
   }
 
@@ -99,7 +130,8 @@ export async function readRepoPackages(dir: string, sha: string): Promise<RepoPa
         `The repository declares ${names.length} ${ECOSYSTEM_LABELS[ecosystem]} packages, more than the ${MAX_REPO_PACKAGES} the quickstart offers; none of them were added.`,
       );
     } else if (names.length > 0) {
-      allowlist[ecosystem] = names;
+      allowlist[ecosystem] =
+        ecosystem === "pypi" ? names.map((name) => pypiEntry(name, pypiExtras.get(name) ?? new Set())) : names;
     }
   }
   return { allowlist, notes: notes.map(printable) };

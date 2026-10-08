@@ -62,7 +62,15 @@ describe("requirementsNames", () => {
       "Werkzeug",
       "\tpytest-cov",
     ].join("\r\n");
-    expect(requirementsNames(text)).toEqual(["flask", "requests", "gunicorn", "Werkzeug", "pytest-cov"]);
+    expect(requirementsNames(text)).toEqual(["flask", "requests[security]", "gunicorn", "Werkzeug", "pytest-cov"]);
+  });
+
+  it("keeps the extras a requirement names, as written", () => {
+    expect(requirementsNames("psycopg[binary,pool]>=3.2\nuvicorn [standard]\nplain\n")).toEqual([
+      "psycopg[binary,pool]",
+      "uvicorn[standard]",
+      "plain",
+    ]);
   });
 
   it("is empty for an empty file", () => {
@@ -115,8 +123,8 @@ select = ["E", "F"]
 `;
     expect(pyprojectNames(text)).toEqual([
       "Flask",
-      "redis",
-      "psycopg",
+      "redis[hiredis]",
+      "psycopg[binary]",
       "escapedAname",
       "pytest",
       "ruff",
@@ -166,6 +174,11 @@ dependencies = ["nor-this"]
     ]);
   });
 
+  it("keeps Poetry extras only when they are a list of strings", () => {
+    const text = `[tool.poetry.dependencies]\npython = "^3.12"\na = { version = "1", extras = ["x", "y"] }\nb = { version = "1", extras = "x" }\nc = [{ version = "<2", extras = ["p"] }, { version = ">=2", extras = ["q"] }]\n`;
+    expect(pyprojectNames(text)).toEqual(["a[x,y]", "b", "c[p,q]", ...LEGACY]);
+  });
+
   it("reads Poetry dependencies (not python), groups, and legacy dev-dependencies", () => {
     const text = `
 [tool.poetry]
@@ -205,9 +218,9 @@ url = "https://example.com/simple"
     expect(pyprojectNames(text)).toEqual([
       "flask",
       "Flask-Login",
-      "sqlalchemy",
+      "sqlalchemy[asyncio]",
       "numpy",
-      "celery",
+      "celery[redis]",
       "pytest",
       "ruff",
       "black",

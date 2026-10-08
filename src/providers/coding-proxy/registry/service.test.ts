@@ -237,6 +237,8 @@ describe("RegistryService", () => {
       findRunByRegistryTokenHash: (hash, now) => inner.findRunByRegistryTokenHash(hash, now),
       isAllowedDependency: (runId, ecosystem, name) => inner.isAllowedDependency(runId, ecosystem, name),
       addAllowances: (runId, ecosystem, names) => inner.addAllowances(runId, ecosystem, names),
+      allowedExtras: (runId, ecosystem, name) => inner.allowedExtras(runId, ecosystem, name),
+      addExtraAllowances: (runId, ecosystem, dependencies) => inner.addExtraAllowances(runId, ecosystem, dependencies),
       recordFetch: async () => {
         throw new Error("simulated database error");
       },
@@ -913,6 +915,123 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
       ["refused", "wardby_version_filtered"],
       ["refused", "wardby_version_filtered"],
     ]);
+  });
+});
+
+describe("RegistryService with the PyPI adapter: allowlisted extras", () => {
+  const body = new TextEncoder().encode("wheel bytes");
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  const wheel = (name: string) => `${name.replace(/-/g, "_")}-1.0-py3-none-any.whl`;
+  // psycopg's real extra-gated Requires-Dist shapes; app needs uvicorn with
+  // its "standard" extra; uvicorn's own metadata says what that extra adds.
+  const metadata: Record<string, string> = {
+    psycopg: [
+      "Name: psycopg",
+      'Requires-Dist: typing-extensions>=4.6; python_version < "3.13"',
+      'Requires-Dist: psycopg-binary==1.0; implementation_name != "pypy" and extra == "binary"',
+      'Requires-Dist: psycopg-c==1.0; implementation_name != "pypy" and extra == "c"',
+      'Requires-Dist: psycopg-pool; extra == "pool"',
+    ].join("\n"),
+    app: "Name: app\nRequires-Dist: uvicorn[standard]>=0.30",
+    uvicorn: [
+      "Name: uvicorn",
+      "Requires-Dist: h11>=0.8",
+      'Requires-Dist: websockets>=10.4; extra == "standard"',
+      'Requires-Dist: watchfiles; extra == "reload"',
+    ].join("\n"),
+  };
+
+  function extrasService(allowlist: string[]) {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { pypi: allowlist },
+      policy: {},
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["pypi", pypiAdapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        const index = url.match(/^https:\/\/pypi\.org\/simple\/([^/]+)\/$/);
+        if (index)
+          return Response.json({
+            name: index[1],
+            files: [
+              {
+                filename: wheel(index[1]),
+                url: `https://files.pythonhosted.org/packages/xx/${wheel(index[1])}`,
+                hashes: { sha256 },
+                "upload-time": new Date(NOW.getTime() - 100 * DAY).toISOString(),
+                size: body.byteLength,
+                "core-metadata": true,
+              },
+            ],
+          });
+        const file = url.match(/\/packages\/xx\/([^/]+?)-1\.0-py3-none-any\.whl\.metadata$/);
+        if (file) return new Response(metadata[file[1].replace(/_/g, "-")] ?? `Name: ${file[1]}\n`);
+        return new Response(body);
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 20, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    const get = async (name: string) => {
+      const response = await registry.handle({
+        ...request(`files/${encodeURIComponent(name)}/${encodeURIComponent(wheel(name))}.metadata`),
+        ecosystem: "pypi",
+      });
+      if ("stream" in response) await new Response(response.stream).text();
+      return response;
+    };
+    const allowed = (name: string) => store.isAllowedDependency("run-1", "pypi", name);
+    return { get, allowed, store };
+  }
+
+  it("follows only the requested extra of an allowlisted package", async () => {
+    const { get, allowed } = extrasService(["psycopg[binary]>=1"]);
+    await expect(get("psycopg")).resolves.toMatchObject({ status: 200 });
+    expect(await allowed("psycopg-binary")).toBe(true);
+    expect(await allowed("typing-extensions")).toBe(true);
+    expect(await allowed("psycopg-c")).toBe(false);
+    expect(await allowed("psycopg-pool")).toBe(false);
+    await expect(get("psycopg-binary")).resolves.toMatchObject({ status: 200 });
+    const refused = await get("psycopg-c");
+    expect(refused).toMatchObject({ status: 403 });
+    expect("body" in refused && refused.body).toContain("wardby_package_not_allowed");
+  });
+
+  it("follows no extra for a plain entry (unchanged)", async () => {
+    const { get, allowed } = extrasService(["psycopg"]);
+    await expect(get("psycopg")).resolves.toMatchObject({ status: 200 });
+    expect(await allowed("typing-extensions")).toBe(true);
+    expect(await allowed("psycopg-binary")).toBe(false);
+    await expect(get("psycopg-binary")).resolves.toMatchObject({ status: 403 });
+  });
+
+  it("propagates the extras a dependency line names to that dependency only", async () => {
+    const { get, allowed, store } = extrasService(["app"]);
+    await get("app");
+    expect(await allowed("uvicorn")).toBe(true);
+    expect(await store.allowedExtras("run-1", "pypi", "uvicorn")).toEqual(["standard"]);
+    expect(await store.allowedExtras("run-1", "pypi", "h11")).toEqual([]);
+    // The extra marker is not itself a package the run may fetch.
+    expect(await allowed("uvicorn[standard]")).toBe(false);
+    await expect(get("uvicorn")).resolves.toMatchObject({ status: 200 });
+    expect(await allowed("h11")).toBe(true);
+    expect(await allowed("websockets")).toBe(true);
+    expect(await allowed("watchfiles")).toBe(false);
+    // websockets reached through an extra gets only its own plain deps.
+    await expect(get("websockets")).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("never treats an extra-marker spelling as a package request", async () => {
+    const { get, store } = extrasService(["app"]);
+    await get("app");
+    const response = await get("uvicorn[standard]");
+    expect(response).toMatchObject({ status: 400 });
+    expect(store.fetches.some((fetch) => fetch.outcome === "served" && fetch.name.includes("["))).toBe(false);
   });
 });
 
