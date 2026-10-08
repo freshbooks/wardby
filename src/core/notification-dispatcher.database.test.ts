@@ -303,21 +303,48 @@ describe.skipIf(!process.env.DATABASE_URL)("notification dispatcher (database)",
     expect(fake.updates.filter((u) => u.channelId === channelId).at(-1)?.msg.text).toContain("merged ✅");
   });
 
-  it("skips the parent edit when the thread status changed after it was read", async () => {
+  it("renders the derived status even when the stored status is stale", async () => {
     const { channelId, itemKey } = await seedThread();
     await record(itemKey, picked, "picked");
-    await drain(deps);
     await record(itemKey, opened, "opened");
+    await drain(deps);
+    await record(itemKey, merged, "merged");
     fake.beforeReply = async () => {
-      await db.notificationThread.updateMany({ where: { channelId }, data: { status: "merged ✅" } });
+      await db.notificationThread.updateMany({ where: { channelId }, data: { status: "picked up" } });
     };
 
     await drain(deps);
 
-    expect(fake.updates.filter((u) => u.channelId === channelId)).toHaveLength(0);
-    const thread = await db.notificationThread.findFirstOrThrow({ where: { channelId } });
-    expect(thread.status).toBe("merged ✅");
+    expect(fake.updates.filter((u) => u.channelId === channelId).at(-1)?.msg.text).toContain("merged ✅");
+    expect((await db.notificationThread.findFirstOrThrow({ where: { channelId } })).status).toBe("merged ✅");
+  });
+
+  it("leaves the status alone after a failed edit and catches up on the next delivery", async () => {
+    const { channelId, itemKey } = await seedThread();
+    await record(itemKey, picked, "picked");
+    await drain(deps);
+    await record(itemKey, opened, "opened");
+    fake.failNext("updateMessage", new ChatError("transient", "internal_error"));
+
+    await drain(deps);
+    expect((await db.notificationThread.findFirstOrThrow({ where: { channelId } })).status).toBe("picked up");
     expect((await deliveriesFor(channelId)).map((r) => r.state)).toEqual(["delivered", "delivered"]);
+
+    // A COMMENT review does not change the status by itself; the derived "PR open" still lands.
+    const comment: WorkflowPayload = {
+      kind: "review_posted",
+      agentName: "reviewer",
+      verdict: "COMMENT",
+      prLabel: "acme/x#7",
+      prUrl: null,
+      ciPending: false,
+    };
+    await record(itemKey, comment, "comment");
+    await drain(deps);
+    const updates = fake.updates.filter((u) => u.channelId === channelId);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].msg.text).toContain("PR open");
+    expect((await db.notificationThread.findFirstOrThrow({ where: { channelId } })).status).toBe("PR open");
   });
 
   it("stops starting deliveries once a pass has run for 20 s", async () => {

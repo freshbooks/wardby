@@ -11,9 +11,11 @@
  *   failed "delivered" write after a successful post retries (and reposts).
  * - Threads: the first delivery for a (provider, channel, threadKey) posts a
  *   parent message and stores its ts in NotificationThread; every event is a
- *   reply under it. When an event changes the thread's status, the parent is
- *   re-rendered with chat.update. A deleted parent (message_not_found on
- *   update) drops the thread row; the next event posts a fresh parent.
+ *   reply under it. The thread status is derived from its delivered events;
+ *   NotificationThread.status is the status last rendered on the parent, which
+ *   is re-rendered with chat.update whenever the two differ. A deleted parent
+ *   (message_not_found on update) drops the thread row; the next event posts
+ *   a fresh parent.
  * - Ordering: within a thread, deliveries go strictly oldest-first. A thread is
  *   only worked when its oldest pending delivery is due, and it stops at its
  *   first failure in a pass, so a reply never overtakes an older one.
@@ -135,60 +137,49 @@ async function openThread(pass: Pass, provider: ChatProvider, d: Delivery, paylo
   }
 }
 
+/** The thread's status as implied by its delivered events, oldest first (terminal statuses stick). */
+async function derivedStatus(db: PrismaClient, d: Delivery): Promise<ThreadStatus | null> {
+  const rows = await db.notificationDelivery.findMany({
+    where: { provider: d.provider, channelId: d.channelId, threadKey: d.threadKey, state: "delivered" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { event: { select: { payload: true } } },
+  });
+  return rows.reduce<ThreadStatus | null>((s, r) => nextStatus(s, r.event.payload as unknown as WorkflowPayload), null);
+}
+
 /**
- * Advances the thread status (compare-and-set) and re-renders the parent's
- * status line. Never throws: the reply is already delivered.
+ * Re-renders the parent when the derived status differs from the one last
+ * rendered (NotificationThread.status). Re-derives once after an edit so a
+ * status another replica delivered meanwhile still reaches the parent. A
+ * failed edit leaves the status alone: the next event re-derives and retries.
+ * Never throws: the reply is already delivered.
  */
-async function refreshParent(
-  pass: Pass,
-  provider: ChatProvider,
-  d: Delivery,
-  thread: Thread,
-  status: ThreadStatus,
-): Promise<void> {
+async function refreshParent(pass: Pass, provider: ChatProvider, d: Delivery): Promise<void> {
   const { db } = pass.deps;
-  const edit = async (next: ThreadStatus) => {
-    await pace(pass, channelKey(d));
-    await provider.updateMessage(d.channelId, thread.parentTs, renderParent(subject, next));
-  };
-  let subject: ThreadSubject;
+  const key = { provider: d.provider, channelId: d.channelId, threadKey: d.threadKey };
+  let threadId: string | null = null;
   try {
-    subject = await subjectOf(db, d);
-    // Compare-and-set: a replica that took over may already have advanced the status.
-    const { count } = await db.notificationThread.updateMany({
-      where: { id: thread.id, status: thread.status },
-      data: { status },
-    });
-    if (count === 0) {
-      log.debug({ channelId: d.channelId, threadKey: d.threadKey }, "thread status superseded; skipping parent edit");
-      return;
+    let subject: ThreadSubject | null = null;
+    for (let round = 0; round < 2; round++) {
+      const thread = await db.notificationThread.findUnique({ where: { provider_channelId_threadKey: key } });
+      const derived = await derivedStatus(db, d);
+      if (!thread || !derived || derived === thread.status) return;
+      threadId = thread.id;
+      subject ??= await subjectOf(db, d);
+      await pace(pass, channelKey(d));
+      await provider.updateMessage(d.channelId, thread.parentTs, renderParent(subject, derived));
+      await db.notificationThread.updateMany({ where: { id: thread.id }, data: { status: derived } });
     }
   } catch (err) {
-    log.warn({ err, channelId: d.channelId, threadKey: d.threadKey }, "could not record the thread status");
-    return;
-  }
-  try {
-    await edit(status);
-    // A newer status written while this edit was in flight must end up on the parent.
-    const current = await db.notificationThread.findUnique({ where: { id: thread.id }, select: { status: true } });
-    if (current && current.status !== status) await edit(current.status as ThreadStatus);
-  } catch (err) {
-    if (err instanceof ChatError && err.code === "message_not_found") {
-      log.info(
-        { channelId: d.channelId, threadKey: d.threadKey },
-        "thread parent is gone; next event starts a new one",
-      );
-      await db.notificationThread.deleteMany({ where: { id: thread.id } }).catch((e: unknown) => {
-        log.warn({ err: e, threadId: thread.id }, "could not drop the stale thread row");
+    if (err instanceof ChatError && err.code === "message_not_found" && threadId) {
+      log.info({ ...key }, "thread parent is gone; next event starts a new one");
+      await db.notificationThread.deleteMany({ where: { id: threadId } }).catch((e: unknown) => {
+        log.warn({ err: e, threadId }, "could not drop the stale thread row");
       });
       return;
     }
-    // Roll the stored status back (if still ours) so the next event retries the edit.
-    await db.notificationThread
-      .updateMany({ where: { id: thread.id, status }, data: { status: thread.status } })
-      .catch((e: unknown) => log.warn({ err: e, threadId: thread.id }, "could not roll back the thread status"));
     if (err instanceof ChatError && err.code === "rate_limited") pass.blocked.add(channelKey(d));
-    log.warn({ err, channelId: d.channelId, threadKey: d.threadKey }, "could not update the thread parent status");
+    log.warn({ err, ...key }, "could not update the thread parent status");
   }
 }
 
@@ -210,8 +201,7 @@ async function deliver(pass: Pass, provider: ChatProvider, d: Delivery): Promise
       where: { id: d.id },
       data: { state: "delivered", deliveredAt: pass.now, messageTs: ts, lastError: null, attempts: { increment: 1 } },
     });
-    const status = nextStatus(thread.status as ThreadStatus, payload);
-    if (status !== thread.status) await refreshParent(pass, provider, d, thread, status);
+    await refreshParent(pass, provider, d);
     return "ok";
   } catch (err) {
     return handleFailure(pass, d, err);
