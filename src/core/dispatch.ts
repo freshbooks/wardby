@@ -55,6 +55,7 @@ export type DispatchTx = Pick<
   | "budgetGroup"
   | "resourceGrant"
   | "workItem"
+  | "localPullRequest"
   | "runAttribution"
   | "$queryRaw"
   | "$executeRawUnsafe"
@@ -425,6 +426,9 @@ const UNREADABLE_DECLARATION: Readonly<Record<string, string>> = {
   github_file_too_large: `it is larger than ${MAX_SERVICE_DECLARATION_BYTES} bytes`,
   github_file_not_a_file: "it is not a file",
   github_file_not_utf8: "it is not UTF-8 text",
+  local_file_too_large: `it is larger than ${MAX_SERVICE_DECLARATION_BYTES} bytes`,
+  local_file_not_a_file: "it is not a file",
+  local_file_not_utf8: "it is not UTF-8 text",
 };
 
 /**

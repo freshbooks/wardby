@@ -23,6 +23,7 @@ import {
   type ReviewHostProvider,
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
+import { LocalRepoError, isLocalRepository, loadLocalRepoRoots, resolveLocalRepository } from "../coding/local-repo.js";
 import { logger } from "./logger.js";
 
 const log = logger.child({ module: "repo-access" });
@@ -30,8 +31,8 @@ const log = logger.child({ module: "repo-access" });
 export type { HostPermission };
 
 /** How an authorization was granted; stored on the row that grants the authority. */
-export type AuthorizedVia = "host_permission" | "admin" | "grandfathered";
-export const AUTHORIZED_VIA: readonly AuthorizedVia[] = ["host_permission", "admin", "grandfathered"];
+export type AuthorizedVia = "host_permission" | "admin" | "grandfathered" | "local_root";
+export const AUTHORIZED_VIA: readonly AuthorizedVia[] = ["host_permission", "admin", "grandfathered", "local_root"];
 
 export type RepoAccessDenial =
   | "owner_required"
@@ -39,6 +40,8 @@ export type RepoAccessDenial =
   | "identity_not_linked"
   | "insufficient_permission"
   | "check_failed"
+  /** A `local:` repository that is not inside the current trusted roots (LOCAL_REPO_ROOTS). */
+  | "local_repo_not_allowed"
   /** In-flight use only: the host was unreachable or rate-limited, even after one retry. */
   | "check_unavailable";
 
@@ -103,6 +106,8 @@ export interface RepoAccessGate {
 export interface RepoAccessGateOptions {
   db: Pick<PrismaClient, "hostIdentity">;
   hosts: ReviewHostRegistry;
+  /** Trusted roots for `local:` repositories, read at each check (default: LOCAL_REPO_ROOTS). */
+  localRoots?: () => readonly string[];
   /** Default 5 minutes. */
   ttlMs?: number;
   /** Default 1000; the oldest entry is evicted first. */
@@ -125,6 +130,8 @@ interface CacheEntry {
   level: HostPermission;
   expiresAt: number;
 }
+
+const defaultLocalRoots = (): readonly string[] => loadLocalRepoRoots(process.env).roots;
 
 export const DEFAULT_REPO_ACCESS_TTL_MS = 5 * 60_000;
 
@@ -221,6 +228,16 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
 
   return {
     async authorizeUse(input) {
+      // A local repository is authorized by the operator's trusted roots alone: no host identity.
+      if (isLocalRepository(input.repository)) {
+        try {
+          await resolveLocalRepository(input.repository, (options.localRoots ?? defaultLocalRoots)());
+          return { ok: true };
+        } catch (err) {
+          if (!(err instanceof LocalRepoError)) log.warn({ err }, "could not check a local repository; denying");
+          return { ok: false, reason: "local_repo_not_allowed" };
+        }
+      }
       if (!input.ownerId) return { ok: false, reason: "owner_required" };
       if (input.authorizedVia === "admin" || input.authorizedVia === "grandfathered") return { ok: true };
       if (input.authorizedVia !== "host_permission") return { ok: false, reason: "not_authorized" };
@@ -252,6 +269,8 @@ export function describeDenial(decision: Extract<RepoAccessDecision, { ok: false
       return `The agent owner has not linked a GitHub account; run link_host_account first.`;
     case "insufficient_permission":
       return `The agent owner's GitHub account has ${decision.level ?? "no"} access to ${repository}, which is not enough.`;
+    case "local_repo_not_allowed":
+      return `local_repo_not_allowed: ${repository} is not a git repository inside the configured local roots (LOCAL_REPO_ROOTS).`;
     case "check_failed":
       return `Could not verify access to ${repository} right now; try again later.`;
     case "check_unavailable":

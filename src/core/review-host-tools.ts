@@ -18,7 +18,7 @@ import {
   type ReviewHostProvider,
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
-import { normalizeGitHubRepository } from "../coding/protocol.js";
+import { isLocalRepository, normalizeGitHubRepository, normalizeLocalRepository } from "../coding/protocol.js";
 import { ciForAgent } from "./ci-context.js";
 import { logger } from "./logger.js";
 import { describeDenial, type RepoAccessDecision } from "./repo-access.js";
@@ -141,7 +141,8 @@ const CommentArgs = z
 
 const REPOSITORY_PROP = {
   type: "string",
-  description: 'The repository as "owner/name" (or "github.com/owner/name"); must be one this agent is linked to.',
+  description:
+    'The repository as "owner/name" (or "github.com/owner/name"), or "local:/abs/path" for a local repository; must be one this agent is linked to.',
 };
 
 export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
@@ -255,11 +256,13 @@ export const REVIEW_HOST_TOOL_DEFS: LoadedTool[] = [
 export const REVIEW_HOST_TOOL_NAMES: ReadonlySet<string> = new Set(REVIEW_HOST_TOOL_DEFS.map((t) => t.name));
 const WRITE_TOOLS: ReadonlySet<string> = new Set(["repo_publish_review", "repo_comment"]);
 
-const HOST_PREFIXES: Record<ReviewHostProvider, string> = { github: "github.com/" };
+/** The "local:" prefix is part of a local repository's id, so resolveLink matches it before stripping host prefixes. */
+const HOST_PREFIXES: Record<ReviewHostProvider, string> = { github: "github.com/", local: "local:" };
 
 function normalizeFor(provider: ReviewHostProvider, value: string): string | null {
   try {
     if (provider === "github") return normalizeGitHubRepository(value);
+    if (provider === "local") return normalizeLocalRepository(value);
   } catch {
     return null;
   }
@@ -271,7 +274,12 @@ export function resolveLink(
   repositoryArg: string,
 ): RepositoryLink | "ambiguous" | null {
   const raw = repositoryArg.trim();
+  if (isLocalRepository(raw)) {
+    const repository = normalizeFor("local", raw);
+    return links.find((l) => l.provider === "local" && l.repository === repository) ?? null;
+  }
   for (const provider of REVIEW_HOST_PROVIDERS) {
+    if (provider === "local") continue;
     const prefix = HOST_PREFIXES[provider];
     if (raw.toLowerCase().startsWith(prefix)) {
       const repository = normalizeFor(provider, raw.slice(prefix.length));

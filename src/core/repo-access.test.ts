@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CodeReviewHost, HostPermission } from "../providers/review-host/types.js";
 import { ReviewHostError } from "../providers/review-host/types.js";
@@ -298,5 +302,39 @@ describe("RepoAccessGate transient host errors (runs in flight)", () => {
     });
     expect(await gate.authorizeUse(use())).toEqual({ ok: false, reason: "check_failed" });
     expect(repositoryPermission).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("RepoAccessGate.authorizeUse on local repositories", () => {
+  async function withRepo() {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "local-gate-")));
+    execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
+    return root;
+  }
+  const gateWith = (roots: string[]) =>
+    createRepoAccessGate({ db: {} as never, hosts: {}, localRoots: () => roots, sleep: async () => undefined });
+
+  it("allows a repository inside the roots with no owner, host or stamp", async () => {
+    const root = await withRepo();
+    try {
+      const decision = await gateWith([root]).authorizeUse(
+        use({ ownerId: null, provider: "github", repository: `local:${root}`, authorizedVia: null }),
+      );
+      expect(decision).toEqual({ ok: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("denies with local_repo_not_allowed once the roots no longer cover it", async () => {
+    const root = await withRepo();
+    try {
+      const decision = await gateWith(["/nonexistent-root"]).authorizeUse(
+        use({ repository: `local:${root}`, authorizedVia: "local_root" }),
+      );
+      expect(decision).toEqual({ ok: false, reason: "local_repo_not_allowed" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

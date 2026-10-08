@@ -31,6 +31,9 @@ continuation also never pushes to a pull request that has since been merged
 or closed — see
 [Continuation's pull request is no longer open](errors/continuation-closed.md).
 
+To review a branch of a git repository on the wardby host, without GitHub, see
+[Use local git repositories](local-repositories.md).
+
 A repository can also be linked so wardby fixes its own review's findings on
 such a pull request automatically, up to a round cap — see
 [Automatic review fix rounds](review-fix-rounds.md).

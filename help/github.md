@@ -23,6 +23,13 @@ Workers do not receive the GitHub App private key. A trusted component validates
 the changes, pushes a controlled branch, and opens at most one draft pull
 request. Wardby does not auto-merge coding-agent output.
 
+Set the App's credentials as `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` on
+the wardby server. Without them, a coding run on a GitHub repository fails with
+[`vcs_github_not_configured`](errors/vcs-github-not-configured.md).
+
+No GitHub App is needed for a git repository on the wardby host. See
+[Use local git repositories](local-repositories.md).
+
 Read [`docs/coding-agent-setup.md`](../docs/coding-agent-setup.md) for coding
 agent setup and [`docs/code-review-agents.md`](../docs/code-review-agents.md)
 for pull-request review agents and webhook configuration.

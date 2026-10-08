@@ -1,12 +1,15 @@
 import { loadGitHubUserAuthConfig, loadGitHubVcsConfig } from "../../config/providers.js";
+import { loadLocalRepoRoots } from "../../coding/local-repo.js";
 import { GitHubAppClient } from "../vcs/github.js";
 import { GitHubReviewHost } from "./github.js";
 import { GitHubUserAuthorizer } from "./github-user-auth.js";
+import { LocalReviewHost, type LocalReviewHostOptions } from "./local.js";
 import type { HostUserAuthorizerRegistry, ReviewHostRegistry } from "./types.js";
 
 export * from "./types.js";
 export { GitHubReviewHost } from "./github.js";
 export { GitHubUserAuthorizer } from "./github-user-auth.js";
+export { LocalReviewHost } from "./local.js";
 
 function githubClient(env: NodeJS.ProcessEnv): GitHubAppClient | null {
   const github = loadGitHubVcsConfig(env);
@@ -14,10 +17,17 @@ function githubClient(env: NodeJS.ProcessEnv): GitHubAppClient | null {
   return new GitHubAppClient({ appId: github.appId, privateKey: github.privateKey, apiVersion: github.apiVersion });
 }
 
-/** One host per configured provider; empty when no GitHub App is configured (the repo_* tools are then never offered). */
-export function buildReviewHosts(env: NodeJS.ProcessEnv = process.env): ReviewHostRegistry {
+/**
+ * One host per configured provider: github when a GitHub App is configured,
+ * local always (the roots are re-read on every local call, so a link with no
+ * roots configured is refused with local_repo_not_allowed at call time).
+ */
+export function buildReviewHosts(env: NodeJS.ProcessEnv, db: LocalReviewHostOptions["db"]): ReviewHostRegistry {
+  const hosts: ReviewHostRegistry = {};
   const client = githubClient(env);
-  return client ? { github: new GitHubReviewHost(client) } : {};
+  if (client) hosts.github = new GitHubReviewHost(client);
+  hosts.local = new LocalReviewHost({ db, roots: () => loadLocalRepoRoots(env).roots });
+  return hosts;
 }
 
 /**

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   CODING_TASK_TRAILER_RESERVE_BYTES,
@@ -259,6 +260,18 @@ describe("CodingAgentOutputSchema", () => {
 describe("CodingRunResultSchema", () => {
   it("still rejects an unsafe tag in a persisted result, which only trusted code writes", () => {
     expect(() => CodingRunResultSchema.parse({ ...result, tag: "Add 20 jokes" })).toThrow();
+  });
+
+  it("accepts a pushed-branch outcome with a branch and commit but no pull request", () => {
+    const pushed = {
+      ...result,
+      outcome: "branch_pushed",
+      pullRequestUrl: undefined,
+      pullRequestNumber: undefined,
+    };
+    expect(CodingRunResultSchema.parse(pushed)).toMatchObject({ outcome: "branch_pushed", commitSha: "a".repeat(40) });
+    expect(() => CodingRunResultSchema.parse({ ...pushed, headRef: undefined })).toThrow();
+    expect(() => CodingRunResultSchema.parse({ ...pushed, pullRequestNumber: 42 })).toThrow();
   });
 
   it("binds PR URL, repository, number, and fields to the PR outcome", () => {
@@ -528,5 +541,12 @@ describe("composeCodingTask", () => {
       "Standing instructions for this coding agent:\nServices for this run: ...\n\nRequest:\nAdd a joke.",
     );
     expect(composeCodingTask("  ", "Add a joke.")).toBe("Add a joke.");
+  });
+});
+
+describe("protocol.ts is shipped to workers as a single file", () => {
+  it("has no relative imports", () => {
+    const source = readFileSync(new URL("./protocol.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/from\s+["']\.\.?\//);
   });
 });

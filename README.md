@@ -52,7 +52,9 @@ You do not need to clone Wardby or install PostgreSQL.
    ```
 
 2. Follow the prompts to choose a provider, start PostgreSQL, create a `$1`
-   demo agent, and optionally connect Codex or Claude Code through MCP.
+   demo agent, optionally set up a coding agent and a review agent against a
+   local git repository (no GitHub App needed), and optionally connect Codex or
+   Claude Code through MCP.
 
 3. Verify the installation:
 

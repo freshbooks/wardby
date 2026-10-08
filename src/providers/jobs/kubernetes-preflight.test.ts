@@ -8,6 +8,7 @@ import {
   CANARY_SCRIPT,
   describePreflightFailure,
   kubernetesPreflight,
+  preflightCanaryImage,
   runKubernetesPreflight,
   type CanaryResult,
 } from "./kubernetes-preflight.js";
@@ -685,5 +686,25 @@ describe("CANARY_SCRIPT", () => {
     expect(output.wardbyCanary.proxy).toBe(true);
     // It never settles on a refusal: the full 20 s window is spent, then the real probe.
     expect(attempts.get("10.96.0.50:8788")).toBe(41);
+  });
+});
+
+describe("preflightCanaryImage", () => {
+  const CLAUDE = `localhost:5001/wardby-claude-coding-worker@sha256:${"b".repeat(64)}`;
+
+  it("uses the Codex worker image when it is set", () => {
+    expect(preflightCanaryImage({ workerImage: IMAGE, claudeWorkerImage: CLAUDE })).toBe(IMAGE);
+  });
+
+  it("uses the Claude Code worker image when there is no Codex image", () => {
+    expect(preflightCanaryImage({ claudeWorkerImage: CLAUDE })).toBe(CLAUDE);
+  });
+
+  it("skips an empty Codex image for the Claude Code worker", () => {
+    expect(preflightCanaryImage({ workerImage: "", claudeWorkerImage: CLAUDE })).toBe(CLAUDE);
+  });
+
+  it("has nothing to run with neither image", () => {
+    expect(preflightCanaryImage({})).toBeUndefined();
   });
 });

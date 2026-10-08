@@ -150,8 +150,8 @@ runs one. To actually see a coding agent do work against this cluster:
    KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
    ```
    `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` is only needed if the agent you
-   trigger uses the `node-python` toolchain; a plain `node` agent only needs
-   `CODING_WORKER_IMAGE`. `CODING_CLAUDE_WORKER_IMAGE` and
+   trigger uses the `node-python` toolchain; a plain `node` Codex agent only
+   needs `CODING_WORKER_IMAGE`, which a Claude-only setup can leave out. `CODING_CLAUDE_WORKER_IMAGE` and
    `CODING_CLAUDE_TOOL_RUNNER_IMAGE` are only needed to trigger an agent whose
    provider is `claude-code`, and `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`
    only for a `claude-code` agent on the `node-python` toolchain.

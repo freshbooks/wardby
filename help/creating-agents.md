@@ -85,6 +85,9 @@ A coding agent can also keep a repository's architecture knowledge current; see
 For an `@mention` builder with a router, see [Agent recipes](help://agent-recipes) and
 [Builder and router prompts](help://builder-agent).
 
+A coding or review agent can also use a git folder on the wardby host instead of a
+GitHub repository; see [Use local git repositories](local-repositories.md).
+
 Read [Connect GitHub repositories](github.md) and
 [Troubleshoot coding workers](troubleshooting/coding-workers.md) before
 enabling repository-changing work.

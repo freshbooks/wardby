@@ -16,6 +16,9 @@ one and the deployment can't start services (for example
 in the first place (see "Allowing services for an agent" below), so its runs
 are unaffected by this and start normally on any launcher.
 
+For a local repository (`local:/abs/path`), the declaration is read from the
+committed `.wardby/services.yaml` at the base ref, never from the working tree.
+
 ## How it works
 
 1. The repository declares its services in `.wardby/services.yaml` on its base

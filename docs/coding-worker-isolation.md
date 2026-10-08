@@ -382,10 +382,18 @@ weaker profile.
 
 ## Control Plane Configuration
 
-Set `JOB_LAUNCHER=docker`, `CODING_WORKER_IMAGE` to an immutable repository
-digest or Docker local image ID, and `CODING_PROXY_CONTAINER` to the dedicated proxy container name.
-For Claude Code, also set `CODING_CLAUDE_WORKER_IMAGE` and
-`CODING_CLAUDE_TOOL_RUNNER_IMAGE` to their immutable IDs.
+Set `JOB_LAUNCHER=docker` and `CODING_PROXY_CONTAINER` to the dedicated proxy
+container name, plus the worker images for the providers you use, each an
+immutable repository digest or Docker local image ID: `CODING_WORKER_IMAGE` for
+Codex agents, and `CODING_CLAUDE_WORKER_IMAGE` plus
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE` for Claude Code agents. At least one
+provider's images must be set or the control plane refuses to start. Without
+`CODING_WORKER_IMAGE`, a Codex agent that doesn't name its own `workerImageRef`
+is refused with `coding_provider_not_configured:codex`; see
+[Coding provider not configured](../help/errors/coding-provider-not-configured.md).
+To let agents use git repositories on the control plane's own machine
+(`local:/absolute/path`), also set `LOCAL_REPO_ROOTS` to the trusted folders; see
+[Local repositories](coding-agent-setup.md#local-repositories).
 `VCS_WORK_ROOT`, `CODING_JOB_STATE_ROOT`, and `CODING_ARTIFACT_ROOT` must be
 trusted host-only directories. Resource limits are controlled by
 `CODING_CPUS`, `CODING_MEMORY_MB`, `CODING_PIDS`, and `CODING_DISK_MB`.
@@ -469,7 +477,10 @@ a coding run's model is still available and how it is priced at dispatch; see
 
 The GitHub adapter requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`; the
 App installation is checked while preparing the workspace, before the
-billable proxy session is created. Upstream keys remain behind
+billable proxy session is created. The server still starts without them (so it
+can serve local repositories alone), but a run on a GitHub repository then fails
+with `vcs_github_not_configured`, and with neither these nor `LOCAL_REPO_ROOTS`
+set the server logs a startup warning naming both. Upstream keys remain behind
 `CODING_OPENAI_CREDENTIAL_REF` and `CODING_ANTHROPIC_CREDENTIAL_REF` and are
 never written to the database, input
 artifact, Docker arguments, or Git workspace.
@@ -557,13 +568,16 @@ sidecar, described in "Pod layout" below.
 
 ### Enabling it
 
-Set `JOB_LAUNCHER=kubernetes` and `CODING_WORKER_IMAGE` to a **registry
-digest** (`repo@sha256:<64 hex>` — a bare `sha256:` local image ID is
-rejected; a cluster cannot pull it). For Claude Code, also set
-`CODING_CLAUDE_WORKER_IMAGE` and `CODING_CLAUDE_TOOL_RUNNER_IMAGE` (and, for
-Claude agents on the `node-python` toolchain,
-`CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`) to registry digests; the
-control plane refuses to start if any of them is set to anything else.
+Set `JOB_LAUNCHER=kubernetes` and the worker images for the providers you
+use, each a **registry digest** (`repo@sha256:<64 hex>` — a bare `sha256:`
+local image ID is rejected; a cluster cannot pull it): `CODING_WORKER_IMAGE`
+for Codex agents, and `CODING_CLAUDE_WORKER_IMAGE` plus
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE` (and, for Claude agents on the `node-python`
+toolchain, `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`) for Claude Code
+agents. At least one provider's images must be set, and the control plane
+refuses to start if any image that is set is anything but a registry digest.
+Without `CODING_WORKER_IMAGE`, a Codex agent that doesn't name its own
+`workerImageRef` is refused with `coding_provider_not_configured:codex`.
 Kubernetes-specific settings (`src/config/providers.ts`,
 `loadKubernetesJobConfig`):
 
@@ -912,7 +926,8 @@ default 90,000ms):
    `cluster-dns` witness, which does not exist on GKE Autopilot (Cloud DNS is the
    only provider there, so no kube-dns pods run) and which made the launcher read
    `kube-system`.
-4. `worker-image` — `CODING_WORKER_IMAGE` is a registry digest.
+4. `worker-image` — the canary's image is a registry digest: `CODING_WORKER_IMAGE`,
+   or `CODING_CLAUDE_WORKER_IMAGE` on a deployment without a Codex worker.
 5. `canary` — creates a real run pod + NetworkPolicy from the same builders
    as a live run, running a script that waits for policy enforcement (as
    above) then attempts DNS resolution, a connect to the proxy's deny port,

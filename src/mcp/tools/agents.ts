@@ -8,7 +8,7 @@
 import { Prisma, type CodingAgentProfile } from "#prisma";
 import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
-import { DEFAULT_CLAUDE_MAX_TURNS, MAX_CODING_TURNS } from "../../coding/protocol.js";
+import { DEFAULT_CLAUDE_MAX_TURNS, MAX_CODING_TURNS, isLocalRepository } from "../../coding/protocol.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { assertAgentModelAvailable } from "../../core/run-pricing.js";
 import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
@@ -29,7 +29,11 @@ import { EVERYONE_KEY, atLeast, canDelegate, deleteGrantsFor, effectiveAccess } 
 import { projectTool } from "./tools.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
-import { authorizeRepositoryForSet, type RepositoryAuthorization } from "../auth/repo-authorization.js";
+import {
+  authorizeRepositoryForSet,
+  canonicalLocalRepository,
+  type RepositoryAuthorization,
+} from "../auth/repo-authorization.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -205,6 +209,15 @@ const REPOSITORY_ADMIN_OVERRIDE = {
     "Admins only (agents:admin with the admin role): approve codingProfile.repository without checking GitHub access, recorded as an admin approval. On an agent the admin doesn't own, only codingProfile.repository may change.",
 };
 
+/** A `local:` repository is stored as its canonical (realpath) name, and refused outside the trusted roots. */
+async function withCanonicalRepository<T extends { codingProfile?: { repository?: string } | undefined }>(
+  args: T,
+): Promise<T> {
+  const repository = args.codingProfile?.repository;
+  if (repository === undefined || !isLocalRepository(repository)) return args;
+  return { ...args, codingProfile: { ...args.codingProfile, repository: await canonicalLocalRepository(repository) } };
+}
+
 /** The profile columns a repository authorization is stamped into. */
 function profileStamp(authorization: RepositoryAuthorization) {
   return {
@@ -222,7 +235,7 @@ const profileJsonSchema = {
     repository: {
       type: "string",
       description:
-        "owner/name on GitHub. Your linked GitHub account (link_host_account) must have write access to it, unless a wardby admin approves it (repositoryAdminOverride). Re-checked on every run.",
+        "owner/name on GitHub, or local:/absolute/path for a git folder inside the server's LOCAL_REPO_ROOTS (stored by its real path; no GitHub access needed). For GitHub, your linked GitHub account (link_host_account) must have write access to it, unless a wardby admin approves it (repositoryAdminOverride). Re-checked on every run.",
     },
     baseRef: { type: "string" },
     defaultTask: { type: ["string", "null"] },
@@ -420,7 +433,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       required: ["name", "systemPrompt", "model", "budgetUsd"],
     },
     handler: async (rawArgs: unknown, ctx) => {
-      const args = parseCreateAgent(rawArgs);
+      const args = await withCanonicalRepository(parseCreateAgent(rawArgs));
       if (args.codingProfile?.workerImageRef != null) requireWorkerImageRefScope(ctx);
       const packages = args.codingProfile;
       if (
@@ -526,7 +539,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       required: ["id"],
     },
     handler: async (rawArgs: unknown, ctx) => {
-      const args = parseUpdateAgent(rawArgs);
+      const args = await withCanonicalRepository(parseUpdateAgent(rawArgs));
       if (args.codingProfile?.workerImageRef !== undefined) requireWorkerImageRefScope(ctx);
       const debugTraceMinutes = args.codingProfile?.debugTraceMinutes;
       if (debugTraceMinutes !== undefined) requireDebugTraceScope(ctx);
