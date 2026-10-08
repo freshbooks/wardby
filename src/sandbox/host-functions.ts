@@ -62,25 +62,59 @@ function args<T extends unknown[]>(argsJson: string): T {
   return JSON.parse(argsJson) as T;
 }
 
-export function installHostFunctions(
-  context: QuickJSContext,
-  runtime: QuickJSRuntime,
-  options: HostFunctionOptions,
-): void {
+/** One host bridge: JSON-string arguments in, a JSON-serializable value out (bridge.ts). */
+export type HostBridge = (argsJson: string) => Promise<unknown>;
+
+/**
+ * The bridges that touch credentials, storage, the network, or the operator's
+ * logs. They always run on the trusted side: in-process today, and served by
+ * the native sandbox gateway for a run whose engine runs in a worker.
+ */
+export const PRIVILEGED_BRIDGE_NAMES = [
+  "__bridge_console",
+  "__bridge_fetch",
+  "__bridge_datastoreGet",
+  "__bridge_datastoreSet",
+  "__bridge_datastoreDelete",
+  "__bridge_datastoreList",
+  "__bridge_sharedDatastoreGet",
+  "__bridge_sharedDatastoreSet",
+  "__bridge_sharedDatastoreDelete",
+  "__bridge_sharedDatastoreList",
+  "__bridge_secretsGet",
+] as const;
+export type PrivilegedBridgeName = (typeof PRIVILEGED_BRIDGE_NAMES)[number];
+export type PrivilegedHost = Record<PrivilegedBridgeName, HostBridge>;
+
+/** The bridges that need no privilege, run wherever QuickJS runs. */
+export const LOCAL_BRIDGE_NAMES = [
+  "__bridge_sleep",
+  "__bridge_randomUUID",
+  "__bridge_randomBytes",
+  "__bridge_parseHTML",
+  "__bridge_parseCSV",
+  "__bridge_parseXML",
+] as const;
+
+export function isPrivilegedBridgeName(name: string): name is PrivilegedBridgeName {
+  return (PRIVILEGED_BRIDGE_NAMES as readonly string[]).includes(name);
+}
+
+export type PrivilegedHostOptions = Omit<HostFunctionOptions, "parserPool">;
+
+/** The privileged bridges for one tool invocation, scoped by its options. */
+export function createPrivilegedHost(options: PrivilegedHostOptions): PrivilegedHost {
   const { agentId, datastore, sharedDatastore, logTag, secrets, signal, allowedFetchHosts } = options;
-  const register = (name: string, fn: (json: string) => Promise<unknown>) =>
-    registerJsonAsyncFunction(context, runtime, name, fn, signal);
   const sandboxLog = (options.logger ?? defaultLogger).child({
     module: "sandbox-tool",
     agentId,
     tool: logTag.slice(0, 100),
   });
-  const parserPool = options.parserPool ?? (sharedParserPool ??= createParserWorkerPool());
 
   // Values fetched via secrets.get() during THIS invocation only — a tool
   // that logs a secret it never fetched has nothing to redact, and one that
   // fetches but doesn't log it costs nothing extra. Fresh per invocation
-  // (installHostFunctions runs once per sandbox context, one per tool call).
+  // (one privileged host per sandbox context, one per tool call).
   const fetchedSecretValues = new Set<string>();
   function redactSecrets(text: string): string {
     let out = text;
@@ -91,14 +125,105 @@ export function installHostFunctions(
     return out;
   }
 
-  register("__bridge_console", async (argsJson) => {
-    const [level, logArgs] = args<[string, unknown[]]>(argsJson);
-    const message = redactPii(redactSecrets(boundedJson(logArgs, LOG_BYTES)));
-    if (level === "warn") sandboxLog.warn(message);
-    else if (level === "error") sandboxLog.error(message);
-    else sandboxLog.info(message);
-    return null;
-  });
+  return {
+    async __bridge_console(argsJson) {
+      const [level, logArgs] = args<[string, unknown[]]>(argsJson);
+      const message = redactPii(redactSecrets(boundedJson(logArgs, LOG_BYTES)));
+      if (level === "warn") sandboxLog.warn(message);
+      else if (level === "error") sandboxLog.error(message);
+      else sandboxLog.info(message);
+      return null;
+    },
+
+    async __bridge_fetch(argsJson) {
+      const [url, init] =
+        args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(argsJson);
+      return safeFetch(url, init, { ...sandboxFetchPolicy(allowedFetchHosts ?? []), signal });
+    },
+
+    async __bridge_datastoreGet(argsJson) {
+      const [key] = args<[string]>(argsJson);
+      boundedString(key, 1024);
+      const value = await datastore.get(agentId, key);
+      return value === undefined ? null : value;
+    },
+
+    async __bridge_datastoreSet(argsJson) {
+      const [key, value, opts] = args<[string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
+      boundedString(key, 1024);
+      await datastore.set(agentId, key, value, opts);
+      return null;
+    },
+
+    async __bridge_datastoreDelete(argsJson) {
+      const [key] = args<[string]>(argsJson);
+      boundedString(key, 1024);
+      await datastore.delete(agentId, key);
+      return null;
+    },
+
+    async __bridge_datastoreList(argsJson) {
+      const [prefix] = args<[string | null]>(argsJson);
+      if (prefix !== null) boundedString(prefix, 1024);
+      return datastore.list(agentId, prefix ?? undefined);
+    },
+
+    async __bridge_sharedDatastoreGet(argsJson) {
+      const [boundName, key] = args<[string, string]>(argsJson);
+      boundedString(boundName, 1024);
+      boundedString(key, 1024);
+      const value = await sharedDatastore.get(boundName, key);
+      return value === undefined ? null : value;
+    },
+
+    async __bridge_sharedDatastoreSet(argsJson) {
+      const [boundName, key, value, opts] =
+        args<[string, string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
+      boundedString(boundName, 1024);
+      boundedString(key, 1024);
+      await sharedDatastore.set(boundName, key, value, opts);
+      return null;
+    },
+
+    async __bridge_sharedDatastoreDelete(argsJson) {
+      const [boundName, key] = args<[string, string]>(argsJson);
+      boundedString(boundName, 1024);
+      boundedString(key, 1024);
+      await sharedDatastore.delete(boundName, key);
+      return null;
+    },
+
+    async __bridge_sharedDatastoreList(argsJson) {
+      const [boundName, prefix] = args<[string, string | null]>(argsJson);
+      boundedString(boundName, 1024);
+      if (prefix !== null) boundedString(prefix, 1024);
+      return sharedDatastore.list(boundName, prefix ?? undefined);
+    },
+
+    async __bridge_secretsGet(argsJson) {
+      const [name] = args<[string]>(argsJson);
+      boundedString(name, 1024);
+      const value = secrets ? await secrets.get(name) : undefined;
+      if (value) fetchedSecretValues.add(value);
+      return value ?? null;
+    },
+  };
+}
+
+export interface SandboxApiOptions {
+  privileged: PrivilegedHost;
+  signal?: AbortSignal;
+  /** Overrides the shared default parser-worker pool — mainly for tests. */
+  parserPool?: ParserWorkerPool;
+}
+
+/** Registers the whole sandbox API: the local bridges directly, the privileged ones through `privileged`. */
+export function installSandboxApi(context: QuickJSContext, runtime: QuickJSRuntime, options: SandboxApiOptions): void {
+  const { privileged, signal } = options;
+  const register = (name: string, fn: HostBridge) => registerJsonAsyncFunction(context, runtime, name, fn, signal);
+  const parserPool = options.parserPool ?? (sharedParserPool ??= createParserWorkerPool());
+
+  for (const name of PRIVILEGED_BRIDGE_NAMES) register(name, (argsJson) => privileged[name](argsJson));
 
   register("__bridge_sleep", async (argsJson) => {
     const [ms] = args<[number]>(argsJson);
@@ -115,78 +240,6 @@ export function installHostFunctions(
     const [length] = args<[number]>(argsJson);
     if (!Number.isInteger(length) || length < 0 || length > RANDOM_BYTES_LIMIT) throw new Error("random_bytes_limit");
     return Array.from(nodeRandomBytes(length));
-  });
-
-  register("__bridge_fetch", async (argsJson) => {
-    const [url, init] = args<[string, { method?: string; headers?: Record<string, string>; body?: string }]>(argsJson);
-    return safeFetch(url, init, { ...sandboxFetchPolicy(allowedFetchHosts ?? []), signal });
-  });
-
-  register("__bridge_datastoreGet", async (argsJson) => {
-    const [key] = args<[string]>(argsJson);
-    boundedString(key, 1024);
-    const value = await datastore.get(agentId, key);
-    return value === undefined ? null : value;
-  });
-
-  register("__bridge_datastoreSet", async (argsJson) => {
-    const [key, value, opts] = args<[string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
-    boundedString(key, 1024);
-    await datastore.set(agentId, key, value, opts);
-    return null;
-  });
-
-  register("__bridge_datastoreDelete", async (argsJson) => {
-    const [key] = args<[string]>(argsJson);
-    boundedString(key, 1024);
-    await datastore.delete(agentId, key);
-    return null;
-  });
-
-  register("__bridge_datastoreList", async (argsJson) => {
-    const [prefix] = args<[string | null]>(argsJson);
-    if (prefix !== null) boundedString(prefix, 1024);
-    return datastore.list(agentId, prefix ?? undefined);
-  });
-
-  register("__bridge_sharedDatastoreGet", async (argsJson) => {
-    const [boundName, key] = args<[string, string]>(argsJson);
-    boundedString(boundName, 1024);
-    boundedString(key, 1024);
-    const value = await sharedDatastore.get(boundName, key);
-    return value === undefined ? null : value;
-  });
-
-  register("__bridge_sharedDatastoreSet", async (argsJson) => {
-    const [boundName, key, value, opts] =
-      args<[string, string, DatastoreValue, DatastoreSetOptions | undefined]>(argsJson);
-    boundedString(boundName, 1024);
-    boundedString(key, 1024);
-    await sharedDatastore.set(boundName, key, value, opts);
-    return null;
-  });
-
-  register("__bridge_sharedDatastoreDelete", async (argsJson) => {
-    const [boundName, key] = args<[string, string]>(argsJson);
-    boundedString(boundName, 1024);
-    boundedString(key, 1024);
-    await sharedDatastore.delete(boundName, key);
-    return null;
-  });
-
-  register("__bridge_sharedDatastoreList", async (argsJson) => {
-    const [boundName, prefix] = args<[string, string | null]>(argsJson);
-    boundedString(boundName, 1024);
-    if (prefix !== null) boundedString(prefix, 1024);
-    return sharedDatastore.list(boundName, prefix ?? undefined);
-  });
-
-  register("__bridge_secretsGet", async (argsJson) => {
-    const [name] = args<[string]>(argsJson);
-    boundedString(name, 1024);
-    const value = secrets ? await secrets.get(name) : undefined;
-    if (value) fetchedSecretValues.add(value);
-    return value ?? null;
   });
 
   // The actual node-html-parser/papaparse/fast-xml-parser calls run in a
@@ -219,5 +272,19 @@ export function installHostFunctions(
     )
       throw new Error("xml_options_invalid");
     return parserPool.run("xml", { xml, xmlOptions }, signal);
+  });
+}
+
+/** The in-process sandbox API for one tool invocation: privileged bridges served right here. */
+export function installHostFunctions(
+  context: QuickJSContext,
+  runtime: QuickJSRuntime,
+  options: HostFunctionOptions,
+): void {
+  const { parserPool, ...privilegedOptions } = options;
+  installSandboxApi(context, runtime, {
+    privileged: createPrivilegedHost(privilegedOptions),
+    signal: options.signal,
+    parserPool,
   });
 }
