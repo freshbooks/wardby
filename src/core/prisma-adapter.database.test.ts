@@ -292,6 +292,28 @@ describe.skipIf(!process.env.DATABASE_URL)("Prisma 7 adapter parity (PostgreSQL)
       expect(result?.run.agentId).toBe(agentId);
     });
 
+    it("retries a transaction that could not start in time (P2028)", async () => {
+      const agentId = await createAgent("tx-unavailable");
+      let attempts = 0;
+      const result = await dispatchRun({
+        db,
+        executor: noopExecutor,
+        agentId,
+        beforePersist: async () => {
+          attempts += 1;
+          if (attempts === 1) {
+            throw Object.assign(new Error("Transaction API error: Unable to start a transaction in the given time."), {
+              code: "P2028",
+            });
+          }
+          return true;
+        },
+      });
+      expect(attempts).toBe(2);
+      expect(result?.run.agentId).toBe(agentId);
+      expect(await db.run.count({ where: { agentId } })).toBe(1);
+    });
+
     it("gives up after PERSIST_ATTEMPTS conflicting attempts and rethrows the serialization failure", async () => {
       const agentId = await createAgent("always-conflict");
       let attempts = 0;

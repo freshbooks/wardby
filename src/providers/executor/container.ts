@@ -22,6 +22,8 @@ import {
 import { CONTINUATION_CLOSED_CATEGORY, CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { budgetSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
+import { isTransactionUnavailable } from "../../core/dispatch.js";
+import { CONTENDED_TX_MAX_WAIT_MS } from "../../core/timing.js";
 import type { IssueTrackerRegistry } from "../issue-tracker/types.js";
 import {
   classifyProviderFailure,
@@ -292,73 +294,83 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
 
   async claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim> {
     try {
-      return await this.db.$transaction(async (tx) => {
-        const { maxConcurrent } = this.options;
-        if (maxConcurrent !== undefined) {
-          // Slot usage is derived from run state, never a separate counter: a
-          // run that finishes, fails, is stopped, or is reconciled to lost stops
-          // counting, so a crashed replica cannot leak a slot.
-          await tx.$queryRawUnsafe(CODING_SLOT_LOCK_SQL);
-          const active = await tx.codingRun.count({
-            where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
-          });
-          // Oldest first (spec §6): a free slot belongs to the queued runs
-          // ahead of this one, not to whichever claim reaches the lock first.
-          // Without this a fresh dispatch could take a slot freed with no
-          // immediate drain (stopped from another replica, say) and starve
-          // older queued runs into coding_queue_timeout. A run not yet queued
-          // is behind every queued run; queued runs order by (queuedAt,
-          // runId), the same order drainCodingQueue starts them in.
-          const self = await tx.codingRun.findUnique({ where: { runId }, select: { queuedAt: true } });
-          const selfQueuedAt = self?.queuedAt ?? null;
-          const queuedAhead = await tx.codingRun.count({
-            where: {
-              runId: { not: runId },
-              queuedAt: { not: null },
-              jobBackend: null,
-              run: { status: "pending" },
-              ...(selfQueuedAt
-                ? { OR: [{ queuedAt: { lt: selfQueuedAt } }, { queuedAt: selfQueuedAt, runId: { lt: runId } }] }
-                : {}),
-            },
-          });
-          if (active + queuedAhead >= maxConcurrent) {
-            const queued = await tx.codingRun.updateMany({
-              where: { runId, jobBackend: null, queuedAt: null, run: { status: "pending" } },
-              data: { queuedAt: new Date() },
+      return await this.db.$transaction(
+        async (tx) => {
+          const { maxConcurrent } = this.options;
+          if (maxConcurrent !== undefined) {
+            // Slot usage is derived from run state, never a separate counter: a
+            // run that finishes, fails, is stopped, or is reconciled to lost stops
+            // counting, so a crashed replica cannot leak a slot.
+            await tx.$queryRawUnsafe(CODING_SLOT_LOCK_SQL);
+            const active = await tx.codingRun.count({
+              where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
             });
-            if (queued.count === 1) return "queued";
-            const alreadyQueued = await tx.codingRun.count({
-              where: { runId, jobBackend: null, queuedAt: { not: null }, run: { status: "pending" } },
+            // Oldest first (spec §6): a free slot belongs to the queued runs
+            // ahead of this one, not to whichever claim reaches the lock first.
+            // Without this a fresh dispatch could take a slot freed with no
+            // immediate drain (stopped from another replica, say) and starve
+            // older queued runs into coding_queue_timeout. A run not yet queued
+            // is behind every queued run; queued runs order by (queuedAt,
+            // runId), the same order drainCodingQueue starts them in.
+            const self = await tx.codingRun.findUnique({ where: { runId }, select: { queuedAt: true } });
+            const selfQueuedAt = self?.queuedAt ?? null;
+            const queuedAhead = await tx.codingRun.count({
+              where: {
+                runId: { not: runId },
+                queuedAt: { not: null },
+                jobBackend: null,
+                run: { status: "pending" },
+                ...(selfQueuedAt
+                  ? { OR: [{ queuedAt: { lt: selfQueuedAt } }, { queuedAt: selfQueuedAt, runId: { lt: runId } }] }
+                  : {}),
+              },
             });
-            return alreadyQueued === 1 ? "queued" : "unavailable";
+            if (active + queuedAhead >= maxConcurrent) {
+              const queued = await tx.codingRun.updateMany({
+                where: { runId, jobBackend: null, queuedAt: null, run: { status: "pending" } },
+                data: { queuedAt: new Date() },
+              });
+              if (queued.count === 1) return "queued";
+              const alreadyQueued = await tx.codingRun.count({
+                where: { runId, jobBackend: null, queuedAt: { not: null }, run: { status: "pending" } },
+              });
+              return alreadyQueued === 1 ? "queued" : "unavailable";
+            }
           }
-        }
-        const claimed = await tx.codingRun.updateMany({
-          where: {
-            runId,
-            jobBackend: null,
-            jobHandle: null,
-            run: { status: { in: ["pending", "running"] } },
-          },
-          data: { jobBackend: PROVISIONING_BACKEND, jobHandle: claimId, queuedAt: null },
-        });
-        if (claimed.count === 0) return "unavailable";
-        const started = await tx.run.updateMany({
-          where: { id: runId, status: { in: ["pending", "running"] } },
-          data: { status: "running", heartbeatAt: new Date() },
-        });
-        if (started.count === 0) {
-          // The Run left pending/running between the CodingRun claim above and
-          // here (e.g. drainCodingQueue's coding_queue_timeout failure landed
-          // mid-claim). Abort the whole transaction so the CodingRun claim
-          // rolls back too, rather than reviving a run that just failed.
-          throw new RunNoLongerActiveError();
-        }
-        return "claimed";
-      });
+          const claimed = await tx.codingRun.updateMany({
+            where: {
+              runId,
+              jobBackend: null,
+              jobHandle: null,
+              run: { status: { in: ["pending", "running"] } },
+            },
+            data: { jobBackend: PROVISIONING_BACKEND, jobHandle: claimId, queuedAt: null },
+          });
+          if (claimed.count === 0) return "unavailable";
+          const started = await tx.run.updateMany({
+            where: { id: runId, status: { in: ["pending", "running"] } },
+            data: { status: "running", heartbeatAt: new Date() },
+          });
+          if (started.count === 0) {
+            // The Run left pending/running between the CodingRun claim above and
+            // here (e.g. drainCodingQueue's coding_queue_timeout failure landed
+            // mid-claim). Abort the whole transaction so the CodingRun claim
+            // rolls back too, rather than reviving a run that just failed.
+            throw new RunNoLongerActiveError();
+          }
+          return "claimed";
+        },
+        { maxWait: CONTENDED_TX_MAX_WAIT_MS },
+      );
     } catch (err) {
       if (err instanceof RunNoLongerActiveError) return "unavailable";
+      // A burst of claims queued on the slot lock left no connection in time.
+      // Nothing was claimed: wait in the coding queue (drainCodingQueue starts
+      // it, oldest first) instead of failing a run that only needed to wait.
+      if (isTransactionUnavailable(err)) {
+        await this.markQueued(runId);
+        return "queued";
+      }
       throw err;
     }
   }

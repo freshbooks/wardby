@@ -281,6 +281,31 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
     await retire([first, second]);
   });
 
+  it("queues a claim whose transaction could not start in time (P2028) instead of failing it", async () => {
+    const runId = id("tx-unavailable");
+    await seed(runId);
+    const unavailable = Object.assign(
+      new Error("Transaction API error: Unable to start a transaction in the given time."),
+      {
+        code: "P2028",
+      },
+    );
+    // Same database, but every interactive transaction fails to start, as under a burst of claims on the slot lock.
+    const busy = new Proxy(db, {
+      get: (target, prop) =>
+        prop === "$transaction" ? () => Promise.reject(unavailable) : Reflect.get(target, prop, target),
+    });
+
+    const store = new PrismaContainerExecutionStore(busy, { maxConcurrent: 1_000 });
+    await expect(store.claimProvisioning(runId, "claim-busy")).resolves.toBe("queued");
+    const row = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(row.queuedAt).not.toBeNull();
+    expect(row.jobBackend).toBeNull();
+    expect((await db.run.findUniqueOrThrow({ where: { id: runId } })).status).toBe("pending");
+
+    await retire([runId]);
+  });
+
   it("the reconciler leaves a queued pending coding run alone but still reaps an unqueued one", async () => {
     const longAgo = new Date(Date.now() - 10 * 60_000);
     const queuedRun = id("recon-queued");
