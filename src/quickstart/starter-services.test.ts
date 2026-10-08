@@ -1,14 +1,5 @@
 import { execFileSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -34,10 +25,10 @@ const git = (...args: string[]): string =>
 function workTree(root: string): Record<string, string> {
   const files: Record<string, string> = {};
   const walk = (current: string) => {
-    for (const entry of readdirSync(current)) {
-      const full = join(current, entry);
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name);
       if (relative(root, full) === ".git") continue;
-      if (statSync(full).isDirectory()) walk(full);
+      if (entry.isDirectory()) walk(full);
       else files[relative(root, full)] = readFileSync(full).toString("base64");
     }
   };
