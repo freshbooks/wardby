@@ -74,6 +74,9 @@ describe("requirementsNames", () => {
   });
 });
 
+// A pyproject with no [build-system] table is built by the legacy setuptools backend.
+const LEGACY = ["setuptools", "wheel"];
+
 describe("pyprojectNames", () => {
   it("reads [project] dependencies and every optional-dependencies group", () => {
     const text = `
@@ -110,19 +113,44 @@ app = "app.cli:main"
 line-length = 100
 select = ["E", "F"]
 `;
-    expect(pyprojectNames(text)).toEqual(["Flask", "redis", "psycopg", "escapedAname", "pytest", "ruff", "mkdocs"]);
+    expect(pyprojectNames(text)).toEqual([
+      "Flask",
+      "redis",
+      "psycopg",
+      "escapedAname",
+      "pytest",
+      "ruff",
+      "mkdocs",
+      "setuptools",
+      "wheel",
+    ]);
   });
 
-  it("does not take setuptools from build-system requires or dependencies from other tables", () => {
+  it("reads [build-system] requires but not dependencies from other tables", () => {
     const text = `
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=61", "wheel", "poetry-core>=1.0.0", "flit_core", "scikit-build-core", "pkg @ https://x/y.tar.gz"]
 [tool.other]
 dependencies = ["not-this"]
 [tool.poetry.extras]
 dependencies = ["nor-this"]
 `;
-    expect(pyprojectNames(text)).toEqual([]);
+    expect(pyprojectNames(text)).toEqual(["setuptools", "wheel", "poetry-core", "flit_core", "scikit-build-core"]);
+  });
+
+  it("adds setuptools and wheel when there is no [build-system] table", () => {
+    expect(pyprojectNames(`[project]\nname = "a"\ndependencies = ["flask"]\n`)).toEqual([
+      "flask",
+      "setuptools",
+      "wheel",
+    ]);
+  });
+
+  it("does not add the legacy backend when [build-system] exists", () => {
+    expect(pyprojectNames(`[build-system]\nrequires = ["hatchling"]\n[project]\ndependencies = ["flask"]\n`)).toEqual([
+      "flask",
+      "hatchling",
+    ]);
   });
 
   it("reads dotted and inline-table optional-dependencies under [project]", () => {
@@ -130,10 +158,11 @@ dependencies = ["nor-this"]
       pyprojectNames(
         `[project]\nname = "a"\noptional-dependencies.dev = ["pytest"]\noptional-dependencies.lint = ['ruff']\n`,
       ),
-    ).toEqual(["pytest", "ruff"]);
+    ).toEqual(["pytest", "ruff", ...LEGACY]);
     expect(pyprojectNames(`[project]\noptional-dependencies = { dev = ["pytest"], docs = ["mkdocs"] }\n`)).toEqual([
       "pytest",
       "mkdocs",
+      ...LEGACY,
     ]);
   });
 
@@ -182,12 +211,13 @@ url = "https://example.com/simple"
       "pytest",
       "ruff",
       "black",
+      ...LEGACY,
     ]);
   });
 
   it("skips Poetry subtables that point at a path or git source", () => {
     const text = `[tool.poetry.dependencies.mine]\npath = "./mine"\n[tool.poetry.dependencies.ok]\nversion = "1"\n`;
-    expect(pyprojectNames(text)).toEqual(["ok"]);
+    expect(pyprojectNames(text)).toEqual(["ok", ...LEGACY]);
   });
 
   it("ignores values it does not need: arrays of tables, nested inline tables, literals, numbers, dates", () => {
@@ -206,7 +236,7 @@ dependencies = ["not-this"]
 [project]
 dependencies = ["kept"]
 `;
-    expect(pyprojectNames(text)).toEqual(["kept"]);
+    expect(pyprojectNames(text)).toEqual(["kept", ...LEGACY]);
   });
 
   it("handles CRLF line endings, quoted dotted keys and multi-line basic strings with continuations", () => {
@@ -220,12 +250,12 @@ dependencies = ["kept"]
       '  "b"  ,  ]',
       "",
     ].join("\r\n");
-    expect(pyprojectNames(text)).toEqual(["a", "b"]);
+    expect(pyprojectNames(text)).toEqual(["a", "b", ...LEGACY]);
   });
 
   it("is empty for a pyproject with no dependencies or dynamic dependencies", () => {
-    expect(pyprojectNames("")).toEqual([]);
-    expect(pyprojectNames(`[project]\nname = "a"\ndynamic = ["dependencies"]\n`)).toEqual([]);
+    expect(pyprojectNames("")).toEqual(LEGACY);
+    expect(pyprojectNames(`[project]\nname = "a"\ndynamic = ["dependencies"]\n`)).toEqual(LEGACY);
   });
 
   it.each([

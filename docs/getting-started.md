@@ -360,7 +360,10 @@ the same commit (never your working tree):
 - `pyproject.toml`: `[project] dependencies`, every
   `[project.optional-dependencies]` group, `[tool.poetry.dependencies]`,
   Poetry's dependency groups and the legacy `[tool.poetry.dev-dependencies]`
-  for PyPI;
+  for PyPI, plus the packages pip needs to build the project:
+  `[build-system] requires` (such as `setuptools`, `hatchling` or
+  `poetry-core`), or `setuptools` and `wheel` when the file has no
+  `[build-system]` table (pip then uses the legacy setuptools backend);
 - every `requirements*.txt` for PyPI. Options such as `-r`, `-c` and `-e`,
   URLs and local paths are skipped; an included file (`-r other.txt`) is not
   followed.

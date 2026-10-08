@@ -153,7 +153,9 @@ then:
   another: folders passed on a run take precedence over saved ones;
 - offers the packages the repository declares (`package.json` dependencies,
   `pyproject.toml` dependencies including optional groups and Poetry, with
-  Poetry's legacy `[tool.poetry.dev-dependencies]`, and
+  Poetry's legacy `[tool.poetry.dev-dependencies]`, the `[build-system]
+requires` build packages (or `setuptools` and `wheel` when there is no
+  `[build-system]` table), and
   `requirements*.txt`, read from the committed root) as `local-builder`'s
   package allowlist: bare names only, up to 200 per ecosystem. It lists them
   and asks "Allow local-builder to install these packages through Wardby's

@@ -400,7 +400,9 @@ function poetryNames(value: Value | undefined): string[] {
  * Names from pyproject.toml: `[project] dependencies`, every
  * `[project.optional-dependencies]` group, `[tool.poetry.dependencies]`
  * (except python), `[tool.poetry.group.*.dependencies]` and the legacy
- * `[tool.poetry.dev-dependencies]`. Throws when the file cannot be scanned or
+ * `[tool.poetry.dev-dependencies]`, plus the packages pip needs to build the
+ * project: `[build-system] requires`, or setuptools and wheel when the file has
+ * no `[build-system]` table. Throws when the file cannot be scanned or
  * one of those keys has an unexpected shape.
  */
 export function pyprojectNames(text: string): string[] {
@@ -420,5 +422,10 @@ export function pyprojectNames(text: string): string[] {
     for (const group of groups.entries.values()) names.push(...poetryNames(get(group, "dependencies")));
   }
   names.push(...poetryNames(get(poetry, "dev-dependencies")));
+  // pip builds the project first: the declared build backend's packages, or
+  // (no [build-system] table) the legacy setuptools backend.
+  const buildSystem = get(root, "build-system");
+  if (buildSystem === undefined) names.push("setuptools", "wheel");
+  else names.push(...requirementList(get(buildSystem, "requires"), "build-system.requires"));
   return names;
 }

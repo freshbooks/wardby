@@ -36,7 +36,8 @@ refused too, so a high-severity advisory deep in a toolchain blocks every run
 that installs it.
 
 The quickstart's coding step offers the packages a local repository declares
-(`package.json`, `pyproject.toml`, `requirements*.txt`) as `local-builder`'s
+(`package.json`, `pyproject.toml` including its build-system packages,
+`requirements*.txt`) as `local-builder`'s
 allowlist after asking, or with `--allow-repo-packages` in a non-interactive
 run. See [Local repositories](local-repositories.md).
 

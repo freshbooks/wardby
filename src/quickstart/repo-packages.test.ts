@@ -36,6 +36,20 @@ function commit(files: Record<string, string>): void {
 const PYPROJECT = `[project]\nname = "app"\ndependencies = ["Flask>=3", "zope.interface"]\n[project.optional-dependencies]\ndev = ["pytest"]\n`;
 
 describe("readRepoPackages", () => {
+  it("offers a project's [build-system] requires, dropping invalid names", async () => {
+    commit({
+      "pyproject.toml": `[build-system]\nrequires = ["hatchling>=1.18", "poetry-core>=1.0.0", "bad name!", "flit_core"]\nbuild-backend = "hatchling.build"\n[project]\nname = "a"\ndependencies = ["flask"]\n`,
+    });
+    const { allowlist, notes } = await readRepoPackages(repo, head());
+    expect(notes).toEqual([]);
+    expect(allowlist).toEqual({ pypi: ["flask", "flit-core", "hatchling", "poetry-core"] });
+  });
+
+  it("offers setuptools and wheel for a pyproject without [build-system]", async () => {
+    commit({ "pyproject.toml": `[project]\nname = "a"\ndependencies = ["flask"]\n` });
+    expect((await readRepoPackages(repo, head())).allowlist).toEqual({ pypi: ["flask", "setuptools", "wheel"] });
+  });
+
   it("is empty for a repository without manifests", async () => {
     expect(await readRepoPackages(repo, head())).toEqual({ allowlist: {}, notes: [] });
   });
@@ -52,7 +66,7 @@ describe("readRepoPackages", () => {
     // PyPI names are PEP 503-normalized, so Flask/flask and pytest/PyTest are one entry each.
     expect(allowlist).toEqual({
       npm: ["@types/node", "express"],
-      pypi: ["flask", "pytest", "pytest-cov", "requests", "zope-interface"],
+      pypi: ["flask", "pytest", "pytest-cov", "requests", "setuptools", "wheel", "zope-interface"],
     });
     expect(() => CodingProfileSchema.parse({ repository: "org/repo", packageAllowlist: allowlist })).not.toThrow();
   });
@@ -62,7 +76,10 @@ describe("readRepoPackages", () => {
       "package.json": JSON.stringify({ dependencies: { "bad name": "^1", ".hidden": "1", ok: "1", "@Scope/x": "1" } }),
       "pyproject.toml": `[tool.poetry.dependencies]\npython = "^3.12"\n"not valid" = "1"\nfine = "1"\n`,
     });
-    expect((await readRepoPackages(repo, head())).allowlist).toEqual({ npm: ["ok"], pypi: ["fine"] });
+    expect((await readRepoPackages(repo, head())).allowlist).toEqual({
+      npm: ["ok"],
+      pypi: ["fine", "setuptools", "wheel"],
+    });
   });
 
   it("ignores manifests that are only in the working tree or the index", async () => {
