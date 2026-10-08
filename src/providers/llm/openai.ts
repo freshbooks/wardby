@@ -103,14 +103,15 @@ function toResponsesInput(messages: LlmMessage[]): OpenAI.Responses.ResponseInpu
   return input;
 }
 
-/** The final usage block on response.completed / response.incomplete. */
-interface ResponsesUsage {
-  input_tokens: number;
-  output_tokens: number;
-  // cache_write_tokens is reported by the API but not yet in the SDK's types.
-  // Both details are subsets of input_tokens (see toUsage).
-  input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
-}
+/**
+ * The final usage block on response.completed / response.incomplete. The
+ * SDK types both details as required, but older models and recorded
+ * fixtures omit them, so this view keeps them optional and toUsage falls
+ * back to 0. Both details are subsets of input_tokens (see toUsage).
+ */
+type ResponsesUsage = Pick<OpenAI.Responses.ResponseUsage, "input_tokens" | "output_tokens"> & {
+  input_tokens_details?: Partial<OpenAI.Responses.ResponseUsage.InputTokensDetails>;
+};
 
 // Fixed: this used to count message tokens only. When a request carries
 // `tools`, OpenAI also tokenizes the serialized tool JSON schemas into the
@@ -184,8 +185,7 @@ export class OpenAiLlmProvider implements CatalogLlmAdapter {
       store: false,
       ...(req.tools ? { tools: toOpenAiTools(req.tools) } : {}),
       ...(req.maxTokens !== undefined ? { max_output_tokens: Math.max(req.maxTokens, MIN_MAX_OUTPUT_TOKENS) } : {}),
-      // The SDK's ReasoningEffort type predates xhigh/max; the API accepts them.
-      ...(sendEffort ? { reasoning: { effort: req.effort as OpenAI.ReasoningEffort } } : {}),
+      ...(sendEffort ? { reasoning: { effort: req.effort } } : {}),
       ...(sendTemperature ? { temperature: req.temperature } : {}),
     };
     const stream = await this.client.responses.create(params, { signal });
