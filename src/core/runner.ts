@@ -458,71 +458,31 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
   return db.run.create({ data: { agentId: agent.id, trigger, nativeExecutionMode: agent.nativeExecutionMode } });
 }
 
-/** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
-export async function executeRun(
-  runId: string,
-  providers: NativeRunProviders,
-  db: RunnerDb = defaultDb,
-  onText?: (delta: string) => void,
-  step: StepRunner = runStepInline,
-): Promise<Run> {
-  // Counted so a shutdown waits for this run instead of abandoning it (core/in-flight-runs.ts).
-  return trackRun(runId, () => executeTrackedRun(runId, providers, db, onText, step));
+export interface LoadNativeRunOptions {
+  runId: string;
+  existingRun: Run;
+  providers: NativeRunProviders;
+  db: RunnerDb;
+  step: StepRunner;
+  reviewHosts: ReviewHostRegistry | undefined;
+  issueTrackers: IssueTrackerRegistry | undefined;
 }
 
-async function executeTrackedRun(
-  runId: string,
-  providers: NativeRunProviders,
-  db: RunnerDb,
-  onText: ((delta: string) => void) | undefined,
-  step: StepRunner,
-): Promise<Run> {
-  const existingRun = await db.run.findUnique({ where: { id: runId } });
-  if (!existingRun) {
-    throw new Error(`Unknown run "${runId}".`);
-  }
-
-  // Pre-flight guard. A run that already reached a terminal state must never
-  // be re-driven: a durable workflow re-dispatched after the reconciler
-  // reaped its row (rollback to EXECUTOR=in-process, then roll forward) would
-  // otherwise re-spend the whole run against a `lost` row, and a duplicate
-  // attempt of a finished run would spend a second time for a result no write
-  // can land. Cheaper and clearer than letting it run and discarding the
-  // result at the conditional write.
-  if (!DRIVABLE.includes(existingRun.status as (typeof DRIVABLE)[number])) {
-    runnerLog.info({ runId, status: existingRun.status }, "skipping execution of an already-terminal run");
-    return existingRun;
-  }
-
-  const reviewHosts = configuredReviewHosts(providers.reviewHosts);
-  const repoAccess = reviewHosts
-    ? (providers.repoAccess ?? createRepoAccessGate({ db, hosts: reviewHosts }))
-    : undefined;
-  const issueTrackers = configuredIssueTrackers(providers.issueTrackers);
-
-  // Fails a run that ends before its engine starts, closing what its trigger opened (the review
-  // check, the host and issue status comments) exactly as the normal and catch paths below do.
-  // Deliberately no self-defect: every caller is a configuration state, not this run's defect (an
-  // admin disabled or removed the model, or this deployment has no coding or native sandbox
-  // executor), and filing would open one defect per affected agent rather than describe a failure
-  // of that agent.
-  const finishEarly = async (error: string): Promise<Run> => {
-    const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
-    await closeOpenHostCheck(db, finished, reviewHosts);
-    await completeHostStatus(db, finished, reviewHosts);
-    await completeIssueStatus(db, finished, issueTrackers);
-    return finished;
-  };
-  // Decided by the run's own snapshot, before any work or spend (no pricing pin, no engine): a
-  // sandbox-mode run never executes in the control plane.
-  if (existingRun.nativeExecutionMode === "sandbox") return finishEarly(NATIVE_SANDBOX_NOT_CONFIGURED);
-
-  // Pinned in one checkpointed step: on replay after a crash, the agent row
-  // or its budget group may have changed since first execution. The
-  // engine's control flow depends on budgetUsd and maxTurns, so they must
-  // be pinned to the values seen on first execution or the replay's step
-  // order diverges from the record.
-  const loadedOrUnavailable = await step("load", async () => {
+/**
+ * The trusted load of a native run: the agent, its attached tools and their
+ * consented capabilities, the pinned catalog entry, the effective budget,
+ * sub-agent edges, and repository/issue links. Shared by in-process execution
+ * and the native sandbox gateway, which hands the worker this result.
+ *
+ * Pinned in one checkpointed step: on replay after a crash, the agent row
+ * or its budget group may have changed since first execution. The
+ * engine's control flow depends on budgetUsd and maxTurns, so they must
+ * be pinned to the values seen on first execution or the replay's step
+ * order diverges from the record.
+ */
+export async function loadNativeRun(options: LoadNativeRunOptions) {
+  const { runId, existingRun, providers, db, step, reviewHosts, issueTrackers } = options;
+  return step("load", async () => {
     const agent = await db.agent.findUnique({ where: { id: existingRun.agentId } });
     if (!agent) {
       throw new Error(`Run "${runId}" references missing agent "${existingRun.agentId}".`);
@@ -686,36 +646,56 @@ async function executeTrackedRun(
     }
     throw err;
   });
-  if ("unavailable" in loadedOrUnavailable) return finishEarly(loadedOrUnavailable.unavailable);
-  const loaded = loadedOrUnavailable;
+}
 
-  if (loaded.kind === "coding") return finishEarly(CODING_EXECUTOR_NOT_CONFIGURED);
+/** A loaded native run (loadNativeRun without its model-unavailable outcome). */
+export type LoadedNativeRun = Exclude<Awaited<ReturnType<typeof loadNativeRun>>, { unavailable: string }>;
 
-  // Conditional on DRIVABLE rather than on `pending`: an adopted attempt
-  // legitimately finds the row already `running`, but a terminal row must
-  // never be flipped back to `running`.
-  await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data: { status: "running" } });
+export interface NativeRunToolsOptions {
+  runId: string;
+  existingRun: Run;
+  loaded: LoadedNativeRun;
+  providers: NativeRunProviders;
+  db: RunnerDb;
+  reviewHosts: ReviewHostRegistry | undefined;
+  repoAccess: RepoAccessGate | undefined;
+  issueTrackers: IssueTrackerRegistry | undefined;
+}
 
-  try {
-    const toolsByName = new Map(Object.entries(loaded.toolsByName));
-    const secretsAccessor = buildSecretsAccessor(loaded.agentId, providers.secrets, db);
-    const sharedDatastoreAccessor = buildSharedDatastoreAccessor(loaded.agentId, providers.datastore, db);
-    // jira_create_issue's per-run cap counter: shared by every tool call of this attempt (a resumed attempt
-    // starts a fresh one, floored by the run's recorded fingerprint creates).
-    const issueCreationCounters = new Map<string, RunCreationCounter>();
-    // One per attempt: admits this run's delegations one at a time (see the delegate branch).
-    const delegationGate = createSerialGate();
-    // The children this attempt's delegations have running, and the sub-agents whose delegation is
-    // waiting for one of them to free budget (parallelDelegations): a waiting delegation keeps its
-    // place in the same-child and limit checks while the gate is open to the others.
-    const delegationSiblings = createDelegationSiblings();
-    const waitingDelegations = new Set<string>();
+/** A built-in tool's handler for one call; built-ins run on the trusted side, never in a sandbox. */
+export type BuiltinToolHandler = (argsJson: string) => Promise<string>;
 
-    const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
-      if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
+/**
+ * One attempt's tool surface for a native run. `builtinHandler(name)` is the
+ * single source of truth for which names are trusted built-ins (memory,
+ * repo_*, jira_*, sub-agent/parent memory, delegate_to_*) and returns undefined
+ * for everything else, which `runUserTool` runs in the WASM sandbox. Per-attempt
+ * state (the delegation gate, siblings, issue creation counters) lives here.
+ */
+export function createNativeRunTools(options: NativeRunToolsOptions) {
+  const { runId, existingRun, loaded, providers, db, reviewHosts, repoAccess, issueTrackers } = options;
+  const toolsByName = new Map(Object.entries(loaded.toolsByName));
+  const secretsAccessor = buildSecretsAccessor(loaded.agentId, providers.secrets, db);
+  const sharedDatastoreAccessor = buildSharedDatastoreAccessor(loaded.agentId, providers.datastore, db);
+  // jira_create_issue's per-run cap counter: shared by every tool call of this attempt (a resumed attempt
+  // starts a fresh one, floored by the run's recorded fingerprint creates).
+  const issueCreationCounters = new Map<string, RunCreationCounter>();
+  // One per attempt: admits this run's delegations one at a time (see the delegate branch).
+  const delegationGate = createSerialGate();
+  // The children this attempt's delegations have running, and the sub-agents whose delegation is
+  // waiting for one of them to free budget (parallelDelegations): a waiting delegation keeps its
+  // place in the same-child and limit checks while the gate is open to the others.
+  const delegationSiblings = createDelegationSiblings();
+  const waitingDelegations = new Set<string>();
+
+  const builtinHandler = (name: string): BuiltinToolHandler | undefined => {
+    if (loaded.memoryEnabled && MEMORY_TOOL_NAMES.has(name)) {
+      return async (argsJson: string): Promise<string> => {
         return handleMemoryTool(name, argsJson, loaded.agentId, providers.memory);
-      }
-      if (REVIEW_HOST_TOOL_NAMES.has(name) && loaded.repositoryLinks.length > 0 && reviewHosts && repoAccess) {
+      };
+    }
+    if (REVIEW_HOST_TOOL_NAMES.has(name) && loaded.repositoryLinks.length > 0 && reviewHosts && repoAccess) {
+      return async (argsJson: string): Promise<string> => {
         const check = await db.runHostCheck.findUnique({ where: { runId } });
         return handleReviewHostTool(name, argsJson, {
           agentId: loaded.agentId,
@@ -770,11 +750,13 @@ async function executeTrackedRun(
             });
           },
         });
-      }
-      // `?? []`: a load step replayed from before these links were pinned has none.
-      // Each link is re-normalised too: one pinned before the allowlists existed lacks them.
-      const issueProjectLinks: readonly IssueProjectLink[] = (loaded.issueProjectLinks ?? []).map(toIssueProjectLink);
-      if (ISSUE_TRACKER_TOOL_NAMES.has(name) && issueProjectLinks.length > 0 && issueTrackers) {
+      };
+    }
+    // `?? []`: a load step replayed from before these links were pinned has none.
+    // Each link is re-normalised too: one pinned before the allowlists existed lacks them.
+    const issueProjectLinks: readonly IssueProjectLink[] = (loaded.issueProjectLinks ?? []).map(toIssueProjectLink);
+    if (ISSUE_TRACKER_TOOL_NAMES.has(name) && issueProjectLinks.length > 0 && issueTrackers) {
+      return async (argsJson: string): Promise<string> => {
         return handleIssueTrackerTool(name, argsJson, {
           agentId: loaded.agentId,
           links: issueProjectLinks,
@@ -795,14 +777,20 @@ async function executeTrackedRun(
               db.issueFingerprint.count({ where: { createdByRunId: runId, issueProvider: "jira", projectKey } }),
           },
         });
-      }
-      if (name === "subagent_memory_get") {
+      };
+    }
+    if (name === "subagent_memory_get") {
+      return async (argsJson: string): Promise<string> => {
         return handleSubAgentMemoryGet(argsJson, loaded.agentId, db, providers.memory);
-      }
-      if (name === "parent_memory_get") {
+      };
+    }
+    if (name === "parent_memory_get") {
+      return async (argsJson: string): Promise<string> => {
         return handleParentMemoryGet(argsJson, runId, db, providers.memory);
-      }
-      if (name.startsWith(DELEGATE_TOOL_PREFIX)) {
+      };
+    }
+    if (name.startsWith(DELEGATE_TOOL_PREFIX)) {
+      return async (argsJson: string): Promise<string> => {
         const boundName = name.slice(DELEGATE_TOOL_PREFIX.length);
         const edge = loaded.subAgentEdges.find((e) => e.boundName === boundName);
         if (!edge) {
@@ -1205,48 +1193,151 @@ async function executeTrackedRun(
           finishSibling();
           release();
         }
-      }
+      };
+    }
 
-      const tool = toolsByName.get(name);
-      if (!tool) {
-        return JSON.stringify({
-          error: "unknown_tool",
-          message: `No tool named "${name}" is attached to this agent.`,
-        });
-      }
+    return undefined;
+  };
 
-      let parsedArgs: unknown;
-      try {
-        // Some providers stream no JSON delta at all for a zero-parameter
-        // tool call, yielding an empty argsJson rather than "{}".
-        parsedArgs = JSON.parse(argsJson || "{}");
-      } catch (err) {
-        return JSON.stringify({
-          error: "invalid_arguments_json",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-
-      const validation = await validateParams(tool.paramsZod, parsedArgs);
-      if (!validation.ok) {
-        return JSON.stringify({ error: "validation_failed", message: validation.errorMessage });
-      }
-
-      const result = await runInSandbox({
-        code: tool.code,
-        params: validation.value,
-        agentId: loaded.agentId,
-        datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
-        sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
-        secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
-        allowedFetchHosts: tool.allowedHosts,
-        toolName: name,
+  const runUserTool = async (name: string, argsJson: string): Promise<string> => {
+    const tool = toolsByName.get(name);
+    if (!tool) {
+      return JSON.stringify({
+        error: "unknown_tool",
+        message: `No tool named "${name}" is attached to this agent.`,
       });
-      if (!result.ok) {
-        return JSON.stringify({ error: result.errorKind, message: result.errorMessage });
-      }
-      return JSON.stringify(result.value);
-    };
+    }
+
+    let parsedArgs: unknown;
+    try {
+      // Some providers stream no JSON delta at all for a zero-parameter
+      // tool call, yielding an empty argsJson rather than "{}".
+      parsedArgs = JSON.parse(argsJson || "{}");
+    } catch (err) {
+      return JSON.stringify({
+        error: "invalid_arguments_json",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    const validation = await validateParams(tool.paramsZod, parsedArgs);
+    if (!validation.ok) {
+      return JSON.stringify({ error: "validation_failed", message: validation.errorMessage });
+    }
+
+    const result = await runInSandbox({
+      code: tool.code,
+      params: validation.value,
+      agentId: loaded.agentId,
+      datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
+      sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
+      secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
+      allowedFetchHosts: tool.allowedHosts,
+      toolName: name,
+    });
+    if (!result.ok) {
+      return JSON.stringify({ error: result.errorKind, message: result.errorMessage });
+    }
+    return JSON.stringify(result.value);
+  };
+
+  const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
+    const builtin = builtinHandler(name);
+    return builtin ? builtin(argsJson) : runUserTool(name, argsJson);
+  };
+
+  return { toolsByName, builtinHandler, runUserTool, runSandboxTool };
+}
+
+/** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
+export async function executeRun(
+  runId: string,
+  providers: NativeRunProviders,
+  db: RunnerDb = defaultDb,
+  onText?: (delta: string) => void,
+  step: StepRunner = runStepInline,
+): Promise<Run> {
+  // Counted so a shutdown waits for this run instead of abandoning it (core/in-flight-runs.ts).
+  return trackRun(runId, () => executeTrackedRun(runId, providers, db, onText, step));
+}
+
+async function executeTrackedRun(
+  runId: string,
+  providers: NativeRunProviders,
+  db: RunnerDb,
+  onText: ((delta: string) => void) | undefined,
+  step: StepRunner,
+): Promise<Run> {
+  const existingRun = await db.run.findUnique({ where: { id: runId } });
+  if (!existingRun) {
+    throw new Error(`Unknown run "${runId}".`);
+  }
+
+  // Pre-flight guard. A run that already reached a terminal state must never
+  // be re-driven: a durable workflow re-dispatched after the reconciler
+  // reaped its row (rollback to EXECUTOR=in-process, then roll forward) would
+  // otherwise re-spend the whole run against a `lost` row, and a duplicate
+  // attempt of a finished run would spend a second time for a result no write
+  // can land. Cheaper and clearer than letting it run and discarding the
+  // result at the conditional write.
+  if (!DRIVABLE.includes(existingRun.status as (typeof DRIVABLE)[number])) {
+    runnerLog.info({ runId, status: existingRun.status }, "skipping execution of an already-terminal run");
+    return existingRun;
+  }
+
+  const reviewHosts = configuredReviewHosts(providers.reviewHosts);
+  const repoAccess = reviewHosts
+    ? (providers.repoAccess ?? createRepoAccessGate({ db, hosts: reviewHosts }))
+    : undefined;
+  const issueTrackers = configuredIssueTrackers(providers.issueTrackers);
+
+  // Fails a run that ends before its engine starts, closing what its trigger opened (the review
+  // check, the host and issue status comments) exactly as the normal and catch paths below do.
+  // Deliberately no self-defect: every caller is a configuration state, not this run's defect (an
+  // admin disabled or removed the model, or this deployment has no coding or native sandbox
+  // executor), and filing would open one defect per affected agent rather than describe a failure
+  // of that agent.
+  const finishEarly = async (error: string): Promise<Run> => {
+    const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
+    await closeOpenHostCheck(db, finished, reviewHosts);
+    await completeHostStatus(db, finished, reviewHosts);
+    await completeIssueStatus(db, finished, issueTrackers);
+    return finished;
+  };
+  // Decided by the run's own snapshot, before any work or spend (no pricing pin, no engine): a
+  // sandbox-mode run never executes in the control plane.
+  if (existingRun.nativeExecutionMode === "sandbox") return finishEarly(NATIVE_SANDBOX_NOT_CONFIGURED);
+
+  const loadedOrUnavailable = await loadNativeRun({
+    runId,
+    existingRun,
+    providers,
+    db,
+    step,
+    reviewHosts,
+    issueTrackers,
+  });
+  if ("unavailable" in loadedOrUnavailable) return finishEarly(loadedOrUnavailable.unavailable);
+  const loaded = loadedOrUnavailable;
+
+  if (loaded.kind === "coding") return finishEarly(CODING_EXECUTOR_NOT_CONFIGURED);
+
+  // Conditional on DRIVABLE rather than on `pending`: an adopted attempt
+  // legitimately finds the row already `running`, but a terminal row must
+  // never be flipped back to `running`.
+  await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data: { status: "running" } });
+
+  try {
+    const { runSandboxTool } = createNativeRunTools({
+      runId,
+      existingRun,
+      loaded,
+      providers,
+      db,
+      reviewHosts,
+      repoAccess,
+      issueTrackers,
+    });
 
     // Live progress for observers (MCP get_run, the viewer). Absolute totals, so a DBOS replay
     // re-writing them is harmless. Written into the run's own cost columns on purpose: the run
