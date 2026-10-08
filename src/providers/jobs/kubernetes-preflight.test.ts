@@ -700,6 +700,10 @@ describe("preflightCanaryImage", () => {
     expect(preflightCanaryImage({ claudeWorkerImage: CLAUDE })).toBe(CLAUDE);
   });
 
+  it("skips an empty Codex image for the Claude Code worker", () => {
+    expect(preflightCanaryImage({ workerImage: "", claudeWorkerImage: CLAUDE })).toBe(CLAUDE);
+  });
+
   it("has nothing to run with neither image", () => {
     expect(preflightCanaryImage({})).toBeUndefined();
   });

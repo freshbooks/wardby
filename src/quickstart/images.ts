@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { imageVariable } from "../config/providers.js";
+
 export interface QuickstartImages {
   runtime: string;
   worker: string;
@@ -44,12 +46,14 @@ export function resolveQuickstartImages(opts: {
   const { env, packageRoot } = opts;
   // The Claude pair resolves on its own: both env vars together beat the package pair, and one
   // image is never taken from the environment and the other from the package.
-  const envClaude =
-    env.CODING_CLAUDE_WORKER_IMAGE && env.CODING_CLAUDE_TOOL_RUNNER_IMAGE
-      ? { claudeWorker: env.CODING_CLAUDE_WORKER_IMAGE, claudeToolRunner: env.CODING_CLAUDE_TOOL_RUNNER_IMAGE }
-      : {};
-  if (env.WARDBY_RUNTIME_IMAGE && env.CODING_WORKER_IMAGE) {
-    return { runtime: env.WARDBY_RUNTIME_IMAGE, worker: env.CODING_WORKER_IMAGE, ...envClaude, source: "env" };
+  // Blank is unset, as the server reads it (imageVariable).
+  const runtimeImage = imageVariable(env.WARDBY_RUNTIME_IMAGE);
+  const workerImage = imageVariable(env.CODING_WORKER_IMAGE);
+  const claudeWorker = imageVariable(env.CODING_CLAUDE_WORKER_IMAGE);
+  const claudeToolRunner = imageVariable(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE);
+  const envClaude = claudeWorker && claudeToolRunner ? { claudeWorker, claudeToolRunner } : {};
+  if (runtimeImage && workerImage) {
+    return { runtime: runtimeImage, worker: workerImage, ...envClaude, source: "env" };
   }
   const pinned = readPackageImages(packageRoot);
   if (pinned) return { ...pinned, ...envClaude, source: "package" };

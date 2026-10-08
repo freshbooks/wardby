@@ -36,6 +36,22 @@ describe("resolveQuickstartImages", () => {
     ).toEqual({ runtime: "r:1", worker: "w:1", source: "env" });
   });
 
+  it("ignores blank environment overrides", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker });
+    expect(
+      resolveQuickstartImages({
+        env: {
+          WARDBY_RUNTIME_IMAGE: "r:1",
+          CODING_WORKER_IMAGE: " ",
+          CODING_CLAUDE_WORKER_IMAGE: " ",
+          CODING_CLAUDE_TOOL_RUNNER_IMAGE: "t:1",
+        },
+        packageRoot: dir,
+      }),
+    ).toEqual({ runtime, worker, source: "package" });
+  });
+
   it("ignores a single environment override", () => {
     const dir = root();
     writePackageFile(dir, { runtime, worker });

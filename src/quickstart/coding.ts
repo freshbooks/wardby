@@ -464,8 +464,8 @@ export async function codingStep(
         claudeToolRunnerImage: images.claudeToolRunner,
       }),
     };
-    // Earlier releases pointed CODING_WORKER_IMAGE at the Claude worker on a Claude-only setup; that
-    // would start the wrong driver for a Codex run. A real Codex worker from an earlier Codex run stays.
+    // An earlier quickstart run, or a manual setting, may have pointed CODING_WORKER_IMAGE at the Claude
+    // worker; that would start the wrong driver for a Codex run. A real Codex worker from a Codex run stays.
     const staleClaude = [config.CODING_CLAUDE_WORKER_IMAGE, images.claudeWorker].filter(Boolean);
     if (provider === "claude-code" && staleClaude.includes(next.CODING_WORKER_IMAGE)) delete next.CODING_WORKER_IMAGE;
     writeQuickstartEnv(paths, next);

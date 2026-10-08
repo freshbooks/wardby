@@ -39,7 +39,7 @@ export interface KubernetesPreflightOptions {
  * else the Claude Code worker, so a Claude-only deployment is checked too.
  */
 export function preflightCanaryImage(images: { workerImage?: string; claudeWorkerImage?: string }): string | undefined {
-  return images.workerImage ?? images.claudeWorkerImage;
+  return images.workerImage || images.claudeWorkerImage || undefined;
 }
 
 export interface CanaryResult {

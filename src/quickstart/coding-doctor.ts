@@ -7,6 +7,7 @@
  * never configured.
  */
 import { LOCAL_REPO_PREFIX, LocalRepoError, loadLocalRepoRoots, resolveLocalRepository } from "../coding/local-repo.js";
+import { imageVariable } from "../config/providers.js";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import { CODING_PROXY_CONTAINER, type RunCommand } from "./coding.js";
 import { inspectDeclaredServices, repoDefaultBranch } from "./starter-services.js";
@@ -61,21 +62,25 @@ export async function codingDoctorLines(
   if (roots.length === 0 && missing.length === 0) lines.push(bad("Trusted folders", "LOCAL_REPO_ROOTS is empty"));
 
   // Each provider's images are optional (Codex: CODING_WORKER_IMAGE; Claude Code: its pair); check what is set.
-  const claudeSet = Boolean(env.CODING_CLAUDE_WORKER_IMAGE || env.CODING_CLAUDE_TOOL_RUNNER_IMAGE);
+  // Blank is unset, as the server reads it (imageVariable).
+  const codexSet = Boolean(imageVariable(env.CODING_WORKER_IMAGE));
+  const claudeSet = Boolean(
+    imageVariable(env.CODING_CLAUDE_WORKER_IMAGE) || imageVariable(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE),
+  );
   const checkImage = (label: string, name: string) => {
-    const image = env[name];
+    const image = imageVariable(env[name]);
     if (!image) lines.push(bad(label, `${name} is not set`));
     else if (!isImmutableDockerImage(image)) lines.push(bad(label, `${name} must be an immutable digest or image id`));
     else if (deps.run("docker", ["image", "inspect", image]).status !== 0) {
       lines.push(bad(label, "Docker cannot inspect it; re-run quickstart"));
     } else lines.push(ok(label));
   };
-  if (env.CODING_WORKER_IMAGE) checkImage("Coding worker image", "CODING_WORKER_IMAGE");
+  if (codexSet) checkImage("Coding worker image", "CODING_WORKER_IMAGE");
   if (claudeSet) {
     checkImage("Claude Code worker image", "CODING_CLAUDE_WORKER_IMAGE");
     checkImage("Claude Code tool runner image", "CODING_CLAUDE_TOOL_RUNNER_IMAGE");
   }
-  if (!env.CODING_WORKER_IMAGE && !claudeSet) {
+  if (!codexSet && !claudeSet) {
     lines.push(
       bad(
         "Coding worker image",

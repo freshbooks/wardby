@@ -13,8 +13,12 @@ appliesTo: ">=0.5.0"
 no worker images on this wardby server. Each provider's images are optional, so
 a server can run Codex agents only, Claude Code agents only, or both. Starting
 the run (a trigger, schedule, or webhook) fails at dispatch with this error,
-before any worker starts and before anything is spent. A run that was dispatched
-earlier and then finds its images gone fails with category `preflight`.
+before any worker starts and before anything is spent. A run records its worker
+image at dispatch, so removing an image later doesn't affect most runs already
+dispatched. The exceptions fail at launch with category
+`preflight`: a Claude Code run when `CODING_CLAUDE_TOOL_RUNNER_IMAGE` has since
+been unset, and a Codex run with no recorded worker image (one dispatched before
+runs recorded it) when `CODING_WORKER_IMAGE` has since been unset.
 
 - **`coding_provider_not_configured:codex`**: `CODING_WORKER_IMAGE` (the Codex
   worker) isn't set, and the agent names no worker image of its own

@@ -172,4 +172,49 @@ describe("buildConfiguredExecutor", () => {
     expect(api.objects.size).toBe(0);
     expect(api.execCalls).toEqual([]);
   });
+
+  it("treats an empty CODING_WORKER_IMAGE as unset on a Claude-only Docker server", () => {
+    const executor = buildConfiguredExecutor({
+      native,
+      db,
+      env: {
+        ...baseEnv,
+        JOB_LAUNCHER: "docker",
+        CODING_PROXY_CONTAINER: "proxy",
+        CODING_WORKER_IMAGE: "",
+        CODING_CLAUDE_WORKER_IMAGE: LOCAL_IMAGE,
+        CODING_CLAUDE_TOOL_RUNNER_IMAGE: LOCAL_IMAGE,
+      },
+    });
+    expect(executor).toBeInstanceOf(RoutingExecutor);
+  });
+
+  it("treats an empty CODING_WORKER_IMAGE as unset on a Claude-only Kubernetes server", () => {
+    const executor = buildConfiguredExecutor({
+      native,
+      db,
+      env: {
+        ...baseEnv,
+        JOB_LAUNCHER: "kubernetes",
+        CODING_WORKER_IMAGE: " ",
+        CODING_CLAUDE_WORKER_IMAGE: REGISTRY_IMAGE,
+        CODING_CLAUDE_TOOL_RUNNER_IMAGE: REGISTRY_IMAGE,
+      },
+      kubernetesApi: new FakeKubernetesApi(),
+    });
+    expect(executor).toBeInstanceOf(RoutingExecutor);
+  });
+
+  it("gives the clear startup error for an empty CODING_WORKER_IMAGE alone", () => {
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: { ...baseEnv, JOB_LAUNCHER: "kubernetes", CODING_WORKER_IMAGE: "" },
+        kubernetesApi: new FakeKubernetesApi(),
+      }),
+    ).toThrow(
+      "CODING_WORKER_IMAGE (Codex) or both CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE (Claude Code) are required when JOB_LAUNCHER=kubernetes.",
+    );
+  });
 });

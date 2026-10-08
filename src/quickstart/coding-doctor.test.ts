@@ -106,4 +106,17 @@ describe("codingDoctorLines", () => {
       "✗ Coding worker image (set CODING_WORKER_IMAGE for Codex, or CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE for Claude Code)",
     );
   });
+
+  it("treats a blank CODING_WORKER_IMAGE as unset next to the Claude Code images", async () => {
+    const env = {
+      LOCAL_REPO_ROOTS: scratch,
+      JOB_LAUNCHER: "docker",
+      CODING_WORKER_IMAGE: "  ",
+      CODING_CLAUDE_WORKER_IMAGE: WORKER,
+      CODING_CLAUDE_TOOL_RUNNER_IMAGE: WORKER,
+    };
+    const lines = await codingDoctorLines(env, deps([]));
+    expect(lines.some((line) => line.includes("CODING_WORKER_IMAGE"))).toBe(false);
+    expect(lines).toContain("✓ Claude Code worker image");
+  });
 });

@@ -237,15 +237,21 @@ function optionalBoundedInteger(value: string | undefined, name: string, min: nu
   return parsed;
 }
 
+/**
+ * An image variable's value, trimmed; empty or blank is unset. An env file that ships
+ * `CODING_WORKER_IMAGE=` must read as "no Codex worker", not as an invalid image.
+ */
+export function imageVariable(value: string | undefined): string | undefined {
+  return value?.trim() || undefined;
+}
+
 export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env): ContainerExecutorConfig {
   const additionalWorkerImages: Record<string, Record<string, string>> = {};
-  if (env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12) {
-    additionalWorkerImages["node-python"] = { "3.12": env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12 };
-  }
+  const nodePythonWorker = imageVariable(env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12);
+  if (nodePythonWorker) additionalWorkerImages["node-python"] = { "3.12": nodePythonWorker };
   const claudeToolRunnerImages: Record<string, Record<string, string>> = {};
-  if (env.CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12) {
-    claudeToolRunnerImages["node-python"] = { "3.12": env.CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 };
-  }
+  const nodePythonToolRunner = imageVariable(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12);
+  if (nodePythonToolRunner) claudeToolRunnerImages["node-python"] = { "3.12": nodePythonToolRunner };
   const diskMb = optionalPositiveInteger(env.CODING_DISK_MB, "CODING_DISK_MB") ?? 2048;
   // Defaults to the effective diskMb: raising the ceiling an agents:write caller can request is an
   // explicit operator choice, so upgrading with an unchanged environment changes nothing.
@@ -254,9 +260,9 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
     throw new Error(`CODING_MAX_DISK_MB (${maxDiskMb}) must be at least the effective CODING_DISK_MB (${diskMb}).`);
   }
   return {
-    workerImage: env.CODING_WORKER_IMAGE,
-    claudeWorkerImage: env.CODING_CLAUDE_WORKER_IMAGE,
-    claudeToolRunnerImage: env.CODING_CLAUDE_TOOL_RUNNER_IMAGE,
+    workerImage: imageVariable(env.CODING_WORKER_IMAGE),
+    claudeWorkerImage: imageVariable(env.CODING_CLAUDE_WORKER_IMAGE),
+    claudeToolRunnerImage: imageVariable(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE),
     claudeToolRunnerImages,
     proxyContainer: env.CODING_PROXY_CONTAINER,
     stateRoot: env.CODING_JOB_STATE_ROOT,
