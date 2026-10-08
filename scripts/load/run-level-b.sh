@@ -28,11 +28,22 @@
 #     AUTH_AUDIENCE and the auth provider's settings). This script sets
 #     MCP_TRANSPORT=http and a dedicated MCP_HTTP_BIND per serve process
 #     (127.0.0.1:18080, :18081, ...), so it never collides with a dev
-#     `wardby serve` on the usual bind.
+#     `wardby serve` on the usual bind. CODING_WORKER_IMAGE specifically must
+#     be the kind-local registry digest up.sh printed (localhost:5001/...) --
+#     a Docker-local tag/digest from .env.local is not pullable by kind nodes
+#     and this script refuses to start rather than let every run pod fail an
+#     ImagePullBackOff. up.sh also recommends KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
+#     under kind; this script exports that default itself so it never has to
+#     be set by hand (an already-set value from the caller's env wins).
 #
-# Env (all optional except LOAD_REPOSITORY):
+# Env (all optional except LOAD_REPOSITORY and CODING_WORKER_IMAGE):
 #   LOAD_REPOSITORY       required. owner/repo for the seeded coding agent
 #                         (e.g. your-org/your-repo).
+#   CODING_WORKER_IMAGE   required. must start with "localhost:5001/" -- the
+#                         kind-local registry up.sh pushes worker images to.
+#                         Copy the CODING_WORKER_IMAGE line up.sh printed when
+#                         you last ran it (a Docker-local .env.local value is
+#                         not resolvable by kind nodes).
 #   LOAD_RUNS             default 10.    runs level-b.ts dispatches.
 #   LOAD_CAP              default 10.    -> CODING_MAX_CONCURRENT.
 #   LOAD_CONTROL_PLANES   default 1.     `wardby mcp` stdio children level-b.ts spawns.
@@ -44,6 +55,9 @@
 #   LOAD_MEMORY_MB        default 512.   -> CODING_MEMORY_MB (per run pod).
 #   LOAD_TIMEOUT_SEC      default 1800.  level-b.ts's overall polling deadline.
 #   KUBERNETES_CONTEXT    default kind-wardby.
+#   KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS  default 60000 if unset (up.sh's
+#                         recommendation for kind's default node resources;
+#                         an already-set value from the caller's env wins).
 #   LOAD_NAMESPACE        default wardby-coding. Must match the namespace
 #                         hardcoded into deploy/kind-coding/manifests
 #                         (only overridable if you've forked the manifests too).
@@ -120,6 +134,20 @@ for bin in kubectl docker; do
     exit 1
   fi
 done
+
+# CODING_WORKER_IMAGE must be the kind-local registry digest up.sh printed,
+# never whatever .env.local holds for a Docker-local launcher: kind's nodes
+# cannot pull a plain Docker-local tag/digest, so every run pod would sit in
+# ImagePullBackOff instead of failing fast here.
+if [[ -z "${CODING_WORKER_IMAGE:-}" || "${CODING_WORKER_IMAGE}" != localhost:5001/* ]]; then
+  echo "run-level-b.sh: CODING_WORKER_IMAGE must be set to a kind-local registry image (localhost:5001/...)." >&2
+  echo "run-level-b.sh: copy the CODING_WORKER_IMAGE line deploy/kind-coding/up.sh printed when you last ran it" >&2
+  echo "run-level-b.sh: (e.g. CODING_WORKER_IMAGE=localhost:5001/wardby-coding-worker@sha256:...) into this shell's env or .env.local." >&2
+  exit 1
+fi
+# up.sh recommends this under kind's default node resources (250m CPU /
+# 128Mi); default it here so it never has to be set by hand for this script.
+export KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS="${KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS:-60000}"
 
 DB="wardby_load_b"
 DB_URL="postgresql://${LOAD_PG_USER}:${LOAD_PG_USER}@localhost:${LOAD_PG_PORT}/${DB}"
@@ -379,7 +407,7 @@ async function main(): Promise<void> {
           repository,
           defaultTask: "Load test task.",
           allowWebhookTaskOverride: true,
-          protectedPaths: [],
+          protectedPaths: ["CODEOWNERS"],
           repositoryAuthorizedVia: "admin",
           repositoryAuthorizedById: OWNER_ID,
           repositoryAuthorizedAt: new Date(),

@@ -45,6 +45,16 @@
  * Precision is bounded by SAMPLE_MS for the terminated time, which a pod
  * deleted between two samples may never show (left null).
  *
+ * Proxy CPU/mem: kind ships no metrics-server, so `kubectl top pod` fails
+ * ("Metrics API not available") until one is installed. When it does, the
+ * proxy CPU/mem columns report "n/a" in the table and `null` in LOAD_OUT's
+ * samples -- never a false 0.0, which would read as "measured and idle".
+ * Proxy replica count does not depend on `top` at all: it is counted
+ * straight from the pods list (running pods carrying the proxy's label), so
+ * it stays accurate whether or not metrics are available. Installing
+ * metrics-server in the kind cluster would make `kubectl top` succeed and
+ * populate the two CPU/mem columns -- this script does not install it.
+ *
  * Resilience: every probe (kubectl, pg_stat_activity, the queue/active-slot
  * counts, get_run polling, the final per-run Run read) is individually
  * guarded, so a transient Kubernetes/Postgres/MCP hiccup degrades one
@@ -194,7 +204,7 @@ interface ProxyPodUsage {
   memMi: number;
 }
 
-/** kubectl top pod on the proxy's replicas; [] (with a one-time stderr note) if metrics aren't available yet. */
+/** kubectl top pod on the proxy's replicas; throws if metrics aren't available (e.g. kind ships no metrics-server). */
 const warned = new Set<string>();
 function warnOnce(key: string, err: unknown): void {
   if (warned.has(key)) return;
@@ -223,8 +233,20 @@ interface ContainerStatus {
   state?: { terminated?: { finishedAt?: string } };
 }
 interface PodListItem {
-  metadata?: { name?: string; creationTimestamp?: string };
+  metadata?: { name?: string; creationTimestamp?: string; deletionTimestamp?: string };
   status?: { phase?: string; conditions?: PodCondition[]; containerStatuses?: ContainerStatus[] };
+}
+
+/**
+ * Running proxy replica count straight from the pods list, never from
+ * `kubectl top` (which has no replica-count notion and is unavailable
+ * entirely without metrics-server -- see the header's "Proxy CPU/mem").
+ * Pods still terminating from a previous rollout (deletionTimestamp set) are
+ * excluded, matching the mock-upstream check in run-level-b.sh step 4.
+ */
+async function countRunningProxyPods(): Promise<number> {
+  const pods = await kubectlJson<{ items: PodListItem[] }>(["get", "pods", "-l", PROXY_POD_LABEL, "-o", "json"]);
+  return pods.items.filter((pod) => pod.status?.phase === "Running" && !pod.metadata?.deletionTimestamp).length;
 }
 
 interface PodTimestamps {
@@ -313,7 +335,12 @@ const ACTIVE_WHERE = {
 
 interface Sample {
   t: string;
-  proxyPods: ProxyPodUsage[];
+  // null (not []) when `kubectl top` itself failed this tick (e.g. no
+  // metrics-server in kind) -- [] would be indistinguishable from "measured
+  // and every replica reported zero usage". See the header's "Proxy CPU/mem".
+  proxyPods: ProxyPodUsage[] | null;
+  // Running proxy replica count from the pods list, independent of `top`.
+  proxyReplicas: number;
   podPhases: Record<string, number>;
   dbConnections: DbConnectionState[];
   // null (not 0) when the count query itself failed this tick -- 0 is a
@@ -324,10 +351,14 @@ interface Sample {
 
 /** Every probe is individually guarded: a transient kubectl/Postgres failure degrades one field of one sample, never the loop. */
 async function takeSample(db: PrismaClient): Promise<Sample> {
-  const [proxyPods, podPhases, dbConnections, queueLength, activeSlots] = await Promise.all([
+  const [proxyPods, proxyReplicas, podPhases, dbConnections, queueLength, activeSlots] = await Promise.all([
     topProxyPods().catch((err: unknown) => {
       warnOnce("kubectl top pod", err);
-      return [];
+      return null;
+    }),
+    countRunningProxyPods().catch((err: unknown) => {
+      warnOnce("kubectl get pods (proxy replicas)", err);
+      return 0;
     }),
     runPodPhaseCounts().catch((err: unknown) => {
       warnOnce("kubectl get pods", err);
@@ -346,7 +377,7 @@ async function takeSample(db: PrismaClient): Promise<Sample> {
       return null;
     }),
   ]);
-  return { t: new Date().toISOString(), proxyPods, podPhases, dbConnections, queueLength, activeSlots };
+  return { t: new Date().toISOString(), proxyPods, proxyReplicas, podPhases, dbConnections, queueLength, activeSlots };
 }
 
 // --- Trigger + poll --------------------------------------------------------
@@ -355,14 +386,48 @@ interface RunRecord {
   index: number;
   runId: string | null;
   dispatchedAt: string;
+  // Fallback "claimed" time only: the client's own wall-clock moment the
+  // poll loop first observed a non-pending status. Mixing this client clock
+  // with the server-clock Run.finishedAt below is exactly what produced
+  // negative claimed→finished durations, since a fast (mock-upstream) run
+  // can finish on the server before the next 2s poll even runs -- by the
+  // time this fires, finishedAt may already be in the past relative to it.
+  // effectiveClaimedAt() below prefers the DB's own `startedAt` (same clock
+  // as finishedAt) and only falls back to this field when startedAt was
+  // never captured for a run (e.g. every get_run and the final DB read
+  // failed for it).
   claimedAt: string | null;
   finishedAt: string | null;
   status: string;
   error: string | null;
   everQueued: boolean;
+  // Run.startedAt (DB/server clock), captured from get_run responses as
+  // polling goes and overwritten by the authoritative final DB read. Used
+  // as the primary "claimed" timestamp -- see effectiveClaimedAt().
   startedAt: string | null;
   heartbeatAt: string | null;
   pod: PodTimestamps | null;
+}
+
+/**
+ * The timestamp to treat as "claimed" for timing stats: Run.startedAt (DB,
+ * same clock as finishedAt) when captured, else the poll-observed fallback
+ * in claimedAt (see RunRecord's comment above). Keeping both ends of a
+ * duration on the same clock is what fixes the negative claimed→finished
+ * durations a run finishing between two polls used to produce.
+ */
+function effectiveClaimedAt(run: RunRecord): string | null {
+  return run.startedAt ?? run.claimedAt;
+}
+
+/**
+ * A duration in ms, clamped to 0 when negative (clock skew between the
+ * client dispatch timestamp and a DB/poll-observed timestamp should never
+ * be reported as a run finishing "before" it started). Returns whether this
+ * particular value was clamped, so callers can count it.
+ */
+function clampNonNegative(ms: number): { ms: number; clamped: boolean } {
+  return ms < 0 ? { ms: 0, clamped: true } : { ms, clamped: false };
 }
 
 function connectClient(): { client: Client; transport: StdioClientTransport } {
@@ -469,6 +534,9 @@ async function pollUntilTerminal(client: Client, runs: RunRecord[]): Promise<{ t
           const parsed = parseToolResult(result, "get_run");
           failures.delete(run.index);
           const status = typeof parsed.status === "string" ? parsed.status : run.status;
+          // Fallback only (see RunRecord.claimedAt / effectiveClaimedAt): the
+          // DB's own Run.startedAt, captured a few lines below from this same
+          // response, is preferred whenever present.
           if (run.status === "pending" && status !== "pending" && run.claimedAt === null) {
             run.claimedAt = new Date().toISOString();
           }
@@ -603,12 +671,31 @@ async function main(): Promise<void> {
   }
 
   const wallSec = (performance.now() - testStart) / 1000;
-  const dispatchToClaimed = stats(
-    runs.filter((r) => r.claimedAt).map((r) => Date.parse(r.claimedAt!) - Date.parse(r.dispatchedAt)),
-  );
-  const claimedToFinished = stats(
-    runs.filter((r) => r.claimedAt && r.finishedAt).map((r) => Date.parse(r.finishedAt!) - Date.parse(r.claimedAt!)),
-  );
+  // Both ends of each duration below come off the same clock (see
+  // effectiveClaimedAt): dispatchedAt (client) vs. the DB's startedAt/poll
+  // fallback for dispatch→claimed, and that same claimed time vs. the DB's
+  // finishedAt for claimed→finished -- never a client poll timestamp mixed
+  // against a DB timestamp, which is what used to go negative. Any value
+  // that still comes out negative (e.g. genuine clock skew) is clamped to 0
+  // and counted rather than reported as-is.
+  let dispatchToClaimedClamped = 0;
+  const dispatchToClaimedMs = runs
+    .filter((r) => effectiveClaimedAt(r))
+    .map((r) => {
+      const { ms, clamped } = clampNonNegative(Date.parse(effectiveClaimedAt(r)!) - Date.parse(r.dispatchedAt));
+      if (clamped) dispatchToClaimedClamped++;
+      return ms;
+    });
+  const dispatchToClaimed = stats(dispatchToClaimedMs);
+  let claimedToFinishedClamped = 0;
+  const claimedToFinishedMs = runs
+    .filter((r) => effectiveClaimedAt(r) && r.finishedAt)
+    .map((r) => {
+      const { ms, clamped } = clampNonNegative(Date.parse(r.finishedAt!) - Date.parse(effectiveClaimedAt(r)!));
+      if (clamped) claimedToFinishedClamped++;
+      return ms;
+    });
+  const claimedToFinished = stats(claimedToFinishedMs);
   // A run whose dispatch itself failed (runId still null) never got a real
   // Run row at all -- counted as failed here regardless of its placeholder status.
   const succeeded = runs.filter((r) => r.runId !== null && r.status === "succeeded").length;
@@ -618,23 +705,37 @@ async function main(): Promise<void> {
   const definedOnly = (values: (number | null)[]): number[] => values.filter((v): v is number => v !== null);
   const peakQueued = Math.max(0, ...definedOnly(samples.map((sample) => sample.queueLength)));
   const peakActive = Math.max(0, ...definedOnly(samples.map((sample) => sample.activeSlots)));
-  const proxyReplicas = Math.max(0, ...samples.map((sample) => sample.proxyPods.length));
-  const peakProxyCpuM = Math.max(0, ...samples.flatMap((sample) => sample.proxyPods.map((p) => p.cpuM)));
-  const peakProxyMemMi = Math.max(0, ...samples.flatMap((sample) => sample.proxyPods.map((p) => p.memMi)));
+  const proxyReplicas = Math.max(0, ...samples.map((sample) => sample.proxyReplicas));
+  // null when `kubectl top` never succeeded in any sample (no metrics-server
+  // in kind) -- reported as "n/a" in the table and `null` in LOAD_OUT, never
+  // a false 0.0 (see the header's "Proxy CPU/mem").
+  const proxyUsageSamples = samples
+    .map((sample) => sample.proxyPods)
+    .filter((usage): usage is ProxyPodUsage[] => usage !== null);
+  const peakProxyCpuM =
+    proxyUsageSamples.length > 0 ? Math.max(0, ...proxyUsageSamples.flatMap((u) => u.map((p) => p.cpuM))) : null;
+  const peakProxyMemMi =
+    proxyUsageSamples.length > 0 ? Math.max(0, ...proxyUsageSamples.flatMap((u) => u.map((p) => p.memMi))) : null;
   const peakDbConnections = Math.max(
     0,
     ...samples.map((sample) => sample.dbConnections.reduce((sum, c) => sum + c.count, 0)),
   );
+  const sOrNA = (v: number | null) => (v === null ? "n/a" : s(v));
 
   console.log(
     "| N | control planes | proxy replicas | cap | dispatch→claimed p50/p95 | claimed→finished p50/p95 | total wall s | succeeded | failed/lost | peak queued | peak active | proxy CPU m peak/replica | proxy mem Mi peak | DB connections peak |",
   );
   console.log("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   console.log(
-    `| ${LOAD_RUNS} | ${LOAD_CONTROL_PLANES} | ${proxyReplicas} | ${cap} | ${s(dispatchToClaimed.p50)}/${s(dispatchToClaimed.p95)} | ${s(claimedToFinished.p50)}/${s(claimedToFinished.p95)} | ${s(wallSec)} | ${succeeded} | ${failedOrLost} | ${peakQueued} | ${peakActive} | ${s(peakProxyCpuM)} | ${s(peakProxyMemMi)} | ${peakDbConnections} |`,
+    `| ${LOAD_RUNS} | ${LOAD_CONTROL_PLANES} | ${proxyReplicas} | ${cap} | ${s(dispatchToClaimed.p50)}/${s(dispatchToClaimed.p95)} | ${s(claimedToFinished.p50)}/${s(claimedToFinished.p95)} | ${s(wallSec)} | ${succeeded} | ${failedOrLost} | ${peakQueued} | ${peakActive} | ${sOrNA(peakProxyCpuM)} | ${sOrNA(peakProxyMemMi)} | ${peakDbConnections} |`,
   );
   if (timedOut) console.error(`LOAD_TIMEOUT_SEC (${LOAD_TIMEOUT_SEC}s) passed with runs still non-terminal.`);
   if (incomplete !== null) console.error(`Load test did not complete normally: ${incomplete}`);
+  if (dispatchToClaimedClamped > 0 || claimedToFinishedClamped > 0) {
+    console.error(
+      `Clamped ${dispatchToClaimedClamped} negative dispatch→claimed and ${claimedToFinishedClamped} negative claimed→finished duration(s) to 0 (see LOAD_OUT config.clampedNegativeDurations).`,
+    );
+  }
 
   const config = {
     runs: LOAD_RUNS,
@@ -646,6 +747,13 @@ async function main(): Promise<void> {
     maxConcurrent: cap,
     incomplete: incomplete !== null,
     incompleteReason: incomplete,
+    // How many dispatch→claimed / claimed→finished durations above were
+    // negative (clock skew or similar) and clamped to 0 -- see
+    // clampNonNegative. 0 in a smoke run is the expected/healthy value.
+    clampedNegativeDurations: {
+      dispatchToClaimed: dispatchToClaimedClamped,
+      claimedToFinished: claimedToFinishedClamped,
+    },
   };
   try {
     await writeFile(LOAD_OUT, JSON.stringify({ config, runs, samples }, null, 2));
