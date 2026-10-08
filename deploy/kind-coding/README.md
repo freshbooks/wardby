@@ -99,14 +99,15 @@ KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
 
 The last one is `kind`-specific, not a copy-paste-everywhere default: a laptop
 `kind` node's default resources (250m CPU / 128Mi memory on the keeper
-container) can make even a healthy NetworkPolicy-enforcement probe exec take
-noticeably longer than the launcher's normal 10 s bound
+container) can make even a healthy NetworkPolicy-enforcement probe take
+noticeably longer than the launcher's normal 10 s per-probe budget
 (`src/providers/jobs/kubernetes.ts`'s `waitForPolicyEnforcement`), which
 otherwise fails every run with `kubernetes_exec_timeout` even though nothing
 is actually wrong. GKE Autopilot has more headroom and doesn't need it. The
-launcher derives its overall enforcement wall-clock bound from whichever exec
-timeout is configured (`enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK`,
-i.e. 180 s at this value), so raising only this one setting is enough.
+three probes of an enforcement streak run in one keeper exec, whose timeout the
+launcher derives from this per-probe value (three probes plus the two 500 ms
+gaps, i.e. 181 s at this value), and the overall enforcement wall-clock bound is
+never shorter than one such exec, so raising only this one setting is enough.
 
 Then run:
 

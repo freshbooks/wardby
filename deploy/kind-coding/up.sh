@@ -224,8 +224,8 @@ CODING_CLAUDE_WORKER_IMAGE=${CLAUDE_WORKER_DIGEST}
 CODING_CLAUDE_TOOL_RUNNER_IMAGE=${CLAUDE_TOOL_RUNNER_DIGEST}
 CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12=${CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST}
 
-# The keeper's NetworkPolicy-enforcement probe exec routinely takes longer than the
-# launcher's 10 s default under kind's default node resources (250m CPU / 128Mi); 60 s
+# The keeper's NetworkPolicy-enforcement probe routinely takes longer than the
+# launcher's 10 s per-probe default under kind's default node resources (250m CPU / 128Mi); 60 s
 # was enough in a live run. GKE Autopilot has more headroom and does not need this.
 KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
 

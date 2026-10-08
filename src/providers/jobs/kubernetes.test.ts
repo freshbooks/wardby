@@ -194,14 +194,14 @@ describe("KubernetesJobLauncher", () => {
     // A Codex launch's Secret carries only the capability: no tool-setup key.
     expect(Object.keys(secret.stringData)).toEqual(["capability"]);
     const commands = h.api.execCalls.map((c) => c.command.join(" "));
-    // Three consecutive "blocked" probes before anything is seeded.
-    expect(h.api.execCalls.slice(0, 3).every((c) => isEnforcementProbe(c.command))).toBe(true);
-    expect(commands[3]).toContain("tar -C /run/wardby/storage/workspace");
-    expect(commands[4]).toContain("tar -C /run/wardby/storage/input");
-    // Re-confirmed with another three consecutive blocked probes immediately before the marker write.
-    expect(h.api.execCalls.slice(5, 8).every((c) => isEnforcementProbe(c.command))).toBe(true);
-    expect(commands[8]).toContain("/run/wardby/storage/input/.seeded");
-    expect(h.api.execCalls).toHaveLength(9);
+    // One streak exec (three consecutive "blocked" probes inside it) before anything is seeded.
+    expect(isEnforcementProbe(h.api.execCalls[0].command)).toBe(true);
+    expect(commands[1]).toContain("tar -C /run/wardby/storage/workspace");
+    expect(commands[2]).toContain("tar -C /run/wardby/storage/input");
+    // Re-confirmed with another full streak exec immediately before the marker write.
+    expect(isEnforcementProbe(h.api.execCalls[3].command)).toBe(true);
+    expect(commands[4]).toContain("/run/wardby/storage/input/.seeded");
+    expect(h.api.execCalls).toHaveLength(5);
     expect(h.api.execCalls.every((c) => c.container === "keeper")).toBe(true);
     expect(await h.launcher.status(handle)).toEqual({ state: "running" });
   });
@@ -1053,6 +1053,8 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
   function clockedLauncher(h: Awaited<ReturnType<typeof harness>>, extra: Partial<KubernetesJobLauncherOptions> = {}) {
     let clock = 0;
     const sleeps: number[] = [];
+    /** Lets a fake exec take wall-clock time, as a slow keeper would. */
+    const advance = (ms: number) => void (clock += ms);
     const launcher = new KubernetesJobLauncher({
       onWarning: () => {},
       api: h.api,
@@ -1068,10 +1070,10 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
       enforcementTimeoutMs: 5_000,
       ...extra,
     });
-    return { launcher, sleeps };
+    return { launcher, sleeps, advance, now: () => clock };
   }
 
-  /** Answers enforcement probes from `answers` in order (then 0), recording the exec order. */
+  /** Answers enforcement streak execs from `answers` in order (then 0), recording the exec order. */
   function scriptProbe(h: Awaited<ReturnType<typeof harness>>, answers: number[]) {
     const original = h.api.onExec;
     h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? (answers.shift() ?? 0) : original(call));
@@ -1079,43 +1081,91 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
       h.api.execCalls.map((c) => (isEnforcementProbe(c.command) ? "probe" : isMarker(c.command) ? "marker" : "seed"));
   }
 
-  it("opens the gate only after three consecutive blocked probes (0, 3, 0, 0, 0)", async () => {
+  it("runs each stage as one streak exec when the first streak passes", async () => {
     const h = await harness();
     const { launcher, sleeps } = clockedLauncher(h);
-    // 5 answers for the initial proof; the pre-marker re-probe then draws from the same queue (empty,
-    // so it defaults to 0 every time — three clean consecutive proofs, same machinery, same script).
-    const kinds = scriptProbe(h, [0, 3, 0, 0, 0]);
+    const kinds = scriptProbe(h, []);
     await launcher.launch(h.spec);
-    expect(kinds().slice(0, 5)).toEqual(["probe", "probe", "probe", "probe", "probe"]);
-    expect(kinds().indexOf("seed")).toBe(5);
-    // Re-confirmed with another three consecutive blocked probes, strictly after seeding and strictly
-    // before the marker write — with nothing else in between.
-    expect(kinds().slice(7, 10)).toEqual(["probe", "probe", "probe"]);
-    expect(kinds()[10]).toBe("marker");
-    expect(kinds()).toHaveLength(11);
-    expect(kinds().at(-1)).toBe("marker");
-    // 4 sleeps to reach the initial 3-streak (0,3,0,0,0), plus 2 more to reach the pre-marker 3-streak
-    // from a clean start (0,0,0 needs two 500 ms polls between the three probes).
-    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(6);
+    // One exec for the initial proof, then seeding, then one exec for the pre-marker re-proof, then
+    // the marker — with nothing else in between.
+    expect(kinds()).toEqual(["probe", "seed", "seed", "probe", "marker"]);
+    // The 500 ms between probes happens inside the streak exec, so the launcher itself never sleeps.
+    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(0);
   });
 
-  it("a connected probe resets the count: 0, 0, 3, 0, 0 does not open the gate", async () => {
+  it("execs the streak script requiring three consecutive probes 500 ms apart", async () => {
     const h = await harness();
-    const { launcher } = clockedLauncher(h);
-    const kinds = scriptProbe(h, [0, 0, 3, 0, 0, 0]);
-    await launcher.launch(h.spec);
-    // Two blocked, a reset, then three blocked: seeding starts only after the sixth probe.
-    expect(kinds().slice(0, 6)).toEqual(Array(6).fill("probe"));
-    expect(kinds().indexOf("seed")).toBe(6);
+    await h.launcher.launch(h.spec);
+    const probes = h.api.execCalls.filter((c) => isEnforcementProbe(c.command));
+    expect(probes).toHaveLength(2);
+    for (const probe of probes) {
+      expect(probe.command[2]).toContain("index < 3;");
+      expect(probe.command[2]).toContain("await pause(500)");
+    }
+  });
 
+  it("a broken streak retries with a fresh streak after 500 ms (3, 0 opens the gate)", async () => {
+    const h = await harness();
+    const { launcher, sleeps } = clockedLauncher(h);
+    const kinds = scriptProbe(h, [3, 4, 5, 127, 0]);
+    await launcher.launch(h.spec);
+    // Four broken streaks (any non-zero code, including one that measured nothing), then one that
+    // held: seeding starts only after the fifth exec.
+    expect(kinds().slice(0, 5)).toEqual(Array(5).fill("probe"));
+    expect(kinds().indexOf("seed")).toBe(5);
+    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(4);
+    // The pre-marker stage still needs its own full streak exec.
+    expect(kinds().slice(7)).toEqual(["probe", "marker"]);
+  });
+
+  it("the pre-marker stage retries a broken streak the same way, and still needs a full streak", async () => {
+    const h = await harness();
+    const { launcher, sleeps } = clockedLauncher(h);
+    const kinds = scriptProbe(h, [0, 3, 0]);
+    await launcher.launch(h.spec);
+    expect(kinds()).toEqual(["probe", "seed", "seed", "probe", "probe", "marker"]);
+    expect(sleeps.filter((ms) => ms === 500)).toHaveLength(1);
+  });
+
+  it("never opens the gate while every streak is broken: the wall-clock bound fails the launch", async () => {
     const g = await harness("run-reset-timeout");
     const { launcher: bounded } = clockedLauncher(g);
-    // Never three in a row: the wall-clock bound still fails the launch.
-    const pattern = Array.from({ length: 100 }, (_, i) => (i % 3 === 2 ? 3 : 0));
+    const pattern = Array.from({ length: 100 }, (_, i) => (i % 2 === 0 ? 3 : 4));
     const gKinds = scriptProbe(g, pattern);
-    await expect(bounded.launch(g.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
+    await expect(bounded.launch(g.spec)).rejects.toThrow(/^kubernetes_policy_/);
     expect(gKinds()).not.toContain("seed");
     expect(gKinds()).not.toContain("marker");
+  });
+
+  it("at the bound, the verdict is the last streak exec's code, at both stages", async () => {
+    for (const [last, initialCode, preMarkerCode] of [
+      [3, "kubernetes_policy_not_enforced", "kubernetes_policy_enforcement_lost_before_marker"],
+      [4, "kubernetes_policy_witness_unavailable", "kubernetes_policy_witness_unavailable_before_marker"],
+      [5, "kubernetes_policy_witness_unserved", "kubernetes_policy_witness_unserved_before_marker"],
+      [127, "kubernetes_policy_probe_unusable", "kubernetes_policy_probe_unusable_before_marker"],
+    ] as const) {
+      // Every earlier exec answers a different non-proven code, so only the last one can name the verdict.
+      const earlier = last === 4 ? 3 : 4;
+      for (const stage of ["initial", "pre_marker"] as const) {
+        const h = await harness(`run-last-${last}-${stage.replace("_", "-")}`);
+        const { launcher, now } = clockedLauncher(h);
+        const original = h.api.onExec;
+        let started: number | undefined;
+        let streaks = 0;
+        h.api.onExec = async (call) => {
+          if (!isEnforcementProbe(call.command)) return original(call);
+          streaks += 1;
+          if (stage === "pre_marker" && streaks === 1) return 0;
+          started ??= now();
+          // clockedLauncher's bound is 5_000 ms; only sleeps advance the clock.
+          return now() - started >= 5_000 ? last : earlier;
+        };
+        const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
+        expect(error.message).toContain(`${stage === "initial" ? initialCode : preMarkerCode}:`);
+        expect(error.message).toContain(`the last probe exited ${last};`);
+        expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(false);
+      }
+    }
   });
 
   it("fails provisioning when the probe exec throws, cleaning up without opening the gate", async () => {
@@ -1146,34 +1196,60 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     expect(probe.command[2]).toContain("timeout: 3000");
   });
 
-  it("bounds each probe exec at the default 10 s when no exec timeout is configured", async () => {
+  it("bounds each streak exec at three default 10 s probes plus the two 500 ms gaps", async () => {
     const h = await harness();
     await h.launcher.launch(h.spec);
-    const probe = h.api.execCalls.find((c) => isEnforcementProbe(c.command))!;
-    expect(probe.timeoutMs).toBe(10_000);
+    const probes = h.api.execCalls.filter((c) => isEnforcementProbe(c.command));
+    expect(probes).toHaveLength(2);
+    // 10_000 * 3 + 500 * 2
+    expect(probes.every((c) => c.timeoutMs === 31_000)).toBe(true);
   });
 
-  it("bounds each probe exec at a configured enforcementExecTimeoutMs", async () => {
+  it("bounds each streak exec at three configured enforcementExecTimeoutMs probes plus the gaps", async () => {
     const h = await harness();
     const { launcher } = clockedLauncher(h, { enforcementExecTimeoutMs: 60_000 });
     await launcher.launch(h.spec);
     const probes = h.api.execCalls.filter((c) => isEnforcementProbe(c.command));
     expect(probes.length).toBeGreaterThan(0);
-    expect(probes.every((c) => c.timeoutMs === 60_000)).toBe(true);
+    // 60_000 * 3 + 500 * 2
+    expect(probes.every((c) => c.timeoutMs === 181_000)).toBe(true);
   });
 
   it("derives an overall enforcement bound long enough for a full streak at a raised exec timeout", async () => {
     const h = await harness();
     // clockedLauncher hard-codes enforcementTimeoutMs: 5_000; left un-overridden here to prove the
-    // launcher itself raises the effective floor to enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK
-    // (60_000 * 3 = 180_000) rather than giving up after the ~10 probes a bare 5_000 ms bound would allow.
+    // launcher itself raises the effective floor to one full streak exec's timeout
+    // (60_000 * 3 + 500 * 2 = 181_000) rather than giving up after the ~10 execs a bare 5_000 ms
+    // bound would allow.
     const { launcher } = clockedLauncher(h, { enforcementExecTimeoutMs: 60_000 });
     const original = h.api.onExec;
     h.api.onExec = async (call) => (isEnforcementProbe(call.command) ? 3 : original(call));
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_policy_not_enforced");
     const probes = h.api.execCalls.filter((c) => isEnforcementProbe(c.command));
-    expect(probes.length).toBeGreaterThan(100);
-    expect(probes.every((c) => c.timeoutMs === 60_000)).toBe(true);
+    // Only the 500 ms retry sleeps advance this clock: 181_000 / 500 retries, plus the first exec.
+    expect(probes).toHaveLength(363);
+    expect(probes.every((c) => c.timeoutMs === 181_000)).toBe(true);
+  });
+
+  it("never lets the overall bound expire inside one slow-but-healthy streak exec", async () => {
+    const h = await harness();
+    // A keeper slow enough that a broken streak takes almost its whole exec timeout must still get a
+    // retry: the bound (floored at 181_000 here) has to cover at least one full streak exec, or "the
+    // keeper is just slow" reads as "the policy is not enforced".
+    const { launcher, advance } = clockedLauncher(h, { enforcementExecTimeoutMs: 60_000 });
+    const original = h.api.onExec;
+    let streaks = 0;
+    h.api.onExec = async (call) => {
+      if (!isEnforcementProbe(call.command)) return original(call);
+      streaks += 1;
+      if (streaks === 1) {
+        advance(180_500); // past streak * exec timeout (180_000), within one streak exec (181_000)
+        return 3;
+      }
+      return 0;
+    };
+    await launcher.launch(h.spec);
+    expect(h.api.execCalls.some((c) => isMarker(c.command))).toBe(true);
   });
 
   it("execs the probe in the keeper as an argv array with the validated IP literal, never a shell", async () => {
@@ -1336,7 +1412,7 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
   });
 
   describe("re-confirmation immediately before the marker", () => {
-    /** Blocks the first N enforcement probes (the initial proof), then returns `after` for every probe past that. */
+    /** Proves the first N enforcement streak execs (the initial proof), then returns `after` for every exec past that. */
     function proveThenChange(h: Awaited<ReturnType<typeof harness>>, provenCount: number, after: number) {
       let probes = 0;
       const original = h.api.onExec;
@@ -1350,11 +1426,12 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     it("fails closed with a code distinct from the initial failure when enforcement is lost during seeding, and cleans up without opening the gate", async () => {
       const h = await harness();
       const { launcher } = clockedLauncher(h);
-      // The initial proof passes cleanly (3 consecutive blocked probes). Every probe after that —
-      // i.e. only the pre-marker re-probe, seeding never execs anything matching isEnforcementProbe —
+      // The initial proof passes cleanly (one streak exec of 3 consecutive blocked probes). Every
+      // streak exec after that — i.e. only the pre-marker re-probe, seeding never execs anything
+      // matching isEnforcementProbe —
       // finds the deny port reachable, as if a permissive NetworkPolicy landed while the workspace
       // was being seeded (the live-cluster attack this fix closes).
-      proveThenChange(h, 3, 3 /* ENFORCEMENT_PROBE_DENY_REACHABLE */);
+      proveThenChange(h, 1, 3 /* ENFORCEMENT_PROBE_DENY_REACHABLE */);
       const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
       expect(error.message).toContain("kubernetes_policy_enforcement_lost_before_marker");
       // Distinguishable from the code the initial proof would have produced for the same exit code.
@@ -1381,7 +1458,7 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
       ] as const) {
         const h = await harness(`run-pre-marker-${exitCode}`);
         const { launcher } = clockedLauncher(h);
-        proveThenChange(h, 3, exitCode);
+        proveThenChange(h, 1, exitCode);
         const error = (await launcher.launch(h.spec).catch((e: unknown) => e)) as Error;
         expect(error.message).toContain(preMarkerCode);
         expect(error.message).not.toContain(`${initialCode}:`);

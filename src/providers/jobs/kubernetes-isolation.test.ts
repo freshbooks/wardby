@@ -15,6 +15,7 @@ import {
   buildRunNetworkPolicy,
   buildRunPod,
   enforcementProbeScript,
+  enforcementStreakScript,
   isRegistryDigest,
   kubernetesRunNames,
   kubernetesRunNamesForToken,
@@ -840,6 +841,142 @@ describe("enforcementProbeScript", () => {
         8788: deny as "connect" | "timeout" | "error",
       }),
     ).toBe(code);
+  });
+});
+
+describe("enforcementStreakScript", () => {
+  type Outcome = "connect" | "timeout" | "error";
+  /**
+   * Drives the real script in a VM with a fake net. `probes[i]` is the i-th probe's outcome per
+   * port; connects past the scripted probes are recorded but never answered. Records every connect
+   * (in order) and every delay the script itself asked setTimeout for.
+   */
+  async function runStreak(script: string, probes: Record<number, Outcome>[]) {
+    const connects: number[] = [];
+    const delays: number[] = [];
+    const startedAt = Date.now();
+    const exitTimes: number[] = [];
+    const code = await new Promise<number>((resolve) => {
+      runInNewContext(script, {
+        require: () => ({
+          connect: ({ port }: { port: number }) => {
+            const probe = Math.floor(connects.length / 2);
+            connects.push(port);
+            const handlers: Record<string, () => void> = {};
+            const outcome = probes[probe]?.[port];
+            if (outcome) setTimeout(() => handlers[outcome]?.(), 0);
+            return {
+              once: (event: string, handler: () => void) => void (handlers[event] = handler),
+              destroy: () => {},
+            };
+          },
+        }),
+        process: {
+          exit: (exitCode: number) => {
+            exitTimes.push(Date.now() - startedAt);
+            resolve(exitCode);
+          },
+        },
+        setTimeout: (handler: () => void, ms: number) => {
+          delays.push(ms);
+          return setTimeout(handler, ms);
+        },
+      });
+    });
+    // Let anything the script might (wrongly) still do after exiting surface before asserting.
+    await new Promise((settle) => setTimeout(settle, 30));
+    return { code, connects, delays, exits: exitTimes.length, elapsedMs: exitTimes[0] };
+  }
+  const PROVEN: Record<number, Outcome> = { 8787: "connect", 8788: "timeout" };
+
+  it("uses exactly the single probe's measurement: same host literal, 3 s connects, 8787 then 8788", () => {
+    const script = enforcementStreakScript("10.96.0.50", 3, 500);
+    expect(script).toContain('host: "10.96.0.50"');
+    expect(script).toContain("timeout: 3000");
+    expect(script).toContain("await tcp(8787)");
+    expect(script).toContain("await tcp(8788)");
+    // The per-probe body is shared with enforcementProbeScript verbatim, not re-implemented.
+    const single = enforcementProbeScript("10.96.0.50");
+    const body = single.slice(0, single.indexOf("(async () => {"));
+    expect(body.length).toBeGreaterThan(0);
+    expect(script.startsWith(body)).toBe(true);
+  });
+
+  it("exits 0 only after `streak` consecutive proven probes", async () => {
+    const run = await runStreak(enforcementStreakScript("10.96.0.50", 3, 1), [PROVEN, PROVEN, PROVEN, PROVEN]);
+    expect(run.code).toBe(0);
+    expect(run.connects).toEqual([8787, 8788, 8787, 8788, 8787, 8788]);
+    expect(run.exits).toBe(1);
+  });
+
+  it("honours streak 1 as a single probe", async () => {
+    const run = await runStreak(enforcementStreakScript("10.96.0.50", 1, 500), [PROVEN, PROVEN]);
+    expect(run.code).toBe(0);
+    expect(run.connects).toEqual([8787, 8788]);
+    expect(run.delays.filter((ms) => ms === 500)).toHaveLength(0);
+  });
+
+  it.each([
+    [0, { 8787: "connect", 8788: "connect" }, 3],
+    [1, { 8787: "connect", 8788: "connect" }, 3],
+    [2, { 8787: "connect", 8788: "connect" }, 3],
+    [0, { 8787: "timeout", 8788: "timeout" }, 4],
+    [1, { 8787: "error", 8788: "connect" }, 4],
+    [2, { 8787: "timeout", 8788: "error" }, 4],
+    [0, { 8787: "connect", 8788: "error" }, 5],
+    [1, { 8787: "connect", 8788: "error" }, 5],
+    [2, { 8787: "connect", 8788: "error" }, 5],
+  ] as const)(
+    "a non-proven probe #%i (%o) exits with that probe's code %i and runs no further probe",
+    async (index, failing, code) => {
+      const probes = [PROVEN, PROVEN, PROVEN, PROVEN];
+      probes[index] = failing;
+      const run = await runStreak(enforcementStreakScript("10.96.0.50", 3, 1), probes);
+      expect(run.code).toBe(code);
+      expect(run.connects).toHaveLength((index + 1) * 2);
+      expect(run.exits).toBe(1);
+    },
+  );
+
+  // The complete 3x3 contract per probe, identical to enforcementProbeScript's.
+  it.each(
+    (["connect", "timeout", "error"] as const).flatMap((proxy) =>
+      (["connect", "timeout", "error"] as const).map((deny) => [proxy, deny] as const),
+    ),
+  )("classifies 8787 %s + 8788 %s exactly as the single probe does", async (proxy, deny) => {
+    const outcome = { 8787: proxy, 8788: deny };
+    const single = await runStreak(enforcementProbeScript("10.96.0.50"), [outcome]);
+    const streak = await runStreak(enforcementStreakScript("10.96.0.50", 1, 500), [outcome]);
+    expect(streak.code).toBe(single.code);
+  });
+
+  it("waits intervalMs between probes, and not before the first or after the last", async () => {
+    const run = await runStreak(enforcementStreakScript("10.96.0.50", 3, 40), [PROVEN, PROVEN, PROVEN]);
+    expect(run.code).toBe(0);
+    expect(run.delays.filter((ms) => ms === 40)).toHaveLength(2);
+    expect(run.elapsedMs).toBeGreaterThanOrEqual(75);
+    expect(run.elapsedMs).toBeLessThan(1_000);
+  });
+
+  it("rejects an address that is not an IP", () => {
+    expect(() => enforcementStreakScript("wardby-proxy", 3, 500)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => enforcementStreakScript('10.0.0.1"; require("child_process")', 3, 500)).toThrow(
+      KUBERNETES_ISOLATION_ERROR,
+    );
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects a streak or interval of %s",
+    (value) => {
+      expect(() => enforcementStreakScript("10.96.0.50", value, 500)).toThrow(KUBERNETES_ISOLATION_ERROR);
+      expect(() => enforcementStreakScript("10.96.0.50", 3, value)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    },
+  );
+
+  it("rejects a non-number streak or interval smuggled past the types", () => {
+    const smuggled = "3; require('child_process')" as unknown as number;
+    expect(() => enforcementStreakScript("10.96.0.50", smuggled, 500)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => enforcementStreakScript("10.96.0.50", 3, smuggled)).toThrow(KUBERNETES_ISOLATION_ERROR);
   });
 });
 

@@ -340,8 +340,9 @@ export interface KubernetesJobConfig {
   preflightTimeoutMs?: number;
   readyTimeoutMs?: number;
   /**
-   * Bound for a single NetworkPolicy-enforcement probe exec (the keeper running two sequential
-   * connects). Defaults to the launcher's own 10 s, which a resource-constrained keeper (e.g. a
+   * Time budget for a single NetworkPolicy-enforcement probe (the keeper running two sequential
+   * connects); a streak's probes share one exec whose timeout the launcher derives from this.
+   * Defaults to the launcher's own 10 s, which a resource-constrained keeper (e.g. a
    * laptop `kind` cluster's default 250m CPU / 128Mi limit) can exceed even though the probe
    * itself is healthy — observed live: raising this to 60_000 was enough on `kind`. GKE Autopilot
    * is unaffected by leaving this unset. The launcher derives its overall enforcement wall-clock

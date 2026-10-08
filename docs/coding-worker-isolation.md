@@ -808,12 +808,12 @@ not just the harness: the worker gate could otherwise
 open on a pod whose isolation isn't active yet.
 
 The fix, before seeding or opening the worker gate: the launcher execs into
-the keeper (which shares the pod's network namespace with the worker) one
-`node -e` probe that measures **both of the coding proxy's ports against the
-proxy Service's ClusterIP, in the same pass** — `8787` (the proxy itself, which
-the run policy permits) and `8788` (the deny port, which no run policy ever
-permits). Only the outcome **(8787 connected, 8788 blocked)** counts toward the
-streak.
+the keeper (which shares the pod's network namespace with the worker) a
+`node -e` script whose every probe measures **both of the coding proxy's ports
+against the proxy Service's ClusterIP, in the same pass** — `8787` (the proxy
+itself, which the run policy permits) and `8788` (the deny port, which no run
+policy ever permits). Only the outcome **(8787 connected, 8788 blocked)** counts
+toward the streak.
 
 Stated exactly, that outcome proves: **the SYN to 8788 was dropped somewhere on
 the path, while the same destination answered on 8787.** That the drop was the
@@ -861,10 +861,19 @@ from "unserved" is not a witness — and such a cluster needs a different one.
 
 It requires **3 consecutive proven results, 500ms apart** (anything else
 resets the streak — this guards against a single dropped SYN packet on an
-allowed path being misread as "policy enforced"), bounded by
-`enforcementTimeoutMs` (default 30,000ms — configurable via
+allowed path being misread as "policy enforced"). The whole streak runs in a
+single keeper exec: the script exits successfully only after three consecutive
+proven probes, and stops at the first probe that is not proven, exiting with
+that probe's result. A broken streak is retried from zero 500ms later, bounded
+by `enforcementTimeoutMs` (default 30,000ms — configurable via
 `KubernetesJobLauncherOptions.enforcementTimeoutMs`; a drop-style CNI can
-need close to this whole window). The verdict at the bound comes from the
+need close to this whole window). Each probe has a time budget of
+`KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS` (default 10,000ms), so one streak exec
+is allowed three budgets plus the two 500ms gaps (31,000ms at the default), and
+the launcher never lets `enforcementTimeoutMs` fall below that one-streak value
+— at the defaults the effective bound is therefore 31,000ms. An exec that
+exceeds its timeout fails the launch with `kubernetes_exec_timeout`. The
+verdict at the bound comes from the
 _last_ probe — not from whether any probe was ever unavailable, so an early
 blip while the pod's networking came up does not misdirect the operator — and
 the three non-proven outcomes stay distinct, because each sends an operator
