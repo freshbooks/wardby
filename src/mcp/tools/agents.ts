@@ -268,7 +268,8 @@ const profileJsonSchema = {
     },
     packageAllowlist: {
       type: "object",
-      description: "Approved top-level packages per ecosystem (npm, pypi). Needs packages:approve or agents:admin.",
+      description:
+        "Approved top-level packages per ecosystem (npm, pypi). A PyPI entry may name extras, e.g. psycopg[binary]. Needs packages:approve or agents:admin.",
       additionalProperties: { type: "array", maxItems: 256, items: { type: "string" } },
     },
     packagePolicy: {

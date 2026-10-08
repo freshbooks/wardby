@@ -19,6 +19,11 @@ export interface AllowlistEntry {
   wildcard: boolean;
   /** Optional version range in this ecosystem's syntax. */
   range?: string;
+  /** PyPI only: the extras the entry names (`psycopg[binary]`), normalized
+   *  (PEP 685), sorted and de-duplicated. Absent when it names none. Each
+   *  one also allows the dependencies the package's own metadata declares
+   *  under that extra, and nothing else. */
+  extras?: readonly string[];
 }
 
 export class AllowlistEntryError extends Error {}
@@ -61,6 +66,13 @@ export interface FileRef {
 export interface DependencySpec {
   name: string;
   range: string;
+}
+
+/** One dependency read from a served file: its name and the extras the
+ *  declaring line asks of it (`uvicorn[standard]`), both normalized. */
+export interface FileDependency {
+  name: string;
+  extras: readonly string[];
 }
 
 export interface VersionInfo {
@@ -298,10 +310,17 @@ export interface RegistryAdapter {
   /** Map a download route to a file in metadata the proxy fetched itself.
    *  Returns null if the route names no known file. */
   resolveDownload(route: DownloadRoute, meta: PackageMetadata): FileRef | null;
-  /** For ecosystems whose indexes omit dependencies (PyPI): dependency
-   *  names read from a served file or its metadata file. Omitted when
+  /** For ecosystems whose indexes omit dependencies (PyPI): dependencies
+   *  read from a served file or its metadata file. `extras` are the extras
+   *  the run allows for this package (from the allowlist or from a parent's
+   *  dependency line): dependencies the file declares only under one of
+   *  them are included too, and no others. Omitted when
    *  VersionInfo.dependencies is already complete (npm). */
-  dependenciesFromFile?(route: DownloadRoute | FileMetadataRoute, body: Uint8Array): Promise<string[]>;
+  dependenciesFromFile?(
+    route: DownloadRoute | FileMetadataRoute,
+    body: Uint8Array,
+    extras: readonly string[],
+  ): Promise<FileDependency[]>;
   /** Map a file-metadata route (PEP 658) to the file it describes, from
    *  metadata the proxy fetched itself. Returns null if the route names no
    *  known file. */

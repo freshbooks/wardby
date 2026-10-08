@@ -80,7 +80,13 @@ export async function prismaLocalAgents(paths: QuickstartPaths): Promise<LocalAg
     const [coding, links] = await Promise.all([
       db.codingAgentProfile.findMany({
         where: { repository: { startsWith: LOCAL_REPO_PREFIX } },
-        select: { repository: true, baseRef: true, agent: { select: { name: true } } },
+        select: {
+          repository: true,
+          baseRef: true,
+          toolchain: true,
+          toolchainVersion: true,
+          agent: { select: { name: true } },
+        },
       }),
       db.agentRepository.findMany({
         where: { provider: "local" },
@@ -88,7 +94,13 @@ export async function prismaLocalAgents(paths: QuickstartPaths): Promise<LocalAg
       }),
     ]);
     return [
-      ...coding.map((row) => ({ name: row.agent.name, repository: row.repository, ref: row.baseRef })),
+      ...coding.map((row) => ({
+        name: row.agent.name,
+        repository: row.repository,
+        ref: row.baseRef,
+        toolchain: row.toolchain,
+        toolchainVersion: row.toolchainVersion,
+      })),
       ...links.map((row) => ({ name: row.agent.name, repository: row.repository })),
     ].sort((a, b) => a.name.localeCompare(b.name));
   });

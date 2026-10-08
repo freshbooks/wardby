@@ -1,5 +1,5 @@
 import type { PackageAllowlist } from "../../../coding/registry/allowlist.js";
-import type { DeclaredDependency } from "../../../coding/registry/types.js";
+import type { DeclaredDependency, FileDependency } from "../../../coding/registry/types.js";
 
 export interface RegistryRunContext {
   runId: string;
@@ -47,6 +47,26 @@ export interface PlanRefusedVersion {
   publishedAt?: Date | null;
 }
 
+/**
+ * An extra a run allows for a package (PyPI `uvicorn[standard]`) is kept as
+ * an allowance row named `name[extra]`, beside the package's own row. No
+ * registry route can ask for that name (routes accept only valid package
+ * names, which never contain `[`), so the row never allows a fetch itself:
+ * it only tells the proxy which of the package's extra-gated dependencies
+ * to follow when it serves the package's files.
+ */
+export function extraAllowanceName(name: string, extra: string): string {
+  return `${name}[${extra}]`;
+}
+
+/** The extra in an allowance row name for `name`, or null when the row is not one of its extras. */
+export function extraOfAllowanceName(rowName: string, name: string): string | null {
+  const prefix = `${name}[`;
+  if (!rowName.startsWith(prefix) || !rowName.endsWith("]")) return null;
+  const extra = rowName.slice(prefix.length, -1);
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(extra) ? extra : null;
+}
+
 /** Run-scoped store over the registry-only token session lookup and the
  *  RegistryAllowance/RegistryFetch tables (Task 5). Backs the registry proxy:
  *  it never sees the model capability, only the derived registry token. */
@@ -54,6 +74,10 @@ export interface RegistryStore {
   findRunByRegistryTokenHash(hash: string, now: Date): Promise<RegistryRunContext | null>;
   isAllowedDependency(runId: string, ecosystem: string, name: string): Promise<boolean>;
   addAllowances(runId: string, ecosystem: string, names: readonly string[]): Promise<void>;
+  /** The extras the run allows for `name` (normalized, sorted). */
+  allowedExtras(runId: string, ecosystem: string, name: string): Promise<string[]>;
+  /** Records extras the run allows for each package (an existing one is kept). */
+  addExtraAllowances(runId: string, ecosystem: string, dependencies: readonly FileDependency[]): Promise<void>;
   recordFetch(record: RegistryFetchRecord): Promise<void>;
   usage(runId: string): Promise<{ files: number; bytes: number }>;
   /** Number of refused RegistryFetch rows recorded for the run. */
@@ -106,11 +130,32 @@ export class MemoryRegistryStore implements RegistryStore {
   }
 
   async isAllowedDependency(runId: string, ecosystem: string, name: string): Promise<boolean> {
+    // An extra's row (`name[extra]`) is never a package allowance.
+    if (name.includes("[")) return false;
     return this.allowances.has(`${runId}\0${ecosystem}\0${name}`);
   }
 
   async addAllowances(runId: string, ecosystem: string, names: readonly string[]): Promise<void> {
     for (const name of names) this.allowances.add(`${runId}\0${ecosystem}\0${name}`);
+  }
+
+  async allowedExtras(runId: string, ecosystem: string, name: string): Promise<string[]> {
+    const prefix = `${runId}\0${ecosystem}\0`;
+    return [...this.allowances]
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => extraOfAllowanceName(key.slice(prefix.length), name))
+      .filter((extra): extra is string => extra !== null)
+      .sort();
+  }
+
+  async addExtraAllowances(runId: string, ecosystem: string, dependencies: readonly FileDependency[]): Promise<void> {
+    await this.addAllowances(
+      runId,
+      ecosystem,
+      dependencies.flatMap((dependency) =>
+        dependency.extras.map((extra) => extraAllowanceName(dependency.name, extra)),
+      ),
+    );
   }
 
   async recordFetch(record: RegistryFetchRecord): Promise<void> {

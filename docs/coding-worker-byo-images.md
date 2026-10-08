@@ -14,7 +14,13 @@ compiled Node.js coding-worker driver, `git`, `ca-certificates`, and the
 `wardby` user (uid/gid 10001) — nothing language-specific. It's built from
 `src/coding-worker/Dockerfile.driver` and published on `driver-vN` git tags;
 each release's GitHub Release notes carry the resolved
-`@sha256:...` digest to pin.
+`@sha256:...` digest to pin. `wardby doctor` prints the digest your installed
+version's own workers are built on ("Base image for your own worker images:
+…"); build on that one so your image matches the run input your Wardby sends.
+
+An MCP assistant connected to Wardby can do the whole procedure for you: the
+`build-worker-image` help article walks it through finding the toolchain,
+writing and checking the Dockerfile, and setting `workerImageRef`.
 
 The image deliberately stops before setting `USER`, `WORKDIR`, or
 `ENTRYPOINT`, and before any of the hardened binary-absence checks wardby's
@@ -54,7 +60,38 @@ own READMEs tell it to — reports a failed command even when the suite is
 green. `Dockerfile.node-python` symlinks `python` to `python3` for exactly
 that reason, and asserts both work.
 
-Build it, push it to your own registry, and note the resulting digest —
+### Design for the run's filesystem
+
+A run's root filesystem is read-only; `/tmp` and `/home/wardby` are empty
+`noexec` tmpfs mounts of 16 to 64 MB (anything the image put there is hidden);
+`/workspace` (the checkout, `CODING_DISK_MB` large, or the agent's
+`codingProfile.workspaceDiskMb`) is the only place a run can write and execute;
+and a run reaches no package registry except Wardby's npm and PyPI proxy. So:
+
+- point every cache, build output and temp directory under `/workspace/.cache/`
+  (a `.cache` folder is never collected into the result, at any depth), and
+  create those directories from a small wrapper around the toolchain command,
+  keeping the `ENTRYPOINT` unchanged. For Go: `GOCACHE`, `GOTMPDIR` (`go test`
+  runs its test binary from there) and `GOMODCACHE`;
+- bake dependencies into a read-only location the toolchain only reads from
+  (Go: a file-based module proxy filled by `go mod download`, used through
+  `GOPROXY=file://...`); a baked cache cannot be written to during a run;
+- add build folders that stay in the checkout (Maven `target`, Gradle `build`)
+  to `codingProfile.collectExclude`.
+
+Before using the image, run the project's tests against a throwaway clone with
+a run's restrictions: `--read-only`, `--tmpfs /tmp:rw,noexec,nosuid,size=64m`,
+`--tmpfs /home/wardby:rw,noexec,nosuid,size=64m,uid=10001,gid=10001`,
+`--network none`, `--user 10001:10001`, `--cap-drop ALL` and
+`--security-opt no-new-privileges`. The `build-worker-image` help article has a
+complete Go Dockerfile that passes this check, recipes for Rust and Java, and
+the exact command.
+
+### Build and pin it
+
+On a local quickstart install with the Docker launcher, `workerImageRef` can be
+the local image ID (`docker image inspect --format '{{.Id}}' <your-tag>`).
+Otherwise, build it, push it to your own registry, and note the resulting digest —
 `docker inspect --format '{{index .RepoDigests 0}}' <your-tag>` after a push,
 or read it straight from `docker buildx build --push`'s output.
 
@@ -74,6 +111,14 @@ picking `toolchain`/`toolchainVersion` from wardby's own images), but cannot
 point one at an arbitrary image without the step-up scope. The scope alone
 isn't enough: the caller must also hold the admin role (see
 [roles and privileged operations](security-deployment.md#roles-and-privileged-operations)).
+
+## Codex only
+
+`workerImageRef` applies to Codex agents. A Claude Code agent's commands run in
+the Claude tool runner, which `workerImageRef` does not change, so Claude Code
+agents cannot use a custom toolchain yet. They can use wardby's curated
+`node-python` toolchain (set the matching
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` image).
 
 ## Running services with a BYO image
 

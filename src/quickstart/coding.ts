@@ -20,12 +20,15 @@ import type { DeclaredService } from "../coding/services/declaration.js";
 import { BUILDER_AGENT, REVIEWER_AGENT, type CodingSeedInput, type CodingSeedResult } from "./coding-seed.js";
 import {
   defaultModel,
+  defaultReviewerModel,
   readQuickstartEnv,
   writeQuickstartEnv,
   type QuickstartPaths,
   type QuickstartState,
 } from "./config.js";
-import { CodingSkip, prepareImages } from "./coding-images.js";
+import { CodingSkip, NODE_PYTHON_ENV, prepareImages, prepareNodePythonImage } from "./coding-images.js";
+import { detectPythonProject } from "./python-detect.js";
+import { readRepoPackages } from "./repo-packages.js";
 import {
   STARTER_SERVICES_BRANCH,
   commitStarterServices,
@@ -79,6 +82,8 @@ export interface CodingStepOptions {
   provider?: CodingProvider;
   /** --starter-services; undefined = ask (interactive) or none (non-interactive). */
   starterServices?: StarterService[];
+  /** --allow-repo-packages / --no-allow-repo-packages; undefined = ask (interactive) or none (non-interactive). */
+  allowRepoPackages?: boolean;
 }
 
 export interface CodingStepResult {
@@ -412,6 +417,91 @@ async function prepareServices(
   return services.map((service) => service.name);
 }
 
+/** For a Python repository, prepares the Node + Python 3.12 workspace image; true when the builder should use it. */
+async function preparePythonWorkspace(
+  paths: QuickstartPaths,
+  provider: CodingProvider,
+  repo: string,
+  sha: string,
+  deps: CodingDeps,
+): Promise<boolean> {
+  if (!(await detectPythonProject(repo, sha))) return false;
+  let image: string | undefined;
+  try {
+    image = prepareNodePythonImage(provider, readQuickstartEnv(paths), deps);
+  } catch (error) {
+    if (!(error instanceof CodingSkip)) throw error;
+    deps.log(`! ${error.message}.`);
+  }
+  if (!image) {
+    deps.log(
+      "! Python project detected, but this version has no Python workspace image; the builder can edit code but not run Python tests. Upgrade, or set CODING_WORKER_IMAGE_NODE_PYTHON_3_12 / CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12",
+    );
+    return false;
+  }
+  writeQuickstartEnv(paths, { ...readQuickstartEnv(paths), [NODE_PYTHON_ENV[provider]]: image });
+  deps.log("Python project detected: local-builder uses a Node + Python 3.12 workspace");
+  return true;
+}
+
+const SHOWN_PACKAGE_NAMES = 12;
+const PACKAGE_ECOSYSTEMS = [
+  ["npm", "npm"],
+  ["pypi", "PyPI"],
+] as const;
+const ADD_PACKAGES_LATER = `update_agent with codingProfile.packageAllowlist (docs/coding-packages.md)`;
+
+/**
+ * Offers the packages the repository declares at `sha` as the builder's
+ * allowlist; returns it when allowed, undefined otherwise (no packages).
+ */
+async function chooseRepoPackages(
+  repo: string,
+  branch: string,
+  sha: string,
+  opts: CodingStepOptions,
+  deps: CodingDeps,
+): Promise<Record<string, string[]> | undefined> {
+  const { allowlist, notes } = await readRepoPackages(repo, sha);
+  for (const note of notes) deps.log(`! ${note}`);
+  const present = PACKAGE_ECOSYSTEMS.filter(([key]) => allowlist[key]?.length);
+  if (present.length === 0) return undefined;
+
+  deps.log(
+    `Packages declared on ${branch}: ${present.map(([key, label]) => `${allowlist[key]!.length} ${label}`).join(", ")}`,
+  );
+  let shown = 0;
+  let total = 0;
+  for (const [key, label] of present) {
+    const names = allowlist[key]!;
+    total += names.length;
+    const slice = names.slice(0, Math.max(0, SHOWN_PACKAGE_NAMES - shown));
+    shown += slice.length;
+    if (slice.length > 0) deps.log(`  ${label}: ${slice.join(", ")}`);
+  }
+  if (total > shown) deps.log(`  … and ${total - shown} more`);
+
+  let allow = opts.allowRepoPackages;
+  if (allow === undefined && opts.nonInteractive) {
+    deps.log(`Not allowing them: pass --allow-repo-packages to allow them, or later: ${ADD_PACKAGES_LATER}.`);
+    return undefined;
+  }
+  if (allow === undefined) {
+    allow = await deps.prompts.yesNo(
+      `Allow ${BUILDER_AGENT} to install these packages through Wardby's registry?`,
+      true,
+    );
+  }
+  if (!allow) {
+    deps.log(`${BUILDER_AGENT} may not install packages. To allow some later: ${ADD_PACKAGES_LATER}.`);
+    return undefined;
+  }
+  deps.log(
+    `✓ ${BUILDER_AGENT} may install these packages through Wardby's registry; release-age, advisory, and record checks still apply.`,
+  );
+  return Object.fromEntries(present.map(([key]) => [key, allowlist[key]!]));
+}
+
 function seedLines(seed: CodingSeedResult, repository: string): string[] {
   const lines: string[] = [];
   for (const [name, outcome] of [
@@ -496,14 +586,18 @@ export async function codingStep(
       return { roots, provider };
     }
     const services = await prepareServices(repo, roots, base.branch, base.sha, opts, deps);
+    const python = await preparePythonWorkspace(paths, provider, repo, base.sha, deps);
+    const packageAllowlist = await chooseRepoPackages(repo, base.branch, base.sha, opts, deps);
     const repository = `${LOCAL_REPO_PREFIX}${repo}`;
     const seed = await deps.seed({
       provider,
       builderModel: defaultModel(provider === "codex" ? "openai" : "anthropic"),
-      reviewerModel: state.model,
+      reviewerModel: defaultReviewerModel(state.provider),
       repository,
       baseRef: base.branch,
       services,
+      ...(python ? { toolchain: "node-python" as const, toolchainVersion: "3.12" } : {}),
+      ...(packageAllowlist ? { packageAllowlist } : {}),
     });
     for (const line of seedLines(seed, repository)) deps.log(line);
     return { roots, provider, repository, seed };

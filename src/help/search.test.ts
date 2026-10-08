@@ -211,3 +211,14 @@ describe("coding provider not configured help", () => {
     }
   });
 });
+
+describe("build worker image help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["worker image", "custom image", "Go", "Java", "other language"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("build-worker-image");
+    }
+  });
+});
