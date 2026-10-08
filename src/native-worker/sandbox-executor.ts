@@ -32,6 +32,9 @@ import { PrismaGatewayLedger, type GatewayLedgerDb } from "./ledger.js";
 
 const executorLog = logger.child({ module: "native-sandbox-executor" });
 
+const isUniqueViolation = (err: unknown): boolean =>
+  typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2002";
+
 /** What the executor needs from a worker launcher (DockerNativeWorkerLauncher, or a test double). */
 export interface ManagedWorkerLauncher extends DetachedWorkerLauncher {
   handle(runId: string): WorkerHandle;
@@ -81,7 +84,16 @@ export class NativeSandboxExecutor implements Executor {
       this.watch(runId, launcher.handle(runId), existing.deadlineAt);
       return;
     }
-    const outcome = await startSandboxRun({ runId, providers, db, gatewayUrl, launcher });
+    let outcome: Awaited<ReturnType<typeof startSandboxRun>>;
+    try {
+      outcome = await startSandboxRun({ runId, providers, db, gatewayUrl, launcher });
+    } catch (err) {
+      // A concurrent start won the race for the run's one session: attach to its worker.
+      if (!isUniqueViolation(err)) throw err;
+      const raced = await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId }, select: { deadlineAt: true } });
+      this.watch(runId, launcher.handle(runId), raced.deadlineAt);
+      return;
+    }
     if (outcome.kind === "ended") return;
     const session = await db.nativeGatewaySession.findUniqueOrThrow({
       where: { id: outcome.sessionId },
@@ -139,8 +151,10 @@ export class NativeSandboxExecutor implements Executor {
 
   async stop(runId: string, reason?: string): Promise<void> {
     const sessionId = await this.endSession(runId, "cancelled");
-    await this.options.launcher.kill(runId).catch(() => {});
+    // Recorded before the kill: the exit watcher then finds the run already ended and leaves it
+    // cancelled, instead of recording the killed worker's exit as a failure.
     await failNativeRun(this.finishContext(runId), new RunCancelledError(reason ?? "The run was cancelled."));
+    await this.options.launcher.kill(runId).catch(() => {});
     if (sessionId) {
       // Its delegations' children belong to the server's executor; a child left running would
       // spend on behalf of a parent that no longer waits for it.

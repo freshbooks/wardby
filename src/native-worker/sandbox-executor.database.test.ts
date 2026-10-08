@@ -86,13 +86,17 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     expect(JSON.stringify(session)).not.toContain(fake.launched[0].gateway!.capability);
   });
 
-  it("never launches a second worker for a run started twice", async () => {
+  it("never launches a second worker for a run started twice, one after the other or at once", async () => {
     const fake = fakeLauncher();
     const run = await sandboxRun();
     const executor = executorWith(fake.launcher);
     await executor.start(run.id);
     await executor.start(run.id);
     expect(fake.launched).toHaveLength(1);
+
+    const raced = await sandboxRun();
+    await Promise.all([executor.start(raced.id), executorWith(fake.launcher).start(raced.id)]);
+    expect(fake.launched.filter((i) => i.runId === raced.id)).toHaveLength(1);
   });
 
   it("fails a run whose worker exits without a result, and removes the worker", async () => {
