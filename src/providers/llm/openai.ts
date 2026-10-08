@@ -1,7 +1,27 @@
 /**
- * OpenAI adapter for the `LlmProvider` seam — Phase 1's only concrete LLM
- * adapter. The `openai` npm package is used only inside this file; core
- * never imports it.
+ * OpenAI adapter for the `LlmProvider` seam. The `openai` npm package is used
+ * only inside this file; core never imports it.
+ *
+ * It speaks the Responses API, not Chat Completions: Chat Completions rejects
+ * any request carrying tools on gpt-5.6-* and gpt-6-*, while Responses takes
+ * tools on every OpenAI model and reasoning effort on the reasoning ones.
+ *
+ * Mapping notes (what the Responses API cannot carry, and why that's fine):
+ * - `stopSequences` is dropped — Responses has no stop parameter ("Unknown
+ *   parameter" on every model). No caller sets it today.
+ * - `LlmMessage.name` is dropped — Responses has no per-message name. The
+ *   engine sets it only on tool results, where `call_id` already correlates.
+ * - `store: false` is always sent — Responses stores every response by
+ *   default, and wardby replays the whole conversation itself each turn.
+ * - Reasoning items are not replayed between turns: with `store: false` the
+ *   next turn starts without the previous turn's hidden reasoning, only the
+ *   visible text and function_call/function_call_output items. That costs
+ *   some reasoning continuity, not correctness.
+ * - Reasoning tokens never stream as deltas, so the engine's mid-stream budget
+ *   estimate (driven by text deltas) can't see them. They arrive inside
+ *   `output_tokens` on the final usage and are charged there, at the output
+ *   rate, which is how OpenAI bills them; the per-turn reservation and
+ *   post-turn accounting still bound spend.
  */
 
 import OpenAI from "openai";
@@ -37,12 +57,55 @@ function encodeForModel(model: string, text: string, lookup: CatalogLookup): num
   return encoding === "o200k_base" ? encodeO200kBase(text) : encodeCl100kBase(text);
 }
 
-/** Same shape sent to the API in `stream()` — kept as one function so the estimate can never drift from what's actually serialized. */
-function toOpenAiTools(tools: LlmToolDef[]) {
+/**
+ * Same shape sent to the API in `stream()` — kept as one function so the
+ * estimate can never drift from what's actually serialized. `strict: false`
+ * because wardby's tool schemas aren't written to strict mode's rules (every
+ * property required, additionalProperties false), and Responses defaults
+ * strict on.
+ */
+function toOpenAiTools(tools: LlmToolDef[]): OpenAI.Responses.FunctionTool[] {
   return tools.map((t) => ({
     type: "function" as const,
-    function: { name: t.name, description: t.description, parameters: t.parameters },
+    name: t.name,
+    description: t.description,
+    parameters: t.parameters,
+    strict: false,
   }));
+}
+
+// Responses rejects max_output_tokens below 16 with a 400 ("Expected a value
+// >= 16"). Raising a smaller cap to 16 costs at most a few output tokens;
+// failing the call outright would cost the whole turn.
+const MIN_MAX_OUTPUT_TOKENS = 16;
+
+/** One `LlmMessage` becomes zero or more Responses input items, in order. */
+function toResponsesInput(messages: LlmMessage[]): OpenAI.Responses.ResponseInputItem[] {
+  const input: OpenAI.Responses.ResponseInputItem[] = [];
+  for (const m of messages) {
+    if (m.role === "tool") {
+      input.push({ type: "function_call_output", call_id: m.toolCallId ?? "", output: m.content });
+      continue;
+    }
+    const toolCalls = m.role === "assistant" ? (m.toolCalls ?? []) : [];
+    // An assistant turn that only made tool calls has empty text; an empty
+    // assistant message item adds nothing, so omit it.
+    if (!(m.content === "" && toolCalls.length > 0)) {
+      input.push({ role: m.role, content: m.content });
+    }
+    for (const tc of toolCalls) {
+      input.push({ type: "function_call", call_id: tc.id, name: tc.name, arguments: tc.argsJson });
+    }
+  }
+  return input;
+}
+
+/** The final usage block on response.completed / response.incomplete. */
+interface ResponsesUsage {
+  input_tokens: number;
+  output_tokens: number;
+  // cache_write_tokens is reported by the API but not yet in the SDK's types.
+  input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 }
 
 // Fixed: this used to count message tokens only. When a request carries
@@ -103,81 +166,73 @@ export class OpenAiLlmProvider implements CatalogLlmAdapter {
   }
 
   async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<LlmStreamEvent> {
-    const stream = await this.client.chat.completions.create(
-      {
-        model: req.model,
-        messages: req.messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-          ...(m.name ? { name: m.name } : {}),
-          ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
-          ...(m.toolCalls && m.toolCalls.length > 0
-            ? {
-                tool_calls: m.toolCalls.map((tc) => ({
-                  id: tc.id,
-                  type: "function" as const,
-                  function: { name: tc.name, arguments: tc.argsJson },
-                })),
-              }
-            : {}),
-        })) as OpenAI.Chat.ChatCompletionMessageParam[],
-        tools: req.tools ? toOpenAiTools(req.tools) : undefined,
-        max_tokens: req.maxTokens,
-        temperature: req.temperature,
-        stop: req.stopSequences,
-        stream: true,
-        stream_options: { include_usage: true },
-      },
-      { signal },
-    );
+    const entry = this.lookup(req.model);
+    // Effort is sent only at a level the catalog says the model accepts and
+    // dropped otherwise (the LlmRequest.effort contract). Temperature only
+    // goes to non-reasoning models: reasoning models reject it ("not
+    // supported with this model").
+    const sendEffort = req.effort !== undefined && entry.efforts.includes(req.effort);
+    const sendTemperature = req.temperature !== undefined && entry.efforts.length === 0;
+    const params: OpenAI.Responses.ResponseCreateParamsStreaming = {
+      model: req.model,
+      input: toResponsesInput(req.messages),
+      stream: true,
+      store: false,
+      ...(req.tools ? { tools: toOpenAiTools(req.tools) } : {}),
+      ...(req.maxTokens !== undefined ? { max_output_tokens: Math.max(req.maxTokens, MIN_MAX_OUTPUT_TOKENS) } : {}),
+      // The SDK's ReasoningEffort type predates xhigh/max; the API accepts them.
+      ...(sendEffort ? { reasoning: { effort: req.effort as OpenAI.ReasoningEffort } } : {}),
+      ...(sendTemperature ? { temperature: req.temperature } : {}),
+    };
+    const stream = await this.client.responses.create(params, { signal });
 
-    let stopReason = "stop";
-    // OpenAI streams tool-call arguments fragmented across chunks, keyed by
-    // index — buffer per index until the turn's finish_reason confirms the
-    // call is complete, then emit one `tool_call` event per call.
-    const toolCallBuffers = new Map<number, { id: string; name: string; argsJson: string }>();
-
-    for await (const chunk of stream) {
-      const choice = chunk.choices[0];
-      if (choice?.delta?.content) {
-        yield { type: "text", delta: choice.delta.content };
-      }
-      if (choice?.delta?.tool_calls) {
-        for (const fragment of choice.delta.tool_calls) {
-          const buffered = toolCallBuffers.get(fragment.index) ?? { id: "", name: "", argsJson: "" };
-          if (fragment.id) buffered.id = fragment.id;
-          if (fragment.function?.name) buffered.name += fragment.function.name;
-          if (fragment.function?.arguments) buffered.argsJson += fragment.function.arguments;
-          toolCallBuffers.set(fragment.index, buffered);
-        }
-      }
-      if (choice?.finish_reason) {
-        stopReason = choice.finish_reason;
-        if (stopReason === "tool_calls") {
-          for (const toolCall of toolCallBuffers.values()) {
-            yield { type: "tool_call", id: toolCall.id, name: toolCall.name, argsJson: toolCall.argsJson };
+    let sawToolCall = false;
+    for await (const event of stream) {
+      switch (event.type) {
+        case "response.output_text.delta":
+          yield { type: "text", delta: event.delta };
+          break;
+        case "response.output_item.done":
+          // Arguments also stream as function_call_arguments.delta fragments,
+          // but the done item carries the complete call — emit from that.
+          if (event.item.type === "function_call") {
+            sawToolCall = true;
+            yield { type: "tool_call", id: event.item.call_id, name: event.item.name, argsJson: event.item.arguments };
           }
-          toolCallBuffers.clear();
+          break;
+        case "response.completed":
+        case "response.incomplete": {
+          const stopReason = sawToolCall
+            ? "tool_calls"
+            : event.response.incomplete_details?.reason === "max_output_tokens"
+              ? "length"
+              : "stop";
+          yield { type: "done", stopReason, usage: this.toUsage(req.model, event.response.usage) };
+          break;
         }
-      }
-      if (chunk.usage) {
-        // OpenAI's prompt caching is automatic and read-only — no billed
-        // "cache write" step, so cacheWriteTokens stays unset here. Other
-        // future adapters (e.g. Bedrock/Claude) may report and bill one.
-        const cachedInputTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
-        const usage: LlmUsage = {
-          inputTokens: chunk.usage.prompt_tokens,
-          outputTokens: chunk.usage.completion_tokens,
-          cachedInputTokens,
-          costUsd: this.priceUsd(req.model, {
-            inputTokens: chunk.usage.prompt_tokens,
-            outputTokens: chunk.usage.completion_tokens,
-            cachedInputTokens,
-          }),
-        };
-        yield { type: "done", stopReason, usage };
+        case "response.failed":
+          throw new Error(`OpenAI response failed: ${event.response.error?.message ?? "no error message"}`);
+        case "error":
+          throw new Error(`OpenAI stream error: ${event.message}`);
+        default:
+          break;
       }
     }
+  }
+
+  private toUsage(model: string, raw: ResponsesUsage | null | undefined): LlmUsage {
+    const inputTokens = raw?.input_tokens ?? 0;
+    // output_tokens already includes reasoning tokens.
+    const outputTokens = raw?.output_tokens ?? 0;
+    const cachedInputTokens = raw?.input_tokens_details?.cached_tokens ?? 0;
+    const cacheWrite = raw?.input_tokens_details?.cache_write_tokens;
+    const tokens = {
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      ...(cacheWrite !== undefined && cacheWrite > 0 ? { cacheWriteTokens: cacheWrite } : {}),
+    };
+    return { ...tokens, costUsd: this.priceUsd(model, tokens) };
   }
 
   async countTokens(model: string, messages: LlmMessage[], tools?: LlmToolDef[]): Promise<number> {
