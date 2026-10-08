@@ -8,6 +8,29 @@ no agents itself.
 
 It is built with Tauri (a Rust core and a React UI). macOS is supported first.
 
+## Download
+
+Each Wardby release on GitHub has a matching macOS build of the viewer
+attached: `wardby-viewer_<version>_macos-universal.dmg` (Apple Silicon and
+Intel), with a `.sha256` checksum. Use the viewer from the same release as
+your server.
+
+The build is **not signed or notarized**, so macOS blocks it the first time.
+After copying the app to Applications, either right-click it and choose
+**Open**, then **Open** again, or remove the download quarantine:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/wardby viewer.app"
+```
+
+To check that a download was built by this repository's release workflow:
+
+```sh
+gh attestation verify wardby-viewer_<version>_macos-universal.dmg --repo wardby/wardby
+```
+
+To build it yourself instead, follow the rest of this guide.
+
 ## Prerequisites
 
 - Node 24 (see `.nvmrc` at the repository root).
