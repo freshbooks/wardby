@@ -39,7 +39,12 @@ describe("buildConfiguredExecutor", () => {
     const routingDb = {
       run: { findUnique: async ({ where }: { where: { id: string } }) => rows[where.id] ?? null },
     } as unknown as PrismaClient;
-    const executor = buildConfiguredExecutor({ native: nativeSpy, nativeSandbox: sandbox, db: routingDb, env: { ...baseEnv } });
+    const executor = buildConfiguredExecutor({
+      native: nativeSpy,
+      nativeSandbox: sandbox,
+      db: routingDb,
+      env: { ...baseEnv },
+    });
     expect(executor).toBeInstanceOf(RoutingExecutor);
     await executor.start("s");
     await executor.start("n");

@@ -1397,7 +1397,12 @@ describe("native sandbox mode on a deployment without a native sandbox executor"
     engine: {
       async run() {
         engineCalls.push("run");
-        return { status: "succeeded" as const, finalText: "ok", turns: 1, usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 } };
+        return {
+          status: "succeeded" as const,
+          finalText: "ok",
+          turns: 1,
+          usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 },
+        };
       },
     },
     datastore: fakeDatastore(),

@@ -191,7 +191,12 @@ describe("RoutingExecutor native sandbox routing", () => {
 
   it("routes start, stop and recover for a sandbox run to the sandbox executor, and the others unchanged", async () => {
     const calls: string[] = [];
-    const executor = new RoutingExecutor(resolver, fake("native", calls), fake("coding", calls), fake("sandbox", calls));
+    const executor = new RoutingExecutor(
+      resolver,
+      fake("native", calls),
+      fake("coding", calls),
+      fake("sandbox", calls),
+    );
     for (const runId of ["native-run", "sandbox-run", "coding-run"]) {
       await executor.start(runId);
       await executor.stop(runId);
@@ -268,9 +273,9 @@ describe("PrismaExecutionKindResolver", () => {
     expect(await resolverFor({ agent: { kind: "native" }, nativeExecutionMode: "sandbox" }).kindForRun("r")).toBe(
       "native-sandbox",
     );
-    expect(
-      await resolverFor({ agent: { kind: "native" }, nativeExecutionMode: "control_plane" }).kindForRun("r"),
-    ).toBe("native");
+    expect(await resolverFor({ agent: { kind: "native" }, nativeExecutionMode: "control_plane" }).kindForRun("r")).toBe(
+      "native",
+    );
   });
 
   it("treats a native run with no snapshot (created before the field) as control-plane", async () => {
