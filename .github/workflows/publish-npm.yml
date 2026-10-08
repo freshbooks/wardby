@@ -54,6 +54,13 @@ jobs:
       # The Codex policy script checks Codex-specific pins, so the Claude Code
       # images are gated by their own policy tests instead.
       - run: npx vitest run src/claude-coding-worker/image-policy.test.ts src/claude-tool-runner/image-policy.test.ts
+      # The same driver-reference check the publish job runs before recording it in
+      # dist/quickstart-images.json, here so a bad FROM fails before any image is pushed.
+      - name: Verify the worker's driver reference is digest-pinned
+        run: >-
+          node -e 'const { readFileSync } = require("node:fs");
+          const driver = /^FROM\s+(\S+)/im.exec(readFileSync("src/coding-worker/Dockerfile", "utf8"))?.[1] ?? "";
+          if (!/^[a-z0-9][a-z0-9._\/:-]*@sha256:[0-9a-f]{64}$/.test(driver)) throw new Error(`bad driver ${driver}`);'
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io

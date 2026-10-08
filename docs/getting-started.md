@@ -287,7 +287,8 @@ This step needs Docker, and an `OPENAI_API_KEY` (Codex) or `ANTHROPIC_API_KEY`
 4. creates `local-builder` (a coding agent, $2 budget) and `local-reviewer` (a
    review agent, $1.50 budget, on Claude Sonnet 5 or `gpt-5.6-terra` by default:
    a step above the builder's model, so a review costs more per call but stays
-   within its budget) for a repository in the trusted folders (a trusted
+   within its budget; `--model` does not change it: change it with
+   `update_agent` — a quickstart re-run resets it) for a repository in the trusted folders (a trusted
    folder that is a git repository, or one directly inside it; with several,
    quickstart asks, or non-interactively uses the first in sorted order and
    prints it. Re-run with `--trust <repo>` to choose another: folders passed on
