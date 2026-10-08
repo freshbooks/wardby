@@ -7,7 +7,7 @@
  */
 import { parseArgs } from "node:util";
 import type { PrismaClient } from "#prisma";
-import { REVIEW_HOST_PROVIDERS } from "../../providers/review-host/types.js";
+import { HOST_ACCOUNT_PROVIDERS } from "../../providers/review-host/types.js";
 
 const USAGE = "Use auth host-account list [--subject <s>] | host-account unlink --subject <s> [--provider github].";
 
@@ -25,7 +25,7 @@ export async function hostAccountCommand(
     options: { subject: { type: "string" }, provider: { type: "string" } },
   });
   const provider = values.provider ?? "github";
-  if (!(REVIEW_HOST_PROVIDERS as readonly string[]).includes(provider))
+  if (!(HOST_ACCOUNT_PROVIDERS as readonly string[]).includes(provider))
     throw new Error(`Unknown provider "${provider}".`);
   if (action === "list") {
     const rows = await db.hostIdentity.findMany({

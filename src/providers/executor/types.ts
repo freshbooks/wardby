@@ -63,7 +63,7 @@ export interface Executor {
   readCodingServiceDeclaration?(input: { repository: string; baseRef: string }): Promise<string | null>;
   /**
    * The raw text of one repository file at `baseRef`, or null when absent.
-   * Throws (github_file_too_large, github_file_not_a_file, github_file_not_utf8)
+   * Throws (github_file_* or local_file_*: too_large, not_a_file, not_utf8)
    * when the file is oversized or not UTF-8 text. Called by dispatch before its transaction (network call).
    * Used for the knowledge note (src/knowledge/note.ts).
    */

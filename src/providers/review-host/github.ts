@@ -47,6 +47,10 @@ const MAX_FILE_PAGES = 3;
 const MAX_COMMENT_PAGES = 3;
 const MAX_LISTED_FILES = 1000;
 const VENDORED = /(^|\/)(node_modules|dist|\.venv)\//;
+/** listFiles leaves out vendored trees and lockfiles; every host applies the same filter. */
+export function skippedInListing(path: string): boolean {
+  return VENDORED.test(path) || path.endsWith("package-lock.json");
+}
 const CHECK_TEXT_LIMIT = 65_535;
 const COMMENT_WRITE = { issues: "write", pull_requests: "write" } as const;
 const REVIEW_WRITE = { pull_requests: "write", checks: "write" } as const;
@@ -571,7 +575,7 @@ export class GitHubReviewHost implements CodeReviewHost {
       const tree = record(await (await get(`${base}/git/trees/${encodeURIComponent(resolvedRef)}?recursive=1`)).json());
       const entries = list(tree.tree)
         .filter((e) => e.type === "blob" && typeof e.path === "string" && e.path.startsWith(pathPrefix))
-        .filter((e) => !VENDORED.test(str(e.path)) && !str(e.path).endsWith("package-lock.json"));
+        .filter((e) => !skippedInListing(str(e.path)));
       return {
         ref: resolvedRef,
         count: entries.length,

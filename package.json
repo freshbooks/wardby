@@ -1,6 +1,6 @@
 {
   "name": "@wardby/cli",
-  "version": "0.4.1",
+  "version": "0.5.1",
   "description": "Self-hosted control plane for budget-guarded AI agents.",
   "license": "Apache-2.0",
   "homepage": "https://github.com/wardby/wardby#readme",
@@ -36,6 +36,7 @@
     "NOTICE",
     "bin/",
     "docs/",
+    "deploy/local/docker-compose.quickstart-coding.yml",
     "deploy/local/docker-compose.yml",
     "dist/",
     "help/",

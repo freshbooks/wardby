@@ -7,6 +7,9 @@ GitHub App: reviewing pull requests automatically and responding to
 opens draft PRs — a review agent only reads a repository and posts comments,
 inline suggestions, and a check result.
 
+A review agent can also review a branch of a git repository on the wardby host,
+without a GitHub App; see [Local repositories](coding-agent-setup.md#local-repositories).
+
 ## What a linked review agent does
 
 Once an agent is linked to a repository with the `pull_request` trigger:

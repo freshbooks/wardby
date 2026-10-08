@@ -1,0 +1,27 @@
+# Coding proxy for the quickstart's optional coding step. Layered on
+# docker-compose.yml (which provides the postgres service); runs a prebuilt
+# runtime image instead of building one.
+services:
+  coding-proxy:
+    container_name: wardby-coding-proxy
+    image: ${WARDBY_RUNTIME_IMAGE:?WARDBY_RUNTIME_IMAGE must be set to the wardby runtime image}
+    command: ["node", "dist/coding-proxy/main.js"]
+    environment:
+      # Same credentials as the postgres service in docker-compose.yml. The values
+      # are interpolated as-is: quickstart's generated password is hex, and a
+      # custom user or database name must be URL-safe.
+      DATABASE_URL: postgresql://${WARDBY_POSTGRES_USER:-wardby}:${WARDBY_POSTGRES_PASSWORD:-wardby}@postgres:5432/${WARDBY_POSTGRES_DB:-wardby}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

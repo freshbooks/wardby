@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { Prisma } from "#prisma";
 import type { RepoAccessDecision, RepoAccessGate } from "../../core/repo-access.js";
 import type { HostPermission } from "../../providers/review-host/types.js";
@@ -801,5 +805,66 @@ describe("link_repository admin override on someone else's agent (M-3)", () => {
     // Admins get no implicit access to others' agents: the agent is hidden.
     expect(errorText(noOverride as never)).toContain("not found");
     await c2.close();
+  });
+});
+
+describe("link_repository local repositories", () => {
+  let root: string;
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "local-link-")));
+    execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
+    vi.stubEnv("LOCAL_REPO_ROOTS", root);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  });
+  const agent: FakeAgentRow = { id: "a1", name: "reviewer", ownerId: "p1", kind: "native" };
+
+  it("links a local repository without a host gate, stamping local_root", async () => {
+    const { gate, authorizePrincipal } = gateAt("unlinked");
+    const { mcp } = setup([agent], "p1", [], { gate });
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a1", repository: `local:${root}`, access: "read" },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(parseText(result as never)).toMatchObject({
+      linked: true,
+      link: { provider: "local", repository: `local:${root}`, triggers: [], authorizedVia: "local_root" },
+    });
+    expect(authorizePrincipal).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("refuses triggers on a local link", async () => {
+    const { mcp } = setup([agent], "p1");
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: `local:${root}`,
+        access: "write",
+        triggers: ["pull_request"],
+        checkName: "r",
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(errorText(result as never)).toContain("local repositories support manual review only");
+    await client.close();
+  });
+
+  it("refuses a repository outside the trusted roots", async () => {
+    vi.stubEnv("LOCAL_REPO_ROOTS", join(tmpdir(), "elsewhere-entirely"));
+    const { mcp } = setup([agent], "p1");
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "a1", repository: `local:${root}`, access: "read" },
+    });
+    expect(errorText(result as never)).toContain("local_repo_not_allowed");
+    await client.close();
   });
 });

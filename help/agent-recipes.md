@@ -15,9 +15,11 @@ agent, a merge watcher with the `push` trigger, and a reviewer step that uses
 delegates to a coding builder, for Node/TypeScript, Python, or a
 bring-your-own-image toolchain).
 
-They go beyond the quickstart, which runs native agents only. They require
-Wardby 0.4.0 or later, plus the GitHub App, worker image, and job launcher from
-coding-agent setup. The full recipes, with every configuration and prompt, are
+They go beyond the quickstart. Its optional coding step sets up a builder and a
+reviewer on a local git repository, with no GitHub App (see the
+`local-repositories` article). These recipes react to GitHub events (`push`,
+`mention`, pull requests), so they require Wardby 0.4.0 or later, plus the
+GitHub App, worker image, and job launcher from coding-agent setup. The full recipes, with every configuration and prompt, are
 in [`docs/agent-recipes.md`](../docs/agent-recipes.md).
 
 If you are an assistant connected to Wardby over MCP, follow these steps. Do

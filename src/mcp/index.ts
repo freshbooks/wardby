@@ -171,7 +171,7 @@ export function buildMcpProviders(): McpProviderComposition {
   const secrets = buildSecretCipher(providerConfig);
   const datastore = new PostgresDatastore(prisma, secrets);
   const memory = new PostgresAgentMemory(prisma);
-  const reviewHosts = buildReviewHosts();
+  const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   const hostUserAuthorizers = buildHostUserAuthorizers();
   // One gate (and one cache) for the whole process: set-time checks in the

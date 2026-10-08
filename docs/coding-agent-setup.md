@@ -15,7 +15,9 @@ registry) but never holds the run capability.
   for each enabled coding provider: `OPENAI_API_KEY` and/or
   `ANTHROPIC_API_KEY`.
 - The local database has the current Prisma migrations applied.
-- A GitHub App is installed on only the repository to be exercised. Grant it
+- A GitHub App is installed on only the repository to be exercised. (Not needed
+  for a repository on this machine; see
+  [Local repositories](#local-repositories).) Grant it
   `Contents: Read and write` and `Pull requests: Read and write`; set
   `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` in `.env.local`.
 
@@ -62,6 +64,98 @@ fails with category `continuation_closed` and nothing pushed — see
 Over stdio, the local operator holds every role, so `repositoryAdminOverride`
 is the way to approve a repository there.
 
+## Local repositories
+
+A coding agent (or a review agent) can work on a git repository on the same
+machine as the wardby server instead of a GitHub repository. Write the
+repository as `local:/absolute/path`. No GitHub App, GitHub account link or
+webhook is involved, and no extra role is required: the trusted folders below
+are the only boundary.
+
+Set `LOCAL_REPO_ROOTS` only on a single-user or personal server. Every
+principal who can create or update agents or link repositories can use every
+repository under the trusted folders: its committed code is sent to the model,
+and runs push `wardby/run-*` branches into it. Anyone with execute access to a
+local coding agent can trigger such pushes.
+
+Set these on the control plane:
+
+```dotenv
+# Folders wardby may use, separated by the platform path delimiter (":" on macOS
+# and Linux, ";" on Windows). Unset = every local: repository is refused.
+LOCAL_REPO_ROOTS=/home/you/projects:/srv/repos
+# Coding runs need a container executor.
+JOB_LAUNCHER=docker
+```
+
+- **Trusted folders.** A repository must be the top level of a git work tree
+  whose real path (symlinks resolved) is at or below one of the folders.
+  Wardby stores the repository by that real path and checks the folders again
+  when an agent is created or updated, a repository is linked, a run is
+  triggered, and while a run uses the repository. A change to the variable takes
+  effect after a restart. An outside path fails with `local_repo_not_allowed`.
+- **Launcher.** With `JOB_LAUNCHER=local` a coding run ends with "Coding agents
+  need a container executor"; use `docker` or `kubernetes`. Review agents are
+  native agents and do not need a worker.
+- **The server runs on the host.** Wardby reads and writes the repository
+  directly, so the control plane must not run in a container, a pod or on
+  another machine. A trusted folder the server cannot see is ignored, so its
+  repositories fail with `local_repo_not_allowed`, and `doctor` reports the
+  folder as missing. The machine needs git 2.24 or newer.
+- **Worker images.** Use worker images from the same release as the control
+  plane. An older worker image rejects `local:` repositories (the run fails with
+  `worker_input_failed`), including a bring-your-own `workerImageRef` image,
+  which must be rebuilt on a current driver image.
+
+### What a coding run does
+
+1. Wardby clones the repository's **committed** history at the base ref
+   (`baseRef`, default the profile's). Untracked and uncommitted files, such as
+   `.env.local`, never leave the host. `trigger_agent` returns `warnings` when
+   the working tree is dirty or the repository uses submodules or Git LFS;
+   uncommitted changes are not included, and submodules and LFS are not
+   supported (submodules are not initialized, LFS files are not fetched).
+2. The worker runs in the usual sandbox. `.wardby/services.yaml` works: it is
+   read from the committed file at the base ref (never the working tree) and
+   fails with the same errors as on GitHub (see [coding-services.md](coding-services.md)).
+3. Wardby validates the result and pushes one commit to the branch
+   `wardby/run-<run id>` in the source repository. Your working tree, index
+   and checked-out branch are never modified. `get_run` reports `resultBranch`
+   and `baseSha`.
+4. The repository's own receive-side hooks (`pre-receive`, `update`,
+   `post-receive`) run on that push, as they would for any push.
+
+To build on an earlier result, trigger with `baseRef: "wardby/run-<run id>"`. A
+continuation of a run (a lead agent revising its earlier work) fast-forwards the
+same branch; if the branch has moved, or is checked out, the run fails with
+`local_branch_conflict` and nothing is pushed.
+
+Result branches accumulate, and wardby does not delete them. Clean up with
+`git branch -D wardby/run-<run id>`.
+
+### Review agents
+
+Link a native review agent with `link_repository` (`provider: "local"`,
+`repository: "local:/absolute/path"`, `access: "write"`). A local link is
+manual only: it takes no `triggers` and no `checkName`, and event triggers
+(`pull_request`, `push`, `mention`, `review_fix`) are rejected. The agent's
+owner starts a review with:
+
+```json
+{ "agentId": "<review agent id>", "review": { "branch": "wardby/run-<run id>", "base": "main" } }
+```
+
+`repository` defaults to the agent's only local link, and `base` to the branch
+checked out in the repository. The `repo_*` tools work unchanged and read
+committed content at the branch, never the working tree. `get_run` returns the
+result in `review` (`number`, `branch`, `base`, and `reviews` with `verdict`,
+`summary`, `body` and `comments`). There are no check runs and no CI results.
+
+### Quickstart
+
+`quickstart` can set all of this up. See the coding step in
+[Getting started](getting-started.md#coding-agents-on-a-local-repository).
+
 ## Start the trusted proxy
 
 Run these commands from the repository root:
@@ -77,10 +171,20 @@ The image commands create local tags. Resolve every enabled image with
 `sha256:...` ID in `.env.local`; do not use the mutable tag at runtime. Add the
 following values, replacing image IDs and GitHub values:
 
+Set the images for the providers you use: `CODING_WORKER_IMAGE` for Codex
+agents, and the `CODING_CLAUDE_*` pair for Claude Code agents. Each provider's
+images are optional, but at least one provider must be configured. A Claude-only
+deployment can leave `CODING_WORKER_IMAGE` unset (and skip
+`npm run worker:image:local`); a Codex agent there is then refused with
+`coding_provider_not_configured:codex` unless it names its own worker image
+(see [Coding provider not configured](../help/errors/coding-provider-not-configured.md)).
+
 ```dotenv
 # Leave this as local until every value below is set and reviewed.
 JOB_LAUNCHER=local
+# Codex agents only:
 CODING_WORKER_IMAGE=sha256:replace-with-worker-image-id
+# Claude Code agents only (both or neither):
 CODING_CLAUDE_WORKER_IMAGE=sha256:replace-with-claude-worker-image-id
 CODING_CLAUDE_TOOL_RUNNER_IMAGE=sha256:replace-with-claude-tool-runner-image-id
 # Only for Claude Code agents on the node-python toolchain (version 3.12):
@@ -112,7 +216,9 @@ change `JOB_LAUNCHER=docker` and run:
 npm run cli -- coding preflight
 ```
 
-The preflight checks that Docker can inspect the immutable worker image. A real
+The preflight checks that every configured worker image (the Codex worker and/or
+the Claude Code worker and tool runner) is immutable and that Docker can inspect
+it. A real
 run additionally verifies the proxy's isolated-network attachment immediately
 before launching the worker.
 

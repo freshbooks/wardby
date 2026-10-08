@@ -149,6 +149,10 @@ jobs:
       - run: npm ci
       - run: node scripts/coding-worker-image-policy.mjs ../${{ matrix.dockerfile }} --kind=${{ matrix.kind }}
       - run: docker build -f ${{ matrix.dockerfile }} -t wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }} .
+      # The runtime images inherit protocol.js from the pinned driver; a protocol change needs a new
+      # driver-v* pinned, or every rebuilt worker keeps validating with the old protocol.
+      - if: matrix.kind == 'runtime'
+        run: npx tsc -p tsconfig.build.json && node scripts/check-worker-protocol.mjs wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
       - if: matrix.tag-suffix == 'node'
         run: npm run test:docker-isolation
         env:

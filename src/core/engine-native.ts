@@ -412,7 +412,9 @@ export class NativeEngine implements Engine {
       };
     }
 
-    const calibration = checkTokenCalibration(inputTokens, usage.inputTokens);
+    // The estimate covers the whole prompt; LlmUsage.inputTokens excludes
+    // cache-write tokens (billed separately), so add them back to compare.
+    const calibration = checkTokenCalibration(inputTokens, usage.inputTokens + (usage.cacheWriteTokens ?? 0));
     if (calibration.diverged) {
       const direction =
         calibration.deltaRatio < 0

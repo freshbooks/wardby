@@ -31,7 +31,7 @@ export type { HostEvent };
 const log = logger.child({ module: "host-events" });
 const MAX_TASK_BODY = 8000;
 const MAX_TITLE = 256;
-const HOST_NAMES: Record<HostEvent["provider"], string> = { github: "GitHub" };
+const HOST_NAMES: Record<HostEvent["provider"], string> = { github: "GitHub", local: "local repository" };
 
 export type HostEventDb = Pick<
   PrismaClient,

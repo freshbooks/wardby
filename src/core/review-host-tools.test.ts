@@ -64,6 +64,25 @@ describe("resolveLink", () => {
     expect(resolveLink([WRITE], "chfields/nope")).toBeNull();
     expect(resolveLink([WRITE], "not a repo")).toBeNull();
   });
+
+  it("matches local:/abs links whole and never confuses them with owner/name", () => {
+    const LOCAL: RepositoryLink = {
+      provider: "local",
+      repository: "local:/srv/repos/app",
+      access: "write",
+      checkName: null,
+      waitForCi: false,
+    };
+    const lookalike: RepositoryLink = { ...WRITE, repository: "repos/app" };
+    expect(resolveLink([WRITE, LOCAL], "local:/srv/repos/app")).toBe(LOCAL);
+    expect(resolveLink([WRITE, LOCAL], " local:/srv/repos/app/ ")).toBe(LOCAL);
+    expect(resolveLink([lookalike, LOCAL], "local:/srv/repos/app")).toBe(LOCAL);
+    expect(resolveLink([lookalike, LOCAL], "repos/app")).toBe(lookalike);
+    expect(resolveLink([WRITE, LOCAL], "local:/srv/repos/other")).toBeNull();
+    expect(resolveLink([WRITE, LOCAL], "local:relative")).toBeNull();
+    expect(resolveLink([WRITE, LOCAL], "/srv/repos/app")).toBeNull();
+    expect(resolveLink([LOCAL], "github.com/chfields/knock-knock-jokes")).toBeNull();
+  });
 });
 
 describe("handleReviewHostTool", () => {

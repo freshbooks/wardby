@@ -87,6 +87,16 @@ export type FinalizeChangesResult =
       commitSha: string;
       pullRequestNumber: number;
       pullRequestUrl: string;
+    }
+  | {
+      /** Pushed the run's branch to a remote with no pull requests (a local
+       * repository): headRef now points at commitSha there. */
+      outcome: "branch_pushed";
+      repository: string;
+      baseRef: string;
+      baseCommit: string;
+      headRef: string;
+      commitSha: string;
     };
 
 export interface VcsProvider {

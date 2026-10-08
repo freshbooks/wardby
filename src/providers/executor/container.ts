@@ -96,6 +96,14 @@ export async function normalizeCollectedLockfiles(provider: string, workspacePat
   });
 }
 
+/** Columns on CodingRun recorded when a run completes, beyond its result JSON. */
+export interface CodingRunRecord {
+  /** The pushed branch of a run on a local repository. */
+  resultBranch?: string;
+  /** The commit the run started from. */
+  baseSha?: string;
+}
+
 export interface ContainerRunSnapshot {
   runId: string;
   status: string;
@@ -175,7 +183,12 @@ export interface ContainerExecutionStore {
    * Related pull requests section. Optional: without it no section is written.
    */
   relatedPullRequests?(runId: string): Promise<RelatedPullRequestEntry[]>;
-  complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void>;
+  complete(
+    runId: string,
+    status: "succeeded" | "budget_exhausted",
+    result: CodingRunResult,
+    record?: CodingRunRecord,
+  ): Promise<void>;
   terminate(
     runId: string,
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
@@ -401,7 +414,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
   }
 
-  async complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void> {
+  async complete(
+    runId: string,
+    status: "succeeded" | "budget_exhausted",
+    result: CodingRunResult,
+    record: CodingRunRecord = {},
+  ): Promise<void> {
     const finishedAt = new Date();
     const finished = await this.db.$transaction(async (tx) => {
       const run = await tx.run.findUnique({ where: { id: runId }, include: { codingRun: true } });
@@ -412,7 +430,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       }
       await tx.codingRun.update({
         where: { runId },
-        data: { result, resultSchema: CODING_PROTOCOL_VERSION },
+        data: {
+          result,
+          resultSchema: CODING_PROTOCOL_VERSION,
+          ...(record.resultBranch ? { resultBranch: record.resultBranch } : {}),
+          ...(record.baseSha ? { baseSha: record.baseSha } : {}),
+        },
       });
       await tx.run.update({
         where: { id: runId },
@@ -504,7 +527,12 @@ export interface ContainerExecutorOptions {
   sessions: CodingSessionController;
   capabilities: RunCapabilityVault;
   artifactRoot: string;
-  workerImage: string;
+  /**
+   * The Codex worker for the "node" toolchain (CODING_WORKER_IMAGE). Optional on a Claude-only
+   * deployment: a Codex run without an agent BYO image is then refused with
+   * coding_provider_not_configured:codex, as Claude Code is without its images.
+   */
+  workerImage?: string;
   /** Additional toolchains beyond the "node" baseline (workerImage). Keyed by toolchain, then version. */
   additionalWorkerImages?: Record<string, Record<string, string>>;
   credentialRef: string;
@@ -573,7 +601,7 @@ export class ContainerExecutor implements Executor {
   constructor(private readonly options: ContainerExecutorOptions) {
     this.artifactRoot = resolve(options.artifactRoot);
     if (this.artifactRoot === resolve("/")) throw new Error("coding_artifact_root_invalid");
-    if (!isImmutableDockerImage(options.workerImage)) {
+    if (options.workerImage !== undefined && !isImmutableDockerImage(options.workerImage)) {
       throw new Error("coding_worker_image_invalid");
     }
     for (const versions of Object.values(options.additionalWorkerImages ?? {})) {
@@ -1070,9 +1098,18 @@ export class ContainerExecutor implements Executor {
         ...this.issueFor(current),
         ...(await this.relatedFor(current)),
       });
+      // A pushed branch (local repository) is a successful run with no pull
+      // request; its branch is recorded on the run for the operator to merge.
       const result = this.resultFor(output, current, finalized.outcome, finalized);
-      await this.options.store.complete(run.runId, "succeeded", result);
-      if (finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated") {
+      await this.options.store.complete(run.runId, "succeeded", result, {
+        baseSha: finalized.baseCommit,
+        ...(finalized.outcome === "branch_pushed" ? { resultBranch: finalized.headRef } : {}),
+      });
+      if (
+        finalized.outcome === "pull_request_opened" ||
+        finalized.outcome === "pull_request_updated" ||
+        finalized.outcome === "branch_pushed"
+      ) {
         this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
       }
       this.terminal(current, "succeeded");
@@ -1134,7 +1171,7 @@ export class ContainerExecutor implements Executor {
   private resultFor(
     output: CodingAgentOutput,
     run: ContainerRunSnapshot,
-    forcedOutcome?: "pull_request_opened" | "pull_request_updated" | "no_changes" | "budget_exhausted",
+    forcedOutcome?: CodingRunResult["outcome"],
     finalized?: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>,
   ): CodingRunResult {
     const outcome = forcedOutcome ?? (output.outcome === "budget_exhausted" ? "budget_exhausted" : "no_changes");
@@ -1151,7 +1188,9 @@ export class ContainerExecutor implements Executor {
             pullRequestUrl: finalized.pullRequestUrl,
             pullRequestNumber: finalized.pullRequestNumber,
           }
-        : {}),
+        : outcome === "branch_pushed" && finalized?.outcome === "branch_pushed"
+          ? { headRef: finalized.headRef, commitSha: finalized.commitSha }
+          : {}),
       summary: output.summary,
       tests: output.tests,
       tag: output.tag,
@@ -1174,7 +1213,10 @@ export class ContainerExecutor implements Executor {
       if (!isImmutableDockerImage(selector.workerImageRef)) throw new Error("coding_worker_image_invalid");
       return selector.workerImageRef;
     }
-    if (selector.toolchain === "node") return this.options.workerImage;
+    if (selector.toolchain === "node") {
+      if (!this.options.workerImage) throw new Error("coding_provider_not_configured:codex");
+      return this.options.workerImage;
+    }
     const versions = this.options.additionalWorkerImages?.[selector.toolchain];
     const image = selector.toolchainVersion ? versions?.[selector.toolchainVersion] : undefined;
     if (!image) {
@@ -1262,6 +1304,9 @@ export class ContainerExecutor implements Executor {
     if (provider === "claude-code" && (!run.workerImage || !this.options.claudeToolRunnerImage)) {
       throw new Error("coding_provider_not_configured:claude-code");
     }
+    // Runs keep the image they were dispatched with; one without it needs the deployment default.
+    const image = run.workerImage ?? this.options.workerImage;
+    if (!image) throw new Error("coding_provider_not_configured:codex");
     if (run.workspaceDiskMb && run.workspaceDiskMb > this.options.maxDiskMb) {
       throw new Error("coding_workspace_disk_exceeds_limit");
     }
@@ -1274,7 +1319,7 @@ export class ContainerExecutor implements Executor {
       kind: "coding-agent",
       runId: run.runId,
       provider,
-      image: run.workerImage ?? this.options.workerImage,
+      image,
       // A run keeps the tool image it was dispatched with; rows from before CodingRun.toolImage use the default.
       ...(provider === "claude-code" ? { toolImage: run.toolImage ?? this.options.claudeToolRunnerImage } : {}),
       inputArtifact,
@@ -1584,7 +1629,13 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   ["vcs_protected_path:", PROTECTED_PATH_CATEGORY],
   // A continuation whose pull request was merged or closed: nothing pushed (coding/continuation-wording.ts).
   [CONTINUATION_CLOSED_ERROR, CONTINUATION_CLOSED_CATEGORY],
+  // A provider whose worker images this deployment doesn't configure (codex or claude-code): configuration.
+  ["coding_provider_not_configured", "preflight"],
+  // A GitHub repository on a server with no GitHub App: configuration, like an unsupported service.
+  ["vcs_github_not_configured", "preflight"],
   ["vcs_", "workspace"],
+  // Local repositories (LocalRepoError codes): the same family as the vcs_ errors.
+  ["local_", "workspace"],
   ["git_", "workspace"],
 ];
 

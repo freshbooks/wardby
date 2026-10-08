@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { CodingProfilePatchSchema, CodingProfileSchema, DEFAULT_PROTECTED_PATHS } from "./profile.js";
 
 describe("CodingProfileSchema", () => {
+  it("accepts a local repository and normalizes its path; GitHub validation is unchanged", () => {
+    expect(CodingProfileSchema.parse({ repository: "local:/srv/repos/app/" }).repository).toBe("local:/srv/repos/app");
+    expect(CodingProfileSchema.safeParse({ repository: "local:relative/path" }).success).toBe(false);
+    expect(CodingProfileSchema.safeParse({ repository: "local:" }).success).toBe(false);
+    expect(CodingProfileSchema.safeParse({ repository: "https://token@github.com/o/r" }).success).toBe(false);
+  });
+
   it("normalizes identifiers and applies fail-safe defaults", () => {
     expect(CodingProfileSchema.parse({ repository: "OpenAI/Example.git" })).toEqual({
       provider: "codex",

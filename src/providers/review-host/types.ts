@@ -1,13 +1,15 @@
 /**
- * Host-neutral code-review surface for native agents. GitHub is the first
- * implementation (./github.ts); Bitbucket Cloud is anticipated. Every method
+ * Host-neutral code-review surface for native agents. GitHub (./github.ts) and
+ * local git repositories (./local.ts) implement it; Bitbucket Cloud is anticipated. Every method
  * takes the repository and mints its own least-permission credential — no
  * method accepts a token or a permission. See
  * docs/private/2026-09-25-code-review-host-design.md §5.
  */
 
-export type ReviewHostProvider = "github";
-export const REVIEW_HOST_PROVIDERS: readonly ReviewHostProvider[] = ["github"];
+export type ReviewHostProvider = "github" | "local";
+export const REVIEW_HOST_PROVIDERS: readonly ReviewHostProvider[] = ["github", "local"];
+/** Providers with host user accounts to link (link_host_account); a local repository has none. */
+export const HOST_ACCOUNT_PROVIDERS: readonly ReviewHostProvider[] = ["github"];
 
 export type ReviewVerdict = "APPROVE" | "CHANGES_REQUESTED" | "COMMENT";
 export type CheckConclusion = "success" | "failure" | "neutral";

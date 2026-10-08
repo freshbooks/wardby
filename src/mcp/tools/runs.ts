@@ -75,7 +75,13 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           diagnosticId: true,
           debugTrace: true,
           services: true,
+          resultBranch: true,
+          baseSha: true,
         },
+      });
+      const localPr = await ctx.db.localPullRequest.findUnique({
+        where: { runId: run.id },
+        include: { reviews: { orderBy: { createdAt: "asc" } } },
       });
       const codingResult = publicCodingRunResult(codingRun?.result);
       // A pending coding run with queuedAt is waiting for a concurrency slot
@@ -113,6 +119,23 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         // An admin turned on the debug trace: the worker's full trace is in its pod log.
         ...(codingRun?.debugTrace ? { debugTrace: true } : {}),
         ...(services.length > 0 ? { services } : {}),
+        ...(codingRun?.resultBranch ? { resultBranch: codingRun.resultBranch } : {}),
+        ...(codingRun?.baseSha ? { baseSha: codingRun.baseSha } : {}),
+        ...(localPr
+          ? {
+              review: {
+                number: localPr.number,
+                branch: localPr.branch,
+                base: localPr.base,
+                reviews: localPr.reviews.map((r) => ({
+                  verdict: r.verdict,
+                  summary: r.summary,
+                  body: r.body,
+                  comments: r.comments,
+                })),
+              },
+            }
+          : {}),
         ...(codingRun ? { packages, packageRefusals, packagePlan } : {}),
       });
     },

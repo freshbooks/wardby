@@ -295,7 +295,7 @@ async function finishRunClaimed(
  */
 const CODING_EXECUTOR_NOT_CONFIGURED =
   "Coding agents need a container executor, but this deployment runs with JOB_LAUNCHER=local. " +
-  "Set JOB_LAUNCHER=docker on a host with Docker to run them (see docs/coding-worker-isolation.md).";
+  "Set JOB_LAUNCHER=docker (or kubernetes) to run them (see docs/coding-worker-isolation.md).";
 
 /**
  * Slack past the child's own queue wait + container deadline before the
@@ -528,8 +528,9 @@ async function executeTrackedRun(
       where: { parentAgentId: agent.id },
       select: { boundName: true, childAgentId: true },
     });
-    // Only queried when a review host is configured, so deployments without
-    // a GitHub App (and tests) never touch the table.
+    // Only queried when the runner was given review hosts. buildReviewHosts
+    // always includes the local host, so a configured server always queries;
+    // only a runner built without hosts (as in many tests) skips the table.
     const repositoryLinks: RepositoryLink[] = reviewHosts
       ? (await db.agentRepository.findMany({ where: { agentId: agent.id } })).map((l) => ({
           provider: l.provider as RepositoryLink["provider"],

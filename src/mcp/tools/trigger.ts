@@ -35,7 +35,10 @@ import {
   RESPONSE_PATH_SNAPSHOT_BUDGET,
   type AttributionIntent,
 } from "../../core/attribution.js";
-import { CodingBaseRefSchema, CodingTaskOverrideSchema } from "../../coding/protocol.js";
+import { CodingBaseRefSchema, CodingTaskOverrideSchema, isLocalRepository } from "../../coding/protocol.js";
+import { loadLocalRepoRoots, resolveLocalRepository, LocalRepoError } from "../../coding/local-repo.js";
+import { localRepoWarnings } from "../../coding/local-repo-status.js";
+import { SHA, isSafeRefName, localGit } from "../../coding/local-git.js";
 import { z } from "zod";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
@@ -54,8 +57,70 @@ const TriggerAgentSchema = z
     task: CodingTaskOverrideSchema.optional(),
     baseRef: CodingBaseRefSchema.optional(),
     issue: z.unknown().optional(),
+    review: z
+      .object({
+        repository: z.string().optional(),
+        branch: z.string().min(1).max(250),
+        base: z.string().min(1).max(250).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
+
+/**
+ * Resolves a manual local review request to a canonical repository and the two
+ * commit SHAs. Roots are re-checked now (they can narrow after linking); every
+ * failure is a 400 whose message carries the code, before any row exists.
+ */
+async function resolveLocalReview(
+  ctx: McpRequestContext,
+  agentId: string,
+  review: { repository?: string; branch: string; base?: string },
+): Promise<{ repository: string; branch: string; base: string; headSha: string }> {
+  let repository = review.repository;
+  const links = await ctx.db.agentRepository.findMany({ where: { agentId, provider: "local" } });
+  if (repository === undefined) {
+    if (links.length !== 1) throw new McpError(400, "pass review.repository");
+    repository = links[0].repository;
+  }
+  let resolved;
+  try {
+    resolved = await resolveLocalRepository(repository, loadLocalRepoRoots(process.env).roots);
+  } catch (err) {
+    if (err instanceof LocalRepoError) throw new McpError(400, err.message);
+    throw new McpError(400, `local_repo_not_found: ${(err as Error).message}`);
+  }
+  if (!links.some((l) => l.repository === resolved.repository)) {
+    throw new McpError(
+      400,
+      `Agent "${agentId}" is not linked to ${resolved.repository}; link it with link_repository first.`,
+    );
+  }
+  const dir = resolved.path;
+  let base = review.base;
+  if (base === undefined) {
+    try {
+      base = (await localGit(dir, ["symbolic-ref", "--short", "HEAD"])).trim();
+    } catch {
+      throw new McpError(400, "local_ref_invalid: the repository's HEAD is not on a branch; pass review.base");
+    }
+  }
+  const sha = async (ref: string): Promise<string> => {
+    if (!(await isSafeRefName(dir, ref)))
+      throw new McpError(400, `local_ref_invalid: "${ref}" is not a valid branch name`);
+    try {
+      const out = (await localGit(dir, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])).trim();
+      if (SHA.test(out)) return out;
+    } catch {
+      // fall through
+    }
+    throw new McpError(400, `local_ref_not_found: "${ref}" does not name a commit in ${resolved.repository}`);
+  };
+  const headSha = await sha(review.branch);
+  await sha(base);
+  return { repository: resolved.repository, branch: review.branch, base, headSha };
+}
 
 function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
   const parsed = TriggerAgentSchema.safeParse(args);
@@ -118,6 +183,25 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         agentId: { type: "string" },
         task: { type: "string" },
         baseRef: { type: "string" },
+        review: {
+          type: "object",
+          additionalProperties: false,
+          description:
+            "Native review agents only, owner only: review a branch of a linked local repository (local:/abs/path). " +
+            "The result appears in get_run as `review`.",
+          properties: {
+            repository: {
+              type: "string",
+              description: "The local repository (local:/abs/path). Default: the agent's only local link.",
+            },
+            branch: { type: "string", description: "The branch to review (resolved to its current commit)." },
+            base: {
+              type: "string",
+              description: "The branch to review against. Default: the branch currently checked out in the repository.",
+            },
+          },
+          required: ["branch"],
+        },
         issue: {
           type: "object",
           description: "Count this run's cost toward an issue in a project the agent is linked to.",
@@ -135,9 +219,32 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         args.agentId,
         args,
       );
+      let review: Awaited<ReturnType<typeof resolveLocalReview>> | undefined;
+      if (args.review !== undefined) {
+        if (agent.kind !== "native") throw new McpError(400, "review is only valid for native review agents.");
+        if (agent.ownerId === null || agent.ownerId !== ctx.principal.id) {
+          throw new McpError(403, `Agent "${agent.id}": only its owner can start a manual review.`);
+        }
+        review = await resolveLocalReview(ctx, agent.id, args.review);
+      }
       if (agent.kind !== "coding" && (args.task !== undefined || args.baseRef !== undefined)) {
         throw new McpError(400, "Task and baseRef overrides are only valid for coding agents.");
       }
+
+      // A local repository is re-checked against the roots as they are now
+      // (they can narrow after the agent was saved), before any run exists.
+      let warnings: string[] = [];
+      const repository = agent.kind === "coding" ? agent.codingProfile?.repository : undefined;
+      if (repository !== undefined && isLocalRepository(repository)) {
+        try {
+          const resolved = await resolveLocalRepository(repository, loadLocalRepoRoots(process.env).roots);
+          warnings = await localRepoWarnings(resolved.path);
+        } catch (err) {
+          if (err instanceof LocalRepoError) throw new McpError(400, err.message);
+          throw err;
+        }
+      }
+      const withWarnings = <T extends object>(result: T) => (warnings.length > 0 ? { ...result, warnings } : result);
 
       // Refused before any run exists: an invalid or unlinked issue is never
       // silently dropped into an unattributed run.
@@ -157,37 +264,60 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         }
       }
 
-      const dispatched = await dispatchRun({
-        db: ctx.db,
-        executor: ctx.providers.executor,
-        selfDefects: { db: ctx.db, issueTrackers: ctx.providers.issueTrackers },
-        agentId: agent.id,
-        trigger: "manual",
-        codingTask: args.task,
-        codingBaseRef: args.baseRef,
-        attribution,
-        task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
-        triggeredById: ctx.principal.id,
-        // Re-checked through the transaction: a concurrent revoke or
-        // make_owner conflicts instead of racing the run in.
-        beforePersist: async (tx, current) => {
-          await requireTriggerable(ctx, current, agent.id, args, tx);
-          return true;
-        },
-      });
-      if (!dispatched) throw new Error("Run dispatch was not claimed.");
+      // The pull request row is made first (its serial number is in the task
+      // text) and removed again if the run is not dispatched.
+      const pullRequest = review
+        ? await ctx.db.localPullRequest.create({
+            data: { repository: review.repository, branch: review.branch, base: review.base },
+          })
+        : undefined;
+      let dispatched;
+      try {
+        dispatched = await dispatchRun({
+          db: ctx.db,
+          executor: ctx.providers.executor,
+          selfDefects: { db: ctx.db, issueTrackers: ctx.providers.issueTrackers },
+          agentId: agent.id,
+          trigger: "manual",
+          codingTask: args.task,
+          codingBaseRef: args.baseRef,
+          attribution,
+          task: ctx.clientSupportsTasks ? { principalId: ctx.principal.id, ttlMs: DEFAULT_TASK_TTL_MS } : undefined,
+          triggeredById: ctx.principal.id,
+          ...(review && pullRequest
+            ? {
+                taskOverride: `Review pull request #${pullRequest.number} in ${review.repository} (head ${review.headSha}).`,
+                afterPersist: async (tx, run) => {
+                  await tx.localPullRequest.update({ where: { id: pullRequest.id }, data: { runId: run.id } });
+                },
+              }
+            : {}),
+          // Re-checked through the transaction: a concurrent revoke or
+          // make_owner conflicts instead of racing the run in.
+          beforePersist: async (tx, current) => {
+            await requireTriggerable(ctx, current, agent.id, args, tx);
+            return true;
+          },
+        });
+        if (!dispatched) throw new Error("Run dispatch was not claimed.");
+      } catch (err) {
+        if (pullRequest) await ctx.db.localPullRequest.deleteMany({ where: { id: pullRequest.id } }).catch(() => {});
+        throw err;
+      }
 
       if (ctx.clientSupportsTasks) {
         if (!dispatched.task) throw new Error("Run task was not persisted.");
-        return textResult(createTaskResult(dispatched.task, DEFAULT_TASK_TTL_MS));
+        return textResult(withWarnings(createTaskResult(dispatched.task, DEFAULT_TASK_TTL_MS)));
       }
       // A run refused at dispatch (its budget group or run tree is spent), or
       // failed there (a coding agent's model is unavailable), is already
       // terminal: say so now rather than only through get_run.
       if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
-        return textResult({ runId: dispatched.run.id, status: dispatched.run.status, error: dispatched.run.error });
+        return textResult(
+          withWarnings({ runId: dispatched.run.id, status: dispatched.run.status, error: dispatched.run.error }),
+        );
       }
-      return textResult({ runId: dispatched.run.id });
+      return textResult(withWarnings({ runId: dispatched.run.id }));
     },
   });
 

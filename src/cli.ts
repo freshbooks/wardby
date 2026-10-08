@@ -30,9 +30,17 @@ import {
   loadProviderConfig,
 } from "./config/providers.js";
 import { drainCodingQueue } from "./core/coding-queue.js";
-import { isImmutableDockerImage } from "./providers/jobs/docker-isolation.js";
+import {
+  CODING_WORKER_IMAGES_REQUIRED,
+  configuredCodingImages,
+  dockerCodingPreflight,
+} from "./coding/docker-preflight.js";
 import { ClientNodeKubernetesApi } from "./providers/jobs/kubernetes-client.js";
-import { describePreflightFailure, kubernetesPreflight } from "./providers/jobs/kubernetes-preflight.js";
+import {
+  describePreflightFailure,
+  kubernetesPreflight,
+  preflightCanaryImage,
+} from "./providers/jobs/kubernetes-preflight.js";
 import {
   RoutingLlmProvider,
   isLlmEffort,
@@ -614,7 +622,15 @@ async function run(name: string | undefined): Promise<void> {
   try {
     run = await runAgent(
       name,
-      { llm, engine, datastore, secrets, memory, reviewHosts: buildReviewHosts(), issueTrackers: buildIssueTrackers() },
+      {
+        llm,
+        engine,
+        datastore,
+        secrets,
+        memory,
+        reviewHosts: buildReviewHosts(process.env, prisma),
+        issueTrackers: buildIssueTrackers(),
+      },
       prisma,
       (delta) => {
         process.stdout.write(delta);
@@ -658,10 +674,13 @@ async function codingOps(args: string[]): Promise<void> {
     fail("coding operations require JOB_LAUNCHER=docker or kubernetes.");
   }
   const container = loadContainerExecutorConfig();
-  if (config.jobs === "kubernetes") {
-    if (!container.workerImage) fail("CODING_WORKER_IMAGE is required when JOB_LAUNCHER=kubernetes.");
-  } else if (!container.workerImage || !container.proxyContainer) {
-    fail("CODING_WORKER_IMAGE and CODING_PROXY_CONTAINER are required when JOB_LAUNCHER=docker.");
+  // Either provider's images are enough: CODING_WORKER_IMAGE (Codex) or the Claude Code pair.
+  const canaryImage = preflightCanaryImage(container);
+  if (!container.workerImage && !(container.claudeWorkerImage && container.claudeToolRunnerImage)) {
+    fail(`${CODING_WORKER_IMAGES_REQUIRED} when JOB_LAUNCHER=${config.jobs}.`);
+  }
+  if (config.jobs === "docker" && !container.proxyContainer) {
+    fail("CODING_PROXY_CONTAINER is required when JOB_LAUNCHER=docker.");
   }
 
   if (operation === "preflight" && config.jobs === "kubernetes") {
@@ -672,27 +691,32 @@ async function codingOps(args: string[]): Promise<void> {
       checks = await kubernetesPreflight({
         api,
         config: kubernetes,
-        workerImage: container.workerImage,
+        workerImage: canaryImage as string,
         maxDiskMb: container.maxDiskMb,
         timeoutMs: kubernetes.preflightTimeoutMs,
       });
     } catch (error) {
       fail(`coding preflight failed: ${describePreflightFailure(error)}`);
     }
-    console.log(`coding preflight passed (${checks.join(", ")}) for ${container.workerImage}`);
+    console.log(`coding preflight passed (${checks.join(", ")}) for ${canaryImage}`);
     return;
   }
 
   if (operation === "preflight") {
-    if (!isImmutableDockerImage(container.workerImage)) {
-      fail("CODING_WORKER_IMAGE must use an immutable repository digest or local image ID.");
-    }
-    try {
-      await execFile("docker", ["image", "inspect", container.workerImage], { maxBuffer: 1024 * 1024 });
-    } catch {
-      fail(`Docker cannot inspect coding worker image "${container.workerImage}".`);
-    }
-    console.log(`coding preflight passed for ${container.workerImage}`);
+    const failure = await dockerCodingPreflight(container, async (image) => {
+      try {
+        await execFile("docker", ["image", "inspect", image], { maxBuffer: 1024 * 1024 });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (failure) fail(failure);
+    console.log(
+      `coding preflight passed for ${configuredCodingImages(container)
+        .map(([, image]) => image)
+        .join(", ")}`,
+    );
     return;
   }
 
@@ -781,7 +805,7 @@ async function scheduler(args: string[]): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory();
-  const reviewHosts = buildReviewHosts();
+  const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   // One repository-access gate (and cache) for native repo_* calls and coding runs.
   const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });
