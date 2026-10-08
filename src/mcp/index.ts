@@ -249,9 +249,11 @@ async function closeQuietly(promise: Promise<void> | undefined, what: string): P
  * right when a long-running server process starts, so its first coding run doesn't pay for it.
  * Never awaited by its caller and never throws: `warmUp()` on every implementation already swallows
  * its own failure (logging it instead), but this still guards the call site against a surprise
- * rejection, since nothing here may block or fail server start-up. Called only from `startMcp` below
- * — i.e. from `wardby mcp` (stdio and HTTP) and from `wardby serve`, which shares this same start-up
- * path — never from a one-shot CLI command (`wardby run`, `coding preflight`, migrations, imports).
+ * rejection, since nothing here may block or fail server start-up. Called from `startMcp` below —
+ * i.e. from `wardby mcp` (stdio and HTTP) and from `wardby serve`, which shares this same start-up
+ * path — and, separately, from `cli.ts`'s `scheduler()` (`wardby scheduler`), which dispatches
+ * scheduled coding runs through its own Kubernetes executor but never starts an MCP server. Never
+ * called from a one-shot CLI command (`wardby run`, `coding preflight`, migrations, imports).
  */
 export function warmUpExecutor(executor: Pick<McpProviders["executor"], "warmUp">): void {
   void executor.warmUp?.()?.catch((err: unknown) => {

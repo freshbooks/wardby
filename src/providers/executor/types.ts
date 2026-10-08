@@ -41,8 +41,9 @@ export interface Executor {
   close?: () => Promise<void>;
   /**
    * Fire-and-forget start-up warm-up, called only from a long-running server process's own
-   * start-up (`wardby serve`, the MCP server) — never from a one-shot CLI command. Delegates to the
-   * coding job launcher's own `warmUp` (e.g. Kubernetes's memoized cluster preflight); never throws.
+   * start-up (`wardby serve`, the MCP server, `wardby scheduler`) — never from a one-shot CLI
+   * command. Delegates to the coding job launcher's own `warmUp` (e.g. Kubernetes's memoized
+   * cluster preflight); never throws.
    */
   warmUp?: () => Promise<void>;
   /**
