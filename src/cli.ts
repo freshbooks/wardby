@@ -49,6 +49,7 @@ import {
 } from "./providers/llm/index.js";
 import { startModelCatalog, type CatalogStore } from "./providers/llm/catalog-store.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
+import { drainDeferredRuns } from "./providers/executor/deferred.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
 import { PostgresAgentMemory } from "./providers/memory/index.js";
@@ -842,6 +843,8 @@ async function scheduler(args: string[]): Promise<void> {
     selfDefects,
     onLeaderTick: async () => {
       await drainCodingQueue({ db: prisma, executor, ...concurrency, selfDefects });
+      // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.
+      await drainDeferredRuns({ db: prisma, executor });
     },
   });
 

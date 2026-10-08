@@ -375,6 +375,14 @@ model Run {
   localPullRequest LocalPullRequest?
   /// A sandbox-mode native run's gateway session (native sandbox phase 3).
   nativeGatewaySession NativeGatewaySession?
+  /// Set when a process that may not start runs itself (the native sandbox
+  /// gateway, which holds no executor) dispatched this run: the scheduler
+  /// leader starts it through the server's executor and clears this.
+  startDeferredAt   DateTime?
+  /// Likewise a stop that process asked for: the scheduler leader stops the
+  /// run through the server's executor and clears this.
+  stopRequestedAt   DateTime?
+  stopRequestReason String?
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -410,6 +418,8 @@ model Run {
   @@index([startedAt])
   @@index([status])
   @@index([parentRunId])
+  @@index([startDeferredAt])
+  @@index([stopRequestedAt])
 }
 
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
