@@ -14,6 +14,18 @@ import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import type { WorkerLauncher } from "./gateway.js";
 import { loopbackLauncher } from "./loopback.js";
+import { createProcessLauncher } from "./stdio.js";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+
+// The real worker entry as a separate process, from source, with an empty environment.
+const REPO_ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
+const processLauncher = createProcessLauncher({
+  command: process.execPath,
+  args: ["--import", "tsx", "src/native-worker/main.ts"],
+  env: {},
+  cwd: REPO_ROOT,
+});
 
 const MODEL = "claude-haiku-4-5";
 
@@ -154,14 +166,14 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
 
   // Counts worker launches, so a test can prove the sandbox path (not the in-process engine) ran.
   let launches = 0;
-  const countingLauncher: WorkerLauncher = {
+  const counting = (launcher: WorkerLauncher): WorkerLauncher => ({
     run: (input, gateway, signal) => {
       launches += 1;
-      return loopbackLauncher.run(input, gateway, signal);
+      return launcher.run(input, gateway, signal);
     },
-  };
+  });
 
-  async function runIn(mode: "control_plane" | "sandbox") {
+  async function runIn(mode: "control_plane" | "sandbox", launcher: WorkerLauncher = loopbackLauncher) {
     const { llm, requests } = scriptedModel(script());
     const datastore = memoryDatastore({ [`${agentId}:notes/a`]: "hello" });
     const texts: string[] = [];
@@ -172,7 +184,7 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
       secrets: identityCipher,
       memory: noMemory,
       // Both runs get the launcher: only the run's own snapshot decides where its engine runs.
-      nativeSandbox: countingLauncher,
+      nativeSandbox: counting(launcher),
     };
     const run = await db.run.create({ data: { agentId, trigger: "manual", nativeExecutionMode: mode } });
     const finished = await executeRun(run.id, providers, db, (delta) => texts.push(delta));
@@ -185,9 +197,10 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
     const inProcess = await runIn("control_plane");
     expect(launches).toBe(0);
     const sandboxed = await runIn("sandbox");
-    expect(launches).toBe(1);
+    const separateProcess = await runIn("sandbox", processLauncher);
+    expect(launches).toBe(2);
 
-    for (const result of [inProcess, sandboxed]) {
+    for (const result of [inProcess, sandboxed, separateProcess]) {
       expect(result.finished.status).toBe("succeeded");
       expect(result.finished.finalText).toBe("The note says hello.");
       expect(result.datastore.store.get(`${agentId}:notes/seen`)).toEqual({ key: "notes/a", keyLength: 16 });
@@ -204,8 +217,10 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox worker parity (databa
       modelUsage: r.modelUsage.map(({ runId: _runId, ...rest }) => ({ ...rest, costUsd: Number(rest.costUsd) })),
     });
     expect(summary(sandboxed)).toEqual(summary(inProcess));
+    expect(summary(separateProcess)).toEqual(summary(inProcess));
     // The model saw the same conversation, tool result included.
     expect(sandboxed.requests).toEqual(inProcess.requests);
+    expect(separateProcess.requests).toEqual(inProcess.requests);
     const toolResult = sandboxed.requests[1].messages.find((m) => m.role === "tool");
     expect(toolResult?.content).toContain('{"note":"hello","keyLength":16}');
   });

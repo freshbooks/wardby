@@ -156,7 +156,7 @@ describe("runSandboxedEngine (trusted gateway)", () => {
   it("serves privileged bridges only for the run's own user tools, and only privileged bridge names", async () => {
     const host = Object.fromEntries(
       PRIVILEGED_BRIDGE_NAMES.map((name) => [name, async () => (name === "__bridge_secretsGet" ? "v" : null)]),
-    ) as PrivilegedHost;
+    ) as unknown as PrivilegedHost;
     const scoped = vi.fn((tool: string) => (tool === "lookup" ? host : undefined));
     const { result } = await withWorker(
       async (gateway) => {
@@ -180,7 +180,7 @@ describe("runSandboxedEngine (trusted gateway)", () => {
           throw new Error("fetch_host_not_allowed");
         },
       ]),
-    ) as PrivilegedHost;
+    ) as unknown as PrivilegedHost;
     const { result } = await withWorker(
       async (gateway) => {
         await expect(
