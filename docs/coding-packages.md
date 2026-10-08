@@ -129,24 +129,50 @@ Name the extras on the entry, exactly as you would to pip:
   marker is not evaluated, so the extra's dependencies are allowed on every
   platform; pip still installs only what applies. Dependencies under any
   other extra stay refused.
-- A dependency reached through an extra gets its own plain dependencies, as
-  usual. When a dependency line itself names extras (`uvicorn[standard]>=0.30`
-  in some package's metadata), those extras are followed for that dependency
-  too, the same way.
-- An entry without brackets behaves as before: no extra-gated dependencies.
+- An entry without brackets follows no extras at all — neither its own nor
+  its dependencies'. When a plain entry's metadata asks for a dependency with
+  extras (`fastapi` declaring `uvicorn[standard]>=0.30`), the dependency is
+  allowed as the bare package, exactly as for any plain dependency, and the
+  packages under its extra stay refused. To allow them, name the extra on the
+  allowlist: `fastapi[standard]`, or `uvicorn[standard]` directly.
+- Dependencies' extras are followed only below a package the run allows with
+  extras: an entry that names extras, or a dependency such a package's
+  metadata asks for with extras. Below `fastapi[standard]`, a
+  `uvicorn[standard]` dependency line allows `uvicorn`'s `standard` packages
+  too. A dependency reached that way without extras of its own gets only its
+  plain dependencies.
 - The same package may appear in several entries; their extras are combined.
 - An extra that a dependency line asks for is followed only once the proxy has
   served that parent's metadata. If pip reads the dependency before its parent
   (for example because the dependency is also an allowlist entry) and the
   extra's packages are refused with `403 wardby_package_not_allowed`, name the
   extra on the allowlist directly, e.g. `uvicorn[standard]`.
-- A marker that mentions `extra` in any form the proxy does not recognise
-  (anything other than `extra == "name"` or `extra === "name"`, or a marker
-  with an unbalanced quote) is treated as gated on no extra: that line is never
-  followed. Allowlist the package it names directly if you need it.
-- Extras on allowlist entries need the coding proxy and the control plane at
-  the same Wardby version: an older proxy rejects `name[extra]` entries, so
-  upgrade the proxy before (or with) the control plane.
+- The extra markers the proxy recognises are `extra == "name"`,
+  `extra === "name"`, and the reversed forms `"name" == extra` and
+  `"name" === extra` (single or double quotes, inside `and`/`or` and
+  parentheses).
+- A marker that mentions `extra` in any other form (`"name" in extra`,
+  `extra in "a b"`, a bare `extra`, or a marker with an unbalanced quote) is
+  treated as gated on no extra: that line is never followed, for any entry,
+  plain or not. Allowlist the package it names directly if you need it.
+- The proxy reads a wheel's `METADATA` only up to the end of its headers (the
+  first empty line); `Requires-Dist` text in the package description after
+  them is ignored.
+
+The last two rules apply to every PyPI allowlist, including ones without any
+extras, and are deliberately fail-closed: a dependency line the proxy cannot
+read with certainty is not followed. If a package that installed before is now
+refused with `403 wardby_package_not_allowed` because its parent declares it
+that way, add it to the allowlist directly.
+
+Extras on allowlist entries need the coding proxy and the control plane at the
+same Wardby version. A proxy from before extras support cannot parse a
+`name[extra]` entry at all: the whole allowlist fails to load, so **every**
+registry request of a run with such an entry fails, not just that package.
+Upgrade the proxy before (or with) the control plane. For the same reason,
+once any coding profile stores an extras entry, downgrading the control plane
+or proxy below the release that added extras is unsafe; remove the extras
+entries first.
 
 Every safeguard below (release age, advisories, wheels only, the record of
 what was fetched) applies to packages reached through an extra.

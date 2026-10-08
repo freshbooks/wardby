@@ -114,6 +114,17 @@ describe("requiredDists (extras)", () => {
     ]);
   });
 
+  it("follows no extras at all for a plain install: neither its own nor its dependencies'", () => {
+    const text = [
+      "Name: app",
+      "Requires-Dist: uvicorn[standard]>=0.30",
+      "Requires-Dist: app[web]",
+      'Requires-Dist: flask; extra == "web"',
+    ].join("\n");
+    // uvicorn is allowed as the bare package, exactly as before extras support.
+    expect(requiredDists(text)).toEqual([{ name: "uvicorn", extras: [] }]);
+  });
+
   it("expands a package's extras that name its own other extras", () => {
     const text = [
       "Name: Celery",

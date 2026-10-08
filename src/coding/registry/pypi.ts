@@ -127,6 +127,9 @@ interface RequirementLine {
 
 const REQUIREMENT = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?/;
 
+// Splits each Requires-Dist value only at its first `;` (the marker), which is
+// all wheel METADATA needs: no `name @ url` with a `;` in the URL, no comments
+// or line continuations as in a requirements file.
 function requirementLines(metadataText: string): { self: string | null; lines: RequirementLine[] } {
   let self: string | null = null;
   const lines: RequirementLine[] = [];
@@ -163,12 +166,18 @@ function requirementLines(metadataText: string): { self: string | null; lines: R
  * asks of it (`uvicorn[standard]`); a line naming the package itself
  * (`celery[redis]; extra == "all"`) adds those extras to this install
  * instead. Names and extras are validated and normalized.
+ *
+ * Policy, not pip: a plain install (no `extras`) follows no extras at all,
+ * neither its own (a self-referencing line) nor its dependencies' — each
+ * dependency comes back bare, so extras are followed only along a chain that
+ * starts at an allowlist entry naming extras.
  */
 export function requiredDists(metadataText: string, extras: readonly string[] = []): FileDependency[] {
   const { self, lines } = requirementLines(metadataText);
   const requested = new Set(extras.map(normalizePypiName));
+  const plain = requested.size === 0;
   const included = (line: RequirementLine) => line.gate === null || line.gate.some((extra) => requested.has(extra));
-  for (let grew = true; grew;) {
+  for (let grew = !plain; grew;) {
     grew = false;
     for (const line of lines) {
       if (line.name !== self || !included(line)) continue;
@@ -183,7 +192,7 @@ export function requiredDists(metadataText: string, extras: readonly string[] = 
   for (const line of lines) {
     if (line.name === self || !included(line)) continue;
     const merged = out.get(line.name) ?? new Set<string>();
-    for (const extra of line.extras) if (merged.size < MAX_EXTRAS) merged.add(extra);
+    if (!plain) for (const extra of line.extras) if (merged.size < MAX_EXTRAS) merged.add(extra);
     out.set(line.name, merged);
   }
   return [...out].map(([name, merged]) => ({ name, extras: [...merged].sort() }));

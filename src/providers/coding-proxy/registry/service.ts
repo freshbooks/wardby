@@ -1371,7 +1371,11 @@ export class RegistryService {
                 adapter.id,
                 dependencies.map((dependency) => dependency.name),
               );
-              await store.addExtraAllowances(context.runId, adapter.id, dependencies);
+              // Dependency extras are followed only below a package the run
+              // allows with extras (an entry naming extras, or a dependency
+              // such a package asked for with extras): a plain entry follows
+              // no extras, its own or its dependencies'.
+              if (extras.length > 0) await store.addExtraAllowances(context.runId, adapter.id, dependencies);
             }
             controller.close();
           } catch (error) {

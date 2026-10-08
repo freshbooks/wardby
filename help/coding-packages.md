@@ -41,20 +41,28 @@ A PyPI entry may name extras, as pip does: `psycopg[binary]`,
 `uvicorn[standard]>=0.30`. An extra allows only the dependencies that
 package's own metadata declares under that extra (for `psycopg[binary]`, the
 `psycopg-binary` wheel); a bare `psycopg` entry follows no extra, so
-`psycopg-binary` is refused with `wardby_package_not_allowed`. Extras a
-dependency line names (`uvicorn[standard]` in another package's metadata) are
-followed the same way, once the proxy has served that parent's metadata: if
+`psycopg-binary` is refused with `wardby_package_not_allowed`. A plain entry
+follows no extras at all, its own or its dependencies': a plain `fastapi`
+whose metadata asks for `uvicorn[standard]` gets bare `uvicorn` only. Extras a
+dependency line names are followed only below an entry that names extras
+(`fastapi[standard]`), once the proxy has served that parent's metadata: if
 an extra's packages are still refused with `403 wardby_package_not_allowed`,
 name the extra on the allowlist directly (`uvicorn[standard]`). Every
 safeguard still applies to what an extra adds. Extras need the coding proxy
-and control plane on the same Wardby version; an older proxy rejects
-`name[extra]` entries.
+and control plane on the same Wardby version: a proxy from before extras
+support cannot load an allowlist with a `name[extra]` entry, so every registry
+request of that run fails; and once a profile stores an extras entry, do not
+downgrade below the release that added extras.
 
 The quickstart's coding step offers the packages a local repository declares
 (`package.json`, `pyproject.toml` including its build-system packages,
 `requirements*.txt`, keeping Python extras such as `psycopg[binary]`) as
 `local-builder`'s allowlist after asking, or with `--allow-repo-packages` in a non-interactive
 run. See [Local repositories](local-repositories.md).
+
+> Re-running the quickstart replaces `local-builder`'s package allowlist with
+> what the repository declares (or empties it), discarding any packages you
+> added with `update_agent`; re-add them after a re-run.
 
 Review agents see the pull request's CI results in `repo_pr_read` and are
 told to trust CI over the sandbox's **Tests**.

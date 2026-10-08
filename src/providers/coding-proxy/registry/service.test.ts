@@ -933,6 +933,8 @@ describe("RegistryService with the PyPI adapter: allowlisted extras", () => {
       'Requires-Dist: psycopg-pool; extra == "pool"',
     ].join("\n"),
     app: "Name: app\nRequires-Dist: uvicorn[standard]>=0.30",
+    fastapi:
+      'Name: fastapi\nRequires-Dist: uvicorn[standard]>=0.30\nRequires-Dist: email-validator; extra == "standard"',
     uvicorn: [
       "Name: uvicorn",
       "Requires-Dist: h11>=0.8",
@@ -1010,10 +1012,23 @@ describe("RegistryService with the PyPI adapter: allowlisted extras", () => {
     await expect(get("psycopg-binary")).resolves.toMatchObject({ status: 403 });
   });
 
-  it("propagates the extras a dependency line names to that dependency only", async () => {
-    const { get, allowed, store } = extrasService(["app"]);
-    await get("app");
+  it("follows no dependency's extras below a plain entry", async () => {
+    // fastapi's metadata asks for uvicorn[standard], but the allowlist entry is plain.
+    const { get, allowed, store } = extrasService(["fastapi"]);
+    await get("fastapi");
     expect(await allowed("uvicorn")).toBe(true);
+    expect(await store.allowedExtras("run-1", "pypi", "uvicorn")).toEqual([]);
+    await expect(get("uvicorn")).resolves.toMatchObject({ status: 200 });
+    expect(await allowed("h11")).toBe(true);
+    expect(await allowed("websockets")).toBe(false);
+    await expect(get("websockets")).resolves.toMatchObject({ status: 403 });
+  });
+
+  it("propagates the extras a dependency line names below an entry that names extras", async () => {
+    const { get, allowed, store } = extrasService(["fastapi[standard]"]);
+    await get("fastapi");
+    expect(await allowed("uvicorn")).toBe(true);
+    expect(await allowed("email-validator")).toBe(true);
     expect(await store.allowedExtras("run-1", "pypi", "uvicorn")).toEqual(["standard"]);
     expect(await store.allowedExtras("run-1", "pypi", "h11")).toEqual([]);
     // The extra marker is not itself a package the run may fetch.
