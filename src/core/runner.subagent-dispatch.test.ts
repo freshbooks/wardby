@@ -39,6 +39,7 @@ interface FakeAgent {
   parallelDelegations?: boolean;
   budgetGroupId?: string | null;
   kind?: "native" | "coding";
+  nativeExecutionMode?: "control_plane" | "sandbox";
   codingProfile?: FakeCodingProfile;
   ownerId?: string | null;
 }
@@ -586,6 +587,129 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     // a long-running container crash mid-dispatch is exactly what the
     // reconciler exists for.
     expect(childRuns[0].executionManaged).toBe(true);
+  });
+
+  describe("a sandbox-mode native child", () => {
+    const lead: FakeAgent = {
+      id: "lead-agent",
+      name: "lead",
+      systemPrompt: "You delegate.",
+      model: "m",
+      budgetUsd: 10,
+      maxTurns: 10,
+      kind: "native",
+    };
+    const boxed: FakeAgent = {
+      id: "boxed-agent",
+      name: "boxed",
+      systemPrompt: "You work in a box.",
+      model: "m",
+      budgetUsd: 10,
+      maxTurns: 10,
+      kind: "native",
+      nativeExecutionMode: "sandbox",
+    };
+    const edge = { parentAgentId: "lead-agent", childAgentId: "boxed-agent", boundName: "boxed" };
+    const childrenOf = async (db: RunnerDb, parentRunId: string) =>
+      (await db.run.findMany({ where: { parentRunId: { in: [parentRunId] } } })) as unknown as Array<{
+        id: string;
+        status: string;
+        error: string | null;
+        trigger: string;
+        taskOverride: string | null;
+        triggeredById: string | null;
+        executionManaged: boolean;
+        nativeExecutionMode: string | null;
+      }>;
+
+    it("goes through dispatchRun and the Executor, never inline, and its result reaches the parent", async () => {
+      const db = fakeDb([lead, boxed], [edge]);
+      const parentRun = await db.run.create({ data: { agentId: "lead-agent", triggeredById: "p-1" } });
+      const started: string[] = [];
+      const finished = fakeCodingExecutor(db, { status: "succeeded", finalText: "done in the box", costUsd: 0.01 });
+      const executor = {
+        async start(runId: string) {
+          started.push(runId);
+          await finished.start(runId);
+        },
+        async stop() {},
+      };
+      const llm = scriptedLlm([
+        toolCall("delegate_to_boxed", JSON.stringify({ task: "do it" })),
+        finalAnswer("lead done"),
+      ]);
+
+      const result = await executeRun(parentRun.id, providers(llm, executor), db);
+      expect(result.status).toBe("succeeded");
+      const [child] = await childrenOf(db, parentRun.id);
+      expect(started).toEqual([child.id]);
+      expect(child).toMatchObject({
+        status: "succeeded",
+        trigger: "subagent",
+        taskOverride: "do it",
+        triggeredById: "p-1",
+        executionManaged: true,
+        nativeExecutionMode: "sandbox",
+      });
+      expect(toolResultSeen(llm, 1)).toMatchObject({ status: "succeeded", finalText: "done in the box" });
+    });
+
+    it("fails closed through a native executor that has no sandbox: the child fails unstarted, the parent goes on", async () => {
+      const db = fakeDb([lead, boxed], [edge]);
+      const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+      const llm = scriptedLlm([
+        toolCall("delegate_to_boxed", JSON.stringify({ task: "do it" })),
+        finalAnswer("lead done"),
+      ]);
+      const engineProviders = providers(llm);
+      // Stands in for RoutingExecutor with no sandbox executor: the run goes to the native executor, i.e. executeRun.
+      const nativeExecutor = {
+        async start(runId: string) {
+          await executeRun(runId, engineProviders, db);
+        },
+        async stop() {},
+      };
+      engineProviders.executor = nativeExecutor as never;
+
+      const result = await executeRun(parentRun.id, engineProviders, db);
+
+      expect(result.status).toBe("succeeded");
+      const [child] = await childrenOf(db, parentRun.id);
+      expect(child.status).toBe("failed");
+      expect(child.error).toMatch(/^native_sandbox_unavailable:/);
+      expect(toolResultSeen(llm, 1)).toMatchObject({ status: "failed" });
+      // The child's model was never called: the scripted LLM served only the parent's two turns.
+      expect(llm.calls).toHaveLength(2);
+    });
+
+    it("is refused as a tool error, creating no run, where no Executor is wired in", async () => {
+      const db = fakeDb([lead, boxed], [edge]);
+      const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+      const llm = scriptedLlm([
+        toolCall("delegate_to_boxed", JSON.stringify({ task: "do it" })),
+        finalAnswer("lead done"),
+      ]);
+      const result = await executeRun(parentRun.id, providers(llm), db);
+      expect(result.status).toBe("succeeded");
+      expect(await childrenOf(db, parentRun.id)).toEqual([]);
+      expect(toolResultSeen(llm, 1)).toMatchObject({ error: "sandbox_dispatch_unavailable" });
+    });
+
+    it("a control-plane child still runs inline and records its control-plane snapshot", async () => {
+      const inline: FakeAgent = { ...boxed, nativeExecutionMode: "control_plane" };
+      const db = fakeDb([lead, inline], [edge]);
+      const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+      const llm = scriptedLlm([
+        toolCall("delegate_to_boxed", JSON.stringify({ task: "do it" })),
+        finalAnswer("child done"),
+        finalAnswer("lead done"),
+      ]);
+      await executeRun(parentRun.id, providers(llm), db);
+      const [child] = await childrenOf(db, parentRun.id);
+      expect(child).toMatchObject({ status: "succeeded", nativeExecutionMode: "control_plane" });
+      // Inline, as before: never marked executionManaged (the column defaults to false).
+      expect(child.executionManaged ?? false).toBe(false);
+    });
   });
 
   it("E-01: reserves a coding child's budget from the run tree's remainder, not its own budgetUsd", async () => {

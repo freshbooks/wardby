@@ -315,6 +315,13 @@ const CODING_EXECUTOR_NOT_CONFIGURED =
  */
 export const CODING_CHILD_WAIT_GRACE_SEC = 60;
 
+/**
+ * How long a parent waits for a sandbox-mode native child before stopping it. Native runs have
+ * no run timeout of their own; until the sandbox executor brings a per-run deadline, this bounds
+ * a parent left waiting on a child that never finishes.
+ */
+export const SANDBOX_CHILD_WAIT_SEC = 60 * 60;
+
 export type CodingChildWaitOutcome =
   { kind: "terminal"; run: Run } | { kind: "timed_out" } | { kind: "parent_cancelled" };
 
@@ -876,6 +883,7 @@ async function executeTrackedRun(
                 budgetGroupId: true,
                 budgetUsd: true,
                 ownerId: true,
+                nativeExecutionMode: true,
                 codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true } },
               },
             }),
@@ -1077,6 +1085,85 @@ async function executeTrackedRun(
             : args.task.trim() !== ""
               ? args.task
               : undefined;
+
+          if (childAgent.nativeExecutionMode === "sandbox") {
+            // A sandbox-mode child must run where its snapshot says, so it goes through
+            // dispatchRun and the Executor (RoutingExecutor sends it to the sandbox executor),
+            // exactly like a coding child — never inline in this process.
+            if (!providers.executor) {
+              return JSON.stringify({
+                error: "sandbox_dispatch_unavailable",
+                message:
+                  "This execution context has no Executor wired in, so a sandbox-mode sub-agent cannot be dispatched.",
+              });
+            }
+            const dispatched = await dispatchRun({
+              db,
+              executor: providers.executor,
+              selfDefects: { db, issueTrackers },
+              agentId: edge.childAgentId,
+              trigger: "subagent",
+              taskOverride,
+              grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
+              parentRunId: runId,
+              triggeredById: existingRun.triggeredById,
+              awaitExecution: true,
+              onPersisted: (persistedRun) => {
+                if (persistedRun.status !== "refused" && persistedRun.status !== "failed") {
+                  finishSibling = delegationSiblings.start();
+                }
+                release();
+              },
+            });
+            if (!dispatched) {
+              return JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." });
+            }
+            const childRunId = dispatched.run.id;
+            const startedAt = Date.now();
+            runnerLog.info({ runId, childRunId, boundName, kind: "native-sandbox" }, "delegation started");
+            // Executor.start may resolve before the child is terminal, so wait on the row like a coding child.
+            const waited = await waitForCodingChild({
+              db,
+              executor: providers.executor,
+              childRunId,
+              parentRunId: runId,
+              boundMs: SANDBOX_CHILD_WAIT_SEC * 1000,
+            });
+            finishSibling();
+            runnerLog.info(
+              {
+                runId,
+                childRunId,
+                boundName,
+                outcome: waited.kind === "terminal" ? waited.run.status : waited.kind,
+                durationMs: Date.now() - startedAt,
+              },
+              "delegation finished",
+            );
+            if (waited.kind === "timed_out") {
+              return JSON.stringify({
+                error: "subagent_wait_timed_out",
+                runId: childRunId,
+                message: "The sandbox sub-agent did not finish in time; it was stopped and produced no result.",
+              });
+            }
+            if (waited.kind === "parent_cancelled") {
+              return JSON.stringify({
+                error: "parent_cancelled",
+                runId: childRunId,
+                message: "This run was cancelled while waiting for the sandbox sub-agent; the sub-agent was stopped.",
+              });
+            }
+            return JSON.stringify({
+              status: waited.run.status,
+              finalText: waited.run.finalText,
+              costUsd: Number(waited.run.costUsd),
+              tokensIn: waited.run.tokensIn,
+              tokensOut: waited.run.tokensOut,
+              ...(waited.run.error ? { error: waited.run.error } : {}),
+            });
+          }
+
           const childRun = await db.run.create({
             data: {
               agentId: edge.childAgentId,
@@ -1085,6 +1172,7 @@ async function executeTrackedRun(
               grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [],
               taskOverride,
               triggeredById: existingRun.triggeredById,
+              nativeExecutionMode: childAgent.nativeExecutionMode,
             },
           });
           finishSibling = delegationSiblings.start();
