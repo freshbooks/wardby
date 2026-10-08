@@ -56,6 +56,21 @@ export interface KubernetesNativeWorkerLauncherOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/**
+ * An object as the API server would store it, for comparison: keys sorted, and missing, undefined,
+ * and empty arrays alike (it drops an empty `ingress: []`, which `policyTypes` already makes deny-all).
+ */
+export function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.length === 0 ? undefined : value.map(canonical);
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    const item = canonical((value as Record<string, unknown>)[key]);
+    if (item !== undefined) out[key] = item;
+  }
+  return out;
+}
+
 export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
   readonly networkReadyAtLaunch = false;
   private gatewayHost: Promise<string> | undefined;
@@ -142,7 +157,7 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
     ]);
     const stored = pod?.spec;
     const want = built.spec!;
-    const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    const same = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
     const ok =
       !!stored &&
       !!policy &&

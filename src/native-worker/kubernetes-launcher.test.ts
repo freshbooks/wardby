@@ -131,4 +131,14 @@ describe("KubernetesNativeWorkerLauncher", () => {
     await launcher.removeByWorkerName(names.pod);
     expect(exists(api, "pod", names.pod)).toBe(false);
   });
+
+  it("compares stored objects canonically: key order and dropped empty arrays are not a change", async () => {
+    const { canonical } = await import("./kubernetes-launcher.js");
+    const built = { podSelector: { matchLabels: { a: "1" } }, policyTypes: ["Ingress", "Egress"], ingress: [] };
+    const stored = { policyTypes: ["Ingress", "Egress"], podSelector: { matchLabels: { a: "1" } } };
+    expect(JSON.stringify(canonical(stored))).toBe(JSON.stringify(canonical(built)));
+    expect(JSON.stringify(canonical({ ...stored, ingress: [{ from: [] }] }))).not.toBe(
+      JSON.stringify(canonical(built)),
+    );
+  });
 });
