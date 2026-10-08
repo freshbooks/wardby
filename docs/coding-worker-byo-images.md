@@ -75,6 +75,14 @@ point one at an arbitrary image without the step-up scope. The scope alone
 isn't enough: the caller must also hold the admin role (see
 [roles and privileged operations](security-deployment.md#roles-and-privileged-operations)).
 
+## Codex only
+
+`workerImageRef` applies to Codex agents. A Claude Code agent's commands run in
+the Claude tool runner, which `workerImageRef` does not change, so Claude Code
+agents cannot use a custom toolchain yet. They can use wardby's curated
+`node-python` toolchain (set the matching
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` image).
+
 ## Running services with a BYO image
 
 An agent whose `codingProfile.services` allows a service ([coding

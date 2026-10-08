@@ -30,6 +30,9 @@ Claude Code. Run `wardby doctor` afterwards to verify the local installation.
   Review that branch with
   `trigger_agent {"agentId": "<reviewer id>", "review": {"branch": "wardby/run-<run id>"}}`.
   You need Docker and an OpenAI key (Codex) or an Anthropic key (Claude Code).
+  For a Python project (a root `pyproject.toml`, `setup.py`, `setup.cfg`,
+  `Pipfile` or `requirements*.txt`), the builder gets a Node + Python 3.12
+  workspace and can run `pytest`.
   See [Use local git repositories](local-repositories.md).
 - **B. A coding agent that opens GitHub pull requests.** Do A first. Then
   install a GitHub App on the repository (Contents and Pull requests: read and

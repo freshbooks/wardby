@@ -70,7 +70,10 @@ key; you don't need both.
    Or run plain `quickstart` and answer **yes** to "Set up coding + review
    agents against a local git repo?". It asks for Codex or Claude Code, pulls
    only that provider's images, starts the coding proxy, and creates two agents:
-   `local-builder` (writes code) and `local-reviewer` (reviews it).
+   `local-builder` (writes code) and `local-reviewer` (reviews it). If the
+   repository is a Python project, the builder gets a Node + Python 3.12
+   workspace so it can run the project's tests (see
+   [Python projects](#python-projects)).
 
 2. Ask your MCP client (the quickstart can register Wardby with Codex or Claude
    Code) to run the builder. The quickstart prints the exact call, for example:
@@ -283,6 +286,36 @@ branch. Merge that branch, or set the agent's `baseRef` to it. "The default
 branch" for these agents is the branch checked out when quickstart runs. If the
 repository already has a services file, quickstart prints what it declares, or
 why it is invalid.
+
+#### Python projects
+
+Quickstart reads the committed root of the repository (never your working tree)
+and treats it as a Python project when it holds `pyproject.toml`, `setup.py`,
+`setup.cfg`, `Pipfile` or a `requirements*.txt` file. For a Python project it
+prepares the Node + Python 3.12 workspace image for the provider you chose
+(`toolchain: node-python`, version `3.12`) and creates `local-builder` on it, for
+both Codex and Claude Code. The builder can then run the project's tests:
+`pytest` and `ruff` are installed. Quickstart prints
+"Python project detected: local-builder uses a Node + Python 3.12 workspace".
+
+The image is recorded in `.wardby/.env`. To use your own build of it, set the
+variable for your provider to an immutable digest (`repo@sha256:...`) or a local
+image id before running quickstart:
+
+| Provider    | Variable                                           |
+| ----------- | -------------------------------------------------- |
+| Codex       | `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`             |
+| Claude Code | `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` |
+
+If your wardby version ships no Python workspace image, quickstart prints
+"Python project detected, but this version has no Python workspace image" and
+creates the builder on the default Node workspace: it can edit code but not run
+Python tests. Upgrade, or set the variable above.
+
+Other languages (Go, Rust, Java and so on) are not detected. Use a
+bring-your-own image through `workerImageRef`; see
+[Bring-your-own worker images](coding-worker-byo-images.md). That is Codex-only
+today: a Claude Code agent cannot use a custom toolchain yet.
 
 Options for unattended use:
 

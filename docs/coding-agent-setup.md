@@ -133,6 +133,23 @@ same branch; if the branch has moved, or is checked out, the run fails with
 Result branches accumulate, and wardby does not delete them. Clean up with
 `git branch -D wardby/run-<run id>`.
 
+### Toolchains for local repositories
+
+The default workspace is Node. A coding agent whose `codingProfile` sets
+`toolchain: "node-python"` and `toolchainVersion: "3.12"` runs in a Node +
+Python 3.12 workspace with `pytest` and `ruff`, for Codex and for Claude Code.
+The server selects the image from `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`
+(Codex) or `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (Claude Code); a
+`node-python` agent is refused when the variable for its provider is unset.
+`quickstart` sets this up for you when the repository has a Python marker file
+(`pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` or `requirements*.txt`)
+at its committed root; see
+[Python projects](getting-started.md#python-projects).
+
+For any other language, point a Codex agent at your own image with
+`workerImageRef` ([Bring-your-own worker images](coding-worker-byo-images.md)).
+Claude Code agents cannot use a custom toolchain yet.
+
 ### Review agents
 
 Link a native review agent with `link_repository` (`provider: "local"`,
