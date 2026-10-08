@@ -27,6 +27,14 @@
  * DATABASE_URL whose database name does not contain "load" (same check as
  * Level A): it reads live cluster/DB state freely but never mutates rows
  * beyond what trigger_agent itself does.
+ *
+ * Resilience: every probe (kubectl, pg_stat_activity, the queue/active-slot
+ * counts, get_run polling, the final per-run Run read) is individually
+ * guarded, so a transient Kubernetes/Postgres/MCP hiccup degrades one
+ * sample or one run's data rather than crashing the process. If the core
+ * flow still fails unexpectedly, main() prints the table and writes
+ * LOAD_OUT from whatever `runs`/`samples` it collected before the failure
+ * (marked `incomplete`) and exits 1, instead of losing the run entirely.
  */
 import { execFile } from "node:child_process";
 import { performance } from "node:perf_hooks";
@@ -269,10 +277,13 @@ interface Sample {
   proxyPods: ProxyPodUsage[];
   podPhases: Record<string, number>;
   dbConnections: DbConnectionState[];
-  queueLength: number;
-  activeSlots: number;
+  // null (not 0) when the count query itself failed this tick -- 0 is a
+  // real, meaningful sample value and must not be confused with "unknown".
+  queueLength: number | null;
+  activeSlots: number | null;
 }
 
+/** Every probe is individually guarded: a transient kubectl/Postgres failure degrades one field of one sample, never the loop. */
 async function takeSample(db: PrismaClient): Promise<Sample> {
   const [proxyPods, podPhases, dbConnections, queueLength, activeSlots] = await Promise.all([
     topProxyPods().catch((err: unknown) => {
@@ -287,8 +298,14 @@ async function takeSample(db: PrismaClient): Promise<Sample> {
       warnOnce("pg_stat_activity", err);
       return [];
     }),
-    db.codingRun.count({ where: QUEUE_WHERE }),
-    db.codingRun.count({ where: ACTIVE_WHERE }),
+    db.codingRun.count({ where: QUEUE_WHERE }).catch((err: unknown) => {
+      warnOnce("codingRun.count (queue length)", err);
+      return null;
+    }),
+    db.codingRun.count({ where: ACTIVE_WHERE }).catch((err: unknown) => {
+      warnOnce("codingRun.count (active slots)", err);
+      return null;
+    }),
   ]);
   return { t: new Date().toISOString(), proxyPods, podPhases, dbConnections, queueLength, activeSlots };
 }
@@ -324,6 +341,14 @@ function connectClient(): { client: Client; transport: StdioClientTransport } {
   return { client, transport };
 }
 
+/**
+ * Never throws: a single trigger_agent failure must not discard every other
+ * run's already-returned runId (Promise.all would otherwise reject the
+ * whole dispatch and the caller loses the (real, now-running) runs that
+ * *did* get dispatched). A run whose dispatch itself failed keeps
+ * runId === null and status "failed" -- isPollable (below) and the final
+ * tally both treat a null runId as accounted-for-and-failed.
+ */
 async function dispatchRuns(clients: Client[]): Promise<RunRecord[]> {
   const runs: RunRecord[] = Array.from({ length: LOAD_RUNS }, (_, index) => ({
     index,
@@ -342,46 +367,88 @@ async function dispatchRuns(clients: Client[]): Promise<RunRecord[]> {
     runs.map(async (run) => {
       const client = clients[run.index % clients.length]!;
       const dispatchedAt = new Date();
-      const result = await client.callTool({
-        name: "trigger_agent",
-        arguments: { agentId: LOAD_AGENT_ID, task: `Load test run ${run.index}.` },
-      });
-      const parsed = parseToolResult(result, "trigger_agent");
       run.dispatchedAt = dispatchedAt.toISOString();
-      const runId = (parsed.runId ?? parsed.id) as unknown;
-      if (typeof runId !== "string") {
-        throw new Error(`trigger_agent did not return a runId for run ${run.index}: ${JSON.stringify(parsed)}`);
+      try {
+        const result = await client.callTool({
+          name: "trigger_agent",
+          arguments: { agentId: LOAD_AGENT_ID, task: `Load test run ${run.index}.` },
+        });
+        const parsed = parseToolResult(result, "trigger_agent");
+        const runId = (parsed.runId ?? parsed.id) as unknown;
+        if (typeof runId !== "string") {
+          throw new Error(`trigger_agent did not return a runId for run ${run.index}: ${JSON.stringify(parsed)}`);
+        }
+        run.runId = runId;
+        run.status = typeof parsed.status === "string" ? parsed.status : "pending";
+        run.error = typeof parsed.error === "string" ? parsed.error : null;
+      } catch (err) {
+        run.status = "failed";
+        run.error = err instanceof Error ? err.message : String(err);
+        console.error(`trigger_agent failed for run ${run.index}: ${run.error}`);
       }
-      run.runId = runId;
-      run.status = typeof parsed.status === "string" ? parsed.status : "pending";
-      run.error = typeof parsed.error === "string" ? parsed.error : null;
     }),
   );
   return runs;
 }
 
-/** Polls get_run on `client` every POLL_MS until every run is terminal or LOAD_TIMEOUT_SEC passes. */
-async function pollUntilTerminal(client: Client, runs: RunRecord[]): Promise<boolean> {
+/** A run this many consecutive get_run calls failed for is abandoned by the poll loop (see pollUntilTerminal). */
+const MAX_CONSECUTIVE_POLL_FAILURES = 5;
+
+/**
+ * Polls get_run on `client` every POLL_MS for every pollable run (has a
+ * runId, not yet terminal, not abandoned) until none are left or
+ * LOAD_TIMEOUT_SEC passes. A single get_run failure never aborts the test:
+ * failures are counted per run, and a run that fails
+ * MAX_CONSECUTIVE_POLL_FAILURES times in a row is abandoned -- excluded
+ * from further polling so it can't wedge the loop forever, but not
+ * otherwise mislabeled. Its real final status still comes from the
+ * authoritative `Run` row read directly from Postgres in main() right
+ * after this loop ends, independent of how polling over MCP went, so an
+ * abandoned run's eventual outcome is not lost -- only its "claimed" timing
+ * precision.
+ */
+async function pollUntilTerminal(client: Client, runs: RunRecord[]): Promise<{ timedOut: boolean }> {
   const deadline = Date.now() + LOAD_TIMEOUT_SEC * 1000;
+  const failures = new Map<number, number>();
+  const abandoned = new Set<number>();
+  const isPollable = (r: RunRecord): r is RunRecord & { runId: string } =>
+    r.runId !== null && !TERMINAL_STATUSES.has(r.status) && !abandoned.has(r.index);
   for (;;) {
-    const pending = runs.filter((r) => !TERMINAL_STATUSES.has(r.status));
-    if (pending.length === 0) return true;
-    if (Date.now() >= deadline) return false;
+    const pending = runs.filter(isPollable);
+    if (pending.length === 0) return { timedOut: false };
+    if (Date.now() >= deadline) return { timedOut: true };
     await sleep(POLL_MS);
     await Promise.all(
       pending.map(async (run) => {
-        const result = await client.callTool({ name: "get_run", arguments: { runId: run.runId } });
-        const parsed = parseToolResult(result, "get_run");
-        const status = typeof parsed.status === "string" ? parsed.status : run.status;
-        if (run.status === "pending" && status !== "pending" && run.claimedAt === null) {
-          run.claimedAt = new Date().toISOString();
+        try {
+          const result = await client.callTool({ name: "get_run", arguments: { runId: run.runId } });
+          const parsed = parseToolResult(result, "get_run");
+          failures.delete(run.index);
+          const status = typeof parsed.status === "string" ? parsed.status : run.status;
+          if (run.status === "pending" && status !== "pending" && run.claimedAt === null) {
+            run.claimedAt = new Date().toISOString();
+          }
+          if (typeof parsed.codingQueuedAt === "string") run.everQueued = true;
+          run.status = status;
+          run.error = typeof parsed.error === "string" ? parsed.error : null;
+          run.startedAt = typeof parsed.startedAt === "string" ? parsed.startedAt : run.startedAt;
+          run.heartbeatAt = typeof parsed.heartbeatAt === "string" ? parsed.heartbeatAt : run.heartbeatAt;
+          run.finishedAt = typeof parsed.finishedAt === "string" ? parsed.finishedAt : run.finishedAt;
+        } catch (err) {
+          const count = (failures.get(run.index) ?? 0) + 1;
+          failures.set(run.index, count);
+          const message = err instanceof Error ? err.message : String(err);
+          if (count >= MAX_CONSECUTIVE_POLL_FAILURES) {
+            abandoned.add(run.index);
+            console.error(
+              `get_run for run ${run.index} (${run.runId}) failed ${count} times in a row; giving up on polling it (the final DB read still picks up its real status). Last error: ${message}`,
+            );
+          } else {
+            console.error(
+              `get_run for run ${run.index} (${run.runId}) failed (attempt ${count}/${MAX_CONSECUTIVE_POLL_FAILURES}): ${message}`,
+            );
+          }
         }
-        if (typeof parsed.codingQueuedAt === "string") run.everQueued = true;
-        run.status = status;
-        run.error = typeof parsed.error === "string" ? parsed.error : null;
-        run.startedAt = typeof parsed.startedAt === "string" ? parsed.startedAt : run.startedAt;
-        run.heartbeatAt = typeof parsed.heartbeatAt === "string" ? parsed.heartbeatAt : run.heartbeatAt;
-        run.finishedAt = typeof parsed.finishedAt === "string" ? parsed.finishedAt : run.finishedAt;
       }),
     );
   }
@@ -405,6 +472,17 @@ async function main(): Promise<void> {
   const db = createPrismaClient(url);
   const cap = loadCodingConcurrencyConfig().maxConcurrent;
   const children = Array.from({ length: LOAD_CONTROL_PLANES }, connectClient);
+  const runs: RunRecord[] = [];
+  const samples: Sample[] = [];
+  let sampling = false;
+  let timedOut = false;
+  // Set on any unexpected failure in the core flow below (connect, dispatch,
+  // polling, or the final per-run read); the table and LOAD_OUT are still
+  // produced from whatever `runs`/`samples` were collected before the
+  // failure, and the exit code reflects the incomplete run.
+  let incomplete: string | null = null;
+  const testStart = performance.now();
+
   try {
     for (const { client, transport } of children) await client.connect(transport);
     const clients = children.map((c) => c.client);
@@ -413,89 +491,129 @@ async function main(): Promise<void> {
       `Level B load test -- ${LOAD_RUNS} runs over ${LOAD_CONTROL_PLANES} control planes, cap ${cap}, timeout ${LOAD_TIMEOUT_SEC}s\n`,
     );
 
-    const testStart = performance.now();
-    const runs = await dispatchRuns(clients);
+    runs.push(...(await dispatchRuns(clients)));
 
-    let sampling = true;
-    const samples: Sample[] = [];
+    sampling = true;
     const sampleLoop = (async () => {
+      // Never rejects: takeSample already guards every probe it makes, but
+      // this catch is the last line of defense -- an unhandled rejection
+      // here would otherwise crash the whole process (no finally, no
+      // table, no LOAD_OUT) long before the poll loop below ever awaits it.
       while (sampling) {
-        samples.push(await takeSample(db));
+        try {
+          samples.push(await takeSample(db));
+        } catch (err) {
+          warnOnce("sample loop", err);
+        }
         await sleep(SAMPLE_MS);
       }
     })();
 
-    const allTerminal = await pollUntilTerminal(clients[0]!, runs);
-    sampling = false;
-    await sampleLoop;
-    const wallSec = (performance.now() - testStart) / 1000;
+    try {
+      ({ timedOut } = await pollUntilTerminal(clients[0]!, runs));
+    } finally {
+      sampling = false;
+      await sampleLoop;
+    }
 
     // Final per-run read: Run fields straight from the DB (authoritative,
-    // post-poll-loop) and the pod's own timestamps, if it still exists.
+    // independent of how polling over MCP went -- covers runs the poll
+    // loop above abandoned) and the pod's own timestamps, if it still
+    // exists. Guarded per run: one DB hiccup must not drop every other
+    // run's already-correct data.
     await mapLimit(runs, 8, async (run) => {
       if (!run.runId) return;
-      const row = await db.run.findUnique({
-        where: { id: run.runId },
-        select: { status: true, error: true, startedAt: true, heartbeatAt: true, finishedAt: true },
-      });
-      if (row) {
-        run.status = row.status;
-        run.error = row.error;
-        run.startedAt = row.startedAt.toISOString();
-        run.heartbeatAt = row.heartbeatAt?.toISOString() ?? null;
-        run.finishedAt = row.finishedAt?.toISOString() ?? null;
+      try {
+        const row = await db.run.findUnique({
+          where: { id: run.runId },
+          select: { status: true, error: true, startedAt: true, heartbeatAt: true, finishedAt: true },
+        });
+        if (row) {
+          run.status = row.status;
+          run.error = row.error;
+          run.startedAt = row.startedAt.toISOString();
+          run.heartbeatAt = row.heartbeatAt?.toISOString() ?? null;
+          run.finishedAt = row.finishedAt?.toISOString() ?? null;
+        }
+      } catch (err) {
+        warnOnce(`final Run read (run ${run.index})`, err);
       }
       run.pod = await runPodTimestamps(run.runId).catch((err: unknown) => {
         warnOnce("kubectl get pod (per-run)", err);
         return null;
       });
     });
-
-    const dispatchToClaimed = stats(
-      runs.filter((r) => r.claimedAt).map((r) => Date.parse(r.claimedAt!) - Date.parse(r.dispatchedAt)),
-    );
-    const claimedToFinished = stats(
-      runs.filter((r) => r.claimedAt && r.finishedAt).map((r) => Date.parse(r.finishedAt!) - Date.parse(r.claimedAt!)),
-    );
-    const succeeded = runs.filter((r) => r.status === "succeeded").length;
-    const failedOrLost = runs.filter((r) => TERMINAL_STATUSES.has(r.status) && r.status !== "succeeded").length;
-    const peakQueued = Math.max(0, ...samples.map((sample) => sample.queueLength));
-    const peakActive = Math.max(0, ...samples.map((sample) => sample.activeSlots));
-    const proxyReplicas = Math.max(0, ...samples.map((sample) => sample.proxyPods.length));
-    const peakProxyCpuM = Math.max(0, ...samples.flatMap((sample) => sample.proxyPods.map((p) => p.cpuM)));
-    const peakProxyMemMi = Math.max(0, ...samples.flatMap((sample) => sample.proxyPods.map((p) => p.memMi)));
-    const peakDbConnections = Math.max(
-      0,
-      ...samples.map((sample) => sample.dbConnections.reduce((sum, c) => sum + c.count, 0)),
-    );
-
-    console.log(
-      "| N | control planes | proxy replicas | cap | dispatch→claimed p50/p95 | claimed→finished p50/p95 | total wall s | succeeded | failed/lost | peak queued | peak active | proxy CPU m peak/replica | proxy mem Mi peak | DB connections peak |",
-    );
-    console.log("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    console.log(
-      `| ${LOAD_RUNS} | ${LOAD_CONTROL_PLANES} | ${proxyReplicas} | ${cap} | ${s(dispatchToClaimed.p50)}/${s(dispatchToClaimed.p95)} | ${s(claimedToFinished.p50)}/${s(claimedToFinished.p95)} | ${s(wallSec)} | ${succeeded} | ${failedOrLost} | ${peakQueued} | ${peakActive} | ${s(peakProxyCpuM)} | ${s(peakProxyMemMi)} | ${peakDbConnections} |`,
-    );
-    if (!allTerminal) {
-      console.error(`LOAD_TIMEOUT_SEC (${LOAD_TIMEOUT_SEC}s) passed with runs still non-terminal.`);
-    }
-
-    const config = {
-      runs: LOAD_RUNS,
-      controlPlanes: LOAD_CONTROL_PLANES,
-      agentId: LOAD_AGENT_ID,
-      namespace: LOAD_NAMESPACE,
-      kubernetesContext: KUBERNETES_CONTEXT,
-      timeoutSec: LOAD_TIMEOUT_SEC,
-      maxConcurrent: cap,
-    };
-    await writeFile(LOAD_OUT, JSON.stringify({ config, runs, samples }, null, 2));
-
-    process.exitCode = allTerminal ? 0 : 1;
+  } catch (err) {
+    incomplete = err instanceof Error ? err.message : String(err);
+    console.error("Level B load test ended early:", err);
   } finally {
-    await Promise.all(children.map(({ client }) => client.close()));
-    await db.$disconnect();
+    sampling = false;
+    // Close every child's client AND transport, connected or not: a client
+    // whose connect() never completed may not hold a transport reference to
+    // close through, so closing the transport directly is what actually
+    // guarantees the spawned `wardby mcp` process is terminated. allSettled
+    // so one rejecting close never skips the rest, or db.$disconnect below.
+    await Promise.allSettled(children.flatMap(({ client, transport }) => [client.close(), transport.close()]));
+    try {
+      await db.$disconnect();
+    } catch (err) {
+      console.error("db.$disconnect() failed:", err);
+    }
   }
+
+  const wallSec = (performance.now() - testStart) / 1000;
+  const dispatchToClaimed = stats(
+    runs.filter((r) => r.claimedAt).map((r) => Date.parse(r.claimedAt!) - Date.parse(r.dispatchedAt)),
+  );
+  const claimedToFinished = stats(
+    runs.filter((r) => r.claimedAt && r.finishedAt).map((r) => Date.parse(r.finishedAt!) - Date.parse(r.claimedAt!)),
+  );
+  // A run whose dispatch itself failed (runId still null) never got a real
+  // Run row at all -- counted as failed here regardless of its placeholder status.
+  const succeeded = runs.filter((r) => r.runId !== null && r.status === "succeeded").length;
+  const failedOrLost = runs.filter(
+    (r) => r.runId === null || (TERMINAL_STATUSES.has(r.status) && r.status !== "succeeded"),
+  ).length;
+  const definedOnly = (values: (number | null)[]): number[] => values.filter((v): v is number => v !== null);
+  const peakQueued = Math.max(0, ...definedOnly(samples.map((sample) => sample.queueLength)));
+  const peakActive = Math.max(0, ...definedOnly(samples.map((sample) => sample.activeSlots)));
+  const proxyReplicas = Math.max(0, ...samples.map((sample) => sample.proxyPods.length));
+  const peakProxyCpuM = Math.max(0, ...samples.flatMap((sample) => sample.proxyPods.map((p) => p.cpuM)));
+  const peakProxyMemMi = Math.max(0, ...samples.flatMap((sample) => sample.proxyPods.map((p) => p.memMi)));
+  const peakDbConnections = Math.max(
+    0,
+    ...samples.map((sample) => sample.dbConnections.reduce((sum, c) => sum + c.count, 0)),
+  );
+
+  console.log(
+    "| N | control planes | proxy replicas | cap | dispatch→claimed p50/p95 | claimed→finished p50/p95 | total wall s | succeeded | failed/lost | peak queued | peak active | proxy CPU m peak/replica | proxy mem Mi peak | DB connections peak |",
+  );
+  console.log("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+  console.log(
+    `| ${LOAD_RUNS} | ${LOAD_CONTROL_PLANES} | ${proxyReplicas} | ${cap} | ${s(dispatchToClaimed.p50)}/${s(dispatchToClaimed.p95)} | ${s(claimedToFinished.p50)}/${s(claimedToFinished.p95)} | ${s(wallSec)} | ${succeeded} | ${failedOrLost} | ${peakQueued} | ${peakActive} | ${s(peakProxyCpuM)} | ${s(peakProxyMemMi)} | ${peakDbConnections} |`,
+  );
+  if (timedOut) console.error(`LOAD_TIMEOUT_SEC (${LOAD_TIMEOUT_SEC}s) passed with runs still non-terminal.`);
+  if (incomplete !== null) console.error(`Load test did not complete normally: ${incomplete}`);
+
+  const config = {
+    runs: LOAD_RUNS,
+    controlPlanes: LOAD_CONTROL_PLANES,
+    agentId: LOAD_AGENT_ID,
+    namespace: LOAD_NAMESPACE,
+    kubernetesContext: KUBERNETES_CONTEXT,
+    timeoutSec: LOAD_TIMEOUT_SEC,
+    maxConcurrent: cap,
+    incomplete: incomplete !== null,
+    incompleteReason: incomplete,
+  };
+  try {
+    await writeFile(LOAD_OUT, JSON.stringify({ config, runs, samples }, null, 2));
+  } catch (err) {
+    console.error(`Failed to write LOAD_OUT (${LOAD_OUT}): ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const allAccountedFor = runs.length > 0 && runs.every((r) => r.runId !== null && TERMINAL_STATUSES.has(r.status));
+  process.exitCode = incomplete === null && allAccountedFor ? 0 : 1;
 }
 
 main().catch((err: unknown) => {
