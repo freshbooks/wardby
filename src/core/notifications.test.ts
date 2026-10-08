@@ -52,22 +52,32 @@ describe("startNotifications", () => {
     expect(findUnique).not.toHaveBeenCalled();
   });
 
-  it("installs the recorder, logs identity, and returns a handle whose stop() clears the dispatch interval", async () => {
+  it("starts the dispatcher immediately, without waiting on the auth check, and stop() clears its interval", async () => {
     vi.useFakeTimers();
     const { db } = fakeDb();
     const slack = new FakeChatProvider();
-    const authTestSpy = vi.spyOn(slack, "authTest");
+    let resolveAuth!: (who: { team: string; botUserId: string }) => void;
+    const authTestSpy = vi
+      .spyOn(slack, "authTest")
+      .mockImplementation(() => new Promise((resolve) => (resolveAuth = resolve)));
 
     const handle = await startNotifications({ db, chat: { slack }, holder: "test-holder" });
 
+    // The dispatcher is already running even though authTest has not
+    // resolved yet - a slow/unreachable Slack must never delay startup.
     expect(authTestSpy).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    resolveAuth({ team: "fake", botUserId: "UFAKE" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(authTestSpy).toHaveResolved();
 
     handle.stop();
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("logs the auth check failure but still returns a handle (never fatal)", async () => {
+  it("logs the auth check failure in the background but still starts the dispatcher (never fatal, never blocking)", async () => {
     vi.useFakeTimers();
     const { db } = fakeDb();
     const slack = new FakeChatProvider();
@@ -76,6 +86,14 @@ describe("startNotifications", () => {
 
     const handle = await startNotifications({ db, chat: { slack } });
     expect(handle.stop).toBeTypeOf("function");
+    // The dispatcher started without waiting for the (failed) auth check.
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    // Let the background authTest rejection settle before the test ends.
+    await Promise.resolve();
+    await Promise.resolve();
+
     handle.stop();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

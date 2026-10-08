@@ -27,16 +27,22 @@ export async function startNotifications(opts: {
 }): Promise<{ stop(): void }> {
   if (Object.keys(opts.chat).length === 0) return { stop() {} };
   installWorkflowEventRecorder(opts.db, opts.chat);
+  // Identity checks run in the background: Slack being slow or unreachable
+  // must never delay process startup. The dispatcher starts immediately
+  // regardless; a failed check just logs (dispatch itself re-checks auth
+  // on an auth_failed delivery error).
   for (const provider of Object.values(opts.chat)) {
-    try {
-      const who = await provider.authTest();
-      log.info({ provider: provider.name, team: who.team, botUserId: who.botUserId }, "chat notifications acting as");
-    } catch (err) {
-      log.error(
-        { err, provider: provider.name },
-        "chat provider auth check failed; deliveries will pause until it succeeds",
-      );
-    }
+    void provider
+      .authTest()
+      .then((who) => {
+        log.info({ provider: provider.name, team: who.team, botUserId: who.botUserId }, "chat notifications acting as");
+      })
+      .catch((err: unknown) => {
+        log.error(
+          { err, provider: provider.name },
+          "chat provider auth check failed; deliveries will pause until it succeeds",
+        );
+      });
   }
   return startNotificationDispatcher({ db: opts.db, chat: opts.chat, holder: opts.holder ?? `notify-${randomUUID()}` });
 }
