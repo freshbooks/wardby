@@ -293,6 +293,45 @@ export interface CodingConcurrencyConfig {
  * before closing the executor (SHUTDOWN_DRAIN_SECONDS, default 600; 0 = do
  * not wait). Keep the platform's termination grace period above this.
  */
+/** The native sandbox (docs/native-sandbox.md): where sandbox-mode native runs execute. */
+export interface NativeSandboxConfig {
+  launcher: "docker";
+  workerImage: string;
+  /** The container running `wardby native-gateway`, joined to each run's network. */
+  gatewayContainer: string;
+  /** What a worker dials; undefined = the gateway's alias on its run network. */
+  gatewayUrl?: string;
+  cpus: number;
+  memoryMb: number;
+  pids: number;
+}
+
+/** Undefined when NATIVE_SANDBOX_LAUNCHER is unset (sandbox-mode runs then fail closed). Throws on a bad configuration. */
+export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): NativeSandboxConfig | undefined {
+  const launcher = env.NATIVE_SANDBOX_LAUNCHER?.trim();
+  if (!launcher) return undefined;
+  if (launcher !== "docker") {
+    throw new Error(`NATIVE_SANDBOX_LAUNCHER must be "docker" (got "${launcher}").`);
+  }
+  const workerImage = imageVariable(env.NATIVE_SANDBOX_WORKER_IMAGE);
+  if (!workerImage) throw new Error("NATIVE_SANDBOX_WORKER_IMAGE is required when NATIVE_SANDBOX_LAUNCHER=docker.");
+  const gatewayContainer = env.NATIVE_GATEWAY_CONTAINER?.trim();
+  if (!gatewayContainer) throw new Error("NATIVE_GATEWAY_CONTAINER is required when NATIVE_SANDBOX_LAUNCHER=docker.");
+  const gatewayUrl = env.NATIVE_GATEWAY_URL?.trim();
+  if (gatewayUrl && !/^https?:\/\/[^\s]+$/.test(gatewayUrl)) {
+    throw new Error(`NATIVE_GATEWAY_URL must be an http(s) URL (got "${gatewayUrl}").`);
+  }
+  return {
+    launcher,
+    workerImage,
+    gatewayContainer,
+    ...(gatewayUrl ? { gatewayUrl } : {}),
+    cpus: optionalPositiveNumber(env.NATIVE_SANDBOX_CPUS, "NATIVE_SANDBOX_CPUS", 1),
+    memoryMb: optionalPositiveInteger(env.NATIVE_SANDBOX_MEMORY_MB, "NATIVE_SANDBOX_MEMORY_MB") ?? 512,
+    pids: optionalPositiveInteger(env.NATIVE_SANDBOX_PIDS, "NATIVE_SANDBOX_PIDS") ?? 128,
+  };
+}
+
 export function loadShutdownDrainSeconds(env: NodeJS.ProcessEnv = process.env): number {
   const value = env.SHUTDOWN_DRAIN_SECONDS?.trim();
   if (!value) return 600;

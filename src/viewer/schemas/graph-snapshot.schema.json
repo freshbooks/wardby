@@ -52,6 +52,20 @@
                   "null"
                 ]
               },
+              "nativeExecutionMode": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "control-plane",
+                      "sandbox"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "status": {
                 "type": "string",
                 "enum": [
@@ -488,6 +502,7 @@
               "agentKind",
               "model",
               "codingProvider",
+              "nativeExecutionMode",
               "status",
               "trigger",
               "turns",

@@ -833,4 +833,109 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
       await db.principal.deleteMany({ where: { subject: { in: [ownerSubject5, otherSubject5] } } });
     }
   });
+
+  describe("nativeExecutionMode", () => {
+    const run = async (mode: "control-plane" | "sandbox" | undefined, env: Record<string, string>) => {
+      const id = randomUUID().slice(0, 8);
+      const name = `test-agent-mode-${id}`;
+      const subject = `test-owner-mode-${id}`;
+      const manifest: Manifest = {
+        bundleVersion: 1,
+        source: { product: "test", exporterVersion: "1.0", exportedAt: new Date().toISOString() },
+        secretMode: "references",
+        transferKeyId: null,
+        contentWindowDays: null,
+        contentSince: null,
+        toolCallDetail: "metadata",
+        runAuditWindowDays: null,
+        runAuditSince: null,
+        capabilities: [],
+        counts: { agents: 1 },
+      };
+      const agent: NeutralAgent = {
+        name,
+        systemPrompt: "Test agent",
+        provider: "bedrock",
+        model: "claude-opus-4",
+        region: null,
+        schedule: null,
+        timezone: "UTC",
+        scheduleEnabled: false,
+        maxTurns: 10,
+        budgetUsd: "5.00",
+        ownerEmail: null,
+        kind: "native",
+        memoryEnabled: false,
+        ...(mode ? { nativeExecutionMode: mode } : {}),
+        unmodeled: {},
+      };
+      const bundle: Bundle = {
+        manifest,
+        readAgents: () => [agent],
+        readTools: () => [],
+        readAgentTools: () => [],
+        readSecrets: () => [],
+        readAgentSecrets: () => [],
+        readSingleDatastores: () => [],
+        readSharedDatastores: () => [],
+        readWebhooks: () => [],
+        readBudgets: () => [],
+      };
+      const owner = await resolvePrincipal(subject, db);
+      const saved = { ...process.env };
+      try {
+        delete process.env.NATIVE_SANDBOX_LAUNCHER;
+        Object.assign(process.env, env);
+        const recon = preflight({
+          bundle,
+          routableModels: new Set(["claude-opus-4"]),
+          supportedGlobals: new Set(),
+          existingAgentNames: new Set(),
+          existingToolNames: new Set(),
+          capabilitiesSupported: new Set([]),
+          onConflict: "fail",
+          prefix: "",
+          allowOpenFetch: false,
+        });
+        const result = await createFromBundle(bundle, recon, {
+          db,
+          cipher: buildSecretCipher(loadProviderConfig()),
+          ownerId: owner.id,
+          defaultBudget: "5.00",
+          secretMode: "references",
+          allowOpenFetch: false,
+        });
+        const row = await db.agent.findUnique({ where: { name } });
+        return { result, mode: row?.nativeExecutionMode };
+      } finally {
+        process.env = saved;
+        await db.agent.deleteMany({ where: { name } });
+        await db.principal.deleteMany({ where: { subject } });
+      }
+    };
+
+    it("stores sandbox and warns when no native sandbox is configured here", async () => {
+      const { result, mode } = await run("sandbox", {});
+      expect(mode).toBe("sandbox");
+      expect(result.warnings.join("\n")).toMatch(/nativeExecutionMode is "sandbox".*NATIVE_SANDBOX_LAUNCHER/);
+    });
+
+    it("stores sandbox without a warning when the sandbox is configured", async () => {
+      const { result, mode } = await run("sandbox", {
+        NATIVE_SANDBOX_LAUNCHER: "docker",
+        NATIVE_SANDBOX_WORKER_IMAGE: "ghcr.io/example/worker@sha256:" + "a".repeat(64),
+        NATIVE_GATEWAY_CONTAINER: "wardby",
+      });
+      expect(mode).toBe("sandbox");
+      expect(result.warnings.filter((w) => w.includes("nativeExecutionMode"))).toEqual([]);
+    });
+
+    it("stores control-plane, and defaults to it when the bundle omits the field, without a warning", async () => {
+      const explicit = await run("control-plane", {});
+      expect(explicit.mode).toBe("control_plane");
+      expect(explicit.result.warnings).toEqual([]);
+      const omitted = await run(undefined, {});
+      expect(omitted.mode).toBe("control_plane");
+    });
+  });
 });

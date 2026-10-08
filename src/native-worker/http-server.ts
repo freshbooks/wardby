@@ -60,6 +60,15 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
         res.writeHead(status);
         res.end(JSON.stringify(body));
       };
+      if (req.method === "GET" && req.url === "/healthz") {
+        // Ready when the database answers: every call needs it.
+        const healthy = await deps.db.$queryRaw`SELECT 1`.then(
+          () => true,
+          () => false,
+        );
+        send(healthy ? 200 : 503, { ok: healthy });
+        return;
+      }
       if (req.method !== "POST" || req.url !== NATIVE_GATEWAY_PATH) {
         send(404, { ok: false, error: { code: "not_found", message: "not found" } });
         return;

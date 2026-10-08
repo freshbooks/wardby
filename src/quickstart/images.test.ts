@@ -13,6 +13,7 @@ const claudeToolRunner = `ghcr.io/o/r/wardby-claude-tool-runner@${digest("d")}`;
 const workerNodePython = `ghcr.io/o/r/wardby-coding-worker-node-python@${digest("e")}`;
 const claudeToolRunnerNodePython = `ghcr.io/o/r/wardby-claude-tool-runner-node-python@${digest("f")}`;
 const driver = `ghcr.io/o/r/wardby-coding-worker-driver@${digest("1")}`;
+const nativeWorker = `ghcr.io/o/r/wardby-native-worker@${digest("2")}`;
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), "wardby-images-"));
@@ -215,6 +216,19 @@ describe("resolveQuickstartImages", () => {
     const bare = resolveQuickstartImages({ env: {}, packageRoot: dir });
     expect(bare).not.toHaveProperty("workerNodePython");
     expect(bare).not.toHaveProperty("claudeToolRunnerNodePython");
+  });
+
+  it("reads the native sandbox worker image when the release has one, and requires it pinned", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, nativeWorker });
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toEqual({
+      runtime,
+      worker,
+      nativeWorker,
+      source: "package",
+    });
+    writePackageFile(dir, { runtime, worker, nativeWorker: "ghcr.io/o/r/wardby-native-worker:v1" });
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toHaveProperty("unavailable");
   });
 
   it("rejects the whole package file when a Node + Python image is not digest-pinned", () => {

@@ -25,6 +25,7 @@ jobs:
       claude-tool-runner: ${{ steps.claude-tool-runner.outputs.digest }}
       worker-node-python: ${{ steps.worker-node-python.outputs.digest }}
       claude-tool-runner-node-python: ${{ steps.claude-tool-runner-node-python.outputs.digest }}
+      native-worker: ${{ steps.native-worker.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -53,7 +54,7 @@ jobs:
       - run: node scripts/check-worker-protocol.mjs --from-dockerfile src/coding-worker/Dockerfile.node-python
       # The Codex policy script checks Codex-specific pins, so the Claude Code
       # images are gated by their own policy tests instead.
-      - run: npx vitest run src/claude-coding-worker/image-policy.test.ts src/claude-tool-runner/image-policy.test.ts
+      - run: npx vitest run src/claude-coding-worker/image-policy.test.ts src/claude-tool-runner/image-policy.test.ts src/native-worker/image-policy.test.ts
       # The same driver-reference check the publish job runs before recording it in
       # dist/quickstart-images.json, here so a bad FROM fails before any image is pushed.
       - name: Verify the worker's driver reference is digest-pinned
@@ -110,6 +111,13 @@ jobs:
           target: node-python
           push: true
           tags: ${{ env.IMAGE_PREFIX }}/wardby-claude-tool-runner-node-python:${{ github.event.release.tag_name }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: native-worker
+        with:
+          context: .
+          file: src/native-worker/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}/wardby-native-worker:${{ github.event.release.tag_name }}
 
   publish:
     needs: images
@@ -152,12 +160,13 @@ jobs:
           CLAUDE_TOOL_RUNNER_DIGEST: ${{ needs.images.outputs.claude-tool-runner }}
           WORKER_NODE_PYTHON_DIGEST: ${{ needs.images.outputs.worker-node-python }}
           CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST: ${{ needs.images.outputs.claude-tool-runner-node-python }}
+          NATIVE_WORKER_DIGEST: ${{ needs.images.outputs.native-worker }}
         run: >-
           node -e 'const { mkdirSync, readFileSync, writeFileSync } = require("node:fs");
           const { IMAGE_PREFIX, RUNTIME_DIGEST, WORKER_DIGEST, CLAUDE_WORKER_DIGEST, CLAUDE_TOOL_RUNNER_DIGEST,
-          WORKER_NODE_PYTHON_DIGEST, CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST } = process.env;
+          WORKER_NODE_PYTHON_DIGEST, CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST, NATIVE_WORKER_DIGEST } = process.env;
           for (const d of [RUNTIME_DIGEST, WORKER_DIGEST, CLAUDE_WORKER_DIGEST, CLAUDE_TOOL_RUNNER_DIGEST,
-          WORKER_NODE_PYTHON_DIGEST, CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST])
+          WORKER_NODE_PYTHON_DIGEST, CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST, NATIVE_WORKER_DIGEST])
           if (!/^sha256:[0-9a-f]{64}$/.test(d)) throw new Error(`bad digest ${d}`);
           const driver = /^FROM\s+(\S+)/im.exec(readFileSync("src/coding-worker/Dockerfile", "utf8"))?.[1] ?? "";
           if (!/^[a-z0-9][a-z0-9._\/:-]*@sha256:[0-9a-f]{64}$/.test(driver)) throw new Error(`bad driver ${driver}`);
@@ -169,6 +178,7 @@ jobs:
           claudeToolRunner: `${IMAGE_PREFIX}/wardby-claude-tool-runner@${CLAUDE_TOOL_RUNNER_DIGEST}`,
           workerNodePython: `${IMAGE_PREFIX}/wardby-coding-worker-node-python@${WORKER_NODE_PYTHON_DIGEST}`,
           claudeToolRunnerNodePython: `${IMAGE_PREFIX}/wardby-claude-tool-runner-node-python@${CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST}`,
+          nativeWorker: `${IMAGE_PREFIX}/wardby-native-worker@${NATIVE_WORKER_DIGEST}`,
           driver }) + "\n");'
       - run: npm run test:package
         env:
