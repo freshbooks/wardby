@@ -32,6 +32,7 @@ import {
   type WorkerLauncher,
 } from "../native-worker/gateway.js";
 import { NATIVE_WORKER_PROTOCOL_VERSION, type WorkerInput } from "../native-worker/protocol.js";
+import type { PrismaGatewayLedger } from "../native-worker/ledger.js";
 import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
@@ -1438,6 +1439,219 @@ function sandboxWorkerInput(
       : [],
     pricing: { ...loaded.pricing.entry, efforts: [...loaded.pricing.entry.efforts] },
   };
+}
+
+/** What the durable delegation needs from the gateway ledger (src/native-worker/ledger.ts). */
+export type DelegationLedger = Pick<
+  PrismaGatewayLedger,
+  "claim" | "recordResult" | "setDelegation" | "delegation" | "waitingChildAgentIds"
+>;
+
+export interface DurableDelegationContext {
+  runId: string;
+  existingRun: Run;
+  loaded: LoadedNativeRun;
+  providers: NativeRunProviders;
+  db: RunnerDb;
+  issueTrackers: IssueTrackerRegistry | undefined;
+  ledger: DelegationLedger;
+  sessionId: string;
+  /** How long one call waits on the child before answering `pending` (the worker calls again). */
+  pollWindowMs?: number;
+  pollIntervalMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export type DurableDelegationOutcome = { result: string } | { pending: true };
+
+/** Long-poll window: well under common proxy and load-balancer idle timeouts. */
+export const DELEGATION_POLL_WINDOW_MS = 20_000;
+
+/**
+ * A delegate_to_* call from a sandboxed run, served by the native gateway. The in-process branch
+ * holds its admission, budget wait, and child wait in one process's memory for the child's whole
+ * life; this one keeps them on the call's ledger row, so the worker can call again with the same
+ * callId — on any control-plane replica, before or after a restart — and continue where it was:
+ *
+ * - every child, native or coding, is a managed run dispatched through dispatchRun and the
+ *   Executor (never inline: an inline child dies with the replica, and the reconciler does not
+ *   reap unmanaged runs);
+ * - admission re-checks the per-run delegation limit under a run-scoped advisory lock inside the
+ *   child's own transaction, so parallel delegations on different replicas cannot exceed it;
+ * - a delegation the budget would refuse while sibling children still run is recorded as waiting
+ *   and re-evaluated on each call (parallelDelegations), up to the same bound as in process;
+ * - each call waits on the child row up to `pollWindowMs`, then answers `pending`.
+ *
+ * Every refusal and result uses the same helpers, and so the same messages, as in process.
+ */
+export async function durableDelegate(
+  ctx: DurableDelegationContext,
+  callId: string,
+  name: string,
+  argsJson: string,
+): Promise<DurableDelegationOutcome> {
+  const { runId, existingRun, loaded, providers, db, ledger, sessionId } = ctx;
+  const now = ctx.now ?? Date.now;
+  const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const finish = async (result: string): Promise<DurableDelegationOutcome> => {
+    await ledger.recordResult(sessionId, callId, result);
+    return { result };
+  };
+
+  const claimed = await ledger.claim(sessionId, callId, "builtin.call");
+  if (claimed.outcome === "done") return { result: String(claimed.result) };
+  const state = await ledger.delegation(sessionId, callId);
+  const startedAt = state?.createdAt.getTime() ?? now();
+
+  const boundName = name.slice(DELEGATE_TOOL_PREFIX.length);
+  const edge = loaded.subAgentEdges.find((e) => e.boundName === boundName);
+  if (!edge) {
+    return finish(
+      JSON.stringify({ error: "no_such_subagent", message: `No sub-agent is bound to name "${boundName}".` }),
+    );
+  }
+  const executor = providers.executor;
+  if (!executor) {
+    return finish(
+      JSON.stringify({
+        error: "delegation_unavailable",
+        message: "This execution context has no Executor wired in, so the sub-agent cannot be dispatched.",
+      }),
+    );
+  }
+  const parsedArgs = parseDelegateArgs(argsJson);
+  if ("refusal" in parsedArgs) return finish(parsedArgs.refusal);
+  const { args } = parsedArgs;
+  const authorized = await authorizeDelegation(db, loaded.agentId, edge, boundName, args);
+  if ("refusal" in authorized) return finish(authorized.refusal);
+  const { childAgent } = authorized;
+  const coding = childAgent.kind === "coding";
+  const { queueTimeoutSec } = loadCodingConcurrencyConfig();
+
+  let childRunId = state?.childRunId ?? null;
+  if (!childRunId && state?.childAgentId === edge.childAgentId) {
+    // A replica that died between dispatching the child and recording it left the child row:
+    // adopt it rather than refusing this very delegation as a duplicate.
+    const orphan = await db.run.findFirst({
+      where: { parentRunId: runId, agentId: edge.childAgentId },
+      select: { id: true },
+    });
+    childRunId = orphan?.id ?? null;
+  }
+
+  if (!childRunId) {
+    const limit = loaded.maxDelegationsPerRun ?? 1;
+    const refusalNow = async (reader: { run: { findMany: RunnerDb["run"]["findMany"] } }) => {
+      const prior = await reader.run.findMany({ where: { parentRunId: runId }, select: { agentId: true } });
+      return delegationLimitRefusal({
+        priorChildAgentIds: prior.map((p) => p.agentId),
+        waitingChildAgentIds: await ledger.waitingChildAgentIds(sessionId, callId),
+        childAgentId: edge.childAgentId,
+        boundName,
+        limit,
+      });
+    };
+    const limitRefusal = await refusalNow(db);
+    if (limitRefusal) return finish(limitRefusal);
+
+    // parallelDelegations: a child the budget would refuse while a sibling still runs waits for a
+    // sibling to finish and free its hold, up to the child's own wait bound. With no sibling
+    // running it goes ahead and is refused at dispatch or at its first turn, as in process.
+    if (loaded.parallelDelegations) {
+      const siblings = await db.run.count({ where: { parentRunId: runId, status: { in: [...DRIVABLE] } } });
+      if (siblings > 0) {
+        const runTimeoutSec = coding ? (childAgent.codingProfile?.timeoutSec ?? 0) : 0;
+        const boundMs = (queueTimeoutSec + runTimeoutSec + CODING_CHILD_WAIT_GRACE_SEC) * 1000;
+        const { exhaustedBy } = await effectiveBudgetForRun(db, childAgent, new Date(), runId);
+        if (exhaustedBy && now() - startedAt < boundMs) {
+          await ledger.setDelegation(sessionId, callId, { status: "waiting_budget", childAgentId: edge.childAgentId });
+          return { pending: true };
+        }
+      }
+    }
+
+    // Recorded before dispatch, so a replica dying in between leaves a row the next call adopts.
+    await ledger.setDelegation(sessionId, callId, { status: "pending", childAgentId: edge.childAgentId });
+    let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+    let refusedUnderLock: string | null = null;
+    try {
+      dispatched = await dispatchRun({
+        db,
+        executor,
+        selfDefects: { db, issueTrackers: ctx.issueTrackers },
+        agentId: edge.childAgentId,
+        trigger: "subagent",
+        ...(coding
+          ? { codingTask: args.task, continuesCodingRunId: args.continuePriorRun }
+          : { taskOverride: delegationTaskOverride(args), grantedParentMemoryKeys: args.grantParentMemoryKeys ?? [] }),
+        parentRunId: runId,
+        // The child's result flows back into this run, which the triggerer sees, so the child is visible to them too.
+        triggeredById: existingRun.triggeredById,
+        beforePersist: async (tx) => {
+          // One admission per parent at a time, across every replica.
+          await tx.$queryRaw`SELECT 1 AS locked FROM (SELECT pg_advisory_xact_lock(hashtext(${runId}))) AS l`;
+          refusedUnderLock = await refusalNow(tx);
+          return refusedUnderLock === null;
+        },
+      });
+    } catch (err) {
+      if (!(err instanceof ContinuationRefusedError)) throw err;
+      return finish(
+        JSON.stringify({
+          error: "continuation_refused",
+          message:
+            `${err.message} No sub-agent run was started. Do not open a new pull request in its place: ` +
+            "tell the requester that this wardby deployment cannot continue that pull request's branch.",
+        }),
+      );
+    }
+    if (!dispatched) {
+      return finish(
+        refusedUnderLock ??
+          JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." }),
+      );
+    }
+    childRunId = dispatched.run.id;
+    await ledger.setDelegation(sessionId, callId, { status: "pending", childAgentId: edge.childAgentId, childRunId });
+    runnerLog.info({ runId, childRunId, boundName, kind: childAgent.kind, durable: true }, "delegation started");
+  }
+
+  const codingRun = coding
+    ? await db.codingRun.findUnique({ where: { runId: childRunId }, select: { timeoutSec: true } })
+    : null;
+  const boundMs = coding
+    ? (queueTimeoutSec + (codingRun?.timeoutSec ?? 0) + CODING_CHILD_WAIT_GRACE_SEC) * 1000
+    : SANDBOX_CHILD_WAIT_SEC * 1000;
+  const windowEnd = now() + (ctx.pollWindowMs ?? DELEGATION_POLL_WINDOW_MS);
+  for (;;) {
+    const child = await db.run.findUniqueOrThrow({ where: { id: childRunId } });
+    if (!DRIVABLE.includes(child.status as (typeof DRIVABLE)[number])) {
+      runnerLog.info({ runId, childRunId, boundName, outcome: child.status, durable: true }, "delegation finished");
+      if (!coding) return finish(nativeChildResult(child));
+      const stored = await db.codingRun
+        .findUnique({ where: { runId: childRunId }, select: { result: true } })
+        .catch(() => null);
+      return finish(codingChildResult(child, stored?.result));
+    }
+    if (now() - startedAt >= boundMs) {
+      await executor.stop(childRunId, "sub-agent wait timed out").catch((err: unknown) => {
+        runnerLog.warn({ err, childRunId, runId }, "failed to stop a timed-out sub-agent run");
+      });
+      return finish(
+        JSON.stringify({
+          error: "subagent_wait_timed_out",
+          runId: childRunId,
+          message: coding
+            ? "The coding sub-agent did not finish within its queue timeout plus run timeout; it was stopped and produced no result."
+            : "The sub-agent did not finish in time; it was stopped and produced no result.",
+        }),
+      );
+    }
+    const remaining = windowEnd - now();
+    if (remaining <= 0) return { pending: true };
+    await sleep(Math.min(ctx.pollIntervalMs ?? 1_000, remaining));
+  }
 }
 
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
