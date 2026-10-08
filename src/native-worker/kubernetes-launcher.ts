@@ -44,6 +44,8 @@ export interface KubernetesNativeWorkerLauncherOptions {
   /** The native gateway's Service, in the same namespace (NetworkPolicy selects its pods there). */
   gatewayService: string;
   runtimeClassName?: string;
+  /** NATIVE_GATEWAY_URL: dial this instead of the Service's ClusterIP (its host is also what the probe checks). */
+  gatewayUrl?: string;
   /** Called once a pod's isolation is proven; the executor marks the run's session ready. */
   onNetworkProven: (runId: string) => Promise<void>;
   /** The pod's hard lifetime (its session's deadline). */
@@ -72,6 +74,7 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
 
   /** The gateway Service's ClusterIP: workers dial an address, so they need no DNS egress. */
   private resolveGatewayHost(): Promise<string> {
+    if (this.options.gatewayUrl) return Promise.resolve(new URL(this.options.gatewayUrl).hostname);
     this.gatewayHost ??= (async () => {
       const service = await this.api.readService(this.ns, this.options.gatewayService);
       const ip = service?.spec?.clusterIP;
@@ -87,6 +90,7 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
   }
 
   async resolveGatewayUrl(): Promise<string> {
+    if (this.options.gatewayUrl) return this.options.gatewayUrl;
     return `http://${await this.resolveGatewayHost()}:${NATIVE_GATEWAY_PORT}/native-gateway/v1/call`;
   }
 
