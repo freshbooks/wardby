@@ -871,8 +871,10 @@ need close to this whole window). Each probe has a time budget of
 `KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS` (default 10,000ms), so one streak exec
 is allowed three budgets plus the two 500ms gaps (31,000ms at the default), and
 the launcher never lets `enforcementTimeoutMs` fall below that one-streak value
-— at the defaults the effective bound is therefore 31,000ms. An exec that
-exceeds its timeout fails the launch with `kubernetes_exec_timeout`. The
+— at the defaults the effective bound is therefore 31,000ms. The bound is
+checked between streak execs, so a launch can run past it by up to one streak
+exec. An exec that exceeds its timeout fails the launch with
+`kubernetes_exec_timeout`. The
 verdict at the bound comes from the
 _last_ probe — not from whether any probe was ever unavailable, so an early
 blip while the pod's networking came up does not misdirect the operator — and

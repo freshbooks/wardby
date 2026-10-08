@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
@@ -977,6 +978,42 @@ describe("enforcementStreakScript", () => {
     const smuggled = "3; require('child_process')" as unknown as number;
     expect(() => enforcementStreakScript("10.96.0.50", smuggled, 500)).toThrow(KUBERNETES_ISOLATION_ERROR);
     expect(() => enforcementStreakScript("10.96.0.50", 3, smuggled)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+});
+
+describe("enforcement scripts never exit 0 without an explicit proven exit", () => {
+  // A real `node` whose net.connect is replaced before the script runs, so the script's own
+  // `require("node:net")` sees the stub. Nothing the stub returns holds the event loop open: if the
+  // script's promises never settle (or reject under a non-throwing --unhandled-rejections mode, as a
+  // BYO worker image's NODE_OPTIONS could set), the process drains and exits naturally. A natural
+  // exit must read as "did not run", never as PROVEN — for the streak, that would open the gate.
+  const NEVER_ANSWERS = 'require("node:net").connect = () => ({ once: () => {}, destroy: () => {} });';
+  const REJECTS = 'require("node:net").connect = () => { throw new Error("stubbed connect failure"); };';
+  const scripts = [
+    ["enforcementProbeScript", () => enforcementProbeScript("10.96.0.50")],
+    ["enforcementStreakScript", () => enforcementStreakScript("10.96.0.50", 3, 1)],
+  ] as const;
+  const run = (stub: string, script: string, nodeArgs: string[] = []) =>
+    spawnSync(process.execPath, [...nodeArgs, "-e", `${stub}\n${script}`], { encoding: "utf8", timeout: 20_000 });
+
+  it.each(scripts)("%s exits non-zero when no probe ever settles", (_name, build) => {
+    const result = run(NEVER_ANSWERS, build());
+    expect(result.error).toBeUndefined();
+    expect(result.status).not.toBe(0);
+    expect(result.status).toBe(1);
+  });
+
+  it.each(scripts)("%s exits non-zero when a probe rejects and rejections only warn", (_name, build) => {
+    for (const mode of ["warn", "none"]) {
+      const result = run(REJECTS, build(), [`--unhandled-rejections=${mode}`]);
+      expect(result.error).toBeUndefined();
+      expect(result.status).not.toBe(0);
+      expect(result.status).toBe(1);
+    }
+  });
+
+  it.each(scripts)("%s presets a did-not-run exit code before doing anything else", (_name, build) => {
+    expect(build().startsWith("process.exitCode = 1;\n")).toBe(true);
   });
 });
 

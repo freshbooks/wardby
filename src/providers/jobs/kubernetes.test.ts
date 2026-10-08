@@ -1132,7 +1132,8 @@ describe("KubernetesJobLauncher NetworkPolicy enforcement gate", () => {
     const { launcher: bounded } = clockedLauncher(g);
     const pattern = Array.from({ length: 100 }, (_, i) => (i % 2 === 0 ? 3 : 4));
     const gKinds = scriptProbe(g, pattern);
-    await expect(bounded.launch(g.spec)).rejects.toThrow(/^kubernetes_policy_/);
+    // 500 ms retry sleeps against the 5_000 ms bound: the 11th exec (index 10, a 3) is the last.
+    await expect(bounded.launch(g.spec)).rejects.toThrow(/^kubernetes_policy_not_enforced: .*the last probe exited 3;/);
     expect(gKinds()).not.toContain("seed");
     expect(gKinds()).not.toContain("marker");
   });

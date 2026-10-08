@@ -129,12 +129,10 @@ const DEFAULT_ENFORCEMENT_EXEC_TIMEOUT_MS = 10_000;
  * and sending an operator to the CNI over a dead exec wastes the one clue they were given.
  */
 const ENFORCEMENT_VERDICTS: Readonly<Record<number, { code: string; detail: string }>> = {
-  [ENFORCEMENT_PROBE_PROVEN]: {
-    code: "kubernetes_policy_not_enforced",
-    // Reaching the bound on a proven probe means the streak kept being broken: enforcement was
-    // observed, but never ENFORCEMENT_BLOCKED_STREAK times running, so it is not stable evidence.
-    detail: `the last probe was proven, but never ${ENFORCEMENT_BLOCKED_STREAK} consecutive times within the bound — enforcement is flapping rather than absent`,
-  },
+  // No ENFORCEMENT_PROBE_PROVEN entry, deliberately: the whole streak runs in one exec
+  // (enforcementStreakScript), which exits PROVEN only after ENFORCEMENT_BLOCKED_STREAK consecutive
+  // proven probes — and that opens the gate before the bound is ever checked. A streak broken by
+  // flapping exits with the breaking probe's own code, so the verdict is always one of these.
   [ENFORCEMENT_PROBE_DENY_REACHABLE]: {
     code: "kubernetes_policy_not_enforced",
     detail: `the deny port ${CODING_PROXY_DENY_PORT} accepted a connection, so no policy is blocking it (or the policy is not port-scoped) — look at the CNI`,
@@ -174,13 +172,8 @@ type EnforcementStage = "initial" | "pre_marker";
 
 /** Same shape as ENFORCEMENT_VERDICTS/ENFORCEMENT_PROBE_DID_NOT_RUN, but for the `pre_marker` stage. */
 const ENFORCEMENT_VERDICTS_PRE_MARKER: Readonly<Record<number, { code: string; detail: string }>> = {
-  [ENFORCEMENT_PROBE_PROVEN]: {
-    code: "kubernetes_policy_enforcement_lost_before_marker",
-    detail:
-      `the policy was proven enforced earlier in this launch, but the re-probe run immediately before ` +
-      `opening the gate never reached ${ENFORCEMENT_BLOCKED_STREAK} consecutive proven probes within the ` +
-      "bound — enforcement held at the initial proof but is flapping now, immediately before release",
-  },
+  // No ENFORCEMENT_PROBE_PROVEN entry, for the same reason as ENFORCEMENT_VERDICTS: a proven streak
+  // exec opens the gate, so it never reaches enforcementVerdict.
   [ENFORCEMENT_PROBE_DENY_REACHABLE]: {
     code: "kubernetes_policy_enforcement_lost_before_marker",
     detail:

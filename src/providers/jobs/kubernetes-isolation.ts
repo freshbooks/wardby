@@ -870,12 +870,18 @@ export function enforcementProbeScript(proxyIp: string): string {
 /**
  * The one measurement both enforcement scripts make, as script lines defining `probe()`: connect to
  * CODING_PROXY_PORT, then to CODING_PROXY_DENY_PORT (both with a 3 s connect timeout, always both,
- * in that order), and resolve to the exit code classifying that pair. Shared verbatim so the
+ * in that order), and resolve to the exit code classifying that pair. Its first statement presets
+ * `process.exitCode = 1` so that a natural exit is never mistaken for PROVEN. Shared verbatim so the
  * single probe and the streak can never disagree about what "proven" means.
  */
 function enforcementProbeBody(proxyIp: string): string[] {
   if (isIP(proxyIp) === 0) throw isolationError();
   return [
+    // Preset a code no probe produces (it reads as "did not run"), so the only way to exit 0 is
+    // the explicit proven exit. Without it, a process that drains its event loop without ever
+    // calling process.exit — a probe promise that never settles, or a rejection under a
+    // non-throwing --unhandled-rejections mode — would exit 0 and read as PROVEN.
+    "process.exitCode = 1;",
     'const net = require("node:net");',
     "const tcp = (port) =>",
     "  new Promise((done) => {",
