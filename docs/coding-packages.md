@@ -135,6 +135,18 @@ Name the extras on the entry, exactly as you would to pip:
   too, the same way.
 - An entry without brackets behaves as before: no extra-gated dependencies.
 - The same package may appear in several entries; their extras are combined.
+- An extra that a dependency line asks for is followed only once the proxy has
+  served that parent's metadata. If pip reads the dependency before its parent
+  (for example because the dependency is also an allowlist entry) and the
+  extra's packages are refused with `403 wardby_package_not_allowed`, name the
+  extra on the allowlist directly, e.g. `uvicorn[standard]`.
+- A marker that mentions `extra` in any form the proxy does not recognise
+  (anything other than `extra == "name"` or `extra === "name"`, or a marker
+  with an unbalanced quote) is treated as gated on no extra: that line is never
+  followed. Allowlist the package it names directly if you need it.
+- Extras on allowlist entries need the coding proxy and the control plane at
+  the same Wardby version: an older proxy rejects `name[extra]` entries, so
+  upgrade the proxy before (or with) the control plane.
 
 Every safeguard below (release age, advisories, wheels only, the record of
 what was fetched) applies to packages reached through an extra.

@@ -89,24 +89,33 @@ export function parseExtras(list: string): string[] | null {
   return [...new Set(items.map(normalizePypiName))].sort();
 }
 
-/** The string literals a marker compares `extra` to with `==` (either
- *  operand order), normalized; null when the marker has no such clause.
- *  Tokenized, so text inside another clause's quoted value never counts. */
+/** The string literals a marker compares `extra` to with `==` or `===`
+ *  (either operand order), normalized; null when the marker never mentions
+ *  `extra`. Tokenized, so a quoted value never counts as a clause. Fails
+ *  closed: when `extra` appears in any shape this does not fully recognise
+ *  (`extra in "a b"`, `extra.x`, a bare `extra`, an unbalanced quote), the
+ *  line is gated on no extra at all, so it is never followed. */
 function markerExtras(marker: string): string[] | null {
+  if (!/\bextra\b/.test(marker)) return null;
   const tokens = marker.match(/"[^"]*"|'[^']*'|===|==|!=|<=|>=|~=|[A-Za-z_][A-Za-z0-9_.]*|\S/g) ?? [];
-  const literal = (token: string | undefined) =>
-    token !== undefined && token.length >= 2 && (token[0] === '"' || token[0] === "'") ? token.slice(1, -1) : null;
+  const isLiteral = (token: string | undefined) =>
+    token !== undefined && token.length >= 2 && (token[0] === '"' || token[0] === "'");
+  const isEquals = (token: string | undefined) => token === "==" || token === "===";
+  // A lone quote (unterminated string) means the marker cannot be read.
+  if (tokens.some((token) => token === '"' || token === "'")) return [];
   const found: string[] = [];
-  let gated = false;
-  for (let i = 0; i + 2 < tokens.length; i++) {
-    if (tokens[i + 1] !== "==") continue;
-    const value =
-      tokens[i] === "extra" ? literal(tokens[i + 2]) : tokens[i + 2] === "extra" ? literal(tokens[i]) : null;
-    if (value === null) continue;
-    gated = true;
+  let recognised = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] !== "extra") continue;
+    let value: string | null = null;
+    if (isEquals(tokens[i + 1]) && isLiteral(tokens[i + 2])) value = tokens[i + 2].slice(1, -1);
+    else if (isEquals(tokens[i - 1]) && isLiteral(tokens[i - 2])) value = tokens[i - 2].slice(1, -1);
+    if (value === null) return [];
+    recognised++;
     if (PROJECT_NAME.test(value)) found.push(normalizePypiName(value));
   }
-  return gated ? found : null;
+  // `extra` only inside quoted values: not a clause, but not one this reads either.
+  return recognised === 0 ? [] : found;
 }
 
 interface RequirementLine {
@@ -122,8 +131,9 @@ function requirementLines(metadataText: string): { self: string | null; lines: R
   let self: string | null = null;
   const lines: RequirementLine[] = [];
   for (const line of metadataText.split(/\r?\n/)) {
-    // The headers end at the first empty line; the description follows.
-    if (line.trim() === "") break;
+    // The headers end at the first truly empty line; the description
+    // follows. A whitespace-only line is a folded header's continuation.
+    if (line === "") break;
     if (line.startsWith("Name:")) {
       const name = line.slice("Name:".length).trim();
       if (self === null && PROJECT_NAME.test(name)) self = normalizePypiName(name);

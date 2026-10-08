@@ -140,6 +140,67 @@ describe("requiredDists (extras)", () => {
     expect(names(requiredDists(text))).toEqual(["real"]);
   });
 
+  it("reads past a folded header's whitespace-only continuation lines", () => {
+    const text = [
+      "Name: a",
+      "License: MIT",
+      "        ",
+      "        Permission is hereby granted",
+      "\t",
+      "        to any person",
+      "Requires-Dist: needed",
+      "",
+      "Requires-Dist: from-the-readme",
+    ].join("\n");
+    expect(names(requiredDists(text))).toEqual(["needed"]);
+  });
+
+  it.each([
+    ['extra === "foo"', "foo"],
+    ['extra == "foo', "foo"],
+    ["extra == 'foo", "foo"],
+    ['"foo" in extra', "foo"],
+    ["extra in 'foo bar'", "foo"],
+    ['extra.thing == "foo"', "foo"],
+    ['python_version > "3" and extra', "foo"],
+    ['os_name == "nt" or extra == "foo"', "foo"],
+  ])("fails closed on the extra marker %j", (marker, extra) => {
+    const text = `Name: a\nRequires-Dist: gated; ${marker}\nRequires-Dist: plain; python_version >= "3.8"`;
+    // A plain install never follows it (the old /;\s*.*\bextra\s*==/ skip did the same or stricter).
+    expect(names(requiredDists(text))).toEqual(["plain"]);
+    expect(requiresDist(text)).toEqual(["plain"]);
+    if (marker.startsWith("extra ===")) {
+      // pip treats === as equality: a recognised gate, followed for that extra.
+      expect(names(requiredDists(text, [extra]))).toEqual(["gated", "plain"]);
+    } else if (!marker.startsWith("os_name")) {
+      // Anything not fully recognised is followed for no extra at all.
+      expect(names(requiredDists(text, [extra]))).toEqual(["plain"]);
+    }
+  });
+
+  it("matches the old skip on plain entries for every extra == shape", () => {
+    const old = (text: string) =>
+      text
+        .split("\n")
+        .filter((line) => line.startsWith("Requires-Dist:"))
+        .map((line) => line.slice("Requires-Dist:".length).trim())
+        .filter((value) => !/;\s*.*\bextra\s*==/.test(value))
+        .map((value) => value.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)/)![1]);
+    const text = [
+      "Name: a",
+      'Requires-Dist: one; extra == "x"',
+      'Requires-Dist: two; extra=="x"',
+      "Requires-Dist: three; (extra == 'x' or extra == 'y')",
+      'Requires-Dist: four; implementation_name != "pypy" and extra == "binary"',
+      'Requires-Dist: five; extra === "x"',
+      'Requires-Dist: six; extra == "x',
+      'Requires-Dist: seven; python_version < "3.9"',
+      "Requires-Dist: eight",
+      "Requires-Dist: nine; platform_release == 'extra == \"x\"'",
+    ].join("\n");
+    expect(requiresDist(text)).toEqual(old(text));
+  });
+
   it("passes requested extras through dependenciesFromFile for a metadata file", async () => {
     const deps = await pypiAdapter.dependenciesFromFile!(
       { kind: "file-metadata", name: "psycopg", filename: "psycopg-3.2.3-py3-none-any.whl" },

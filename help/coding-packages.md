@@ -43,7 +43,12 @@ package's own metadata declares under that extra (for `psycopg[binary]`, the
 `psycopg-binary` wheel); a bare `psycopg` entry follows no extra, so
 `psycopg-binary` is refused with `wardby_package_not_allowed`. Extras a
 dependency line names (`uvicorn[standard]` in another package's metadata) are
-followed the same way. Every safeguard still applies to what an extra adds.
+followed the same way, once the proxy has served that parent's metadata: if
+an extra's packages are still refused with `403 wardby_package_not_allowed`,
+name the extra on the allowlist directly (`uvicorn[standard]`). Every
+safeguard still applies to what an extra adds. Extras need the coding proxy
+and control plane on the same Wardby version; an older proxy rejects
+`name[extra]` entries.
 
 The quickstart's coding step offers the packages a local repository declares
 (`package.json`, `pyproject.toml` including its build-system packages,
