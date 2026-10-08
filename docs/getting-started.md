@@ -43,6 +43,116 @@ Provider credentials and `SECRET_APP_KEY` are written with owner-only file
 permissions. They are not printed, passed as command-line arguments, or added
 to the application's own `.env` files.
 
+## Choose what to set up next
+
+The quickstart's sample agent is a native agent: it calls a model and nothing
+else. To have agents write code or review it, pick the path that matches what
+you have:
+
+| You want                                          | You need                                                           | Path                                              |
+| ------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------- |
+| A coding agent and a review agent, tried locally  | Docker, an OpenAI **or** Anthropic key, a git repository on disk   | [A](#path-a-local-repository-no-github-app)       |
+| A coding agent that opens pull requests on GitHub | Path A's setup, plus a GitHub App installed on the repository      | [B](#path-b-coding-agent-on-a-github-repository)  |
+| A review agent that reviews GitHub pull requests  | A GitHub App with webhooks, and Wardby reachable over public HTTPS | [C](#path-c-review-agent-on-github-pull-requests) |
+
+Codex agents need only an OpenAI key and Claude Code agents only an Anthropic
+key; you don't need both.
+
+### Path A: local repository, no GitHub App
+
+1. Run the quickstart with its coding step, pointing it at your repository (or
+   at a folder of repositories):
+
+   ```sh
+   npx --yes @wardby/cli@latest quickstart --coding --trust ~/code/my-repo
+   ```
+
+   Or run plain `quickstart` and answer **yes** to "Set up coding + review
+   agents against a local git repo?". It asks for Codex or Claude Code, pulls
+   only that provider's images, starts the coding proxy, and creates two agents:
+   `local-builder` (writes code) and `local-reviewer` (reviews it).
+
+2. Ask your MCP client (the quickstart can register Wardby with Codex or Claude
+   Code) to run the builder. The quickstart prints the exact call, for example:
+
+   ```json
+   trigger_agent {"agentId": "<local-builder id>", "task": "Add a short CONTRIBUTING.md"}
+   ```
+
+3. Check the run with `get_run`. When it succeeds, its `resultBranch` is a new
+   branch `wardby/run-<run id>` **in your repository**. Inspect it with
+   `git diff main...wardby/run-<run id>`. Your working tree and checked-out
+   branch are not touched.
+4. Review that branch:
+
+   ```json
+   trigger_agent {"agentId": "<local-reviewer id>", "review": {"branch": "wardby/run-<run id>"}}
+   ```
+
+   `get_run` on the review run shows its verdict, summary, and line comments.
+
+5. Merge the branch if you like it, or delete it with
+   `git branch -D wardby/run-<run id>`.
+
+Details, options, and the trust model are in
+[Coding agents on a local repository](#coding-agents-on-a-local-repository)
+below.
+
+### Path B: coding agent on a GitHub repository
+
+A coding agent you trigger yourself can work on a GitHub repository from the
+same local setup. It pushes a branch and opens a **draft pull request**. GitHub
+doesn't need to reach your machine for this.
+
+1. Complete path A first, so that Docker, the coding proxy, and the worker
+   image are set up.
+2. Create a GitHub App and install it on **only** the repository the agent may
+   change, with `Contents: Read and write` and `Pull requests: Read and write`
+   ([details](coding-agent-setup.md#prerequisites)).
+3. Add `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` to the project's
+   `.wardby/.env`, then re-run `doctor`.
+4. Create a coding agent whose `codingProfile.repository` is `owner/name`. The
+   repository must be authorized for the agent's owner. Either link your GitHub
+   account with `link_host_account`, or, on a local installation (where you
+   hold the `admin` role), pass `repositoryAdminOverride: true`. See
+   [Repository authorization](coding-agent-setup.md#repository-authorization).
+5. Trigger it with `trigger_agent` and a `task`. `get_run` shows the draft
+   pull request it opened.
+
+### Path C: review agent on GitHub pull requests
+
+Automatic reviews start from GitHub webhooks, so GitHub must be able to reach
+your Wardby server over public HTTPS. A laptop-only installation can't receive
+them; use a deployment such as [Getting started on GKE](getting-started-gke.md),
+or another host with a public URL.
+
+1. Run Wardby where GitHub can reach it, with `MCP_CANONICAL_URI` set to its
+   public URL.
+2. Register the GitHub App with the webhook URL, secret, events, and
+   permissions in
+   [Registering the GitHub App](code-review-agents.md#registering-the-github-app).
+3. Link your GitHub account with `link_host_account`.
+4. Create a native review agent. The reviewer prompt in
+   [Agent recipes](agent-recipes.md) is a good start.
+5. Link it to the repository with the `pull_request` trigger (see
+   [Linking an agent to a repository](code-review-agents.md#linking-an-agent-to-a-repository)):
+
+   ```json
+   {
+     "agentId": "<agent-id>",
+     "repository": "owner/name",
+     "access": "write",
+     "triggers": ["pull_request"],
+     "checkName": "wardby review"
+   }
+   ```
+
+6. Open or update a pull request. A **wardby review** check starts, and the
+   agent posts inline comments and a summary.
+
+To try reviews before you have a public URL, use path A's `local-reviewer` on
+any local branch.
+
 ## Unattended setup
 
 Automation must explicitly accept the billed demo with `--yes`:
@@ -118,7 +228,8 @@ agents do not use it.
 ## Coding agents
 
 The first-run demo proves native model routing, budget admission, persistence,
-and accounting. It does not install a GitHub App or start any worker.
+and accounting. It does not install a GitHub App or start any worker. For the
+step-by-step paths, see [Choose what to set up next](#choose-what-to-set-up-next).
 
 Coding agents require the stronger boundary described in
 [Coding-agent setup](coding-agent-setup.md): an immutable worker image, a
@@ -200,8 +311,9 @@ folders) and its limits (no submodules or Git LFS).
 
 [Agent recipes](agent-recipes.md) gives two complete, copyable setups: an
 architecture keeper and a builder per language. They go beyond the quickstart,
-which runs native agents only. They require Wardby 0.4.0 or later. They need the
-GitHub App, worker image, and job launcher from
+whose optional coding step works on a local git repository without a GitHub
+App. The recipes react to GitHub events, so they require Wardby 0.4.0 or later
+and need the GitHub App, worker image, and job launcher from
 [Coding-agent setup](coding-agent-setup.md). Their event triggers need GitHub to
 reach your instance at a public HTTPS URL.
 

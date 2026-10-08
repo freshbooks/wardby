@@ -43,6 +43,9 @@ jobs:
           throw new Error(`release ${process.env.RELEASE_TAG} does not match v${version}`);'
       - run: npm ci --ignore-scripts
       - run: node scripts/coding-worker-image-policy.mjs ../src/coding-worker/Dockerfile --kind=runtime
+      # The Codex worker inherits protocol.js from its pinned driver: refuse to publish it when that
+      # driver predates src/coding/protocol.ts (a new driver-v* must be published and pinned first).
+      - run: npm run build && node scripts/check-worker-protocol.mjs --from-dockerfile src/coding-worker/Dockerfile
       # The Codex policy script checks Codex-specific pins, so the Claude Code
       # images are gated by their own policy tests instead.
       - run: npx vitest run src/claude-coding-worker/image-policy.test.ts src/claude-tool-runner/image-policy.test.ts

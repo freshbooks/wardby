@@ -19,9 +19,33 @@ The quickstart creates local state under `.wardby/`, starts the local services,
 applies the required database migrations, and can register Wardby with Codex or
 Claude Code. Run `wardby doctor` afterwards to verify the local installation.
 
-To try a coding agent and a review agent without a GitHub App, answer yes to the
-quickstart's coding step (or pass `--coding --trust <dir>`, a repository or a folder of repositories); it points them at a
-git folder on your machine. See [Use local git repositories](local-repositories.md).
+## Coding and review agents: pick a path
+
+- **A. Try them locally, no GitHub App.** Run
+  `npx --yes @wardby/cli@latest quickstart --coding --trust <repo-or-folder>`
+  (or answer yes to the coding step). It creates `local-builder` and
+  `local-reviewer` for a git repository on your machine. Run the builder with
+  `trigger_agent {"agentId": "<id>", "task": "..."}`. It pushes a branch
+  `wardby/run-<run id>` into your repository and leaves your checkout alone.
+  Review that branch with
+  `trigger_agent {"agentId": "<reviewer id>", "review": {"branch": "wardby/run-<run id>"}}`.
+  You need Docker and an OpenAI key (Codex) or an Anthropic key (Claude Code).
+  See [Use local git repositories](local-repositories.md).
+- **B. A coding agent that opens GitHub pull requests.** Do A first. Then
+  install a GitHub App on the repository (Contents and Pull requests: read and
+  write), add `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` to `.wardby/.env`,
+  and create a coding agent for `owner/name`. You trigger it yourself, so
+  GitHub doesn't need to reach your machine. See
+  [GitHub integration](github.md).
+- **C. A review agent on GitHub pull requests.** Reviews start from GitHub
+  webhooks, so Wardby must be reachable over public HTTPS. Register the App
+  with webhooks, link a native agent to the repository with the `pull_request`
+  trigger, and open a pull request. See [Code review agents](code-review-agents.md).
+
+The full step-by-step guide is "Choose what to set up next" in
+[`docs/getting-started.md`](../docs/getting-started.md).
+
+## Next
 
 Use [Operate agents](operating-agents.md) to create and supervise managed work.
 Read [Choose a native or coding agent](creating-agents.md) before creating your
