@@ -15,6 +15,7 @@
  * channels always need /invite @<app> before the bot can see or post to
  * them. See docs/private/2026-10-08-slack-workflow-notifications-design.md §8.
  */
+import { Prisma } from "#prisma";
 import { requireAgentAccess } from "../auth/access.js";
 import { requireScope } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
@@ -110,24 +111,29 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
         if (!agent) throw new McpError(404, `Agent "${agentId}" not found.`);
       }
       const channelId = normalizeChannelId(args.channel);
-      let channelName: string | null;
+      // `info` is undefined when channelInfo can't be validated at all
+      // (missing channels:read/groups:read — accept the id unvalidated) and
+      // null when the bot genuinely cannot see the channel (an error, not a
+      // validation gap) — kept out of the try/catch below so the 400 for
+      // "bot cannot see this channel" isn't routed through ChatError handling.
+      let info: { id: string; name: string; isPrivate: boolean } | null | undefined;
       try {
-        const info = await chat.channelInfo(channelId);
-        if (!info) {
-          throw new McpError(
-            400,
-            `The bot cannot see channel ${channelId}: invite it with /invite @<app> (private channels always need ` +
-              "this). See errors/slack-channel-unreachable.",
-          );
-        }
-        channelName = info.name;
+        info = await chat.channelInfo(channelId);
       } catch (err) {
         if (err instanceof ChatError && err.code === "auth_failed") {
-          channelName = null;
+          info = undefined;
         } else {
           throw err;
         }
       }
+      if (info === null) {
+        throw new McpError(
+          400,
+          `The bot cannot see channel ${channelId}: invite it with /invite @<app> (private channels always need ` +
+            "this). See errors/slack-channel-unreachable.",
+        );
+      }
+      const channelName = info ? info.name : null;
       const events = [...new Set(args.events ?? [])];
       const includeCost = args.includeCost ?? false;
       const fields = {
@@ -147,14 +153,30 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       // this compound key never matches an existing row the way a fully
       // non-null key would. Find the existing row explicitly instead, then
       // update it by id or create.
-      const existing = await ctx.db.notificationChannel.findFirst({
-        where: hasProject ? { provider, channelId, issueProvider, projectKey } : { provider, channelId, agentId },
-      });
-      const link = existing
-        ? await ctx.db.notificationChannel.update({ where: { id: existing.id }, data: fields })
-        : await ctx.db.notificationChannel.create({
+      const subjectWhere = hasProject
+        ? { provider, channelId, issueProvider, projectKey }
+        : { provider, channelId, agentId };
+      const existing = await ctx.db.notificationChannel.findFirst({ where: subjectWhere });
+      let link;
+      if (existing) {
+        link = await ctx.db.notificationChannel.update({ where: { id: existing.id }, data: fields });
+      } else {
+        try {
+          link = await ctx.db.notificationChannel.create({
             data: { provider, channelId, issueProvider, projectKey, agentId, ...fields },
           });
+        } catch (err) {
+          if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== "P2002") throw err;
+          // Lost a create race: another concurrent link_notification_channel
+          // call for the same channel + subject committed first. Re-linking
+          // an existing link is normal, documented behavior (it replaces
+          // events/includeCost and clears lastError) — so re-query and
+          // update that row instead of surfacing the race as an error.
+          const raced = await ctx.db.notificationChannel.findFirst({ where: subjectWhere });
+          if (!raced) throw err;
+          link = await ctx.db.notificationChannel.update({ where: { id: raced.id }, data: fields });
+        }
+      }
       return textResult({ link });
     },
   });

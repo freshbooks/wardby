@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
+import { Prisma } from "#prisma";
 import { buildMcpServer } from "../server.js";
 import { registerNotificationChannelTools } from "./notification-channels.js";
 import { FakeChatProvider } from "../../providers/chat/fake.js";
@@ -40,10 +41,16 @@ function matches(row: ChannelRow, where: Record<string, unknown>): boolean {
   return Object.entries(where).every(([field, value]) => (row as unknown as Record<string, unknown>)[field] === value);
 }
 
-function fakeDb(agents: FakeAgentRow[], links: ChannelRow[] = [], deliveries: DeliveryRow[] = []) {
+function fakeDb(
+  agents: FakeAgentRow[],
+  links: ChannelRow[] = [],
+  deliveries: DeliveryRow[] = [],
+  failCreateOnce?: Error,
+) {
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   const rows: ChannelRow[] = links.map((l) => ({ ...l }));
   let nextId = rows.length + 1;
+  let pendingCreateFailure = failCreateOnce;
   const db = {
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
@@ -69,6 +76,17 @@ function fakeDb(agents: FakeAgentRow[], links: ChannelRow[] = [], deliveries: De
           createdAt: new Date(),
           ...data,
         } as ChannelRow;
+        if (pendingCreateFailure) {
+          const err = pendingCreateFailure;
+          pendingCreateFailure = undefined;
+          // Simulate another concurrent `link_notification_channel` call for
+          // the same channel + subject committing its create first: the row
+          // it would have inserted lands with the same key the retried
+          // findFirst below looks up, and this call fails as a real unique
+          // violation would.
+          rows.push({ ...row, id: `race${nextId}`, authorizedById: "racer" });
+          throw err;
+        }
         rows.push(row);
         return { ...row };
       },
@@ -116,9 +134,10 @@ async function setup(
     links?: ChannelRow[];
     deliveries?: DeliveryRow[];
     principalId?: string;
+    failCreateOnce?: Error;
   } = {},
 ) {
-  const { db, rows, deliveries } = fakeDb(agents, opts.links, opts.deliveries);
+  const { db, rows, deliveries } = fakeDb(agents, opts.links, opts.deliveries, opts.failCreateOnce);
   const chatProvider = new FakeChatProvider();
   const mcp = buildMcpServer({ providers: {} as never, db, config: { canonicalUri: CANONICAL_URI } });
   const principalId = opts.principalId ?? "admin1";
@@ -250,6 +269,28 @@ describe("notification channel tools", () => {
       authorizedById: "admin1",
     });
     expect(rows[0].authorizedAt).toBeInstanceOf(Date);
+  });
+
+  it("recovers from a concurrent create race (P2002) by updating the row the other caller just created", async () => {
+    const race = new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+      code: "P2002",
+      clientVersion: "test",
+    });
+    const { client, rows, chatProvider } = await setup([NATIVE], { failCreateOnce: race });
+    chatProvider.channels.set("C123ABCDEF", { id: "C123ABCDEF", name: "eng-pay", isPrivate: false });
+    const r = await call(client, "link_notification_channel", {
+      channel: "C123ABCDEF",
+      projectKey: "PAY",
+      events: ["pr_opened"],
+    });
+    expect(r.isError).toBeFalsy();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      channelId: "C123ABCDEF",
+      projectKey: "PAY",
+      events: ["pr_opened"],
+      authorizedById: "admin1",
+    });
   });
 
   it("links an agent channel", async () => {
@@ -420,7 +461,7 @@ describe("notification channel tools", () => {
     expect(rows[0].lastError).toBeNull();
   });
 
-  it("404s on an unknown link id for unlink and test", async () => {
+  it("404s on an unknown link id for test_notification_channel", async () => {
     const { client } = await setup([NATIVE]);
     const r = await call(client, "test_notification_channel", { id: "zz" });
     expect(r.isError).toBeTruthy();
