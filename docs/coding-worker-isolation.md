@@ -949,12 +949,29 @@ default 90,000ms):
 
 This whole preflight is **memoized per launcher instance and its failure is
 sticky**: `KubernetesJobLauncher.runPreflight()` caches the first call's
-promise (`this.preflightResult ??= ...`, `kubernetes.ts:472-487`), including
+promise (`this.preflightResult ??= ...`, `kubernetes.ts:790`), including
 a rejection — so once a launcher process has seen preflight fail, every
 subsequent `launch()` in that process fails immediately with the same error
 without re-probing the cluster. A fresh preflight requires a new process
 (or, from the CLI, a fresh `wardby coding preflight` invocation, which is
 not memoized).
+
+**A long-running server process starts this same memoized preflight at
+start-up, not on the first coding run.** `wardby serve` and `wardby mcp`
+(both transports) call `KubernetesJobLauncher.warmUp()` right after the
+executor is built, fire-and-forget: it runs the identical preflight
+`launch()` would otherwise run lazily, so the first coding run after a
+restart doesn't pay the preflight's own cost (a canary pod, routinely tens of
+seconds on a resource-constrained cluster such as `kind`). The result is
+logged once at start-up — an info line on success, a warning naming the
+failure code (e.g. `kubernetes_isolation_unsupported:<check>`) otherwise —
+and either way the outcome is the same memoized promise described above:
+a failed start-up preflight still fails every coding run in that process
+until it is restarted (after the underlying configuration is fixed), exactly
+as a preflight failure discovered on the first `launch()` always has. This
+never runs for a one-shot CLI command (`wardby run`, `wardby coding
+preflight`, migrations, imports) — only for a process that stays up to serve
+runs.
 
 **A hung pod create during preflight can leave a preflight pod and its
 NetworkPolicy behind.** If `createPod` never settles (rather than failing),

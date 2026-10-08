@@ -443,6 +443,81 @@ describe("KubernetesJobLauncher", () => {
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
     expect(calls).toBe(1);
   });
+
+  it("warmUp runs the preflight once; a following launch reuses it", async () => {
+    const h = await harness();
+    let calls = 0;
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
+      preflight: async () => {
+        calls += 1;
+        return { proxyIp: "10.96.0.50" };
+      },
+    });
+    await launcher.warmUp();
+    expect(calls).toBe(1);
+    await launcher.launch(h.spec);
+    expect(calls).toBe(1);
+  });
+
+  it("warmUp never rejects when the preflight fails, and a following launch still fails the same way", async () => {
+    const h = await harness();
+    let calls = 0;
+    const warnings: string[] = [];
+    const launcher = new KubernetesJobLauncher({
+      onWarning: (m) => warnings.push(m),
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
+      preflight: async () => {
+        calls += 1;
+        throw new Error("canary_reached_internet");
+      },
+    });
+    await expect(launcher.warmUp()).resolves.toBeUndefined();
+    expect(calls).toBe(1);
+    // The warning carries the error's own code (KUBERNETES_ISOLATION_ERROR), never the raw cause.
+    expect(warnings.some((w) => w.includes("kubernetes_isolation_unsupported"))).toBe(true);
+    expect(warnings.some((w) => w.includes("canary_reached_internet"))).toBe(false);
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
+    expect(calls).toBe(1);
+  });
+
+  it("shares one preflight between a concurrent warmUp and launch", async () => {
+    const h = await harness();
+    let calls = 0;
+    let resolvePreflight!: (value: { proxyIp: string }) => void;
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
+      preflight: async () => {
+        calls += 1;
+        return new Promise((resolve) => {
+          resolvePreflight = resolve;
+        });
+      },
+    });
+    const warm = launcher.warmUp();
+    const launch = launcher.launch(h.spec);
+    resolvePreflight({ proxyIp: "10.96.0.50" });
+    await warm;
+    await launch;
+    expect(calls).toBe(1);
+  });
 });
 
 describe("KubernetesJobLauncher planned handles", () => {

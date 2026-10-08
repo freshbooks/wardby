@@ -23,6 +23,22 @@ Review the deployment guide for your target before assigning a coding profile.
 
 For the specific isolation refusal, read [Coding-worker isolation unavailable](../errors/docker-isolation-unsupported.md).
 
+## Cluster preflight at start-up (Kubernetes)
+
+With `JOB_LAUNCHER=kubernetes`, a long-running server process (`wardby
+serve`, or `wardby mcp` over either transport) starts the cluster preflight
+as soon as it starts, instead of waiting for the first coding run. Check the
+server's start-up log for the result: an info line when the preflight
+passes, or a warning naming the failure code (the same
+`kubernetes_isolation_unsupported:<check>` codes `wardby coding preflight`
+reports) when it does not.
+
+A failed start-up preflight still fails every coding run in that process —
+restart the process after fixing the underlying configuration; a running
+process never re-probes the cluster on its own. Run `wardby coding
+preflight` at any time for a one-off, non-memoized check against the same
+cluster.
+
 ## Runs that stop at the turn limit
 
 A Claude Code run whose failure category is `turn_limit` reached its agent's

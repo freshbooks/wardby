@@ -1278,6 +1278,11 @@ export class ContainerExecutor implements Executor {
     return this.options.jobs.supportsServicesFor?.(provider) === true;
   }
 
+  /** Delegates to the job launcher's own warm-up (Executor.warmUp); a no-op for a launcher without one. */
+  async warmUp(): Promise<void> {
+    await this.options.jobs.warmUp?.();
+  }
+
   private async requireCurrent(runId: string): Promise<ContainerRunSnapshot> {
     const current = await this.options.store.load(runId);
     if (!current) throw new Error("coding_run_not_found");

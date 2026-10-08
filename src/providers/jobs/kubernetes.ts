@@ -763,6 +763,28 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Launch
 
+  /**
+   * Starts the memoized cluster preflight (`runPreflight`) right away, instead of waiting for the
+   * first `launch()`, so a long-running server process's own start-up pays the preflight's cost (a
+   * canary pod on `kind`: ~20s) rather than that process's first coding run. Never throws: it only
+   * reports the outcome (an info line on success, a warning naming the failure code otherwise) so
+   * an operator sees a misconfigured cluster at boot. `launch()` later awaits this exact same
+   * memoized promise and still fails exactly as it does today when the preflight failed.
+   */
+  async warmUp(): Promise<void> {
+    try {
+      await this.runPreflight();
+      kubernetesLog.info("kubernetes_preflight_warm_up_succeeded: cluster preflight passed at start-up");
+    } catch (error) {
+      // Same code-only convention as every other failure this launcher logs (e.g. launch()'s
+      // kubernetes_spec_rejected above): the error's own message is the fixed reason code set by
+      // runPreflight's errorWithCode (KUBERNETES_ISOLATION_ERROR) — never the raw cause, which could
+      // carry cluster detail.
+      const code = error instanceof Error ? error.message : String(error);
+      this.warn(`kubernetes_preflight_warm_up_failed: ${code}`);
+    }
+  }
+
   /** Memoized: the preflight (or, without one, a single proxy-witness read) runs once per launcher. */
   private runPreflight(): Promise<KubernetesClusterInfo> {
     this.preflightResult ??= (async () => {

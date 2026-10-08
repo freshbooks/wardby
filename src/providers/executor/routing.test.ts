@@ -81,6 +81,36 @@ describe("RoutingExecutor", () => {
     expect(order).toEqual(["native-launch", "native-close"]);
   });
 
+  it("fans warmUp out to both executors when they implement it", async () => {
+    const order: string[] = [];
+    const native = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      warmUp: vi.fn(async () => {
+        order.push("native-warmup");
+      }),
+    };
+    const coding = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      warmUp: vi.fn(async () => {
+        order.push("coding-warmup");
+      }),
+    };
+    const executor = new RoutingExecutor({ kindForRun: async () => "native" }, native, coding);
+
+    await executor.warmUp();
+    expect(order).toEqual(["native-warmup", "coding-warmup"]);
+  });
+
+  it("does nothing for warmUp when neither sub-executor implements it", async () => {
+    const native = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const coding = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const executor = new RoutingExecutor({ kindForRun: async () => "native" }, native, coding);
+
+    await expect(executor.warmUp()).resolves.toBeUndefined();
+  });
+
   it("delegates resolveCodingWorkerImage to the coding sub-executor", () => {
     const native = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
     const coding = {
