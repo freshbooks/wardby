@@ -375,6 +375,36 @@ describe("dispatchRun", () => {
     expect(state.runs).toHaveLength(0);
   });
 
+  it("snapshots a native agent's execution mode onto the run, which later setting changes never touch", async () => {
+    const agent: Record<string, any> = { ...nativeAgent(), nativeExecutionMode: "sandbox" };
+    const state = fakeDb(agent);
+    const executor: Executor = { async start() {}, async stop() {} };
+    await dispatchRun({ db: state.db, executor, agentId: "agent_1" });
+    agent.nativeExecutionMode = "control_plane";
+    await dispatchRun({ db: state.db, executor, agentId: "agent_1" });
+    expect(state.runs.map((run) => run.nativeExecutionMode)).toEqual(["sandbox", "control_plane"]);
+  });
+
+  it("writes no execution mode on a coding run", async () => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      nativeExecutionMode: "control_plane",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "codex",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+      },
+    };
+    const state = fakeDb(agent);
+    await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: agent.id });
+    expect(state.runs[0].nativeExecutionMode ?? null).toBeNull();
+  });
+
   it("leaves a native run's catalog entry for the runner to record", async () => {
     const state = fakeDb(nativeAgent());
     await dispatchRun({ db: state.db, executor: { async start() {}, async stop() {} }, agentId: "agent_1" });

@@ -288,6 +288,17 @@ async function finishRunClaimed(
 }
 
 /**
+ * Why a sandbox-mode native run is not executed here. The runner only ever
+ * executes native runs in the control plane; a run whose snapshot says
+ * `sandbox` reaches it only when no native sandbox executor is composed in
+ * (RoutingExecutor sends it to the native executor), and must fail closed
+ * rather than run unisolated.
+ */
+export const NATIVE_SANDBOX_NOT_CONFIGURED =
+  "native_sandbox_unavailable: This agent runs with nativeExecutionMode=sandbox, but this deployment has no native " +
+  "sandbox executor configured, so the run was not started. Switch the agent back to control-plane mode to run it here.";
+
+/**
  * Why a coding run cannot start in this process: runs reach the runner only
  * when no container executor is composed in (JOB_LAUNCHER=local, e.g. every
  * Cloud Run deployment today). Names the cause and the fix; the old wording
@@ -433,7 +444,11 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
   if (agent.kind === "coding") {
     throw new Error(CODING_EXECUTOR_NOT_CONFIGURED);
   }
-  return db.run.create({ data: { agentId: agent.id, trigger } });
+  // Refused here, before any row: a foreground run executes inline, never in a sandbox.
+  if (agent.nativeExecutionMode === "sandbox") {
+    throw new Error(NATIVE_SANDBOX_NOT_CONFIGURED);
+  }
+  return db.run.create({ data: { agentId: agent.id, trigger, nativeExecutionMode: agent.nativeExecutionMode } });
 }
 
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
@@ -477,6 +492,23 @@ async function executeTrackedRun(
     ? (providers.repoAccess ?? createRepoAccessGate({ db, hosts: reviewHosts }))
     : undefined;
   const issueTrackers = configuredIssueTrackers(providers.issueTrackers);
+
+  // Fails a run that ends before its engine starts, closing what its trigger opened (the review
+  // check, the host and issue status comments) exactly as the normal and catch paths below do.
+  // Deliberately no self-defect: every caller is a configuration state, not this run's defect (an
+  // admin disabled or removed the model, or this deployment has no coding or native sandbox
+  // executor), and filing would open one defect per affected agent rather than describe a failure
+  // of that agent.
+  const finishEarly = async (error: string): Promise<Run> => {
+    const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
+    await closeOpenHostCheck(db, finished, reviewHosts);
+    await completeHostStatus(db, finished, reviewHosts);
+    await completeIssueStatus(db, finished, issueTrackers);
+    return finished;
+  };
+  // Decided by the run's own snapshot, before any work or spend (no pricing pin, no engine): a
+  // sandbox-mode run never executes in the control plane.
+  if (existingRun.nativeExecutionMode === "sandbox") return finishEarly(NATIVE_SANDBOX_NOT_CONFIGURED);
 
   // Pinned in one checkpointed step: on replay after a crash, the agent row
   // or its budget group may have changed since first execution. The
@@ -647,18 +679,6 @@ async function executeTrackedRun(
     }
     throw err;
   });
-  // Fails a run that ends before its engine starts, closing what its trigger opened (the review
-  // check, the host and issue status comments) exactly as the normal and catch paths below do.
-  // Deliberately no self-defect: both callers are configuration states, not this run's defect (an
-  // admin disabled or removed the model, or this deployment has no coding executor), and filing
-  // would open one defect per affected agent rather than describe a failure of that agent.
-  const finishEarly = async (error: string): Promise<Run> => {
-    const finished = await finishRun(db, runId, { status: "failed", error, finishedAt: new Date() });
-    await closeOpenHostCheck(db, finished, reviewHosts);
-    await completeHostStatus(db, finished, reviewHosts);
-    await completeIssueStatus(db, finished, issueTrackers);
-    return finished;
-  };
   if ("unavailable" in loadedOrUnavailable) return finishEarly(loadedOrUnavailable.unavailable);
   const loaded = loadedOrUnavailable;
 
