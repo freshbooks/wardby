@@ -88,3 +88,11 @@ or not anything enforces it. See
 [coding-worker-isolation.md](coding-worker-isolation.md) for the mechanics and
 the [Kubernetes deployment guide](../deploy/kind-coding/README.md) for the local
 and GKE Autopilot overlays.
+
+### Native agents in a sandbox
+
+Native agents run in the server process by default. A native agent set to
+`nativeExecutionMode=sandbox` instead runs its turn loop and user tools in a
+single-use credential-free container whose only path out is a separate native
+gateway, enabled with `NATIVE_SANDBOX_LAUNCHER=docker` (independent of
+`JOB_LAUNCHER`). See [native-sandbox.md](native-sandbox.md).

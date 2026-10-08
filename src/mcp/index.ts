@@ -30,6 +30,7 @@ import { startModelCatalog } from "../providers/llm/catalog-store.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
 import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
+import { buildNativeSandboxExecutor } from "../native-worker/composition.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildIssueTrackers } from "../providers/issue-tracker/index.js";
 import { buildHostUserAuthorizers, buildReviewHosts } from "../providers/review-host/index.js";
@@ -205,7 +206,14 @@ export function buildMcpProviders(): McpProviderComposition {
     repoAccess,
   };
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
-  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig, repoAccess });
+  const executor = buildConfiguredExecutor({
+    native: nativeExecutor,
+    db: prisma,
+    providerConfig,
+    repoAccess,
+    // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
+    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders }),
+  });
   nativeProviders.executor = executor;
 
   return {

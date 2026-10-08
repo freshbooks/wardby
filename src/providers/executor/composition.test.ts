@@ -18,6 +18,39 @@ describe("buildConfiguredExecutor", () => {
     expect(buildConfiguredExecutor({ native, db, env: { ...baseEnv } })).toBe(native);
   });
 
+  it("composes the native sandbox executor without a container launcher (independent of JOB_LAUNCHER)", async () => {
+    const started: string[] = [];
+    const sandbox: Executor = {
+      async start(runId) {
+        started.push(`sandbox:${runId}`);
+      },
+      async stop() {},
+    };
+    const nativeSpy: Executor = {
+      async start(runId) {
+        started.push(`native:${runId}`);
+      },
+      async stop() {},
+    };
+    const rows: Record<string, { nativeExecutionMode: string | null; agent: { kind: string } }> = {
+      s: { nativeExecutionMode: "sandbox", agent: { kind: "native" } },
+      n: { nativeExecutionMode: "control_plane", agent: { kind: "native" } },
+    };
+    const routingDb = {
+      run: { findUnique: async ({ where }: { where: { id: string } }) => rows[where.id] ?? null },
+    } as unknown as PrismaClient;
+    const executor = buildConfiguredExecutor({
+      native: nativeSpy,
+      nativeSandbox: sandbox,
+      db: routingDb,
+      env: { ...baseEnv },
+    });
+    expect(executor).toBeInstanceOf(RoutingExecutor);
+    await executor.start("s");
+    await executor.start("n");
+    expect(started).toEqual(["sandbox:s", "native:n"]);
+  });
+
   it("still requires CODING_PROXY_CONTAINER for Docker", () => {
     expect(() =>
       buildConfiguredExecutor({

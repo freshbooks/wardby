@@ -21,6 +21,7 @@ import type { DatastoreValue } from "../providers/datastore/types.js";
 import { decryptTransferEnvelope } from "../providers/secrets/transfer-envelope.js";
 import { mapBudget } from "./budgets.js";
 import { EVERYONE_KEY, everyoneGrantData } from "../core/grants.js";
+import { loadNativeSandboxConfig } from "../config/providers.js";
 
 export interface CreateOptions {
   db: PrismaClient;
@@ -47,6 +48,15 @@ export interface ImportResult {
   webhookSecrets: { agentName: string; secret: string }[];
   pendingSecretReentry: string[];
   warnings: string[];
+}
+
+/** Whether this process has a native sandbox configured; a bad configuration counts as not configured. */
+function nativeSandboxConfigured(): boolean {
+  try {
+    return loadNativeSandboxConfig(process.env) !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 export async function createFromBundle(
@@ -137,9 +147,18 @@ export async function createFromBundle(
         maxTurns: a.maxTurns,
         scheduleEnabled,
         ownerId: agentOwnerId,
+        ...(a.nativeExecutionMode
+          ? { nativeExecutionMode: a.nativeExecutionMode === "sandbox" ? "sandbox" : "control_plane" }
+          : {}),
       },
       update: {},
     });
+    if (a.nativeExecutionMode === "sandbox" && !nativeSandboxConfigured()) {
+      warnings.push(
+        `agent ${a.name}: nativeExecutionMode is "sandbox" but NATIVE_SANDBOX_LAUNCHER is not configured here; ` +
+          "its runs fail with native_sandbox_unavailable until the server that runs it has a native sandbox",
+      );
+    }
     agentIdMap.set(a.name, agent.id);
     if (agentOwnerId !== null && agent.ownerId === agentOwnerId) {
       ownedAgentIds.add(agent.id);

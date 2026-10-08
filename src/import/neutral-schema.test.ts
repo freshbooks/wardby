@@ -51,7 +51,22 @@ describe("neutral-schema", () => {
       unmodeled: { description: "d", slug: "digest", emailAllowlist: null },
     });
     expect(a.schedule).toBe(""); // "" = manual-only, preserved
+    expect(a.nativeExecutionMode).toBeUndefined();
     expect(a.region).toBe("us-east-1");
+  });
+
+  it("parses nativeExecutionMode and rejects unknown values", () => {
+    const agent = {
+      name: "a",
+      systemPrompt: "sp",
+      provider: "bedrock",
+      model: "m",
+      scheduleEnabled: false,
+      maxTurns: 1,
+      budgetUsd: "1.00",
+    };
+    expect(NeutralAgentSchema.parse({ ...agent, nativeExecutionMode: "sandbox" }).nativeExecutionMode).toBe("sandbox");
+    expect(NeutralAgentSchema.safeParse({ ...agent, nativeExecutionMode: "vm" }).success).toBe(false);
   });
 
   it("parses an envelope secret shell", () => {

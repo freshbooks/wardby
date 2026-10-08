@@ -16,6 +16,7 @@ function makeRun(overrides: Partial<GraphRun> = {}): GraphRun {
     agentKind: "coding",
     model: "gpt-5.5-codex",
     codingProvider: "codex",
+    nativeExecutionMode: null,
     declaredServices: [],
     status: "running",
     trigger: { kind: "manual" },

@@ -23,6 +23,7 @@ import { startNotifications } from "./core/notifications.js";
 import { startReconciler } from "./core/reconciler.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { startScheduler } from "./core/scheduler.js";
+import { drainDeferredRuns } from "./providers/executor/deferred.js";
 import type { McpProviders } from "./mcp/context.js";
 import { buildMcpProviders, startMcp } from "./mcp/index.js";
 
@@ -79,6 +80,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     selfDefects,
     onLeaderTick: async () => {
       await drainCodingQueue({ db: prisma, executor: providers.executor, ...concurrency, selfDefects });
+      // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.
+      await drainDeferredRuns({ db: prisma, executor: providers.executor });
     },
   });
 

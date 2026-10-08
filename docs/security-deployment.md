@@ -628,6 +628,17 @@ guarantee; and the OSV vulnerability audit fails **closed**
 operator explicitly sets `REGISTRY_AUDIT_FAIL_OPEN=true` to allow installs
 through unaudited during an OSV outage.
 
+## Native sandbox
+
+A native agent set to `nativeExecutionMode=sandbox` runs its turn loop and user
+tools in a single-use container with no credentials, database access, Docker
+socket, or network except the native gateway. The gateway is a trusted
+component: it holds the LLM credentials and integration settings, so give it
+the database and provider settings it needs and nothing else, never the Docker
+socket, and do not publish its port outside the Docker host. Only the server,
+which launches workers, needs Docker access. See
+[Native sandbox](native-sandbox.md).
+
 ## Images and dependencies
 
 ```sh

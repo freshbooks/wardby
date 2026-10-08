@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
+import { PrismaExecutionKindResolver, RoutingExecutor } from "../providers/executor/routing.js";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { IssueTracker } from "../providers/issue-tracker/types.js";
 
@@ -353,6 +354,30 @@ describe("reconcileOnce", () => {
 
     expect(await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor)).toBe(0);
     expect(runs[0].status).toBe("running"); // the executor's recover() owns the terminal write
+  });
+
+  it("sends a stale sandbox-mode run's handle to the sandbox executor, never to the DBOS-owning native one", async () => {
+    const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "native-sandbox" })];
+    const db = fakeDb(runs);
+    const resolver = new PrismaExecutionKindResolver({
+      run: { findUnique: async () => ({ nativeExecutionMode: "sandbox", agent: { kind: "native" } }) },
+    });
+    const nativeRecover = vi.fn(async () => ({
+      state: "lost" as const,
+      reason: 'DbosExecutor cannot recover backend "native-sandbox".',
+    }));
+    const sandboxRecover = vi.fn(async () => ({ state: "lost" as const, reason: "worker container is gone" }));
+    const executor = new RoutingExecutor(
+      resolver,
+      { start: async () => undefined, stop: async () => undefined, recover: nativeRecover },
+      { start: async () => undefined, stop: async () => undefined },
+      { start: async () => undefined, stop: async () => undefined, recover: sandboxRecover },
+    );
+
+    expect(await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor)).toBe(1);
+    expect(sandboxRecover).toHaveBeenCalledWith({ runId: "r1", backend: "native-sandbox", id: "r1" });
+    expect(nativeRecover).not.toHaveBeenCalled();
+    expect(runs[0]).toMatchObject({ status: "lost", error: "worker container is gone" });
   });
 
   it("falls back to the plain lost path for a durable-backend run when no executor can recover", async () => {

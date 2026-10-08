@@ -18,6 +18,8 @@
 - [Architecture knowledge bundles](knowledge.md) covers `docs/knowledge/`: the
   concept format, how coding runs and reviewers use it, `wardby knowledge check`,
   and the scheduled architecture agent.
+- [Native sandbox](native-sandbox.md) runs a native agent's turn loop and user
+  tools in a single-use, credential-free container behind a native gateway.
 - [Coding-worker isolation](coding-worker-isolation.md) documents the threat
   model and enforced worker boundary.
 - [Bring-your-own worker images](coding-worker-byo-images.md) explains how to

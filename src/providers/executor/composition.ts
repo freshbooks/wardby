@@ -37,6 +37,12 @@ const compositionLog = logger.child({ module: "executor-composition" });
 
 export interface ConfiguredExecutorOptions {
   native: Executor;
+  /**
+   * Runs native agents whose run snapshot says `sandbox`. Composed whether or
+   * not a coding job launcher is configured. Absent: sandbox runs go to
+   * `native`, whose runner refuses them (RoutingExecutor).
+   */
+  nativeSandbox?: Executor;
   db: PrismaClient;
   env?: NodeJS.ProcessEnv;
   providerConfig?: ProviderConfig;
@@ -46,11 +52,24 @@ export interface ConfiguredExecutorOptions {
   repoAccess?: RepoAccessGate;
 }
 
-/** Builds container execution only when Docker or Kubernetes is explicitly selected. */
+/**
+ * Builds container execution only when Docker or Kubernetes is explicitly
+ * selected, and native sandbox routing whenever a sandbox executor is given.
+ */
 export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Executor {
   const env = options.env ?? process.env;
   const providerConfig = options.providerConfig ?? loadProviderConfig(env);
-  if (providerConfig.jobs !== "docker" && providerConfig.jobs !== "kubernetes") return options.native;
+  if (providerConfig.jobs !== "docker" && providerConfig.jobs !== "kubernetes") {
+    if (!options.nativeSandbox) return options.native;
+    // No coding launcher: coding runs reach the native executor, whose runner fails them with
+    // the "needs a container executor" explanation, exactly as without this wrapper.
+    return new RoutingExecutor(
+      new PrismaExecutionKindResolver(options.db),
+      options.native,
+      options.native,
+      options.nativeSandbox,
+    );
+  }
 
   const github = loadGitHubVcsConfig(env);
   const config = loadContainerExecutorConfig(env);
@@ -180,6 +199,11 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       });
     },
   });
-  const composed = new RoutingExecutor(new PrismaExecutionKindResolver(options.db), options.native, coding);
+  const composed = new RoutingExecutor(
+    new PrismaExecutionKindResolver(options.db),
+    options.native,
+    coding,
+    options.nativeSandbox,
+  );
   return composed;
 }

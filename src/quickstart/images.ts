@@ -14,6 +14,8 @@ export interface QuickstartImages {
   claudeToolRunnerNodePython?: string;
   /** The coding-worker driver image every worker is built on: the base for a bring-your-own worker image. */
   driver?: string;
+  /** The native sandbox worker image (docs/native-sandbox.md); absent from releases before it existed. */
+  nativeWorker?: string;
   source: "env" | "package" | "build";
 }
 
@@ -28,14 +30,23 @@ type PackageImages = Pick<
   | "workerNodePython"
   | "claudeToolRunnerNodePython"
   | "driver"
+  | "nativeWorker"
 >;
 
 function readPackageImages(packageRoot: string): PackageImages | undefined {
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(packageRoot, "dist", "quickstart-images.json"), "utf8"));
     if (typeof parsed !== "object" || parsed === null) return undefined;
-    const { runtime, worker, claudeWorker, claudeToolRunner, workerNodePython, claudeToolRunnerNodePython, driver } =
-      parsed as Record<string, unknown>;
+    const {
+      runtime,
+      worker,
+      claudeWorker,
+      claudeToolRunner,
+      workerNodePython,
+      claudeToolRunnerNodePython,
+      driver,
+      nativeWorker,
+    } = parsed as Record<string, unknown>;
     if (typeof runtime !== "string" || typeof worker !== "string") return undefined;
     // An image is never resolved by tag: a tag can be repointed after release.
     if (!DIGEST_REF.test(runtime) || !DIGEST_REF.test(worker)) return undefined;
@@ -62,6 +73,11 @@ function readPackageImages(packageRoot: string): PackageImages | undefined {
     if (driver !== undefined) {
       if (typeof driver !== "string" || !DIGEST_REF.test(driver)) return undefined;
       result.driver = driver;
+    }
+    // Likewise the native sandbox worker.
+    if (nativeWorker !== undefined) {
+      if (typeof nativeWorker !== "string" || !DIGEST_REF.test(nativeWorker)) return undefined;
+      result.nativeWorker = nativeWorker;
     }
     return result;
   } catch {
