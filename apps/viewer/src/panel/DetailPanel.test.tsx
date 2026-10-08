@@ -92,6 +92,16 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("DetailPanel", () => {
+  it("says so when a native run executed in a sandbox container", () => {
+    setup(makeRun({ nativeExecutionMode: "sandbox" }));
+    expect(screen.getByText("Ran in a sandbox container")).toBeInTheDocument();
+  });
+
+  it("shows no execution-mode note for a control-plane run", () => {
+    setup(makeRun({ nativeExecutionMode: "control-plane" }));
+    expect(screen.queryByText("Ran in a sandbox container")).not.toBeInTheDocument();
+  });
+
   it("highlights the outcome or trigger clicked in the graph", async () => {
     const view = render(
       <DetailPanel

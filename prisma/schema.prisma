@@ -373,6 +373,16 @@ model Run {
   serviceStatuses  CodingRunServiceStatus[]
   /// A manual review of a local branch: this run is the review run dispatched for it.
   localPullRequest LocalPullRequest?
+  /// A sandbox-mode native run's gateway session (native sandbox phase 3).
+  nativeGatewaySession NativeGatewaySession?
+  /// Set when a process that may not start runs itself (the native sandbox
+  /// gateway, which holds no executor) dispatched this run: the scheduler
+  /// leader starts it through the server's executor and clears this.
+  startDeferredAt   DateTime?
+  /// Likewise a stop that process asked for: the scheduler leader stops the
+  /// run through the server's executor and clears this.
+  stopRequestedAt   DateTime?
+  stopRequestReason String?
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a
   /// top-level run; set when this run was created by a parent run's
@@ -408,6 +418,8 @@ model Run {
   @@index([startedAt])
   @@index([status])
   @@index([parentRunId])
+  @@index([startDeferredAt])
+  @@index([stopRequestedAt])
 }
 
 /// Phase 5: owner-configured coding behavior. Runtime credentials and opaque
@@ -604,6 +616,73 @@ enum CodingProxyRequestStatus {
   completed
   released
   uncertain
+}
+
+enum NativeGatewaySessionStatus {
+  active
+  finished
+  cancelled
+}
+
+enum NativeGatewayCallStatus {
+  reserved
+  completed
+  released
+  uncertain
+  pending
+  waiting_budget
+}
+
+/// The trusted gateway's record of one sandbox-mode native run (native
+/// sandbox phase 3): the worker authenticates with a capability whose hash is
+/// stored here (the raw token is never persisted), and any control-plane
+/// replica can serve it from this row. `snapshot` is what the run loaded --
+/// the worker's input plus trusted-only capabilities and links -- and never
+/// holds a secret value.
+model NativeGatewaySession {
+  id                String                     @id @default(cuid())
+  runId             String                     @unique
+  run               Run                        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  capabilityHash    String                     @unique
+  status            NativeGatewaySessionStatus @default(active)
+  deadlineAt        DateTime
+  budgetUsd         Decimal                    @db.Decimal(18, 10)
+  snapshot          Json
+  /// Set the first time the gateway refuses a model call for budget.
+  budgetExhaustedAt DateTime?
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
+  calls             NativeGatewayCall[]
+}
+
+/// One worker call through the gateway, keyed by its callId: model calls are
+/// reserved before the provider is called and settled after; side-effecting
+/// built-in and bridge calls keep their result so a retried callId replays it;
+/// a delegation records the child run it started.
+model NativeGatewayCall {
+  id                String                  @id @default(cuid())
+  sessionId         String
+  session           NativeGatewaySession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  callId            String
+  method            String
+  status            NativeGatewayCallStatus
+  reservationUsd    Decimal?                @db.Decimal(18, 10)
+  actualCostUsd     Decimal?                @db.Decimal(18, 10)
+  inputTokens       Int?
+  outputTokens      Int?
+  cachedInputTokens Int?
+  cacheWriteTokens  Int?
+  /// A replayable result. Never a secret value.
+  result            Json?
+  childRunId        String?
+  /// A delegation's sub-agent, recorded at admission (it holds a place while waiting for budget).
+  childAgentId      String?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  completedAt       DateTime?
+
+  @@unique([sessionId, callId])
+  @@index([sessionId, status])
 }
 
 /// Trusted-boundary state for one coding run. Only a capability digest and an

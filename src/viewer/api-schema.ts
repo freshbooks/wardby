@@ -94,6 +94,8 @@ export const GraphRunSchema = z.object({
   model: z.string(),
   /** The coding worker (e.g. `codex`, `claude-code`); null for native runs. */
   codingProvider: z.string().nullable(),
+  /** Where a native run executed, snapshotted at start; null for coding runs and runs from before the field existed. */
+  nativeExecutionMode: z.enum(["control-plane", "sandbox"]).nullable(),
   status: RunStatusSchema,
   trigger: RunTriggerSchema,
   turns: z.number().int(),

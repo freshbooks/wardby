@@ -122,6 +122,10 @@ export class RoutingExecutor implements Executor {
     return this.coding.readCodingRepositoryFile(input);
   }
 
+  supportsNativeSandbox(): boolean {
+    return this.sandbox !== undefined;
+  }
+
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.coding.supportsCodingServices?.(provider) === true;
   }

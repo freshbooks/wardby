@@ -85,5 +85,10 @@ export interface Executor {
    * says so (Kubernetes and Docker, for Codex and Claude Code).
    */
   supportsCodingServices?(provider: CodingProvider): boolean;
+  /**
+   * Whether this executor can run sandbox-mode native runs (a native sandbox executor is composed
+   * in). MCP refuses to set an agent to sandbox mode where it cannot (docs/native-sandbox.md).
+   */
+  supportsNativeSandbox?(): boolean;
 }
 import type { CodingProvider } from "../../coding/provider.js";

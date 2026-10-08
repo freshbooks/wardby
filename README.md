@@ -334,7 +334,8 @@ production alerts, and SLOs remain operator responsibilities. See the
   repository content, credentials, diffs, and raw worker output.
 
 Read the [runtime architecture](https://github.com/wardby/wardby/blob/main/docs/architecture-runtime.md),
-[coding-worker isolation model](https://github.com/wardby/wardby/blob/main/docs/coding-worker-isolation.md), and
+[coding-worker isolation model](https://github.com/wardby/wardby/blob/main/docs/coding-worker-isolation.md),
+[native sandbox guide](https://github.com/wardby/wardby/blob/main/docs/native-sandbox.md), and
 [security deployment guide](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md) before enabling a
 production repository.
 

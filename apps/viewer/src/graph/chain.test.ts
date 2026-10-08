@@ -13,6 +13,7 @@ function run(id: string, overrides: Partial<GraphRun> = {}): GraphRun {
     agentKind: "native",
     model: "m",
     codingProvider: null,
+    nativeExecutionMode: null,
     declaredServices: [],
     status: "succeeded",
     trigger: { kind: "manual" },
