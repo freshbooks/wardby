@@ -86,7 +86,13 @@ export async function localGitWrite(
       { env: { ...cleanGitEnv(), ...extra }, maxBuffer: GIT_MAX_BUFFER, encoding: "utf8" },
       (error: Error | null, stdout: string) => (error ? reject(error) : resolve(stdout)),
     );
-    child.stdin?.end(options.input ?? "");
+    // git may exit before reading stdin (an early error, or a command that never
+    // reads it); writing to the closed pipe then raises EPIPE on stdin. The
+    // callback above already reports git's own result, so a stdin error is not
+    // the outcome — but left unhandled it would be an uncaught exception.
+    child.stdin?.on("error", () => {});
+    if (options.input === undefined) child.stdin?.end();
+    else child.stdin?.end(options.input);
   });
 }
 
