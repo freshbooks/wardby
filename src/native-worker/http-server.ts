@@ -56,7 +56,8 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
   return createServer({ maxHeaderSize: 16 * 1024 }, (req, res) => {
     void (async () => {
       const send = (status: number, body: unknown) => {
-        res.writeHead(status, { "content-type": "application/json" });
+        res.setHeader("content-type", "application/json");
+        res.writeHead(status);
         res.end(JSON.stringify(body));
       };
       if (req.method !== "POST" || req.url !== NATIVE_GATEWAY_PATH) {
@@ -78,7 +79,8 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
         send(response.status, response.body);
         return;
       }
-      res.writeHead(200, { "content-type": "application/x-ndjson" });
+      res.setHeader("content-type", "application/x-ndjson");
+      res.writeHead(200);
       try {
         for await (const event of response.events) res.write(`${JSON.stringify({ event })}\n`);
         res.end(`${JSON.stringify({ end: true })}\n`);
