@@ -1,0 +1,54 @@
+# Weekly "outdated majors" report: keeps one issue listing the direct
+# dependencies (root package and each worker package) whose latest release is a
+# major version or more ahead of the lockfile, and closes it when there are
+# none. npm dependencies are upgraded by hand (dependabot.yml), so without this
+# nothing says when one has quietly fallen majors behind.
+#
+# Informational only: it runs on a schedule (and on demand), never on pushes or
+# pull requests, so it can never block or fail another check. It installs
+# nothing and runs no package scripts: `npm outdated --package-lock-only` reads
+# the lockfiles and the registry.
+name: Outdated dependencies report
+on:
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: outdated-report
+  cancel-in-progress: false
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - id: report
+        run: node scripts/outdated-report.mjs "$RUNNER_TEMP/outdated-report.md"
+      - name: Create, update or close the report issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COUNT: ${{ steps.report.outputs.count }}
+          TITLE: Dependencies a major version or more behind
+        run: |
+          body="$RUNNER_TEMP/outdated-report.md"
+          # Exact-title match over open issues (not the search index, which lags).
+          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 500 \
+            --json number,title --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')"
+          if [ "$COUNT" -gt 0 ]; then
+            if [ -n "$number" ]; then
+              gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$body"
+            fi
+          elif [ -n "$number" ]; then
+            gh issue close "$number" --repo "$GITHUB_REPOSITORY" \
+              --comment "No dependencies are a major version or more behind any more."
+          fi
