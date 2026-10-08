@@ -46,7 +46,9 @@ function runtimeGraph(entry: string): string[] {
 }
 
 it("the native sandbox worker's runtime import graph has no database, provider credential, or config module", () => {
-  const graph = runtimeGraph("native-worker/worker.ts");
+  // The process entry, so its transports (stdio, HTTP) are covered too.
+  const graph = runtimeGraph("native-worker/main.ts");
+  expect(graph).toContain("native-worker/http-transport.ts");
   expect(graph).toContain("core/engine-native.ts");
   expect(graph.filter((file) => FORBIDDEN.some((prefix) => file.startsWith(prefix)))).toEqual([]);
 });
