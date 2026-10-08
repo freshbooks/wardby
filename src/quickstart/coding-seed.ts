@@ -65,6 +65,9 @@ export interface CodingSeedInput {
   baseRef: string;
   /** Catalog service names the builder's runs may start. */
   services: string[];
+  /** The builder's workspace toolchain; omitted = the default Node workspace. */
+  toolchain?: "node" | "node-python";
+  toolchainVersion?: string | null;
 }
 
 export type SeedOutcome = { id: string; status: "created" | "updated" } | { status: "skipped"; reason: string };
@@ -106,6 +109,7 @@ export async function seedCodingAgents(
     repository: input.repository,
     baseRef: input.baseRef,
     services: input.services,
+    ...(input.toolchain ? { toolchain: input.toolchain, toolchainVersion: input.toolchainVersion ?? null } : {}),
   });
 
   const builder = await upsertAgent(db, {

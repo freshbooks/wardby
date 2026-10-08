@@ -18,6 +18,9 @@ export interface LocalAgent {
   repository: string;
   /** The branch whose services.yaml applies (a coding agent's baseRef); default: the checked-out branch. */
   ref?: string;
+  /** A coding agent's workspace toolchain, shown by doctor. */
+  toolchain?: string;
+  toolchainVersion?: string | null;
 }
 
 export interface CodingDoctorDeps {
@@ -37,6 +40,11 @@ async function agentLines(agent: LocalAgent, roots: string[]): Promise<string[]>
     return [`✗ ${agent.name}: ${message}`];
   }
   const lines = [`✓ ${agent.name}: ${path} is inside the trusted folders`];
+  if (agent.toolchain) {
+    lines.push(
+      `✓ ${agent.name}: toolchain ${agent.toolchain}${agent.toolchainVersion ? ` ${agent.toolchainVersion}` : ""}`,
+    );
+  }
   const ref = agent.ref ?? (await repoDefaultBranch(path))?.branch;
   if (!ref) return [...lines, `✗ ${agent.name}: ${path} has no checked-out branch with commits`];
   const declared = await inspectDeclaredServices(path, roots, ref);

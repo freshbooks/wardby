@@ -742,3 +742,180 @@ describe("repositories under trusted folders", () => {
     expect(second.result?.repository).toBe(`local:${join(parent, "zeta")}`);
   });
 });
+
+describe("codingStep with a Python repository", () => {
+  const NP_WORKER = `ghcr.io/wardby/wardby-coding-worker-node-python@sha256:${"6".repeat(64)}`;
+  const NP_TOOLS = `ghcr.io/wardby/wardby-claude-tool-runner-node-python@sha256:${"7".repeat(64)}`;
+  const CLAUDE_WORKER = `ghcr.io/wardby/wardby-claude-coding-worker@sha256:${"4".repeat(64)}`;
+  const CLAUDE_TOOLS = `ghcr.io/wardby/wardby-claude-tool-runner@sha256:${"5".repeat(64)}`;
+  const WORKER_VAR = "CODING_WORKER_IMAGE_NODE_PYTHON_3_12";
+  const TOOLS_VAR = "CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12";
+
+  function commitPython(dir = repoA, name = "pyproject.toml"): void {
+    writeFileSync(join(dir, name), "[project]\nname = 'x'\n");
+    gitIn(dir, "add", name);
+    gitIn(dir, "commit", "-q", "-m", "python");
+  }
+  function packageImages(extra: Record<string, string> = {}): void {
+    writeFileSync(
+      join(packageRoot, "dist", "quickstart-images.json"),
+      JSON.stringify({
+        runtime: RUNTIME,
+        worker: WORKER,
+        claudeWorker: CLAUDE_WORKER,
+        claudeToolRunner: CLAUDE_TOOLS,
+        ...extra,
+      }),
+    );
+  }
+  function sourceCheckout(): void {
+    rmSync(join(packageRoot, "dist", "quickstart-images.json"));
+    mkdirSync(join(packageRoot, "deploy"));
+    writeFileSync(join(packageRoot, "deploy", "Dockerfile"), "FROM scratch\n");
+    mkdirSync(join(packageRoot, "src", "coding-worker"), { recursive: true });
+    writeFileSync(join(packageRoot, "src", "coding-worker", "Dockerfile"), "FROM scratch\n");
+  }
+  const step = (provider: "codex" | "claude-code", deps: CodingDeps) =>
+    codingStep(paths(), state, { nonInteractive: true, coding: true, trust: [repoA], provider }, deps);
+  const keys = () => writeQuickstartEnv(paths(), { OPENAI_API_KEY: "sk-test", ANTHROPIC_API_KEY: "sk-ant" });
+
+  it("pulls the packaged Node + Python worker for Codex and selects the toolchain", async () => {
+    commitPython();
+    packageImages({ workerNodePython: NP_WORKER, claudeToolRunnerNodePython: NP_TOOLS });
+    keys();
+    const { deps, calls, seeds, logs } = harness();
+    await step("codex", deps);
+    const pulled = calls.filter((call) => call[1] === "pull").map((call) => call[2]);
+    expect(pulled).toContain(NP_WORKER);
+    expect(pulled).not.toContain(NP_TOOLS);
+    const env = readQuickstartEnv(paths());
+    expect(env[WORKER_VAR]).toBe(NP_WORKER);
+    expect(env[TOOLS_VAR]).toBeUndefined();
+    expect(seeds[0]).toMatchObject({ toolchain: "node-python", toolchainVersion: "3.12" });
+    expect(logs).toContain("Python project detected: local-builder uses a Node + Python 3.12 workspace");
+  });
+
+  it("pulls the packaged Node + Python tool runner for Claude Code, not the Codex worker", async () => {
+    commitPython(repoA, "requirements.txt");
+    packageImages({ workerNodePython: NP_WORKER, claudeToolRunnerNodePython: NP_TOOLS });
+    keys();
+    const { deps, calls, seeds } = harness();
+    await step("claude-code", deps);
+    const pulled = calls.filter((call) => call[1] === "pull").map((call) => call[2]);
+    expect(pulled).toContain(NP_TOOLS);
+    expect(pulled).not.toContain(NP_WORKER);
+    const env = readQuickstartEnv(paths());
+    expect(env[TOOLS_VAR]).toBe(NP_TOOLS);
+    expect(env[WORKER_VAR]).toBeUndefined();
+    expect(seeds[0]).toMatchObject({ toolchain: "node-python", toolchainVersion: "3.12" });
+  });
+
+  it("leaves a non-Python repository on the Node workspace", async () => {
+    packageImages({ workerNodePython: NP_WORKER, claudeToolRunnerNodePython: NP_TOOLS });
+    keys();
+    const { deps, calls, seeds, logs } = harness();
+    await step("codex", deps);
+    expect(calls.some((call) => call.includes(NP_WORKER))).toBe(false);
+    expect(readQuickstartEnv(paths())[WORKER_VAR]).toBeUndefined();
+    expect(seeds[0].toolchain ?? "node").toBe("node");
+    expect(logs.join("\n")).not.toMatch(/Python project detected/);
+  });
+
+  it("keeps the Node workspace and says so when the release has no Python image", async () => {
+    commitPython();
+    packageImages();
+    keys();
+    const { deps, seeds, logs } = harness();
+    await step("codex", deps);
+    expect(seeds[0].toolchain ?? "node").toBe("node");
+    expect(readQuickstartEnv(paths())[WORKER_VAR]).toBeUndefined();
+    expect(logs.join("\n")).toContain(
+      "Python project detected, but this version has no Python workspace image; the builder can edit code but not run Python tests. Upgrade, or set CODING_WORKER_IMAGE_NODE_PYTHON_3_12 / CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12",
+    );
+  });
+
+  it("falls back to the Node workspace when the Python image cannot be pulled", async () => {
+    commitPython();
+    packageImages({ workerNodePython: NP_WORKER });
+    keys();
+    const { deps, seeds, logs } = harness({
+      run: (command, args) => {
+        if (args[0] === "pull" && args[1] === NP_WORKER) return { status: 1, stdout: "", stderr: "denied" };
+        if (args[0] === "image" && args[1] === "inspect" && args.includes(NP_WORKER)) {
+          return { status: 1, stdout: "", stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    const result = await step("codex", deps);
+    expect(result?.seed).toBeDefined();
+    expect(seeds[0].toolchain ?? "node").toBe("node");
+    expect(readQuickstartEnv(paths())[WORKER_VAR]).toBeUndefined();
+    expect(logs.join("\n")).toMatch(/could not pull/);
+  });
+
+  it("builds the Node + Python worker from a source checkout and pins it by local image id", async () => {
+    commitPython();
+    sourceCheckout();
+    keys();
+    const { deps, calls, seeds } = harness();
+    await step("codex", deps);
+    const build = calls.find((call) => call[1] === "build" && call.includes("wardby-coding-worker-node-python:local"))!;
+    expect(build).toEqual(
+      expect.arrayContaining(["--file", join(packageRoot, "src", "coding-worker", "Dockerfile.node-python")]),
+    );
+    expect(build).not.toContain("--target");
+    expect(readQuickstartEnv(paths())[WORKER_VAR]).toBe(BUILT_ID);
+    expect(seeds[0]).toMatchObject({ toolchain: "node-python", toolchainVersion: "3.12" });
+  });
+
+  it("builds the Node + Python tool runner with --target node-python for Claude Code", async () => {
+    commitPython();
+    sourceCheckout();
+    keys();
+    const { deps, calls } = harness();
+    await step("claude-code", deps);
+    const build = calls.find(
+      (call) => call[1] === "build" && call.includes("wardby-claude-tool-runner-node-python:local"),
+    )!;
+    expect(build).toEqual(
+      expect.arrayContaining([
+        "--file",
+        join(packageRoot, "src", "claude-tool-runner", "Dockerfile"),
+        "--target",
+        "node-python",
+      ]),
+    );
+    expect(calls.some((call) => call.includes("wardby-coding-worker-node-python:local"))).toBe(false);
+    expect(readQuickstartEnv(paths())[TOOLS_VAR]).toBe(BUILT_ID);
+  });
+
+  it("does not build the Python images for a non-Python repository in a source checkout", async () => {
+    sourceCheckout();
+    keys();
+    const { deps, calls } = harness();
+    await step("codex", deps);
+    expect(calls.some((call) => call.join(" ").includes("node-python"))).toBe(false);
+  });
+
+  it("honors an env override over a source build", async () => {
+    commitPython();
+    sourceCheckout();
+    keys();
+    const { deps, calls, seeds } = harness({ env: { [WORKER_VAR]: NP_WORKER } });
+    await step("codex", deps);
+    expect(calls.some((call) => call[1] === "build" && call.join(" ").includes("node-python"))).toBe(false);
+    expect(calls.filter((call) => call[1] === "pull").map((call) => call[2])).toContain(NP_WORKER);
+    expect(readQuickstartEnv(paths())[WORKER_VAR]).toBe(NP_WORKER);
+    expect(seeds[0]).toMatchObject({ toolchain: "node-python" });
+  });
+
+  it("does not detect Python from an uncommitted marker", async () => {
+    packageImages({ workerNodePython: NP_WORKER });
+    writeFileSync(join(repoA, "pyproject.toml"), "x\n");
+    keys();
+    const { deps, seeds } = harness();
+    await step("codex", deps);
+    expect(seeds[0].toolchain ?? "node").toBe("node");
+  });
+});

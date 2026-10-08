@@ -73,6 +73,30 @@ describe("seedCodingAgents", () => {
     expect([...links.values()]).toEqual([{ agentId: reviewer.id, repository: "local:/work/repo", access: "write" }]);
   });
 
+  it("defaults to the Node toolchain and stores node-python 3.12 when asked", async () => {
+    const plain = memoryDb();
+    await seedCodingAgents(plain.db, input);
+    const plainProfile = plain.profiles.get(plain.agents.get(BUILDER_AGENT)!.id)!;
+    expect(plainProfile).toMatchObject({ toolchain: "node", toolchainVersion: null });
+
+    const { db, agents, profiles } = memoryDb();
+    await seedCodingAgents(db, { ...input, toolchain: "node-python", toolchainVersion: "3.12" });
+    expect(profiles.get(agents.get(BUILDER_AGENT)!.id)).toMatchObject({
+      toolchain: "node-python",
+      toolchainVersion: "3.12",
+    });
+  });
+
+  it("updates an existing builder's toolchain on a re-run, in both directions", async () => {
+    const { db, agents, profiles } = memoryDb();
+    await seedCodingAgents(db, input);
+    await seedCodingAgents(db, { ...input, toolchain: "node-python", toolchainVersion: "3.12" });
+    const id = agents.get(BUILDER_AGENT)!.id;
+    expect(profiles.get(id)).toMatchObject({ toolchain: "node-python", toolchainVersion: "3.12" });
+    await seedCodingAgents(db, input);
+    expect(profiles.get(id)).toMatchObject({ toolchain: "node", toolchainVersion: null });
+  });
+
   it("is idempotent: a second run updates in place without duplicating agents or links", async () => {
     const { db, agents, links } = memoryDb();
     const first = await seedCodingAgents(db, input);

@@ -25,7 +25,8 @@ import {
   type QuickstartPaths,
   type QuickstartState,
 } from "./config.js";
-import { CodingSkip, prepareImages } from "./coding-images.js";
+import { CodingSkip, NODE_PYTHON_ENV, prepareImages, prepareNodePythonImage } from "./coding-images.js";
+import { detectPythonProject } from "./python-detect.js";
 import {
   STARTER_SERVICES_BRANCH,
   commitStarterServices,
@@ -412,6 +413,33 @@ async function prepareServices(
   return services.map((service) => service.name);
 }
 
+/** For a Python repository, prepares the Node + Python 3.12 workspace image; true when the builder should use it. */
+async function preparePythonWorkspace(
+  paths: QuickstartPaths,
+  provider: CodingProvider,
+  repo: string,
+  sha: string,
+  deps: CodingDeps,
+): Promise<boolean> {
+  if (!(await detectPythonProject(repo, sha))) return false;
+  let image: string | undefined;
+  try {
+    image = prepareNodePythonImage(provider, readQuickstartEnv(paths), deps);
+  } catch (error) {
+    if (!(error instanceof CodingSkip)) throw error;
+    deps.log(`! ${error.message}.`);
+  }
+  if (!image) {
+    deps.log(
+      "! Python project detected, but this version has no Python workspace image; the builder can edit code but not run Python tests. Upgrade, or set CODING_WORKER_IMAGE_NODE_PYTHON_3_12 / CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12",
+    );
+    return false;
+  }
+  writeQuickstartEnv(paths, { ...readQuickstartEnv(paths), [NODE_PYTHON_ENV[provider]]: image });
+  deps.log("Python project detected: local-builder uses a Node + Python 3.12 workspace");
+  return true;
+}
+
 function seedLines(seed: CodingSeedResult, repository: string): string[] {
   const lines: string[] = [];
   for (const [name, outcome] of [
@@ -496,6 +524,7 @@ export async function codingStep(
       return { roots, provider };
     }
     const services = await prepareServices(repo, roots, base.branch, base.sha, opts, deps);
+    const python = await preparePythonWorkspace(paths, provider, repo, base.sha, deps);
     const repository = `${LOCAL_REPO_PREFIX}${repo}`;
     const seed = await deps.seed({
       provider,
@@ -504,6 +533,7 @@ export async function codingStep(
       repository,
       baseRef: base.branch,
       services,
+      ...(python ? { toolchain: "node-python" as const, toolchainVersion: "3.12" } : {}),
     });
     for (const line of seedLines(seed, repository)) deps.log(line);
     return { roots, provider, repository, seed };
