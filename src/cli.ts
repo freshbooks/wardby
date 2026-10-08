@@ -58,12 +58,14 @@ import { prisma } from "./core/db.js";
 import { runAgent } from "./core/runner.js";
 import { cancelRunOnSignal } from "./core/run-heartbeat.js";
 import { buildIssueTrackers } from "./providers/issue-tracker/index.js";
+import { buildChatProviders } from "./providers/chat/index.js";
 import { buildReviewHosts } from "./providers/review-host/index.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { validateCronExpression } from "./core/cron.js";
 import { assertAgentModelAvailable } from "./core/run-pricing.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
+import { startNotifications } from "./core/notifications.js";
 import { NativeEngine } from "./core/engine-native.js";
 import { logger } from "./core/logger.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
@@ -807,6 +809,7 @@ async function scheduler(args: string[]): Promise<void> {
   const memory = buildMemory();
   const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
+  const chat = buildChatProviders();
   // One repository-access gate (and cache) for native repo_* calls and coding runs.
   const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });
   const nativeExecutor = buildExecutor(
@@ -824,6 +827,7 @@ async function scheduler(args: string[]): Promise<void> {
     issueTrackers,
     deferredReviews: { db: prisma, executor, hosts: reviewHosts, repoAccess, issueTrackers },
   });
+  const notifications = await startNotifications({ db: prisma, chat });
   const selfDefects = { db: prisma, issueTrackers };
   const sched = startScheduler({
     executor,
@@ -842,6 +846,7 @@ async function scheduler(args: string[]): Promise<void> {
       console.log("\nwardby scheduler shutting down...");
       sched.stop();
       reconciler.stop();
+      notifications.stop();
       void Promise.resolve(executor.close?.())
         .catch((err: unknown) => cliLog.warn({ err }, "executor close failed during scheduler shutdown"))
         .finally(() => {

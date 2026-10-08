@@ -19,6 +19,7 @@
 import { loadCodingConcurrencyConfig, loadMcpConfig } from "./config/providers.js";
 import { drainCodingQueue } from "./core/coding-queue.js";
 import { prisma } from "./core/db.js";
+import { startNotifications } from "./core/notifications.js";
 import { startReconciler } from "./core/reconciler.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { startScheduler } from "./core/scheduler.js";
@@ -70,6 +71,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
         }
       : {}),
   });
+  const notifications = await startNotifications({ db: prisma, chat: providers.chat ?? {} });
   const selfDefects = { db: prisma, issueTrackers: providers.issueTrackers };
   const scheduler = startScheduler({
     executor: providers.executor,
@@ -87,6 +89,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       // stop reaping, then let startMcp close HTTP and drain the executor.
       scheduler.stop();
       reconciler.stop();
+      notifications.stop();
       await mcp.close();
     },
   };
