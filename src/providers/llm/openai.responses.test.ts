@@ -142,6 +142,24 @@ describe("OpenAiLlmProvider (Responses API) stream parsing", () => {
     }
   });
 
+  it("drops a truncated (status incomplete) function_call item and reports stopReason length", async () => {
+    const { client } = fakeResponsesClient([
+      {
+        type: "response.output_item.done",
+        item: { type: "function_call", status: "incomplete", call_id: "call_t", name: "toolT", arguments: '{"x":' },
+      },
+      {
+        type: "response.incomplete",
+        response: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, usage: SMALL_USAGE },
+      },
+    ]);
+    const events = await collect(new OpenAiLlmProvider("k", client), { model: "gpt-4o-mini", messages: [] });
+
+    expect(events.filter((e) => e.type === "tool_call")).toEqual([]);
+    const done = events.at(-1);
+    expect(done?.type === "done" && done.stopReason).toBe("length");
+  });
+
   it("prices reasoning tokens (inside output_tokens) at the output rate", async () => {
     const usage = {
       input_tokens: 1_000_000,

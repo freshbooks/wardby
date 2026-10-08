@@ -18,10 +18,13 @@
  *   visible text and function_call/function_call_output items. That costs
  *   some reasoning continuity, not correctness.
  * - Reasoning tokens never stream as deltas, so the engine's mid-stream budget
- *   estimate (driven by text deltas) can't see them. They arrive inside
- *   `output_tokens` on the final usage and are charged there, at the output
- *   rate, which is how OpenAI bills them; the per-turn reservation and
- *   post-turn accounting still bound spend.
+ *   cap (driven by text deltas) can't see them. They arrive inside
+ *   `output_tokens` on the final usage and are charged when the call ends, at
+ *   the output rate, which is how OpenAI bills them. There is no per-call
+ *   reservation: one call can take a run past its budget by that call's
+ *   reasoning, and higher effort levels raise that ceiling. The pre-turn
+ *   input-estimate gate and the run-level budget-group reservation still
+ *   apply.
  */
 
 import OpenAI from "openai";
@@ -196,7 +199,9 @@ export class OpenAiLlmProvider implements CatalogLlmAdapter {
         case "response.output_item.done":
           // Arguments also stream as function_call_arguments.delta fragments,
           // but the done item carries the complete call — emit from that.
-          if (event.item.type === "function_call") {
+          // An "incomplete" item was cut off (e.g. by max_output_tokens) and
+          // its arguments are truncated JSON, so it is not a call to run.
+          if (event.item.type === "function_call" && event.item.status !== "incomplete") {
             sawToolCall = true;
             yield { type: "tool_call", id: event.item.call_id, name: event.item.name, argsJson: event.item.arguments };
           }
@@ -214,6 +219,8 @@ export class OpenAiLlmProvider implements CatalogLlmAdapter {
         case "response.failed":
           throw new Error(`OpenAI response failed: ${event.response.error?.message ?? "no error message"}`);
         case "error":
+          // The SDK usually throws an APIError when an SSE error arrives,
+          // before yielding it; this branch is a backstop.
           throw new Error(`OpenAI stream error: ${event.message}`);
         default:
           break;
