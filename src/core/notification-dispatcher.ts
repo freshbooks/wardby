@@ -135,7 +135,10 @@ async function openThread(pass: Pass, provider: ChatProvider, d: Delivery, paylo
   }
 }
 
-/** Re-renders the parent's status line. Never throws: the reply is already delivered. */
+/**
+ * Advances the thread status (compare-and-set) and re-renders the parent's
+ * status line. Never throws: the reply is already delivered.
+ */
 async function refreshParent(
   pass: Pass,
   provider: ChatProvider,
@@ -144,11 +147,31 @@ async function refreshParent(
   status: ThreadStatus,
 ): Promise<void> {
   const { db } = pass.deps;
-  try {
-    const subject = await subjectOf(db, d);
+  const edit = async (next: ThreadStatus) => {
     await pace(pass, channelKey(d));
-    await provider.updateMessage(d.channelId, thread.parentTs, renderParent(subject, status));
-    await db.notificationThread.update({ where: { id: thread.id }, data: { status } });
+    await provider.updateMessage(d.channelId, thread.parentTs, renderParent(subject, next));
+  };
+  let subject: ThreadSubject;
+  try {
+    subject = await subjectOf(db, d);
+    // Compare-and-set: a replica that took over may already have advanced the status.
+    const { count } = await db.notificationThread.updateMany({
+      where: { id: thread.id, status: thread.status },
+      data: { status },
+    });
+    if (count === 0) {
+      log.debug({ channelId: d.channelId, threadKey: d.threadKey }, "thread status superseded; skipping parent edit");
+      return;
+    }
+  } catch (err) {
+    log.warn({ err, channelId: d.channelId, threadKey: d.threadKey }, "could not record the thread status");
+    return;
+  }
+  try {
+    await edit(status);
+    // A newer status written while this edit was in flight must end up on the parent.
+    const current = await db.notificationThread.findUnique({ where: { id: thread.id }, select: { status: true } });
+    if (current && current.status !== status) await edit(current.status as ThreadStatus);
   } catch (err) {
     if (err instanceof ChatError && err.code === "message_not_found") {
       log.info(
@@ -160,7 +183,10 @@ async function refreshParent(
       });
       return;
     }
-    // Leave the stored status stale so the next event retries the edit.
+    // Roll the stored status back (if still ours) so the next event retries the edit.
+    await db.notificationThread
+      .updateMany({ where: { id: thread.id, status }, data: { status: thread.status } })
+      .catch((e: unknown) => log.warn({ err: e, threadId: thread.id }, "could not roll back the thread status"));
     if (err instanceof ChatError && err.code === "rate_limited") pass.blocked.add(channelKey(d));
     log.warn({ err, channelId: d.channelId, threadKey: d.threadKey }, "could not update the thread parent status");
   }

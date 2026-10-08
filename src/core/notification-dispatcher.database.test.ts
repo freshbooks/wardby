@@ -30,12 +30,19 @@ class ScopedFake extends FakeChatProvider {
   private guard(channelId: string): void {
     if (!channelId.startsWith(this.prefix)) throw new ChatError("rate_limited", "foreign_test_channel", 3_600_000);
   }
+  /** Runs before each in-scope threaded reply. */
+  beforeReply: (() => Promise<void>) | null = null;
   override async postMessage(
     channelId: string,
     msg: ChatMessage,
     opts?: { threadTs?: string; broadcast?: boolean },
   ): Promise<{ ts: string }> {
     this.guard(channelId);
+    const hook = opts?.threadTs ? this.beforeReply : null;
+    if (hook) {
+      this.beforeReply = null;
+      await hook();
+    }
     return super.postMessage(channelId, msg, opts);
   }
   /** Runs before each in-scope chat.update (after the delivery it follows is marked delivered). */
@@ -290,6 +297,27 @@ describe.skipIf(!process.env.DATABASE_URL)("notification dispatcher (database)",
     expect(new Set(posts.map((p) => p.msg.text)).size).toBe(4);
     const rows = await deliveriesFor(channelId);
     expect(rows.map((r) => r.state)).toEqual(["delivered", "delivered", "delivered"]);
+    // A's in-flight "PR open" edit must not win over B's terminal status.
+    const thread = await db.notificationThread.findFirstOrThrow({ where: { channelId } });
+    expect(thread.status).toBe("merged ✅");
+    expect(fake.updates.filter((u) => u.channelId === channelId).at(-1)?.msg.text).toContain("merged ✅");
+  });
+
+  it("skips the parent edit when the thread status changed after it was read", async () => {
+    const { channelId, itemKey } = await seedThread();
+    await record(itemKey, picked, "picked");
+    await drain(deps);
+    await record(itemKey, opened, "opened");
+    fake.beforeReply = async () => {
+      await db.notificationThread.updateMany({ where: { channelId }, data: { status: "merged ✅" } });
+    };
+
+    await drain(deps);
+
+    expect(fake.updates.filter((u) => u.channelId === channelId)).toHaveLength(0);
+    const thread = await db.notificationThread.findFirstOrThrow({ where: { channelId } });
+    expect(thread.status).toBe("merged ✅");
+    expect((await deliveriesFor(channelId)).map((r) => r.state)).toEqual(["delivered", "delivered"]);
   });
 
   it("stops starting deliveries once a pass has run for 20 s", async () => {
