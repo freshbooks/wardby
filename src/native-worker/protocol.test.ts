@@ -67,7 +67,7 @@ describe("native worker protocol", () => {
       runId: "run_1",
       callId: "c1",
       method: "host.call",
-      params: { tool: "double", bridge: "__bridge_datastoreGet", argsJson: '["k"]' },
+      params: { tool: "double", invocation: "t1", bridge: "__bridge_datastoreGet", argsJson: '["k"]' },
     };
     const parsed = parseMessage(JSON.stringify(request), GatewayRequestSchema);
     expect(parseParams("host.call", parsed.params)).toEqual(request.params);

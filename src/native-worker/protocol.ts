@@ -19,10 +19,7 @@ export const NATIVE_WORKER_PROTOCOL_VERSION = 1;
 export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
 export type ProtocolErrorCode =
-  | "unsupported_protocol_version"
-  | "message_too_large"
-  | "message_not_json"
-  | "message_invalid";
+  "unsupported_protocol_version" | "message_too_large" | "message_not_json" | "message_invalid";
 
 export class ProtocolError extends Error {
   constructor(
@@ -155,9 +152,7 @@ export const WorkerInputSchema = z
   .strict();
 export type WorkerInput = z.infer<typeof WorkerInputSchema>;
 
-const UsageTotalsSchema = z
-  .object({ tokensIn: z.number(), tokensOut: z.number(), costUsd: z.number() })
-  .strict();
+const UsageTotalsSchema = z.object({ tokensIn: z.number(), tokensOut: z.number(), costUsd: z.number() }).strict();
 
 /** Each gateway method and its params. */
 export const GatewayParamsSchemas = {
@@ -166,7 +161,15 @@ export const GatewayParamsSchemas = {
     .object({ model: z.string(), messages: z.array(LlmMessageSchema), tools: z.array(LlmToolDefSchema).optional() })
     .strict(),
   "builtin.call": z.object({ name: z.string().max(200), argsJson: z.string() }).strict(),
-  "host.call": z.object({ tool: z.string().max(200), bridge: z.string().max(64), argsJson: z.string() }).strict(),
+  /** `invocation` names one tool call, so its bridges share one privileged host (secret redaction is per call). */
+  "host.call": z
+    .object({
+      tool: z.string().max(200),
+      invocation: z.string().min(1).max(128),
+      bridge: z.string().max(64),
+      argsJson: z.string(),
+    })
+    .strict(),
   progress: z.object({ turns: z.number().int().nonnegative(), usage: UsageTotalsSchema }).strict(),
   text: z.object({ seq: z.number().int().nonnegative(), delta: z.string() }).strict(),
   finish: z
@@ -198,7 +201,7 @@ export function assertMessageSize(text: string): void {
 }
 
 function checkVersion(raw: unknown): void {
-  if (raw && typeof raw === "object" && "v" in raw && (raw as { v: unknown }).v !== NATIVE_WORKER_PROTOCOL_VERSION) {
+  if (raw && typeof raw === "object" && "v" in raw && raw.v !== NATIVE_WORKER_PROTOCOL_VERSION) {
     throw new ProtocolError("unsupported_protocol_version");
   }
 }
@@ -222,5 +225,5 @@ export function parseMessage<T>(text: string, schema: z.ZodType<T>): T {
 export function parseParams<M extends GatewayMethod>(method: M, params: unknown): GatewayParams<M> {
   const parsed = GatewayParamsSchemas[method].safeParse(params);
   if (!parsed.success) throw new ProtocolError("message_invalid", parsed.error.issues[0]?.message);
-  return parsed.data as GatewayParams<M>;
+  return parsed.data;
 }

@@ -25,6 +25,13 @@ import { runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
 import { runUserToolCall } from "../sandbox/user-tool.js";
+import {
+  runSandboxedEngine,
+  SandboxRunCancelledError,
+  type RunDrivability,
+  type WorkerLauncher,
+} from "../native-worker/gateway.js";
+import { NATIVE_WORKER_PROTOCOL_VERSION, type WorkerInput } from "../native-worker/protocol.js";
 import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
@@ -198,6 +205,11 @@ export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "data
   issueTrackers?: IssueTrackerRegistry;
   /** Repository authorization for repo_* calls; built from reviewHosts when absent. */
   repoAccess?: RepoAccessGate;
+  /**
+   * Runs sandbox-mode native runs: the engine runs in a worker this launcher starts, served by the
+   * native gateway (src/native-worker). Absent: a run whose snapshot says sandbox fails closed.
+   */
+  nativeSandbox?: WorkerLauncher;
 };
 
 /**
@@ -1318,11 +1330,52 @@ export async function finishNativeRun(ctx: NativeRunFinishContext, model: string
 /** The backstop terminal write for a run that threw. A cancellation is not a failure: it carries the operator's own reason. */
 export async function failNativeRun(ctx: NativeRunFinishContext, err: unknown): Promise<Run> {
   const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
-    status: err instanceof RunCancelledError ? "cancelled" : "failed",
+    status: err instanceof RunCancelledError || err instanceof SandboxRunCancelledError ? "cancelled" : "failed",
     error: err instanceof Error ? err.message : String(err),
     finishedAt: new Date(),
   });
   return settleFinishedNativeRun(ctx, finished, claimed);
+}
+
+/** Where a run stands for the native gateway: still drivable, cancelled (its task), or otherwise ended. */
+async function runDrivability(db: RunnerDb, runId: string): Promise<RunDrivability> {
+  const run = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
+  if (!run || !DRIVABLE.includes(run.status as (typeof DRIVABLE)[number])) {
+    return run?.status === "cancelled" ? "cancelled" : "ended";
+  }
+  const cancelledTask = await db.task.findFirst({ where: { runId, status: "cancelled" }, select: { id: true } });
+  return cancelledTask ? "cancelled" : "drivable";
+}
+
+/**
+ * What a sandbox worker is given: the pinned agent and tool definitions, which names are built-ins
+ * (served by the gateway), and each user tool's code and schema only — never its capabilities,
+ * secret names, or values, which stay with the gateway's privileged host.
+ */
+function sandboxWorkerInput(
+  runId: string,
+  loaded: LoadedNativeRun,
+  tools: Pick<ReturnType<typeof createNativeRunTools>, "builtinHandler" | "toolsByName">,
+): WorkerInput {
+  if (!loaded.pricing) {
+    throw new Error(
+      "native_sandbox_requires_catalog: a sandbox run needs its model's catalog entry, and none was recorded.",
+    );
+  }
+  return {
+    v: NATIVE_WORKER_PROTOCOL_VERSION,
+    runId,
+    agent: loaded.agent,
+    tools: loaded.tools,
+    builtinTools: loaded.tools.map((tool) => tool.name).filter((name) => tools.builtinHandler(name) !== undefined),
+    userTools: Object.fromEntries(
+      [...tools.toolsByName].map(([name, tool]) => [name, { code: tool.code, paramsZod: tool.paramsZod }]),
+    ),
+    runsConcurrently: loaded.parallelDelegations
+      ? loaded.tools.map((tool) => tool.name).filter((name) => name.startsWith(DELEGATE_TOOL_PREFIX))
+      : [],
+    pricing: { ...loaded.pricing.entry, efforts: [...loaded.pricing.entry.efforts] },
+  };
 }
 
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
@@ -1382,7 +1435,8 @@ async function executeTrackedRun(
   };
   // Decided by the run's own snapshot, before any work or spend (no pricing pin, no engine): a
   // sandbox-mode run never executes in the control plane.
-  if (existingRun.nativeExecutionMode === "sandbox") return finishEarly(NATIVE_SANDBOX_NOT_CONFIGURED);
+  const sandboxed = existingRun.nativeExecutionMode === "sandbox";
+  if (sandboxed && !providers.nativeSandbox) return finishEarly(NATIVE_SANDBOX_NOT_CONFIGURED);
 
   const loadedOrUnavailable = await loadNativeRun({
     runId,
@@ -1405,7 +1459,7 @@ async function executeTrackedRun(
 
   const finishContext: NativeRunFinishContext = { runId, db, providers, reviewHosts, repoAccess, issueTrackers };
   try {
-    const { runSandboxTool } = createNativeRunTools({
+    const tools = createNativeRunTools({
       runId,
       existingRun,
       loaded,
@@ -1415,17 +1469,30 @@ async function executeTrackedRun(
       repoAccess,
       issueTrackers,
     });
+    const { runSandboxTool } = tools;
 
     const onProgress = (progress: EngineProgress) => recordNativeRunProgress(db, runId, progress);
+    const llm =
+      loaded.pricing && providers.llm instanceof RoutingLlmProvider
+        ? providers.llm.forRun(loaded.pricing.entry)
+        : providers.llm;
+    if (sandboxed && providers.nativeSandbox) {
+      // The turn loop runs in a worker; this process serves its calls from the same tools and LLM.
+      const engineResult = await runSandboxedEngine({
+        runId,
+        input: sandboxWorkerInput(runId, loaded, tools),
+        ctx: { providers: { llm }, onText, onProgress },
+        builtinHandler: tools.builtinHandler,
+        privilegedHostFor: tools.privilegedHostFor,
+        drivability: () => runDrivability(db, runId),
+        launcher: providers.nativeSandbox,
+      });
+      return await finishNativeRun(finishContext, loaded.agent.model, engineResult);
+    }
     const engineResult = await providers.engine.run({
       agent: loaded.agent,
       tools: loaded.tools,
-      providers: {
-        llm:
-          loaded.pricing && providers.llm instanceof RoutingLlmProvider
-            ? providers.llm.forRun(loaded.pricing.entry)
-            : providers.llm,
-      },
+      providers: { llm },
       runSandboxTool,
       // A replay recorded before this flag existed has none: its delegations stay sequential.
       ...(loaded.parallelDelegations
