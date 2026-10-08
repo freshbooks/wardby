@@ -15,6 +15,7 @@ function run(id: string, parentRunId: string | null, startedAt: string): GraphRu
     agentKind: "native",
     model: "m",
     codingProvider: null,
+    nativeExecutionMode: null,
     declaredServices: [],
     status: "running",
     trigger: { kind: "manual" },

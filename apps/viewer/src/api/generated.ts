@@ -13,6 +13,7 @@ export interface GraphSnapshot {
     agentKind: "native" | "coding";
     model: string;
     codingProvider: string | null;
+    nativeExecutionMode: ("control-plane" | "sandbox") | null;
     status: "pending" | "running" | "succeeded" | "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled";
     trigger:
       | {
@@ -118,6 +119,7 @@ export interface RunDetail {
   agentKind: "native" | "coding";
   model: string;
   codingProvider: string | null;
+  nativeExecutionMode: ("control-plane" | "sandbox") | null;
   status: "pending" | "running" | "succeeded" | "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled";
   trigger:
     | {

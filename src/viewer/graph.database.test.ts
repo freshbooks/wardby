@@ -53,6 +53,7 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
         startedAt: ago(5 * MIN),
         costUsd: 0.4,
         turns: 3,
+        nativeExecutionMode: "control_plane",
       },
     });
     await db.run.create({
@@ -127,6 +128,9 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
         .sort(),
     ).toEqual([ids.R0, ids.R1, ids.R2, ids.R3, ids.R4, ids.R5].sort());
     expect(() => GraphSnapshotSchema.parse(snap)).not.toThrow();
+    // The run's execution-mode snapshot, in operator spelling; null when none was recorded.
+    expect(snap.runs.find((r) => r.id === ids.R1)?.nativeExecutionMode).toBe("control-plane");
+    expect(snap.runs.find((r) => r.id === ids.R0)?.nativeExecutionMode).toBeNull();
     const group = snap.spend.groups.find((g) => g.id === groupId);
     expect(group).toMatchObject({ dailyBudgetUsd: 10 });
     expect(group?.spentTodayUsd).toBeCloseTo(0.4);
