@@ -313,10 +313,9 @@ describe("codingStep (non-interactive)", () => {
       deps,
     );
     const pulled = calls.filter((call) => call[1] === "pull").map((call) => call[2]);
-    expect(pulled).toEqual(expect.arrayContaining([RUNTIME, claudeWorker, claudeToolRunner]));
-    expect(pulled).not.toContain(WORKER);
+    expect(pulled).toEqual(expect.arrayContaining([RUNTIME, WORKER, claudeWorker, claudeToolRunner]));
     const env = readQuickstartEnv(paths());
-    expect(env.CODING_WORKER_IMAGE).toBe(claudeWorker);
+    expect(env.CODING_WORKER_IMAGE).toBe(WORKER);
     expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(claudeWorker);
     expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(claudeToolRunner);
   });
@@ -386,11 +385,12 @@ describe("codingStep (non-interactive)", () => {
     const tags = calls.filter((call) => call[1] === "build").map((call) => call[call.indexOf("--tag") + 1]);
     expect(tags).toEqual([
       "wardby-runtime:local",
+      "wardby-coding-worker:local",
       "wardby-claude-coding-worker:local",
       "wardby-claude-tool-runner:local",
     ]);
     const env = readQuickstartEnv(paths());
-    // The server and preflight still need CODING_WORKER_IMAGE; it points at the Claude worker.
+    // CODING_WORKER_IMAGE stays the Codex worker so a later Codex agent works.
     expect(env.CODING_WORKER_IMAGE).toBe(BUILT_ID);
     expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(BUILT_ID);
     expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(BUILT_ID);
@@ -590,9 +590,12 @@ describe("repositories under trusted folders", () => {
     withCodex();
     const parent = join(scratch, "parent");
     makeRepo(join(parent, ".hidden-repo"));
-    symlinkSync(repoA, join(parent, "linked-out"));
+    const elsewhere = join(scratch, "elsewhere");
+    makeRepo(join(elsewhere, "target"));
+    // Sorts first; the target is trusted via another root, so only the containment guard skips it here.
+    symlinkSync(join(elsewhere, "target"), join(parent, "aaa-linked"));
     makeRepo(join(parent, "real"));
-    const { result } = await run([parent]);
+    const { result } = await run([parent, elsewhere]);
     expect(result?.repository).toBe(`local:${join(parent, "real")}`);
   });
 
@@ -630,5 +633,16 @@ describe("repositories under trusted folders", () => {
     const { result, logs } = await run([folderB]);
     expect(result?.repository).toBeUndefined();
     expect(logs.join("\n")).toMatch(/No git repository was found in or directly under the trusted folders/);
+  });
+
+  it("prefers this run's --trust folder over saved ones when re-run to pick another", async () => {
+    withCodex();
+    const parent = join(scratch, "parent");
+    makeRepo(join(parent, "zeta"));
+    makeRepo(join(parent, "alpha"));
+    const first = await run([parent]);
+    expect(first.result?.repository).toBe(`local:${join(parent, "alpha")}`);
+    const second = await run([join(parent, "zeta")]);
+    expect(second.result?.repository).toBe(`local:${join(parent, "zeta")}`);
   });
 });

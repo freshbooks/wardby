@@ -9,7 +9,7 @@
  * git plumbing onto its own branch (starter-services.ts).
  */
 import { spawnSync } from "node:child_process";
-import { readdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { delimiter, join, resolve, sep } from "node:path";
 
 import { dockerCodingPreflight } from "../coding/docker-preflight.js";
@@ -244,12 +244,12 @@ function startProxy(paths: QuickstartPaths, state: QuickstartState, deps: Coding
 }
 
 /** Git repositories among the trusted folders: a folder that is one, else its direct (non-hidden) children. */
-async function findRepositories(roots: string[]): Promise<string[]> {
+async function findRepositories(scan: string[], roots: string[]): Promise<string[]> {
   const found: string[] = [];
   const add = (path: string) => {
     if (!found.includes(path)) found.push(path);
   };
-  for (const root of roots) {
+  for (const root of scan) {
     if (await isRepositoryTop(root, roots)) {
       add(root);
       continue;
@@ -272,7 +272,9 @@ async function findRepositories(roots: string[]): Promise<string[]> {
         continue;
       }
       // A symlink out of the trusted folder is not a candidate; resolveLocalRepository checks the roots.
-      if (real !== root && !real.startsWith(root + sep)) continue;
+      if (real !== root && !real.startsWith(root.endsWith(sep) ? root : root + sep)) continue;
+      // Cheap pre-check (a .git directory or file) before spawning git.
+      if (!existsSync(join(real, ".git"))) continue;
       if (await isRepositoryTop(real, roots)) add(real);
     }
   }
@@ -280,7 +282,17 @@ async function findRepositories(roots: string[]): Promise<string[]> {
 }
 
 async function chooseRepository(roots: string[], opts: CodingStepOptions, deps: CodingDeps): Promise<string | null> {
-  const found = await findRepositories(roots);
+  // Folders passed with --trust on this run take precedence over the saved ones.
+  const thisRun: string[] = [];
+  for (const path of opts.trust) {
+    try {
+      thisRun.push(realpathSync(resolve(path)));
+    } catch {
+      // chooseRoots already rejected a missing folder.
+    }
+  }
+  let found = await findRepositories(thisRun, roots);
+  if (found.length === 0) found = await findRepositories(roots, roots);
   if (found.length === 1) return found[0];
   if (found.length > 1) {
     if (opts.nonInteractive) {
