@@ -864,8 +864,24 @@ export function assertRunNetworkPolicyMatches(actual: V1NetworkPolicy, expected:
  * The IP is validated and embedded as a JSON string literal.
  */
 export function enforcementProbeScript(proxyIp: string): string {
+  return [...enforcementProbeBody(proxyIp), "(async () => {", "  process.exit(await probe());", "})();"].join("\n");
+}
+
+/**
+ * The one measurement both enforcement scripts make, as script lines defining `probe()`: connect to
+ * CODING_PROXY_PORT, then to CODING_PROXY_DENY_PORT (both with a 3 s connect timeout, always both,
+ * in that order), and resolve to the exit code classifying that pair. Its first statement presets
+ * `process.exitCode = 1` so that a natural exit is never mistaken for PROVEN. Shared verbatim so the
+ * single probe and the streak can never disagree about what "proven" means.
+ */
+function enforcementProbeBody(proxyIp: string): string[] {
   if (isIP(proxyIp) === 0) throw isolationError();
   return [
+    // Preset a code no probe produces (it reads as "did not run"), so the only way to exit 0 is
+    // the explicit proven exit. Without it, a process that drains its event loop without ever
+    // calling process.exit — a probe promise that never settles, or a rejection under a
+    // non-throwing --unhandled-rejections mode — would exit 0 and read as PROVEN.
+    "process.exitCode = 1;",
     'const net = require("node:net");',
     "const tcp = (port) =>",
     "  new Promise((done) => {",
@@ -874,13 +890,46 @@ export function enforcementProbeScript(proxyIp: string): string {
     '    socket.once("timeout", () => { socket.destroy(); done("timeout"); });',
     '    socket.once("error", () => done("error"));',
     "  });",
-    "(async () => {",
+    "const probe = async () => {",
     `  const allowed = await tcp(${CODING_PROXY_PORT});`,
     `  const denied = await tcp(${CODING_PROXY_DENY_PORT});`,
-    `  if (allowed !== "connect") process.exit(${ENFORCEMENT_PROBE_PROXY_UNREACHABLE});`,
-    `  if (denied === "connect") process.exit(${ENFORCEMENT_PROBE_DENY_REACHABLE});`,
-    `  if (denied === "error") process.exit(${ENFORCEMENT_PROBE_DENY_REFUSED});`,
-    `  process.exit(${ENFORCEMENT_PROBE_PROVEN});`,
+    `  if (allowed !== "connect") return ${ENFORCEMENT_PROBE_PROXY_UNREACHABLE};`,
+    `  if (denied === "connect") return ${ENFORCEMENT_PROBE_DENY_REACHABLE};`,
+    `  if (denied === "error") return ${ENFORCEMENT_PROBE_DENY_REFUSED};`,
+    `  return ${ENFORCEMENT_PROBE_PROVEN};`,
+    "};",
+  ];
+}
+
+/**
+ * A whole enforcement streak in one process: up to `streak` probes, each exactly
+ * `enforcementProbeScript`'s measurement and classification (the body is shared), `intervalMs`
+ * apart. Exits ENFORCEMENT_PROBE_PROVEN only after `streak` consecutive proven probes; at the
+ * first probe that is not proven it exits at once with that probe's own code, so the caller's
+ * verdict is still the last probe's. Running the streak in one exec (rather than one exec per
+ * probe) pays the keeper's exec + interpreter start-up once per streak instead of once per probe;
+ * the evidence required is unchanged.
+ *
+ * The IP is validated and embedded as a JSON string literal; `streak` and `intervalMs` must be
+ * positive safe integers and are embedded as numeric literals.
+ */
+export function enforcementStreakScript(proxyIp: string, streak: number, intervalMs: number): string {
+  const body = enforcementProbeBody(proxyIp);
+  if (!isPositiveSafeInteger(streak) || !isPositiveSafeInteger(intervalMs)) throw isolationError();
+  return [
+    ...body,
+    "const pause = (ms) => new Promise((done) => setTimeout(done, ms));",
+    "(async () => {",
+    `  for (let index = 0; index < ${JSON.stringify(streak)}; index += 1) {`,
+    `    if (index > 0) await pause(${JSON.stringify(intervalMs)});`,
+    "    const code = await probe();",
+    `    if (code !== ${ENFORCEMENT_PROBE_PROVEN}) return process.exit(code);`,
+    "  }",
+    `  return process.exit(${ENFORCEMENT_PROBE_PROVEN});`,
     "})();",
   ].join("\n");
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
