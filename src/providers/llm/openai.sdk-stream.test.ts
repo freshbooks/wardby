@@ -20,6 +20,7 @@ import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import OpenAI from "openai";
+import { getGlobalDispatcher } from "undici";
 import { NativeEngine } from "../../core/engine-native.js";
 import { classifyProviderFailure } from "../../core/provider-wording.js";
 import type { EngineRunContext } from "../engine/types.js";
@@ -676,5 +677,48 @@ describe("NativeEngine over the real OpenAI SDK", () => {
     expect(seen).toHaveLength(3);
     await vi.waitFor(() => expect(closed).toBe(true), { timeout: 3000 });
     expect(server.abortedResponses).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Transport: which dispatcher carries OpenAI traffic
+// ---------------------------------------------------------------------------
+
+/** Reads an undici Agent's module-private options (see http-runtime.test.ts for why). */
+function allowsH2(dispatcher: unknown): unknown {
+  if (dispatcher === null || typeof dispatcher !== "object") return undefined;
+  const key = Object.getOwnPropertySymbols(dispatcher).find((symbol) => symbol.description === "options");
+  const options = key ? (dispatcher as Record<symbol, unknown>)[key] : undefined;
+  return options && typeof options === "object" ? (options as Record<string, unknown>).allowH2 : undefined;
+}
+
+describe("OpenAI SDK transport", () => {
+  /**
+   * openai@5+ dropped node-fetch/agentkeepalive for the built-in fetch, so
+   * its requests now ride the process-global dispatcher that
+   * src/core/http-runtime.ts pins to an h1-only undici Agent (installed for
+   * tests by vitest.setup.ts). If that dispatcher were h2-capable, the
+   * Dispatcher1Wrapper header loss would strip content-encoding and
+   * retry-after from OpenAI responses — so assert the SDK really goes
+   * through it, and that it is the h1-only one.
+   */
+  it("sends OpenAI requests through wardby's h1-only global dispatcher", async () => {
+    const dispatcher = getGlobalDispatcher();
+    expect(allowsH2(dispatcher)).toBe(false);
+    const dispatch = vi.spyOn(dispatcher, "dispatch");
+    try {
+      server.script(sseHandler([created(), textDelta("via dispatcher"), completed(BILLED_USAGE)], { gzip: true }));
+
+      const events = await collect(provider());
+
+      expect(events.at(-1)).toMatchObject({ type: "done", usage: { costUsd: expect.closeTo(BILLED_COST, 12) } });
+      const origin = new URL(server.baseURL).origin;
+      const calls = dispatch.mock.calls.filter(([options]) => String(options.origin) === origin);
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toMatchObject({ method: "POST", path: "/v1/responses" });
+      expect(server.requests[0].httpVersion).toBe("1.1");
+    } finally {
+      dispatch.mockRestore();
+    }
   });
 });
