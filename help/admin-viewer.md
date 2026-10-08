@@ -3,23 +3,7 @@ id: admin-viewer
 title: Watch live runs with the admin viewer API
 summary: Read-only, deployment-wide live view of runs, sub-agent trees, triggers, outcomes and coding-run services for admins (admin:view).
 audience: operator
-tags:
-  [
-    viewer,
-    admin,
-    runs,
-    live,
-    sse,
-    monitoring,
-    desktop,
-    app,
-    infrastructure,
-    kubernetes,
-    pods,
-    networkpolicy,
-    download,
-    release,
-  ]
+tags: [viewer, admin, runs, live, desktop, infrastructure, kubernetes, download]
 appliesTo: ">=0.4.0"
 ---
 
