@@ -16,6 +16,7 @@ import {
   type IssueTrackerRegistry,
 } from "../providers/issue-tracker/types.js";
 import { logger } from "./logger.js";
+import { dedupeKeys, emitWorkflowEvent } from "./workflow-events.js";
 
 const log = logger.child({ module: "issue-bridge" });
 
@@ -116,9 +117,13 @@ export async function recordPullRequests(
   const notes: string[] = [];
   try {
     let newlyOpened = false;
+    const opened: BridgedPullRequest[] = [];
     for (const pr of input.pullRequests) {
       const state = await ensurePair(db, input, pr);
-      if (state === "created" && pr.outcome === "pull_request_opened") newlyOpened = true;
+      if (state === "created" && pr.outcome === "pull_request_opened") {
+        newlyOpened = true;
+        opened.push(pr);
+      }
       if (state !== "created" && state !== "open") continue;
       try {
         await tracker.addRemoteLink(input.issueKey, {
@@ -134,13 +139,26 @@ export async function recordPullRequests(
       }
     }
     const target = input.onPullRequestOpened;
+    let movedTo: string | null = null;
     if (target && newlyOpened) {
       try {
-        await tracker.transitionTo(input.issueKey, target);
+        const moved = await tracker.transitionTo(input.issueKey, target);
+        movedTo = moved.toStatus || target;
       } catch (err) {
         log.warn({ err, issueKey: input.issueKey, target }, "could not move the issue after a pull request opened");
         notes.push(`Could not move ${input.issueKey} to "${target}"; it may need a manual move.`);
       }
+    }
+    // Only pairs this call newly recorded, so a retried completion does not notify twice. Never throws.
+    for (const pr of opened) {
+      await emitWorkflowEvent({
+        dedupeKey: dedupeKeys.prOpened(pr.codeProvider, pr.repository, pr.number),
+        runId: pr.openedByRunId,
+        agentId: input.agentId,
+        workItem: { provider: input.issueProvider, key: input.issueKey },
+        pullRequest: { codeProvider: pr.codeProvider, repository: pr.repository, number: pr.number },
+        payload: { kind: "pr_opened", prLabel: `${pr.repository}#${pr.number}`, prUrl: pr.url, movedTo },
+      });
     }
   } catch (err) {
     log.warn({ err, issueKey: input.issueKey }, "could not bridge the pull requests to the issue");
@@ -176,14 +194,33 @@ export async function handlePullRequestClosed(
   // Not caught: nothing is claimed yet, and a throw rolls back the delivery so it is redelivered.
   const rows = await db.issuePullRequest.findMany({ where: { ...where, state: "open" } });
   for (const row of rows) {
+    // Once per claimed row: before each early exit after the claim, or after the comment. Never throws.
+    const emitClosed = (movedTo: string | null) =>
+      emitWorkflowEvent({
+        dedupeKey: dedupeKeys.prClosed(pr.codeProvider, pr.repository, pr.number),
+        agentId: row.agentId,
+        workItem: { provider: row.issueProvider, key: row.issueKey },
+        pullRequest: { codeProvider: pr.codeProvider, repository: pr.repository, number: pr.number },
+        payload: {
+          kind: "pr_closed",
+          prLabel: `${row.repository}#${row.number}`,
+          prUrl: row.url,
+          merged: pr.merged,
+          movedTo,
+        },
+      });
     try {
       const claimed = await db.issuePullRequest.updateMany({
         where: { id: row.id, state: "open" },
         data: { state: pr.merged ? "merged" : "closed" },
       });
       if (claimed.count === 0) continue;
+      let movedTo: string | null = null;
       const tracker = trackers[row.issueProvider as IssueTrackerProvider];
-      if (!tracker) continue;
+      if (!tracker) {
+        await emitClosed(null);
+        continue;
+      }
       const link = await db.agentIssueProject.findUnique({
         where: {
           agentId_provider_projectKey: {
@@ -194,7 +231,10 @@ export async function handlePullRequestClosed(
         },
         select: { access: true, commentVisibilityRole: true, onPullRequestMerged: true },
       });
-      if (link?.access !== "write") continue;
+      if (link?.access !== "write") {
+        await emitClosed(null);
+        continue;
+      }
       const ref = `[${row.repository}#${row.number}](${row.url})`;
       let markdown: string;
       if (pr.merged) {
@@ -213,6 +253,7 @@ export async function handlePullRequestClosed(
         if (target) {
           try {
             const moved = await tracker.transitionTo(row.issueKey, target);
+            movedTo = moved.toStatus;
             markdown += ` Moved to ${moved.toStatus}.`;
           } catch (err) {
             log.warn({ err, issueKey: row.issueKey, target }, "could not move the issue after its pull request merged");
@@ -226,6 +267,7 @@ export async function handlePullRequestClosed(
         markdown,
         ...(link.commentVisibilityRole ? { visibilityRole: link.commentVisibilityRole } : {}),
       });
+      await emitClosed(movedTo);
     } catch (err) {
       log.warn({ err, issueKey: row.issueKey, ...where }, "could not bridge the closed pull request to the issue");
     }

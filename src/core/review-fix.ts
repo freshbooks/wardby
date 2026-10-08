@@ -20,6 +20,7 @@ import { requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { fixRoundLedger } from "./review-fix-ledger.js";
 import { MAX_REVIEW_BODY_CHARS } from "./review-host-tools.js";
 import { composeTaskOverride } from "./untrusted-content.js";
+import { dedupeKeys, emitWorkflowEvent } from "./workflow-events.js";
 
 const log = logger.child({ module: "review-fix" });
 
@@ -157,7 +158,22 @@ export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFix
   const maxRounds = link.reviewFixMaxRounds ?? DEFAULT_MAX_FIX_ROUNDS;
   const done = ledger.rounds(origin);
   if (done >= maxRounds) {
-    if (await ledger.markStopped(req.repository, req.prNumber, origin)) await comment(capBody(maxRounds));
+    // Only the call that marked the PR stopped comments and notifies.
+    if (await ledger.markStopped(req.repository, req.prNumber, origin)) {
+      await comment(capBody(maxRounds));
+      await emitWorkflowEvent({
+        dedupeKey: dedupeKeys.reviewFix(req.repository, req.prNumber, maxRounds, "capped"),
+        agentId: link.agentId,
+        pullRequest: { codeProvider: req.provider, repository: req.repository, number: req.prNumber },
+        payload: {
+          kind: "review_fix",
+          prLabel: `${req.repository}#${req.prNumber}`,
+          round: maxRounds,
+          maxRounds,
+          state: "capped",
+        },
+      });
+    }
     return skipped("capped");
   }
   const round = done + 1;
@@ -224,6 +240,13 @@ export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFix
     deps.hosts,
     `🔁 Fix round ${round} of ${maxRounds}: working on it.`,
   );
+  await emitWorkflowEvent({
+    dedupeKey: dedupeKeys.reviewFix(req.repository, req.prNumber, round, "started"),
+    runId: dispatched.run.id,
+    agentId: link.agentId,
+    pullRequest: { codeProvider: req.provider, repository: req.repository, number: req.prNumber },
+    payload: { kind: "review_fix", prLabel: `${req.repository}#${req.prNumber}`, round, maxRounds, state: "started" },
+  });
   return { kind: "dispatched", runId: dispatched.run.id, round, maxRounds };
 }
 

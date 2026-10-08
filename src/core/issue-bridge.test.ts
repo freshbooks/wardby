@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 import { Prisma } from "#prisma";
 import type { IssueTracker } from "../providers/issue-tracker/types.js";
 import { handlePullRequestClosed, recordPullRequests, type BridgedPullRequest } from "./issue-bridge.js";
@@ -318,5 +319,79 @@ describe("recordPullRequests", () => {
     store.issuePullRequest.findUnique.mockRejectedValue(new Error("db"));
     await expect(recordPullRequests(store as never, t, recordInput([opened(12)]))).resolves.toEqual({ notes: [] });
     expect(t.transitionTo).not.toHaveBeenCalled();
+  });
+});
+
+describe("workflow events", () => {
+  const events: WorkflowEventInput[] = [];
+  beforeEach(() => {
+    events.length = 0;
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+  });
+  afterEach(() => setWorkflowEventSink(null));
+
+  const prClosed = (merged: boolean, movedTo: string | null) => ({
+    dedupeKey: `pr_closed:github:${REPO}#12`,
+    agentId: "a1",
+    workItem: { provider: "jira", key: "PROJ-7" },
+    pullRequest: { codeProvider: "github", repository: REPO, number: 12 },
+    payload: { kind: "pr_closed", prLabel: `${REPO}#12`, prUrl: ROW.url, merged, movedTo },
+  });
+
+  it("pr_closed: a merge with onPullRequestMerged emits movedTo; a second delivery emits nothing", async () => {
+    await handlePullRequestClosed(db() as never, { jira: tracker() }, closed(true));
+    expect(events).toEqual([prClosed(true, "Done")]);
+    await handlePullRequestClosed(db([]) as never, { jira: tracker() }, closed(true));
+    await handlePullRequestClosed(db([ROW], LINK, 0) as never, { jira: tracker() }, closed(true));
+    expect(events).toHaveLength(1);
+  });
+
+  it("pr_closed: emits once with movedTo null when the link is not write, or the tracker is not configured", async () => {
+    await handlePullRequestClosed(db([ROW], { ...LINK, access: "read" }) as never, { jira: tracker() }, closed(true));
+    await handlePullRequestClosed(db() as never, {}, closed(false));
+    expect(events).toEqual([prClosed(true, null), prClosed(false, null)]);
+  });
+
+  it("pr_closed: a failed move still emits, with movedTo null", async () => {
+    const t = tracker();
+    vi.mocked(t.transitionTo).mockRejectedValue(new Error("no such transition"));
+    await handlePullRequestClosed(db() as never, { jira: t }, closed(true));
+    expect(events).toEqual([prClosed(true, null)]);
+  });
+
+  it("pr_opened: one event per newly recorded opened PR, with the move; a retry emits nothing", async () => {
+    const t = tracker();
+    const store = pairStore();
+    await recordPullRequests(store as never, t, recordInput([opened(12), opened(13, "pull_request_updated")]));
+    expect(events).toEqual([
+      {
+        dedupeKey: `pr_opened:github:${REPO}#12`,
+        runId: "r-code-12",
+        agentId: "a1",
+        workItem: { provider: "jira", key: "PROJ-7" },
+        pullRequest: { codeProvider: "github", repository: REPO, number: 12 },
+        payload: {
+          kind: "pr_opened",
+          prLabel: `${REPO}#12`,
+          prUrl: `https://github.com/${REPO}/pull/12`,
+          movedTo: "In Review",
+        },
+      },
+    ]);
+    await recordPullRequests(store as never, t, recordInput([opened(12)]));
+    expect(events).toHaveLength(1);
+  });
+
+  it("pr_opened: movedTo is null when the move fails or none is configured", async () => {
+    const t = tracker();
+    vi.mocked(t.transitionTo).mockRejectedValue(new Error("no such transition"));
+    await recordPullRequests(pairStore() as never, t, recordInput([opened(12)]));
+    await recordPullRequests(pairStore() as never, tracker(), {
+      ...recordInput([opened(14)]),
+      onPullRequestOpened: null,
+    });
+    expect(events.map((e) => (e.payload as { movedTo: string | null }).movedTo)).toEqual([null, null]);
   });
 });

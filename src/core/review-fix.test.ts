@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 import type { CodeReviewHost, PullRequestOrigin } from "../providers/review-host/types.js";
 import type { RepoAccessGate } from "./repo-access.js";
 
@@ -276,5 +277,52 @@ describe("startReviewFixAfterReview", () => {
     const { deps, findUniqueCheck } = setup();
     findUniqueCheck.mockRejectedValueOnce(new Error("db down"));
     await expect(startReviewFixAfterReview("run-1", deps)).resolves.toBeUndefined();
+  });
+});
+
+describe("review fix workflow events", () => {
+  const events: WorkflowEventInput[] = [];
+  beforeEach(() => {
+    events.length = 0;
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+  });
+  afterEach(() => setWorkflowEventSink(null));
+  const pullRequest = { codeProvider: "github", repository: REPO, number: 7 };
+
+  it("emits review_fix started for a dispatched round", async () => {
+    const { deps } = setup();
+    await startReviewFixRound(REQ, deps);
+    expect(events).toEqual([
+      {
+        dedupeKey: "review_fix:o/r#7:1:started",
+        runId: "run-delivery",
+        agentId: "delivery",
+        pullRequest,
+        payload: { kind: "review_fix", prLabel: "o/r#7", round: 1, maxRounds: 2, state: "started" },
+      },
+    ]);
+  });
+
+  it("emits review_fix capped once, when this call marked the PR stopped", async () => {
+    const { deps } = setup({ origin: { labels: ["wardby-autofix-1", "wardby-autofix-2"] } });
+    await startReviewFixRound(REQ, deps);
+    expect(events).toEqual([
+      {
+        dedupeKey: "review_fix:o/r#7:2:capped",
+        agentId: "delivery",
+        pullRequest,
+        payload: { kind: "review_fix", prLabel: "o/r#7", round: 2, maxRounds: 2, state: "capped" },
+      },
+    ]);
+  });
+
+  it("emits nothing at the cap once the PR is already stopped", async () => {
+    const { deps } = setup({
+      origin: { labels: ["wardby-autofix-1", "wardby-autofix-2", "wardby-autofix-limit"] },
+    });
+    expect(await startReviewFixRound(REQ, deps)).toEqual({ kind: "skipped", reason: "capped" });
+    expect(events).toEqual([]);
   });
 });
