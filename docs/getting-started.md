@@ -200,8 +200,9 @@ folders) and its limits (no submodules or Git LFS).
 
 [Agent recipes](agent-recipes.md) gives two complete, copyable setups: an
 architecture keeper and a builder per language. They go beyond the quickstart,
-which runs native agents only. They require Wardby 0.4.0 or later. They need the
-GitHub App, worker image, and job launcher from
+whose optional coding step works on a local git repository without a GitHub
+App. The recipes react to GitHub events, so they require Wardby 0.4.0 or later
+and need the GitHub App, worker image, and job launcher from
 [Coding-agent setup](coding-agent-setup.md). Their event triggers need GitHub to
 reach your instance at a public HTTPS URL.
 
