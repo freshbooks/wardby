@@ -38,17 +38,27 @@ jobs:
           COUNT: ${{ steps.report.outputs.count }}
           TITLE: Dependencies a major version or more behind
         run: |
+          : "${COUNT:?the report step did not set a count}"
           body="$RUNNER_TEMP/outdated-report.md"
-          # Exact-title match over open issues (not the search index, which lags).
-          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 500 \
-            --json number,title --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')"
+          # Exact-title match over issues in every state (not the search index,
+          # which lags), newest first: a report issue someone closed by hand is
+          # reopened rather than duplicated.
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state all --limit 1000 \
+            --json number,title,state,createdAt \
+            --jq 'map(select(.title == env.TITLE)) | sort_by(.createdAt) | reverse | .[0] // empty | "\(.number) \(.state)"')"
+          number="${existing%% *}"
+          state="${existing#* }"
           if [ "$COUNT" -gt 0 ]; then
-            if [ -n "$number" ]; then
-              gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$body"
-            else
+            if [ -z "$existing" ]; then
               gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$body"
+            else
+              gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$body"
+              if [ "$state" != "OPEN" ]; then
+                gh issue reopen "$number" --repo "$GITHUB_REPOSITORY" \
+                  --comment "Dependencies are a major version or more behind again; reopening."
+              fi
             fi
-          elif [ -n "$number" ]; then
+          elif [ -n "$existing" ] && [ "$state" = "OPEN" ]; then
             gh issue close "$number" --repo "$GITHUB_REPOSITORY" \
               --comment "No dependencies are a major version or more behind any more."
           fi
