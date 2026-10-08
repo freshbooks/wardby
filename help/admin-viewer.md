@@ -3,7 +3,7 @@ id: admin-viewer
 title: Watch live runs with the admin viewer API
 summary: Read-only, deployment-wide live view of runs, sub-agent trees, triggers, outcomes and coding-run services for admins (admin:view).
 audience: operator
-tags: [viewer, admin, runs, live, sse, monitoring, desktop, app, infrastructure, kubernetes, pods, networkpolicy]
+tags: [viewer, admin, runs, live, desktop, infrastructure, kubernetes, download]
 appliesTo: ">=0.4.0"
 ---
 
@@ -33,7 +33,7 @@ must allow long-lived responses and not buffer `text/event-stream`.
 
 A desktop viewer for macOS is included in the source tree (`apps/viewer`). Add
 your server's canonical URI, sign in with an `admin` user in the browser, and it
-shows the live graph. Its README covers setup, and what an external identity
+shows the live graph. Each GitHub release has an unsigned macOS build of the viewer attached (see the README for opening it past Gatekeeper). Its README covers setup, and what an external identity
 provider client needs when the server runs in delegating mode.
 
 The Infrastructure tab shows the Kubernetes pods where your deployment runs
