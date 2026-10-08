@@ -55,7 +55,7 @@ import { PostgresAgentMemory } from "./providers/memory/index.js";
 import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
-import { runAgent } from "./core/runner.js";
+import { runAgent, type NativeRunProviders } from "./core/runner.js";
 import { cancelRunOnSignal } from "./core/run-heartbeat.js";
 import { buildIssueTrackers } from "./providers/issue-tracker/index.js";
 import { buildReviewHosts } from "./providers/review-host/index.js";
@@ -809,12 +809,22 @@ async function scheduler(args: string[]): Promise<void> {
   const issueTrackers = buildIssueTrackers();
   // One repository-access gate (and cache) for native repo_* calls and coding runs.
   const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });
-  const nativeExecutor = buildExecutor(
-    config,
-    { llm, engine, datastore, secrets, memory, reviewHosts, issueTrackers, repoAccess },
-    prisma,
-  );
+  // Patched with the composed executor below, as startMcp does: native runs read
+  // `providers.executor` at call time, so their delegate_to_* calls can dispatch coding and
+  // sandbox-mode sub-agents through the same RoutingExecutor.
+  const nativeProviders: NativeRunProviders = {
+    llm,
+    engine,
+    datastore,
+    secrets,
+    memory,
+    reviewHosts,
+    issueTrackers,
+    repoAccess,
+  };
+  const nativeExecutor = buildExecutor(config, nativeProviders, prisma);
   const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config, repoAccess });
+  nativeProviders.executor = executor;
   await executor.launch?.();
   warmUpExecutor(executor);
   const reconciler = startReconciler({
