@@ -139,14 +139,15 @@ alone. Native agents call OpenAI's Responses API, and when the agent has an
 and an agent with no `effort` gets OpenAI's default. The shipped reasoning
 models (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`) list
 `low`, `medium`, `high`, `xhigh`, and `max`; the older models (`gpt-4o`,
-`gpt-4o-mini`, the `gpt-4.1` family) list none. A model with no `efforts` also
-receives the agent's `temperature`; a model with `efforts` does not, because
-reasoning models reject it. Requests are sent with `store: false`, so OpenAI
-does not retain the conversation. The Responses API has no stop sequences, so
-none are sent. Reasoning tokens are billed as output tokens; they are only
-known when a model call finishes, so a call's reasoning is charged at its end
-(the budget is still reserved per call). OpenAI cache-write tokens are billed
-at the catalog's `cacheWritePerMTok`.
+`gpt-4o-mini`, the `gpt-4.1` family) list none. OpenAI reasoning models reject
+sampling parameters such as `temperature`; wardby doesn't send them. Requests
+are sent with `store: false`, so OpenAI doesn't store the responses for later
+retrieval. Reasoning tokens are billed as output tokens. They don't stream, so
+a call's reasoning is charged when the call ends, and one call can take a run
+past its budget by that call's reasoning; higher effort levels raise that
+ceiling. The pre-turn input estimate and the budget group's run reservation
+still apply. OpenAI cache-write tokens are billed at the catalog's
+`cacheWritePerMTok`.
 
 Setting the wrong `thinkingMode` (or listing `efforts` a model doesn't
 actually accept) does not fail at `set_model` time — it fails when a coding
@@ -238,6 +239,7 @@ leave your override in place.
 
 This matters when a release changes `efforts`: a database override replaces
 the shipped entry wholesale, so an override of an OpenAI reasoning model
-created before the release keeps its stored `efforts` (typically empty) and the
-agent's effort is not sent. Run `reset_model` on the id, or `set_model` again
-with the new `efforts`, to pick up the shipped levels.
+created before the release keeps its stored `efforts` (typically empty).
+While it does, `create_agent` and `update_agent` reject any `effort` for that
+model, and an existing agent's effort is not sent. Run `reset_model` on the id,
+or `set_model` again with the new `efforts`, to pick up the shipped levels.
