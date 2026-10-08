@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
@@ -15,6 +16,7 @@ import {
   buildRunNetworkPolicy,
   buildRunPod,
   enforcementProbeScript,
+  enforcementStreakScript,
   isRegistryDigest,
   kubernetesRunNames,
   kubernetesRunNamesForToken,
@@ -840,6 +842,178 @@ describe("enforcementProbeScript", () => {
         8788: deny as "connect" | "timeout" | "error",
       }),
     ).toBe(code);
+  });
+});
+
+describe("enforcementStreakScript", () => {
+  type Outcome = "connect" | "timeout" | "error";
+  /**
+   * Drives the real script in a VM with a fake net. `probes[i]` is the i-th probe's outcome per
+   * port; connects past the scripted probes are recorded but never answered. Records every connect
+   * (in order) and every delay the script itself asked setTimeout for.
+   */
+  async function runStreak(script: string, probes: Record<number, Outcome>[]) {
+    const connects: number[] = [];
+    const delays: number[] = [];
+    const startedAt = Date.now();
+    const exitTimes: number[] = [];
+    const code = await new Promise<number>((resolve) => {
+      runInNewContext(script, {
+        require: () => ({
+          connect: ({ port }: { port: number }) => {
+            const probe = Math.floor(connects.length / 2);
+            connects.push(port);
+            const handlers: Record<string, () => void> = {};
+            const outcome = probes[probe]?.[port];
+            if (outcome) setTimeout(() => handlers[outcome]?.(), 0);
+            return {
+              once: (event: string, handler: () => void) => void (handlers[event] = handler),
+              destroy: () => {},
+            };
+          },
+        }),
+        process: {
+          exit: (exitCode: number) => {
+            exitTimes.push(Date.now() - startedAt);
+            resolve(exitCode);
+          },
+        },
+        setTimeout: (handler: () => void, ms: number) => {
+          delays.push(ms);
+          return setTimeout(handler, ms);
+        },
+      });
+    });
+    // Let anything the script might (wrongly) still do after exiting surface before asserting.
+    await new Promise((settle) => setTimeout(settle, 30));
+    return { code, connects, delays, exits: exitTimes.length, elapsedMs: exitTimes[0] };
+  }
+  const PROVEN: Record<number, Outcome> = { 8787: "connect", 8788: "timeout" };
+
+  it("uses exactly the single probe's measurement: same host literal, 3 s connects, 8787 then 8788", () => {
+    const script = enforcementStreakScript("10.96.0.50", 3, 500);
+    expect(script).toContain('host: "10.96.0.50"');
+    expect(script).toContain("timeout: 3000");
+    expect(script).toContain("await tcp(8787)");
+    expect(script).toContain("await tcp(8788)");
+    // The per-probe body is shared with enforcementProbeScript verbatim, not re-implemented.
+    const single = enforcementProbeScript("10.96.0.50");
+    const body = single.slice(0, single.indexOf("(async () => {"));
+    expect(body.length).toBeGreaterThan(0);
+    expect(script.startsWith(body)).toBe(true);
+  });
+
+  it("exits 0 only after `streak` consecutive proven probes", async () => {
+    const run = await runStreak(enforcementStreakScript("10.96.0.50", 3, 1), [PROVEN, PROVEN, PROVEN, PROVEN]);
+    expect(run.code).toBe(0);
+    expect(run.connects).toEqual([8787, 8788, 8787, 8788, 8787, 8788]);
+    expect(run.exits).toBe(1);
+  });
+
+  it("honours streak 1 as a single probe", async () => {
+    const run = await runStreak(enforcementStreakScript("10.96.0.50", 1, 500), [PROVEN, PROVEN]);
+    expect(run.code).toBe(0);
+    expect(run.connects).toEqual([8787, 8788]);
+    expect(run.delays.filter((ms) => ms === 500)).toHaveLength(0);
+  });
+
+  it.each([
+    [0, { 8787: "connect", 8788: "connect" }, 3],
+    [1, { 8787: "connect", 8788: "connect" }, 3],
+    [2, { 8787: "connect", 8788: "connect" }, 3],
+    [0, { 8787: "timeout", 8788: "timeout" }, 4],
+    [1, { 8787: "error", 8788: "connect" }, 4],
+    [2, { 8787: "timeout", 8788: "error" }, 4],
+    [0, { 8787: "connect", 8788: "error" }, 5],
+    [1, { 8787: "connect", 8788: "error" }, 5],
+    [2, { 8787: "connect", 8788: "error" }, 5],
+  ] as const)(
+    "a non-proven probe #%i (%o) exits with that probe's code %i and runs no further probe",
+    async (index, failing, code) => {
+      const probes = [PROVEN, PROVEN, PROVEN, PROVEN];
+      probes[index] = failing;
+      const run = await runStreak(enforcementStreakScript("10.96.0.50", 3, 1), probes);
+      expect(run.code).toBe(code);
+      expect(run.connects).toHaveLength((index + 1) * 2);
+      expect(run.exits).toBe(1);
+    },
+  );
+
+  // The complete 3x3 contract per probe, identical to enforcementProbeScript's.
+  it.each(
+    (["connect", "timeout", "error"] as const).flatMap((proxy) =>
+      (["connect", "timeout", "error"] as const).map((deny) => [proxy, deny] as const),
+    ),
+  )("classifies 8787 %s + 8788 %s exactly as the single probe does", async (proxy, deny) => {
+    const outcome = { 8787: proxy, 8788: deny };
+    const single = await runStreak(enforcementProbeScript("10.96.0.50"), [outcome]);
+    const streak = await runStreak(enforcementStreakScript("10.96.0.50", 1, 500), [outcome]);
+    expect(streak.code).toBe(single.code);
+  });
+
+  it("waits intervalMs between probes, and not before the first or after the last", async () => {
+    const run = await runStreak(enforcementStreakScript("10.96.0.50", 3, 40), [PROVEN, PROVEN, PROVEN]);
+    expect(run.code).toBe(0);
+    expect(run.delays.filter((ms) => ms === 40)).toHaveLength(2);
+    expect(run.elapsedMs).toBeGreaterThanOrEqual(75);
+    expect(run.elapsedMs).toBeLessThan(1_000);
+  });
+
+  it("rejects an address that is not an IP", () => {
+    expect(() => enforcementStreakScript("wardby-proxy", 3, 500)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => enforcementStreakScript('10.0.0.1"; require("child_process")', 3, 500)).toThrow(
+      KUBERNETES_ISOLATION_ERROR,
+    );
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects a streak or interval of %s",
+    (value) => {
+      expect(() => enforcementStreakScript("10.96.0.50", value, 500)).toThrow(KUBERNETES_ISOLATION_ERROR);
+      expect(() => enforcementStreakScript("10.96.0.50", 3, value)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    },
+  );
+
+  it("rejects a non-number streak or interval smuggled past the types", () => {
+    const smuggled = "3; require('child_process')" as unknown as number;
+    expect(() => enforcementStreakScript("10.96.0.50", smuggled, 500)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    expect(() => enforcementStreakScript("10.96.0.50", 3, smuggled)).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+});
+
+describe("enforcement scripts never exit 0 without an explicit proven exit", () => {
+  // A real `node` whose net.connect is replaced before the script runs, so the script's own
+  // `require("node:net")` sees the stub. Nothing the stub returns holds the event loop open: if the
+  // script's promises never settle (or reject under a non-throwing --unhandled-rejections mode, as a
+  // BYO worker image's NODE_OPTIONS could set), the process drains and exits naturally. A natural
+  // exit must read as "did not run", never as PROVEN — for the streak, that would open the gate.
+  const NEVER_ANSWERS = 'require("node:net").connect = () => ({ once: () => {}, destroy: () => {} });';
+  const REJECTS = 'require("node:net").connect = () => { throw new Error("stubbed connect failure"); };';
+  const scripts = [
+    ["enforcementProbeScript", () => enforcementProbeScript("10.96.0.50")],
+    ["enforcementStreakScript", () => enforcementStreakScript("10.96.0.50", 3, 1)],
+  ] as const;
+  const run = (stub: string, script: string, nodeArgs: string[] = []) =>
+    spawnSync(process.execPath, [...nodeArgs, "-e", `${stub}\n${script}`], { encoding: "utf8", timeout: 20_000 });
+
+  it.each(scripts)("%s exits non-zero when no probe ever settles", (_name, build) => {
+    const result = run(NEVER_ANSWERS, build());
+    expect(result.error).toBeUndefined();
+    expect(result.status).not.toBe(0);
+    expect(result.status).toBe(1);
+  });
+
+  it.each(scripts)("%s exits non-zero when a probe rejects and rejections only warn", (_name, build) => {
+    for (const mode of ["warn", "none"]) {
+      const result = run(REJECTS, build(), [`--unhandled-rejections=${mode}`]);
+      expect(result.error).toBeUndefined();
+      expect(result.status).not.toBe(0);
+      expect(result.status).toBe(1);
+    }
+  });
+
+  it.each(scripts)("%s presets a did-not-run exit code before doing anything else", (_name, build) => {
+    expect(build().startsWith("process.exitCode = 1;\n")).toBe(true);
   });
 });
 
