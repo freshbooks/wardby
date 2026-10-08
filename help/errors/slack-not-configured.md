@@ -7,7 +7,7 @@ tags: [error, notifications, configuration, config, setup, WARDBY_SLACK_BOT_TOKE
 appliesTo: ">=0.6.0"
 ---
 
-# Slack is not configured
+# Notification bot token not configured
 
 `link_notification_channel`, `unlink_notification_channel`, and
 `test_notification_channel` are refused when the wardby server has no

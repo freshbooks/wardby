@@ -7,7 +7,7 @@ tags: [error, notifications, auth, authentication, invalid_auth, token_revoked, 
 appliesTo: ">=0.6.0"
 ---
 
-# Slack authentication failed
+# Bot authentication failed — invalid or revoked token
 
 Slack returned `invalid_auth`, `token_revoked`, `account_inactive`,
 `missing_scope`, or `not_authed` for `WARDBY_SLACK_BOT_TOKEN`. This is

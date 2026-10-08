@@ -7,7 +7,7 @@ tags: [error, notifications, channel, channel-error, not_in_channel, channel_not
 appliesTo: ">=0.6.0"
 ---
 
-# Slack channel unreachable
+# Channel unreachable — bot not invited or archived
 
 Slack returned `channel_not_found`, `not_in_channel`, or `is_archived` when
 wardby tried to post or update a message. This means the bot genuinely

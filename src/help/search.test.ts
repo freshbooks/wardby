@@ -224,7 +224,7 @@ describe("build worker image help", () => {
 });
 
 describe("Slack notification help", () => {
-  it("is found by the main article for broad queries and tool names", async () => {
+  it("is found by the main article for broad queries and tool names in top 3", async () => {
     const { buildHelpCatalog } = await import("./catalog.js");
     const { fileURLToPath } = await import("node:url");
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
@@ -239,7 +239,7 @@ describe("Slack notification help", () => {
     ]) {
       const results = searchHelp(catalog, query);
       expect(
-        results.map((r) => r.page.id),
+        results.slice(0, 3).map((r) => r.page.id),
         query,
       ).toContain(id);
     }
