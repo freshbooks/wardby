@@ -194,7 +194,8 @@ export async function handlePullRequestClosed(
   // Not caught: nothing is claimed yet, and a throw rolls back the delivery so it is redelivered.
   const rows = await db.issuePullRequest.findMany({ where: { ...where, state: "open" } });
   for (const row of rows) {
-    // Once per claimed row: before each early exit after the claim, or after the comment. Never throws.
+    // Exactly once per claimed row, from the finally below, even when a later step throws: the row is no
+    // longer open, so nothing would retry it. Never throws.
     const emitClosed = (movedTo: string | null) =>
       emitWorkflowEvent({
         dedupeKey: dedupeKeys.prClosed(pr.codeProvider, pr.repository, pr.number),
@@ -209,18 +210,17 @@ export async function handlePullRequestClosed(
           movedTo,
         },
       });
+    let claimedRow = false;
+    let movedTo: string | null = null;
     try {
       const claimed = await db.issuePullRequest.updateMany({
         where: { id: row.id, state: "open" },
         data: { state: pr.merged ? "merged" : "closed" },
       });
       if (claimed.count === 0) continue;
-      let movedTo: string | null = null;
+      claimedRow = true;
       const tracker = trackers[row.issueProvider as IssueTrackerProvider];
-      if (!tracker) {
-        await emitClosed(null);
-        continue;
-      }
+      if (!tracker) continue;
       const link = await db.agentIssueProject.findUnique({
         where: {
           agentId_provider_projectKey: {
@@ -231,10 +231,7 @@ export async function handlePullRequestClosed(
         },
         select: { access: true, commentVisibilityRole: true, onPullRequestMerged: true },
       });
-      if (link?.access !== "write") {
-        await emitClosed(null);
-        continue;
-      }
+      if (link?.access !== "write") continue;
       const ref = `[${row.repository}#${row.number}](${row.url})`;
       let markdown: string;
       if (pr.merged) {
@@ -267,9 +264,10 @@ export async function handlePullRequestClosed(
         markdown,
         ...(link.commentVisibilityRole ? { visibilityRole: link.commentVisibilityRole } : {}),
       });
-      await emitClosed(movedTo);
     } catch (err) {
       log.warn({ err, issueKey: row.issueKey, ...where }, "could not bridge the closed pull request to the issue");
+    } finally {
+      if (claimedRow) await emitClosed(movedTo);
     }
   }
 }

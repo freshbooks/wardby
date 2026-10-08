@@ -354,6 +354,20 @@ describe("workflow events", () => {
     expect(events).toEqual([prClosed(true, null), prClosed(false, null)]);
   });
 
+  it("pr_closed: still emits exactly once, with movedTo, when the comment throws after a merged claim", async () => {
+    const t = tracker();
+    vi.mocked(t.comment).mockRejectedValue(new Error("jira down"));
+    await handlePullRequestClosed(db() as never, { jira: t }, closed(true));
+    expect(events).toEqual([prClosed(true, "Done")]);
+  });
+
+  it("pr_closed: still emits once when the link lookup throws after the claim", async () => {
+    const d = db();
+    d.agentIssueProject.findUnique.mockRejectedValue(new Error("db down"));
+    await handlePullRequestClosed(d as never, { jira: tracker() }, closed(false));
+    expect(events).toEqual([prClosed(false, null)]);
+  });
+
   it("pr_closed: a failed move still emits, with movedTo null", async () => {
     const t = tracker();
     vi.mocked(t.transitionTo).mockRejectedValue(new Error("no such transition"));
