@@ -52,6 +52,7 @@ import { startModelCatalog, type CatalogStore } from "./providers/llm/catalog-st
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
 import { DeferredExecutor, drainDeferredRuns } from "./providers/executor/deferred.js";
 import { parseGatewayListen, startGatewayServer } from "./native-worker/http-server.js";
+import { buildNativeSandboxExecutor } from "./native-worker/composition.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
 import { PostgresAgentMemory } from "./providers/memory/index.js";
@@ -826,7 +827,14 @@ async function scheduler(args: string[]): Promise<void> {
     repoAccess,
   };
   const nativeExecutor = buildExecutor(config, nativeProviders, prisma);
-  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config, repoAccess });
+  const executor = buildConfiguredExecutor({
+    native: nativeExecutor,
+    db: prisma,
+    providerConfig: config,
+    repoAccess,
+    // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
+    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders }),
+  });
   nativeProviders.executor = executor;
   await executor.launch?.();
   warmUpExecutor(executor);
