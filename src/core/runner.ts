@@ -23,8 +23,8 @@ import type { ProviderRegistry } from "../providers/index.js";
 import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engine/types.js";
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
-import { validateParams } from "../sandbox/zod-params.js";
-import { runInSandbox } from "../sandbox/run-in-sandbox.js";
+import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
+import { runUserToolCall } from "../sandbox/user-tool.js";
 import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
 import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
@@ -662,6 +662,9 @@ export interface NativeRunToolsOptions {
   issueTrackers: IssueTrackerRegistry | undefined;
 }
 
+/** An attached user tool as the load step pinned it: its code, schema, and consented capabilities. */
+export type LoadedUserTool = LoadedNativeRun["toolsByName"][string];
+
 /** A built-in tool's handler for one call; built-ins run on the trusted side, never in a sandbox. */
 export type BuiltinToolHandler = (argsJson: string) => Promise<string>;
 
@@ -1199,6 +1202,26 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     return undefined;
   };
 
+  /**
+   * The privileged host for one call of the user tool `name`, scoped to that attachment's
+   * consented capabilities. Undefined for a name that is not an attached user tool. In-process it
+   * serves the sandbox directly; the native sandbox gateway serves a worker's bridge calls with it.
+   */
+  const scopedHost = (name: string, tool: LoadedUserTool, signal: AbortSignal): PrivilegedHost =>
+    createPrivilegedHost({
+      agentId: loaded.agentId,
+      datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
+      sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
+      secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
+      allowedFetchHosts: tool.allowedHosts,
+      logTag: name,
+      signal,
+    });
+  const privilegedHostFor = (name: string, signal: AbortSignal): PrivilegedHost | undefined => {
+    const tool = toolsByName.get(name);
+    return tool ? scopedHost(name, tool, signal) : undefined;
+  };
+
   const runUserTool = async (name: string, argsJson: string): Promise<string> => {
     const tool = toolsByName.get(name);
     if (!tool) {
@@ -1207,38 +1230,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
         message: `No tool named "${name}" is attached to this agent.`,
       });
     }
-
-    let parsedArgs: unknown;
-    try {
-      // Some providers stream no JSON delta at all for a zero-parameter
-      // tool call, yielding an empty argsJson rather than "{}".
-      parsedArgs = JSON.parse(argsJson || "{}");
-    } catch (err) {
-      return JSON.stringify({
-        error: "invalid_arguments_json",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    const validation = await validateParams(tool.paramsZod, parsedArgs);
-    if (!validation.ok) {
-      return JSON.stringify({ error: "validation_failed", message: validation.errorMessage });
-    }
-
-    const result = await runInSandbox({
-      code: tool.code,
-      params: validation.value,
-      agentId: loaded.agentId,
-      datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
-      sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
-      secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
-      allowedFetchHosts: tool.allowedHosts,
-      toolName: name,
-    });
-    if (!result.ok) {
-      return JSON.stringify({ error: result.errorKind, message: result.errorMessage });
-    }
-    return JSON.stringify(result.value);
+    return runUserToolCall(tool, argsJson, (signal) => scopedHost(name, tool, signal));
   };
 
   const runSandboxTool = async (name: string, argsJson: string): Promise<string> => {
@@ -1246,7 +1238,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     return builtin ? builtin(argsJson) : runUserTool(name, argsJson);
   };
 
-  return { toolsByName, builtinHandler, runUserTool, runSandboxTool };
+  return { toolsByName, builtinHandler, privilegedHostFor, runUserTool, runSandboxTool };
 }
 
 /**
