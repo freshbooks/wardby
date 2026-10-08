@@ -834,7 +834,7 @@ describe("model terms from the session", () => {
     });
     await execute(h, "no-terms", new TestSink(), await anthropicBody("claude-sonnet-5"));
     const request = await h.ledger.getRequest(reservedRequestId(h.events));
-    expect(request?.pricing).toMatchObject({ version: "shipped:2026-10-03", outputPerMTok: sonnet.outputPerMTok });
+    expect(request?.pricing).toMatchObject({ version: "shipped:2026-10-08", outputPerMTok: sonnet.outputPerMTok });
   });
 
   it("refuses a no-terms session for a model the shipped catalog lacks or files under the other protocol", async () => {

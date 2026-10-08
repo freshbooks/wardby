@@ -221,9 +221,11 @@ sent on every model call and trades depth of reasoning against latency and
 output-token cost; lower levels are faster and cheaper per turn. Leave it unset
 to use the provider's default. Wardby rejects a level the agent's model does not
 accept, including when you later change the model (clear it with
-`effort: null`). Effort currently applies to direct Anthropic API models that
-support it; OpenAI and Bedrock models accept no effort setting, and coding
-agents do not use it.
+`effort: null`). Effort applies to direct Anthropic API models that support
+it and to the OpenAI reasoning models (`gpt-5.6-sol`, `gpt-5.6-terra`,
+`gpt-5.6-luna`, `gpt-6-astra`), which accept `low` through `max`; the older
+OpenAI models (`gpt-4o`, `gpt-4o-mini`, and the `gpt-4.1` family) and Bedrock
+models accept no effort setting. Coding agents do not use it.
 
 ## Coding agents
 

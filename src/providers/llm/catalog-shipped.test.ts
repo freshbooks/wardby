@@ -5,7 +5,7 @@ const byProvider = (provider: string) => SHIPPED_CATALOG.filter((e) => e.provide
 
 describe("shipped model catalog", () => {
   it("has a dated version", () => {
-    expect(SHIPPED_CATALOG_VERSION).toBe("2026-10-03");
+    expect(SHIPPED_CATALOG_VERSION).toBe("2026-10-08");
   });
 
   it.each([
@@ -40,7 +40,7 @@ describe("shipped model catalog", () => {
     expect(SHIPPED_CATALOG).toHaveLength(17);
   });
 
-  it("keeps the anthropic opus/sonnet/fable effort ladder, and no efforts for haiku, Bedrock, or OpenAI", () => {
+  it("keeps the anthropic opus/sonnet/fable effort ladder, and no efforts for haiku or Bedrock", () => {
     for (const id of ["claude-opus-5", "claude-sonnet-5", "claude-fable-5"]) {
       expect([...SHIPPED_CATALOG.find((e) => e.modelId === id)!.efforts]).toEqual([
         "low",
@@ -50,9 +50,22 @@ describe("shipped model catalog", () => {
         "max",
       ]);
     }
-    for (const e of byProvider("openai")) expect([...e.efforts]).toEqual([]);
     for (const e of byProvider("bedrock-claude")) expect([...e.efforts]).toEqual([]);
     expect([...SHIPPED_CATALOG.find((e) => e.modelId === "claude-haiku-4-5")!.efforts]).toEqual([]);
+  });
+
+  it("lists efforts only on the OpenAI reasoning models, and none on the 4o/4.1 family", () => {
+    const all = ["low", "medium", "high", "xhigh", "max"];
+    const withEfforts = byProvider("openai")
+      .filter((e) => e.efforts.length > 0)
+      .map((e) => e.modelId);
+    expect(withEfforts).toEqual(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+    for (const id of withEfforts) {
+      expect([...SHIPPED_CATALOG.find((e) => e.modelId === id)!.efforts]).toEqual(all);
+    }
+    for (const id of ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"]) {
+      expect([...SHIPPED_CATALOG.find((e) => e.modelId === id)!.efforts]).toEqual([]);
+    }
   });
 
   it("marks only Claude Haiku 4.5 (direct API) as manual thinking, matching the proxy's old set", () => {
