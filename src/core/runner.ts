@@ -164,6 +164,168 @@ const DelegateArgs = z
   })
   .strict();
 
+/** A delegate_to_* call's arguments, or the tool result refusing them. */
+export function parseDelegateArgs(argsJson: string): { args: z.infer<typeof DelegateArgs> } | { refusal: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argsJson || "{}");
+  } catch (err) {
+    return {
+      refusal: JSON.stringify({
+        error: "invalid_arguments_json",
+        message: err instanceof Error ? err.message : String(err),
+      }),
+    };
+  }
+  try {
+    return { args: DelegateArgs.parse(parsed) };
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return {
+        refusal: JSON.stringify({
+          error: "validation_failed",
+          message: err.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; "),
+        }),
+      };
+    }
+    throw err;
+  }
+}
+
+/**
+ * At most `limit` dispatches per run (default one: a classifier deciding plan-vs-implement
+ * commits to exactly one child), and never the same child twice, so a retry can't leave two
+ * children racing on the same task. A delegation waiting for budget holds its place.
+ */
+export function delegationLimitRefusal(input: {
+  priorChildAgentIds: readonly string[];
+  waitingChildAgentIds: readonly string[];
+  childAgentId: string;
+  boundName: string;
+  limit: number;
+}): string | null {
+  const { priorChildAgentIds, waitingChildAgentIds, childAgentId, boundName, limit } = input;
+  if (priorChildAgentIds.includes(childAgentId) || waitingChildAgentIds.includes(childAgentId)) {
+    return JSON.stringify({
+      error: "already_dispatched",
+      message: `This run already delegated to "${boundName}"; a run delegates to each sub-agent at most once.`,
+    });
+  }
+  if (priorChildAgentIds.length < limit && priorChildAgentIds.length + waitingChildAgentIds.length >= limit) {
+    // Only a waiting delegation (parallelDelegations) holds the remaining place.
+    return JSON.stringify({
+      error: "already_dispatched",
+      message: `This run reached its limit of ${limit} delegations: ${priorChildAgentIds.length} made and ${waitingChildAgentIds.length} waiting for budget.`,
+    });
+  }
+  if (priorChildAgentIds.length >= limit) {
+    return JSON.stringify({
+      error: "already_dispatched",
+      message:
+        limit === 1
+          ? "This run already delegated to a sub-agent; only one delegation is allowed per run."
+          : `This run already made ${limit} delegations, the most this agent allows per run.`,
+    });
+  }
+  return null;
+}
+
+const DELEGATION_CHILD_SELECT = {
+  id: true,
+  kind: true,
+  budgetGroupId: true,
+  budgetUsd: true,
+  ownerId: true,
+  nativeExecutionMode: true,
+  codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true } },
+} as const satisfies Prisma.AgentSelect;
+
+/** The child agent fields a delegation decides on. */
+export type DelegationChildAgent = Prisma.AgentGetPayload<{ select: typeof DELEGATION_CHILD_SELECT }>;
+
+/**
+ * The live authorization of one delegation, and the child agent as it is now. Owners are re-read
+ * on every delegation (resource-sharing grants spec §3.4.4, N1): the child must have the parent's
+ * current owner, or that owner must still hold execute on the child. A revoked grant or a
+ * make_owner transfer stops the very next call.
+ */
+export async function authorizeDelegation(
+  db: RunnerDb,
+  parentAgentId: string,
+  edge: { childAgentId: string },
+  boundName: string,
+  args: z.infer<typeof DelegateArgs>,
+): Promise<{ refusal: string } | { childAgent: DelegationChildAgent }> {
+  const [parentNow, childAgent] = await Promise.all([
+    db.agent.findUnique({ where: { id: parentAgentId }, select: { ownerId: true } }),
+    db.agent.findUniqueOrThrow({ where: { id: edge.childAgentId }, select: DELEGATION_CHILD_SELECT }),
+  ]);
+  const parentOwnerId = parentNow?.ownerId ?? null;
+  const childOwnerId = childAgent.ownerId ?? null;
+  if (
+    !parentNow ||
+    !(await canDelegate(db, { ownerId: parentOwnerId }, { id: childAgent.id, ownerId: childOwnerId }))
+  ) {
+    return {
+      refusal: JSON.stringify({
+        error: "subagent_not_authorized",
+        message: `The "${boundName}" sub-agent belongs to another owner who has not given this agent's owner execute access to it.`,
+      }),
+    };
+  }
+  if (parentOwnerId !== childOwnerId) {
+    // Across owners the edge carries execute and nothing more: no
+    // model-chosen memory grant, no continuation of another run's PR,
+    // and no task text the caller couldn't give the child directly --
+    // the trigger_agent rule (review I3): a coding child only with its
+    // owner's allowWebhookTaskOverride opt-in, a native child never
+    // (it runs its owner's fixed prompt; pass an empty task).
+    const refusal =
+      (args.grantParentMemoryKeys?.length ?? 0) > 0
+        ? "grantParentMemoryKeys is only allowed when the sub-agent has the same owner."
+        : args.continuePriorRun !== undefined
+          ? "continuePriorRun is only allowed when the sub-agent has the same owner."
+          : childAgent.kind === "coding" && !childAgent.codingProfile?.allowWebhookTaskOverride
+            ? "This coding sub-agent belongs to another owner and does not accept task text from others (allowWebhookTaskOverride)."
+            : childAgent.kind !== "coding" && (args.task.trim() !== "" || args.datastoreRef !== undefined)
+              ? 'This sub-agent belongs to another owner and runs only its own instructions: delegate with task "" and no datastoreRef.'
+              : null;
+    if (refusal) return { refusal: JSON.stringify({ error: "cross_owner_not_allowed", message: refusal }) };
+  }
+  if (args.continuePriorRun !== undefined && childAgent.kind !== "coding") {
+    return {
+      refusal: JSON.stringify({
+        error: "continuation_requires_coding_agent",
+        message: "continuePriorRun is only supported when the sub-agent is coding-kind.",
+      }),
+    };
+  }
+  return { childAgent };
+}
+
+/** A native child's task text: the delegated task, with any datastore reference as a note. */
+export function delegationTaskOverride(args: z.infer<typeof DelegateArgs>): string | undefined {
+  return args.datastoreRef
+    ? `${args.task}\n\n[Referenced datastore: name="${args.datastoreRef.name}", key="${args.datastoreRef.key}" — use your datastore tools to read it.]`
+    : args.task.trim() !== ""
+      ? args.task
+      : undefined;
+}
+
+/** The tool result a native child's terminal run reports to its parent. */
+export function nativeChildResult(
+  run: Pick<Run, "status" | "finalText" | "costUsd" | "tokensIn" | "tokensOut" | "error">,
+) {
+  return JSON.stringify({
+    status: run.status,
+    finalText: run.finalText,
+    costUsd: Number(run.costUsd),
+    tokensIn: run.tokensIn,
+    tokensOut: run.tokensOut,
+    ...(run.error ? { error: run.error } : {}),
+  });
+}
+
 /**
  * The subset of the Prisma client the runner touches — mockable in tests.
  * Includes `codingRun`/`task`/`webhook`/`$transaction`/`$queryRaw` so this
@@ -823,111 +985,22 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           // racing on the same task. Checked and the child row written under the
           // run's delegation gate: delegations started together in one turn
           // (parallelDelegations) are admitted one at a time.
-          const limit = loaded.maxDelegationsPerRun ?? 1;
           const priorDispatches = await db.run.findMany({ where: { parentRunId: { in: [runId] } } });
-          if (
-            priorDispatches.some((prior) => prior.agentId === edge.childAgentId) ||
-            waitingDelegations.has(edge.childAgentId)
-          ) {
-            return JSON.stringify({
-              error: "already_dispatched",
-              message: `This run already delegated to "${boundName}"; a run delegates to each sub-agent at most once.`,
-            });
-          }
-          if (priorDispatches.length < limit && priorDispatches.length + waitingDelegations.size >= limit) {
-            // Only a waiting delegation (parallelDelegations) holds the remaining place.
-            return JSON.stringify({
-              error: "already_dispatched",
-              message: `This run reached its limit of ${limit} delegations: ${priorDispatches.length} made and ${waitingDelegations.size} waiting for budget.`,
-            });
-          }
-          if (priorDispatches.length >= limit) {
-            return JSON.stringify({
-              error: "already_dispatched",
-              message:
-                limit === 1
-                  ? "This run already delegated to a sub-agent; only one delegation is allowed per run."
-                  : `This run already made ${limit} delegations, the most this agent allows per run.`,
-            });
-          }
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(argsJson || "{}");
-          } catch (err) {
-            return JSON.stringify({
-              error: "invalid_arguments_json",
-              message: err instanceof Error ? err.message : String(err),
-            });
-          }
-          let args: z.infer<typeof DelegateArgs>;
-          try {
-            args = DelegateArgs.parse(parsed);
-          } catch (err) {
-            if (err instanceof z.ZodError) {
-              return JSON.stringify({
-                error: "validation_failed",
-                message: err.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; "),
-              });
-            }
-            throw err;
-          }
+          const limitRefusal = delegationLimitRefusal({
+            priorChildAgentIds: priorDispatches.map((prior) => prior.agentId),
+            waitingChildAgentIds: [...waitingDelegations],
+            childAgentId: edge.childAgentId,
+            boundName,
+            limit: loaded.maxDelegationsPerRun ?? 1,
+          });
+          if (limitRefusal) return limitRefusal;
+          const parsedArgs = parseDelegateArgs(argsJson);
+          if ("refusal" in parsedArgs) return parsedArgs.refusal;
+          const { args } = parsedArgs;
 
-          // Owners are re-read live on every delegation (resource-sharing
-          // grants spec §3.4.4, N1): the child must have the parent's current
-          // owner, or that owner must still hold execute on the child. A
-          // revoked grant or a make_owner transfer stops the very next call.
-          const [parentNow, childAgent] = await Promise.all([
-            db.agent.findUnique({ where: { id: loaded.agentId }, select: { ownerId: true } }),
-            db.agent.findUniqueOrThrow({
-              where: { id: edge.childAgentId },
-              select: {
-                id: true,
-                kind: true,
-                budgetGroupId: true,
-                budgetUsd: true,
-                ownerId: true,
-                nativeExecutionMode: true,
-                codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true } },
-              },
-            }),
-          ]);
-          const parentOwnerId = parentNow?.ownerId ?? null;
-          const childOwnerId = childAgent.ownerId ?? null;
-          if (
-            !parentNow ||
-            !(await canDelegate(db, { ownerId: parentOwnerId }, { id: childAgent.id, ownerId: childOwnerId }))
-          ) {
-            return JSON.stringify({
-              error: "subagent_not_authorized",
-              message: `The "${boundName}" sub-agent belongs to another owner who has not given this agent's owner execute access to it.`,
-            });
-          }
-          if (parentOwnerId !== childOwnerId) {
-            // Across owners the edge carries execute and nothing more: no
-            // model-chosen memory grant, no continuation of another run's PR,
-            // and no task text the caller couldn't give the child directly --
-            // the trigger_agent rule (review I3): a coding child only with its
-            // owner's allowWebhookTaskOverride opt-in, a native child never
-            // (it runs its owner's fixed prompt; pass an empty task).
-            const refusal =
-              (args.grantParentMemoryKeys?.length ?? 0) > 0
-                ? "grantParentMemoryKeys is only allowed when the sub-agent has the same owner."
-                : args.continuePriorRun !== undefined
-                  ? "continuePriorRun is only allowed when the sub-agent has the same owner."
-                  : childAgent.kind === "coding" && !childAgent.codingProfile?.allowWebhookTaskOverride
-                    ? "This coding sub-agent belongs to another owner and does not accept task text from others (allowWebhookTaskOverride)."
-                    : childAgent.kind !== "coding" && (args.task.trim() !== "" || args.datastoreRef !== undefined)
-                      ? 'This sub-agent belongs to another owner and runs only its own instructions: delegate with task "" and no datastoreRef.'
-                      : null;
-            if (refusal) return JSON.stringify({ error: "cross_owner_not_allowed", message: refusal });
-          }
-
-          if (args.continuePriorRun !== undefined && childAgent.kind !== "coding") {
-            return JSON.stringify({
-              error: "continuation_requires_coding_agent",
-              message: "continuePriorRun is only supported when the sub-agent is coding-kind.",
-            });
-          }
+          const authorized = await authorizeDelegation(db, loaded.agentId, edge, boundName, args);
+          if ("refusal" in authorized) return authorized.refusal;
+          const { childAgent } = authorized;
 
           // parallelDelegations: a child the budget would refuse (run_tree_exhausted or
           // budget_group_exhausted:*) while a sibling still runs waits for a sibling to finish and
@@ -1083,11 +1156,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             return codingChildResult(waited.run, stored?.result);
           }
 
-          const taskOverride = args.datastoreRef
-            ? `${args.task}\n\n[Referenced datastore: name="${args.datastoreRef.name}", key="${args.datastoreRef.key}" — use your datastore tools to read it.]`
-            : args.task.trim() !== ""
-              ? args.task
-              : undefined;
+          const taskOverride = delegationTaskOverride(args);
 
           if (childAgent.nativeExecutionMode === "sandbox") {
             // A sandbox-mode child must run where its snapshot says, so it goes through
@@ -1157,14 +1226,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 message: "This run was cancelled while waiting for the sandbox sub-agent; the sub-agent was stopped.",
               });
             }
-            return JSON.stringify({
-              status: waited.run.status,
-              finalText: waited.run.finalText,
-              costUsd: Number(waited.run.costUsd),
-              tokensIn: waited.run.tokensIn,
-              tokensOut: waited.run.tokensOut,
-              ...(waited.run.error ? { error: waited.run.error } : {}),
-            });
+            return nativeChildResult(waited.run);
           }
 
           const childRun = await db.run.create({
