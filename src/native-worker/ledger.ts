@@ -103,6 +103,14 @@ export class PrismaGatewayLedger {
     });
   }
 
+  /** markNetworkReady by the session's run (a launcher knows the run, not the session). */
+  async markNetworkReadyForRun(runId: string, at: Date = new Date()): Promise<void> {
+    await this.db.nativeGatewaySession.updateMany({
+      where: { runId, networkReadyAt: null },
+      data: { networkReadyAt: at },
+    });
+  }
+
   async endSession(sessionId: string, status: "finished" | "cancelled"): Promise<void> {
     await this.db.nativeGatewaySession.updateMany({ where: { id: sessionId, status: "active" }, data: { status } });
   }
