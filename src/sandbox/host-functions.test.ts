@@ -1,3 +1,5 @@
+import { SANDBOX_PRELUDE } from "./prelude.js";
+import { LOCAL_BRIDGE_NAMES, PRIVILEGED_BRIDGE_NAMES } from "./host-functions.js";
 import { describe, expect, it, vi } from "vitest";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { SecretsAccessor } from "../core/secrets.js";
@@ -344,5 +346,15 @@ describe("sharedDatastore sandbox host functions", () => {
       limits: FAST_LIMITS,
     });
     expect(result).toEqual({ ok: true, value: { value: "v1", listed: ["k1", "k2"], afterDelete: null } });
+  });
+});
+
+describe("bridge classification", () => {
+  it("classifies every bridge the prelude calls exactly once, as privileged or local", () => {
+    const called = new Set([...SANDBOX_PRELUDE.matchAll(/__bridge_[A-Za-z]+/g)].map((m) => m[0]));
+    const privileged = new Set<string>(PRIVILEGED_BRIDGE_NAMES);
+    const local = new Set<string>(LOCAL_BRIDGE_NAMES);
+    for (const name of called) expect(privileged.has(name) !== local.has(name)).toBe(true);
+    expect([...privileged, ...local].sort()).toEqual([...called].sort());
   });
 });
