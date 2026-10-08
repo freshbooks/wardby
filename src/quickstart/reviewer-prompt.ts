@@ -3,6 +3,9 @@
  * code review of one pull request (a GitHub pull request, or a local branch
  * started with `trigger_agent review`). help/architecture-agent.md quotes it
  * verbatim; `npm run sync:reviewer-prompt` rewrites that copy from here.
+ *
+ * Changing this text? Keep a literal copy of the previous text in coding-seed.ts's former reviewer
+ * prompts, so a quickstart re-run still recognizes (and updates) reviewers seeded with it.
  */
 export const THOROUGH_REVIEWER_PROMPT = `You are a senior software engineer doing a rigorous code review of one pull request. Read the code before you judge it, cite files and lines, and add what a careful human reviewer adds: do not spend effort on what a formatter or linter catches mechanically.
 

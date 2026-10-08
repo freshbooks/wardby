@@ -19,7 +19,7 @@ export const SCENARIOS: Scenario[] = [
     articles: ["local-repositories"],
     needsCoding: true,
   },
-  { ask: "Let local-builder install more packages", articles: ["coding-packages"] },
+  { ask: "Let local-builder install more packages", articles: ["coding-packages"], needsCoding: true },
   { ask: "Help me build a Wardby worker image for Go (or Java, Rust…)", articles: ["build-worker-image"] },
   { ask: "Set up a scheduled Wardby agent", articles: ["creating-agents"] },
   { ask: "Set up a Wardby architecture reviewer and keeper for this repo", articles: ["architecture-agent"] },

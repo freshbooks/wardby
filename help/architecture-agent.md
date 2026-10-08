@@ -228,7 +228,7 @@ A native agent linked to the local folder. The quickstart's `local-reviewer`
 already is one, with the prompt below; use it if it exists. Otherwise:
 
 1. Create a native agent with `create_agent`, a capable model, a per-run budget
-   such as $1, `maxTurns` 25, and the system prompt below.
+   such as $1.50, `maxTurns` 25, and the system prompt below.
 2. Link it with `link_repository`: `provider: "local"`,
    `repository: "local:/abs/path"`, `access: "write"` (publishing a review
    needs write), and no `triggers` or `checkName`: a local link is manual only.

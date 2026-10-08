@@ -60,10 +60,34 @@ own READMEs tell it to — reports a failed command even when the suite is
 green. `Dockerfile.node-python` symlinks `python` to `python3` for exactly
 that reason, and asserts both work.
 
-Remember the run's filesystem: the root filesystem is read-only, and `/tmp`
-and `/home/wardby` are empty `noexec` scratch mounts (anything the image put
-there is hidden). Workers reach no package registry except Wardby's npm and
-PyPI proxy, so bake other dependencies into the image.
+### Design for the run's filesystem
+
+A run's root filesystem is read-only; `/tmp` and `/home/wardby` are empty
+`noexec` tmpfs mounts of 16 to 64 MB (anything the image put there is hidden);
+`/workspace` (the checkout, `CODING_DISK_MB` large, or the agent's
+`codingProfile.workspaceDiskMb`) is the only place a run can write and execute;
+and a run reaches no package registry except Wardby's npm and PyPI proxy. So:
+
+- point every cache, build output and temp directory under `/workspace/.cache/`
+  (a `.cache` folder is never collected into the result, at any depth), and
+  create those directories from a small wrapper around the toolchain command,
+  keeping the `ENTRYPOINT` unchanged. For Go: `GOCACHE`, `GOTMPDIR` (`go test`
+  runs its test binary from there) and `GOMODCACHE`;
+- bake dependencies into a read-only location the toolchain only reads from
+  (Go: a file-based module proxy filled by `go mod download`, used through
+  `GOPROXY=file://...`); a baked cache cannot be written to during a run;
+- add build folders that stay in the checkout (Maven `target`, Gradle `build`)
+  to `codingProfile.collectExclude`.
+
+Before using the image, run the project's tests against a throwaway clone with
+a run's restrictions: `--read-only`, `--tmpfs /tmp:rw,noexec,nosuid,size=64m`,
+`--tmpfs /home/wardby:rw,noexec,nosuid,size=64m,uid=10001,gid=10001`,
+`--network none`, `--user 10001:10001`, `--cap-drop ALL` and
+`--security-opt no-new-privileges`. The `build-worker-image` help article has a
+complete Go Dockerfile that passes this check, recipes for Rust and Java, and
+the exact command.
+
+### Build and pin it
 
 On a local quickstart install with the Docker launcher, `workerImageRef` can be
 the local image ID (`docker image inspect --format '{{.Id}}' <your-tag>`).

@@ -71,7 +71,7 @@ describe("seedCodingAgents", () => {
     });
 
     const reviewer = agents.get(REVIEWER_AGENT)!;
-    expect(reviewer).toMatchObject({ kind: "native", budgetUsd: 1, systemPrompt: REVIEWER_PROMPT });
+    expect(reviewer).toMatchObject({ kind: "native", budgetUsd: 1.5, systemPrompt: REVIEWER_PROMPT });
     expect([...links.values()]).toEqual([{ agentId: reviewer.id, repository: "local:/work/repo", access: "write" }]);
   });
 

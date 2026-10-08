@@ -19,15 +19,16 @@ describe("quickstart scenario menu", () => {
     for (const scenario of SCENARIOS) expect(scenario.ask).not.toMatch(/github|pull request/i);
   });
 
-  it("shows the builder-then-reviewer scenario only when the coding step ran", () => {
+  it("shows the local-builder scenarios only when the coding step ran", () => {
     const withCoding = scenarioMenuLines({ codingRan: true, mcpConfigured: true }).join("\n");
     const without = scenarioMenuLines({ codingRan: false, mcpConfigured: true }).join("\n");
     expect(withCoding).toContain("Run local-builder with a task, then have local-reviewer review the branch");
-    expect(without).not.toContain("local-reviewer review the branch");
+    expect(withCoding).toContain("Let local-builder install more packages");
+    expect(without).not.toContain("local-builder");
     // Numbering stays consecutive either way.
     expect(withCoding).toMatch(/ 1\. "Run local-builder[\s\S]* 6\. "Help me plan out a GKE deployment"/);
-    expect(without).toMatch(/ 1\. "Let local-builder[\s\S]* 5\. "Help me plan out a GKE deployment"/);
-    expect(without).not.toMatch(/ 6\. /);
+    expect(without).toMatch(/ 1\. "Help me build a Wardby worker image[\s\S]* 4\. "Help me plan out a GKE deployment"/);
+    expect(without).not.toMatch(/ 5\. /);
   });
 
   it("names each scenario's articles, and every scenario the plan lists", () => {

@@ -14,7 +14,7 @@ import { THOROUGH_REVIEWER_PROMPT } from "./reviewer-prompt.js";
 export const BUILDER_AGENT = "local-builder";
 export const REVIEWER_AGENT = "local-reviewer";
 const BUILDER_BUDGET_USD = 2;
-const REVIEWER_BUDGET_USD = 1;
+const REVIEWER_BUDGET_USD = 1.5;
 const REVIEWER_MAX_TURNS = 25;
 
 export const BUILDER_PROMPT =
@@ -30,6 +30,11 @@ export const SHORT_REVIEWER_PROMPT_V1 = [
   "If repo_publish_review returns stale_head, stop: the branch moved on.",
 ].join("\n");
 
+/**
+ * When you change THOROUGH_REVIEWER_PROMPT, add its previous text to the former prompts passed to
+ * upsertAgent for the reviewer (alongside SHORT_REVIEWER_PROMPT_V1), as a literal copy: otherwise a re-run
+ * treats every reviewer seeded with it as foreign and leaves it on the old prompt.
+ */
 export const REVIEWER_PROMPT = THOROUGH_REVIEWER_PROMPT;
 
 /** The database operations seeding needs; the default implementation is Prisma (quickstart/coding.ts). */
@@ -154,6 +159,7 @@ export async function seedCodingAgents(
       maxTurns: REVIEWER_MAX_TURNS,
       ownerId: input.ownerId,
     },
+    // Every reviewer prompt an earlier quickstart seeded: append the previous text whenever REVIEWER_PROMPT changes.
     [SHORT_REVIEWER_PROMPT_V1],
   );
   if (reviewer.status !== "skipped") {

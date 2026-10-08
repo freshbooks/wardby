@@ -164,7 +164,7 @@ then:
   the repository declares now. A manifest quickstart cannot read is skipped
   with a note. See [Approve packages for coding agents](coding-packages.md);
 - creates `local-builder` (a coding agent, $2 budget) and `local-reviewer`
-  (a review agent, $1 budget, with the thorough review prompt quoted in
+  (a review agent, $1.50 budget, with the thorough review prompt quoted in
   [Set up an architecture agent](architecture-agent.md#reviewer-system-prompt))
   for the repository and prints the two `trigger_agent` calls to try; and
 - if the repository has no `.wardby/services.yaml`, offers a starter one with

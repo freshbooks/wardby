@@ -45,64 +45,127 @@ Run `npx @wardby/cli@latest doctor` in the Wardby project directory. It prints:
 Base image for your own worker images: ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:<digest>
 ```
 
-Use exactly that reference. It matches the Wardby version that runs the agent,
-and a worker built on an older driver rejects newer run input. If doctor prints
-no such line, this Wardby version is too old: ask the user to upgrade, and stop.
+Run doctor with the same Wardby version that runs the agents (re-run
+`quickstart` first if you upgraded), so the base image matches. Use exactly the
+reference it prints: a worker built on an older driver rejects newer run input.
+If doctor prints no such line, this Wardby version is too old: ask the user to
+upgrade, and stop.
 
 ## Step 3: write the Dockerfile
 
-Follow the BYO guide's shape:
+Know the filesystem a run gets before you choose where things go:
+
+- the root filesystem is **read-only**, so anything baked into the image
+  (including a dependency cache) is read-only at run time;
+- `/tmp` and `/home/wardby` are empty **`noexec`** scratch mounts of only 16 to
+  64 MB; anything the image put there is hidden, and nothing there can be run;
+- `/workspace` is the checkout, on a disk of `CODING_DISK_MB` (2048 MB by
+  default; raise it per agent with `codingProfile.workspaceDiskMb`, up to the
+  operator's `CODING_MAX_DISK_MB`). It is the only place where a run can write
+  and execute files;
+- a run has **no network** except Wardby's npm and PyPI proxy, so other
+  dependencies must be in the image;
+- files left in `/workspace` can become part of the run's result, except folders
+  named `node_modules`, `.venv`, `__pycache__`, `.cache` and a few other caches
+  (at any depth), plus the repository-relative paths in
+  `codingProfile.collectExclude`.
+
+So put every cache, build output and temporary directory the toolchain writes
+under **`/workspace/.cache/`**, and bake dependencies into a read-only location
+the toolchain reads from without writing. This Go image follows that recipe,
+and runs `go test` under a run's restrictions:
 
 ```dockerfile
 FROM <base image from step 2>
-# Install the toolchain: distribution packages, or a pinned official image
-# (COPY --from=<image>@sha256:<digest> ...), or ADD --checksum=sha256:<sum> <url>.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends <toolchain packages> \
-    && rm -rf /var/lib/apt/lists/*
+# The toolchain, from the official image pinned by digest.
+COPY --from=golang:1.23-bookworm@sha256:<digest> /usr/local/go /usr/local/go
+# Dependencies: download the repository's modules at build time into a
+# read-only, file-based module proxy that runs read from.
+COPY go.mod go.sum /tmp/deps/
+RUN cd /tmp/deps \
+    && GOMODCACHE=/opt/go-deps GOFLAGS=-modcacherw /usr/local/go/bin/go mod download \
+    && rm -rf /tmp/deps /root/.cache
+# Caches and temp files under /workspace/.cache; this wrapper creates them
+# before every go command (go test runs its test binary from GOTMPDIR).
+RUN printf '%s\n' '#!/bin/sh' \
+      'for dir in "$GOCACHE" "$GOTMPDIR" "$GOMODCACHE"; do [ -n "$dir" ] && mkdir -p "$dir"; done' \
+      'exec /usr/local/go/bin/go "$@"' > /usr/local/bin/go \
+    && chmod 0755 /usr/local/bin/go \
+    && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+ENV GOCACHE=/workspace/.cache/go-build \
+    GOTMPDIR=/workspace/.cache/go-tmp \
+    GOMODCACHE=/workspace/.cache/go-mod \
+    GOPROXY=file:///opt/go-deps/cache/download \
+    GOSUMDB=off \
+    GOTOOLCHAIN=local \
+    CGO_ENABLED=0
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
     && test ! -e /usr/bin/wget \
-    && test ! -e /usr/bin/sudo
+    && test ! -e /usr/bin/sudo \
+    && test ! -e /usr/bin/gcc \
+    && test ! -e /usr/bin/make
 USER 10001:10001
 ENV NODE_ENV=production HOME=/home/wardby
 WORKDIR /workspace
 ENTRYPOINT ["node", "/opt/wardby/coding-worker/main.js"]
 ```
 
-- **Install by pinned version or digest.** Never `latest`, and never pipe a
-  download into a shell.
-- **Keep the hardening checks.** The image must not contain docker, ssh, curl,
-  wget or sudo. If the toolchain really needs one of them, drop only that check
-  and tell the user why. The same goes for a C compiler or linker: Rust and
-  cgo, for example, need one.
-- **Provide the command names the project uses** (for example a `python`
-  symlink when the README says `python`), and put the toolchain on `PATH` with
-  `ENV`.
-- **Bake in dependencies the tests need.** A worker reaches no package registry
-  except Wardby's npm and PyPI proxy, so Go modules, Maven or Gradle
-  dependencies, crates and gems cannot be downloaded during a run. Pre-fetch
-  them at build time (for example `go mod download`,
-  `mvn dependency:go-offline` or `cargo fetch`) under a directory outside
-  `/home/wardby` and `/tmp`, and rebuild when they change. Ask before copying
-  the repository's manifests into the build context.
-- **Know the run's filesystem.** The root filesystem is read-only; `/tmp` and
-  `/home/wardby` are empty, writable and `noexec` (anything the image put
-  there is hidden); `/workspace` is the checkout. A tool that executes binaries
-  it builds at test time (such as `go test` or `cargo test`) needs its build
-  directory under `/workspace`, and files left in `/workspace` can end up in
-  the run's result: tell the user, and ask how they want it handled.
+The last six lines are required as they are. For other toolchains, apply the
+same recipe (adapt these, then prove them in step 4):
 
-## Step 4: build and check
+- **Rust:** `CARGO_TARGET_DIR=/workspace/.cache/cargo-target` and
+  `CARGO_HOME=/workspace/.cache/cargo`; bake dependencies with `cargo vendor`
+  into `/opt/cargo-vendor` and point a `/.cargo/config.toml` in the image at it
+  (source replacement, `net.offline = true`). Rust needs a C linker, so drop
+  the `gcc` check and tell the user why.
+- **Java (Maven):** `JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/workspace/.cache/java-tmp`
+  (the JVM unpacks native libraries there) and a wrapper that creates it; bake
+  dependencies with `mvn dependency:go-offline` into `/opt/m2`, and run Maven
+  offline by setting `MAVEN_ARGS` (Maven 3.9 or later) to `-o`,
+  `-Dmaven.repo.local=/workspace/.cache/m2` and
+  `-Dmaven.repo.local.tail=/opt/m2`. Add
+  `target` to `codingProfile.collectExclude`.
+- **Java (Gradle):** the same `java.io.tmpdir`,
+  `GRADLE_USER_HOME=/workspace/.cache/gradle`, a dependency cache baked into
+  `/opt/gradle-ro` and used read-only through `GRADLE_RO_DEP_CACHE`, `--offline`,
+  and `build` and `.gradle` in `codingProfile.collectExclude`.
+
+Other rules:
+
+- **Install by pinned version or digest.** Never `latest`, and never pipe a
+  download into a shell (use `COPY --from=<image>@sha256:...`, distribution
+  packages, or `ADD --checksum=sha256:<sum> <url>`).
+- **Keep every hardening check.** The image must not contain docker, ssh, curl,
+  wget, sudo, gcc or make. If the toolchain really needs one of them (a C
+  compiler for cgo or Rust, for example), drop only that check and tell the
+  user why.
+- **Provide the command names the project uses** (for example a `python`
+  symlink when the README says `python`).
+- **Ask before copying the repository's manifests** (`go.mod`, `pom.xml`, …)
+  into the build context, and rebuild the image when its dependencies change.
+- The base image is `linux/amd64`. On an Apple Silicon or other ARM machine,
+  pass `--platform linux/amd64` to `docker build` and `docker run`.
+
+## Step 4: build it and run the tests the way a run would
 
 ```sh
 docker build --tag wardby-worker-<language>:local <dockerfile folder>
-docker run --rm --read-only --tmpfs /tmp:rw,noexec --tmpfs /home/wardby:rw,noexec,uid=10001,gid=10001 --entrypoint sh wardby-worker-<language>:local -c '<toolchain> --version'
 ```
 
-Check every command the tests need (for example `go version`, `java -version`
-and `mvn -v`, `cargo --version`). Fix the Dockerfile until they all work.
+Then run the project's test command against a **throwaway clone**, never the
+user's checkout, with a run's restrictions:
+
+```sh
+git clone <repository> /tmp/wardby-image-check
+docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --tmpfs /home/wardby:rw,noexec,nosuid,size=64m,uid=10001,gid=10001,mode=0700 --network none --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges -v /tmp/wardby-image-check:/workspace --entrypoint sh wardby-worker-<language>:local -c '<test command, e.g. go test ./...>'
+```
+
+On Linux, make the clone writable for user 10001 first (it is a throwaway copy:
+`chmod -R a+rwX /tmp/wardby-image-check`). Fix the Dockerfile until the tests
+run; a "permission denied" when running a built file means something still
+writes executables to `/tmp` or `/home/wardby`. Delete the clone afterwards.
 
 ## Step 5: choose the image reference
 
@@ -124,7 +187,8 @@ and `mvn -v`, `cargo --version`). Fix the Dockerfile until they all work.
    `trigger_agent {agentId, task: "Run the project's tests and report the results. Change nothing."}`.
 3. Read the result with `get_run` and report to the user what ran, what passed
    and what failed. A command that is missing, or a dependency that could not
-   be fetched, means going back to step 3.
+   be fetched, means going back to step 3. If the run reports the workspace is
+   full, raise `codingProfile.workspaceDiskMb`.
 
 To undo it, call `update_agent` with `codingProfile: {workerImageRef: null}`.
 
