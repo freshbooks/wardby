@@ -232,7 +232,7 @@ describe("codingStep (non-interactive)", () => {
       {
         provider: "codex",
         builderModel: "gpt-5.6-luna",
-        reviewerModel: "gpt-5.6-luna",
+        reviewerModel: "gpt-5.6-terra",
         repository: `local:${repoA}`,
         baseRef: "main",
         services: [],

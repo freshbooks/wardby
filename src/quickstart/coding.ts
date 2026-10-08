@@ -20,6 +20,7 @@ import type { DeclaredService } from "../coding/services/declaration.js";
 import { BUILDER_AGENT, REVIEWER_AGENT, type CodingSeedInput, type CodingSeedResult } from "./coding-seed.js";
 import {
   defaultModel,
+  defaultReviewerModel,
   readQuickstartEnv,
   writeQuickstartEnv,
   type QuickstartPaths,
@@ -591,7 +592,7 @@ export async function codingStep(
     const seed = await deps.seed({
       provider,
       builderModel: defaultModel(provider === "codex" ? "openai" : "anthropic"),
-      reviewerModel: state.model,
+      reviewerModel: defaultReviewerModel(state.provider),
       repository,
       baseRef: base.branch,
       services,

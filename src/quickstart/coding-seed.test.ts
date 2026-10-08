@@ -141,6 +141,14 @@ describe("seedCodingAgents", () => {
     expect(links.size).toBe(1);
   });
 
+  it("a re-run updates a quickstart-owned reviewer's model", async () => {
+    const { db, agents } = memoryDb();
+    await seedCodingAgents(db, input);
+    await seedCodingAgents(db, { ...input, reviewerModel: "gpt-5.6-terra" });
+    expect(agents.get("local-reviewer")!.model).toBe("gpt-5.6-terra");
+    expect(agents.get("local-builder")!.model).toBe("gpt-5.6-luna");
+  });
+
   it("leaves an agent of the same name that quickstart did not create alone", async () => {
     const { db, agents, profiles } = memoryDb();
     await db.createAgent({
