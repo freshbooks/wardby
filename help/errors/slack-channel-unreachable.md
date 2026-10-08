@@ -27,9 +27,10 @@ you fix it.
    the app) in that channel.
 3. Confirm it worked with `test_notification_channel` — it posts "✅ wardby
    is connected to this channel."
-4. Re-link the channel with `link_notification_channel` using the same
-   arguments as before. Re-linking clears `lastError` and resumes delivery
-   for anything still pending.
+4. New events deliver as soon as the bot can post there again. Deliveries
+   that already failed are not resent. To clear `lastError`, re-link the
+   channel with `link_notification_channel` using the same arguments as
+   before (a successful `test_notification_channel` in step 3 also clears it).
 
 If the channel is gone for good, remove the link with
 `unlink_notification_channel` instead.

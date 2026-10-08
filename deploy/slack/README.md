@@ -29,8 +29,9 @@ for the full setup, the channel-linking tools, and failure modes.
 ## Optional: per-agent display names
 
 The manifest comments out `chat:write.customize`, which lets wardby post a
-message under a linked agent's own name and emoji instead of the app's
-default bot name. To use it, uncomment that scope in the manifest, re-create
+message about an agent's work (picked up, failed, review posted) under that
+agent's name instead of `wardby`; other messages still post as `wardby`, and
+no icon is set. To use it, uncomment that scope in the manifest, re-create
 (or update) the app from the edited manifest, reinstall it to the workspace,
 and set `WARDBY_SLACK_CUSTOMIZE=true`.
 

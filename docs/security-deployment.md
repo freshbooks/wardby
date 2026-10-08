@@ -550,9 +550,11 @@ ever calls out to Slack's `chat.postMessage`/`chat.update`/`conversations.info`,
 and the app manifest requests no event subscriptions or interactivity, so
 nothing posted in Slack can start or affect a run. What reaches Slack is
 limited to issue keys/titles and their links, pull request numbers and
-links, agent names, review verdicts, fix-round numbers, and (only when a
-link opts in) the run's spend line — never code, diffs, review bodies, or
-run output. The bot token is a provider credential like any other and never
+links, agent names, review verdicts, fix-round numbers, a failed run's
+reason (its first line, at most 200 characters), and (only when a link opts
+in) the run's spend line — never code, diffs, review bodies, or run output.
+Issue titles are posted regardless of Jira issue security, so link a project
+only to a channel whose members may see every issue in it. The bot token is a provider credential like any other and never
 reaches a sandboxed tool or coding-run worker. See
 [Send workflow updates to Slack](slack-notifications.md).
 

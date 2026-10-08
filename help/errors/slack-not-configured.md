@@ -1,7 +1,7 @@
 ---
 id: errors/slack-not-configured
 title: Notification bot token not configured
-summary: link_notification_channel, unlink_notification_channel, and test_notification_channel are refused because wardby has no Slack bot token configured.
+summary: link_notification_channel and test_notification_channel are refused because wardby has no Slack bot token configured.
 audience: operator
 tags: [error, notifications, configuration, config, setup, WARDBY_SLACK_BOT_TOKEN]
 appliesTo: ">=0.6.0"
@@ -9,15 +9,15 @@ appliesTo: ">=0.6.0"
 
 # Notification bot token not configured
 
-`link_notification_channel`, `unlink_notification_channel`, and
-`test_notification_channel` are refused when the wardby server has no
-`WARDBY_SLACK_BOT_TOKEN` set. Without it, Slack workflow notifications are
+`link_notification_channel` and `test_notification_channel` are refused when
+the wardby server has no `WARDBY_SLACK_BOT_TOKEN` set. Without it, Slack workflow notifications are
 entirely disabled: the notification dispatcher does not start, and any event
 that would otherwise post to Slack is skipped — none are queued or
 backfilled once you do configure it.
 
-`list_notification_channels` still works and shows any links created
-earlier, but nothing is delivered to them while Slack is unconfigured.
+`list_notification_channels` and `unlink_notification_channel` still work,
+so you can see and remove links created earlier, but nothing is delivered to
+them while Slack is unconfigured.
 
 ## What to do
 

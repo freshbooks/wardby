@@ -1,6 +1,6 @@
 # Send workflow updates to Slack
 
-Link a Slack channel to a Jira project or to a native agent, and wardby posts
+Link a Slack channel to a Jira project or to an agent (native or coding), and wardby posts
 that project's or agent's workflow updates there: a card picked up, a pull
 request opened, a review verdict, fix rounds, and the merge — one thread per
 card. This is outbound only: nothing in Slack starts or affects a run, and
@@ -25,17 +25,40 @@ A run finishing successfully is not its own event — on the workflow it shows
 up as `pr_opened` or `review_posted` already. Child coding runs started by a
 parent surface through the parent's own `run_failed`, not their own.
 
+Some runs do not post `run_failed` at all:
+
+- a coding agent's run triggered directly (rather than as a child of a
+  native agent's run),
+- a review verdict or failure from a coding agent acting as the reviewer, and
+- runs started from the `wardby run` CLI command.
+
+A pull request linked to several issues posts `pr_opened` and `pr_closed`
+only to the first linked issue's thread.
+
 ### Threads
 
 Each channel gets one thread per card: one per Jira issue (when the event has
 one) or one per pull request (when it doesn't). The first event for a card
 posts a parent message naming the issue or pull request; every later event
 for the same card is a reply in that thread, and the parent is kept updated
-with a short status line:
+with a short status line. The statuses are:
 
-```
-picked up → PR open → changes requested → fixing (round 1/2) → approved → merged ✅ / closed / failed ❌
-```
+| Status                 | Set by                                                         |
+| ---------------------- | -------------------------------------------------------------- |
+| `picked up`            | `issue_picked_up`                                              |
+| `PR open`              | `pr_opened`                                                    |
+| `changes requested`    | a `CHANGES_REQUESTED` review                                   |
+| `approved`             | an `APPROVE` review                                            |
+| `fixing`               | a fix round starting (the round number is in the thread reply) |
+| `fix rounds exhausted` | fix rounds reaching the cap with changes still requested       |
+| `merged ✅`            | the pull request merged                                        |
+| `closed`               | the pull request closed without merging                        |
+| `failed ❌`            | `run_failed`                                                   |
+
+A `COMMENT` review leaves the status as it was. `merged ✅` and `closed` stick:
+a late review, fix round, failure, or repeated close does not change them.
+Only a new start does — the card picked up again, or a new pull request
+opened for it — which sets `picked up` or `PR open` again.
 
 Most events only post as a thread reply. A merge and a top-level run failure
 also post to the channel itself, so they are visible without opening the
@@ -70,15 +93,24 @@ walkthrough, including the optional per-agent display-name scope.
 
 Store `WARDBY_SLACK_BOT_TOKEN` in your secrets backend the same way you store
 other provider credentials (`GITHUB_APP_PRIVATE_KEY`, `WARDBY_JIRA_API_TOKEN`)
-— never in a committed file. Restart wardby after setting it. The startup log
-line `chat notifications acting as` names the Slack team and bot user id
-wardby authenticated as; if authentication fails instead, wardby logs an
-error and starts with delivery paused rather than failing to boot (see
-[Failure modes](#failure-modes)).
+— never in a committed file. On the GKE reference deployment, see
+[Getting started on GKE](getting-started-gke.md). Restart wardby after setting
+it. The startup log line `chat notifications acting as` names the Slack team
+and bot user id wardby authenticated as. If that check fails instead, wardby
+only logs an error and still starts: it does not fail to boot, and delivery
+is not paused up front. Delivery pauses when the first actual delivery fails
+authentication (see [Failure modes](#failure-modes)).
 
-Without `WARDBY_SLACK_BOT_TOKEN`, `link_notification_channel`,
-`unlink_notification_channel`, and `test_notification_channel` are refused
-and the dispatcher does not start; see
+With `WARDBY_SLACK_CUSTOMIZE=true`, a message about an event that names an
+agent (`issue_picked_up`, `run_failed`, `review_posted`) is posted under that
+agent's name; every other message, and every message when the option is off,
+posts as `wardby`. A thread's parent message uses the name of the event that
+started the thread. wardby sets no icon.
+
+Without `WARDBY_SLACK_BOT_TOKEN`, `link_notification_channel` and
+`test_notification_channel` are refused and the dispatcher does not start;
+`unlink_notification_channel` and `list_notification_channels` still work, so
+you can clean up old links. See
 [`errors/slack-not-configured`](../help/errors/slack-not-configured.md).
 
 ## Scopes and why
@@ -89,10 +121,12 @@ and the dispatcher does not start; see
 | `chat:write.public`    | Recommended | Posting to public channels without inviting the bot first                                                 |
 | `channels:read`        | Recommended | Validating a channel id and recording its name when linking                                               |
 | `groups:read`          | Recommended | The same, for private channels                                                                            |
-| `chat:write.customize` | Optional    | Posting under a linked agent's own name/icon instead of the app's default (`WARDBY_SLACK_CUSTOMIZE=true`) |
+| `chat:write.customize` | Optional    | Posting under the name of the agent an event is about instead of `wardby` (`WARDBY_SLACK_CUSTOMIZE=true`) |
 
 Without `channels:read`/`groups:read`, linking still accepts a raw channel id
-but skips validating it. Private channels always need `/invite @wardby` (or
+but skips validating it. Any other authentication error while linking (an
+invalid or revoked token) refuses the link; see
+[`errors/slack-auth-failed`](../help/errors/slack-auth-failed.md). Private channels always need `/invite @wardby` (or
 whatever you named the app) regardless of scopes — Slack never lets a bot see
 or post to a private channel it hasn't been invited to. `chat.postMessage` is
 rate-limited to about one message per second per channel; wardby's dispatcher
@@ -149,10 +183,12 @@ Then confirm delivery works before relying on it:
 
 `test_notification_channel` posts "✅ wardby is connected to this channel." —
 if the bot can't write there, you get the error immediately instead of
-finding out when the first real event is dropped.
+finding out when the first real event is dropped. A successful test also
+clears the link's `lastError`.
 
 `list_notification_channels` shows every link's `lastError` and its pending
-and failed delivery counts; filter by `projectKey`, `agentId`, or `channel`.
+and failed delivery counts (counted per channel: two links to the same
+channel show the same counts); filter by `projectKey`, `agentId`, or `channel`.
 Listing your own agent's links needs read access to that agent; listing
 everything (or filtering by `projectKey`) needs `agents:admin` with the admin
 role. `unlink_notification_channel` removes a link by `id`.
@@ -160,15 +196,23 @@ role. `unlink_notification_channel` removes a link by `id`.
 ## Failure modes
 
 - **Channel not found, bot not in channel, or channel archived.** That
-  channel's pending deliveries fail immediately, and every link to it shows
-  the error in `lastError` until you fix it. Invite the bot
-  (`/invite @wardby`) or otherwise fix the channel in Slack, then re-link it
-  — re-linking clears `lastError` and resumes delivery. See
+  channel's pending deliveries fail immediately and are never retried, and
+  every link to it shows the error in `lastError`. Invite the bot
+  (`/invite @wardby`) or otherwise fix the channel in Slack. New events
+  deliver as soon as the bot can post there again; the deliveries that
+  already failed are not resent. Re-linking the channel (or a successful
+  `test_notification_channel`) clears `lastError`. See
   [`errors/slack-channel-unreachable`](../help/errors/slack-channel-unreachable.md).
-- **Invalid or revoked token, or a missing scope.** Delivery pauses for every
-  linked channel (no deliveries are lost — they stay pending), and wardby
-  re-checks every five minutes; it resumes automatically once the check
-  succeeds. See [`errors/slack-auth-failed`](../help/errors/slack-auth-failed.md).
+- **Invalid or revoked token.** Delivery pauses for every linked channel (no
+  deliveries are lost — they stay pending), and wardby re-checks the token
+  every five minutes with Slack's `auth.test`; it resumes automatically once
+  the check succeeds. See
+  [`errors/slack-auth-failed`](../help/errors/slack-auth-failed.md).
+- **A missing scope.** Delivery pauses the same way, but `auth.test` needs no
+  scope, so the five-minute check succeeds, the next delivery fails again,
+  and delivery pauses again. It does not fix itself: add the scope to the app
+  and reinstall it to the workspace (and if Slack issues a new token, set it
+  and restart wardby). Pending deliveries are kept and sent once it works.
 - **Rate limits.** wardby paces its own posts to about one per second per
   channel; if Slack still responds with a rate-limit error, that delivery is
   retried after the delay Slack specifies, with no attempt counted against
@@ -180,6 +224,9 @@ role. `unlink_notification_channel` removes a link by `id`.
   `WARDBY_SLACK_BOT_TOKEN` is set is not queued and is not delivered once you
   configure it — only events recorded after Slack notifications are enabled
   reach Slack.
+- **Duplicates.** Delivery is at least once: if wardby crashes or loses its
+  database connection right after Slack accepts a message, that message can
+  be posted again. A rare duplicate thread reply is possible.
 - **Retention.** Delivery records are kept for 30 days and then pruned.
 
 ## Security
@@ -189,10 +236,15 @@ interactivity in the manifest, so there is no new inbound endpoint and
 nothing posted in Slack can start or affect a run.
 
 What leaves to Slack: issue keys, titles, and their links; pull request
-numbers and links; agent names; review verdicts; fix-round numbers; and, only
-when a link's `includeCost` is on, the run's spend line. wardby never posts
-code, diffs, review bodies, or run output, and an error message shown in
-Slack is a short first line only, never a full error or stack trace.
+numbers and links; agent names; review verdicts; fix-round numbers; a failed
+run's reason (its first line, at most 200 characters); and, only when a
+link's `includeCost` is on, the run's spend line. wardby never posts code,
+diffs, review bodies, or run output, and an error message shown in Slack is a
+short first line only, never a full error or stack trace.
+
+Issue titles go to the linked channel regardless of Jira issue security: an
+issue restricted by a Jira security level still has its key and title posted.
+Link a project only to a channel whose members may see every issue in it.
 
 The bot token stays on the wardby server; agents, sandboxed tools, and
 coding-run workers never see it.

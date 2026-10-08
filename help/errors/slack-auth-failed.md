@@ -18,6 +18,15 @@ queued stay pending — nothing is lost — and wardby automatically re-checks
 the token every five minutes with Slack's `auth.test`, resuming delivery as
 soon as it succeeds.
 
+A **missing scope** (`missing_scope`) does not fix itself this way:
+`auth.test` needs no scope, so the re-check succeeds, the next delivery fails
+again, and delivery pauses again. Add the scope and reinstall the app (steps
+1–2 below).
+
+The same errors while linking a channel refuse the link, except
+`missing_scope` from a missing `channels:read`/`groups:read`, which only
+skips validating the channel id.
+
 wardby logs this once per pause, not on every retry.
 
 ## What to do
@@ -29,8 +38,11 @@ wardby logs this once per pause, not on every retry.
    the app to the workspace to apply them.
 3. If the token was revoked or the app was uninstalled, reinstall it and
    copy a fresh Bot User OAuth Token.
-4. Set the new token as `WARDBY_SLACK_BOT_TOKEN` and restart wardby. The
-   startup log line `chat notifications acting as` confirms the fix.
+4. If Slack issued a new token, set it as `WARDBY_SLACK_BOT_TOKEN` and
+   restart wardby; the startup log line `chat notifications acting as`
+   confirms it. If the token is unchanged (a scope added and the app
+   reinstalled), no restart is needed: pending deliveries go out after the
+   next check.
 
 See [Send workflow updates to Slack](../../docs/slack-notifications.md) for
 the full guide.

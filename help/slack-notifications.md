@@ -9,7 +9,7 @@ appliesTo: >=0.6.0
 
 # Send workflow updates to Slack
 
-Link a Slack channel to a Jira project or to a native agent and wardby posts
+Link a Slack channel to a Jira project or to an agent (native or coding) and wardby posts
 that project's or agent's workflow updates there — a card picked up, a pull
 request opened, a review verdict, fix rounds, and the merge — with one thread
 per card. This is outbound only: nothing in Slack starts or affects a run.
@@ -44,6 +44,8 @@ wardby never posts code, diffs, review text, or run output to Slack.
 - No deliveries at all, for every channel, usually means the bot token is
   invalid, revoked, or missing a scope — see
   [`errors/slack-auth-failed`](errors/slack-auth-failed.md).
+- A channel that recovers gets new events again right away; deliveries that
+  already failed are not resent.
 - Linking or testing refused outright means Slack isn't configured yet — see
   [`errors/slack-not-configured`](errors/slack-not-configured.md).
 

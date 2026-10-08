@@ -14,7 +14,7 @@ oauth_config:
       - chat:write.public
       - channels:read
       - groups:read
-      # Optional: per-agent names/icons (also set WARDBY_SLACK_CUSTOMIZE=true)
+      # Optional: post under the agent's name (also set WARDBY_SLACK_CUSTOMIZE=true)
       # - chat:write.customize
 settings:
   org_deploy_enabled: false
