@@ -1,6 +1,6 @@
 /**
  * NotificationChannel CRUD — admin-approved links from a Slack channel to a
- * Jira project or to a native agent, so wardby's workflow dispatcher
+ * Jira project or to an agent (native or coding), so wardby's workflow dispatcher
  * (core/notification-dispatcher.ts) knows where to post a card's lifecycle:
  * picked up, PR opened, review verdict, fix rounds, merge. Outbound only —
  * wardby never reads a channel's history, and linking posts nothing.
@@ -58,8 +58,8 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
     name: "link_notification_channel",
     scope: "agents:write",
     description:
-      "Links a Slack channel to a Jira project or to a native agent, so wardby posts that project's or agent's workflow " +
-      "updates there: a card picked up, a PR opened, a review verdict, fix rounds, and the merge (one thread per card). " +
+      "Links a Slack channel to a Jira project or to an agent (native or coding), so wardby posts that project's or " +
+      "agent's workflow updates there: a card picked up, a PR opened, a review verdict, fix rounds, and the merge (one thread per card). " +
       "Outbound only — wardby never reads the channel's history, and nothing in Slack starts work. Admin-approved " +
       "(agents:admin with the admin role), the same trust model as link_issue_project: wardby cannot verify a caller's " +
       "own Slack workspace access, so an admin approves every link and is stamped as its authorizer. " +
@@ -112,7 +112,9 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       }
       const channelId = normalizeChannelId(args.channel);
       // `info` is undefined when channelInfo can't be validated at all
-      // (missing channels:read/groups:read — accept the id unvalidated) and
+      // (missing_scope: no channels:read/groups:read — accept the id
+      // unvalidated); any other auth failure (revoked or invalid token) is a
+      // real error the operator must fix before linking. `info` is
       // null when the bot genuinely cannot see the channel (an error, not a
       // validation gap) — kept out of the try/catch below so the 400 for
       // "bot cannot see this channel" isn't routed through ChatError handling.
@@ -120,11 +122,14 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       try {
         info = await chat.channelInfo(channelId);
       } catch (err) {
-        if (err instanceof ChatError && err.code === "auth_failed") {
-          info = undefined;
-        } else {
-          throw err;
+        if (!(err instanceof ChatError && err.code === "auth_failed")) throw err;
+        if (err.slackError !== "missing_scope") {
+          throw new McpError(
+            400,
+            `Slack rejected the bot token (${err.slackError}). See help article errors/slack-auth-failed.`,
+          );
         }
+        info = undefined;
       }
       if (info === null) {
         throw new McpError(
@@ -225,22 +230,31 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       if (args.projectKey !== undefined) where.projectKey = normalizeProjectKey(args.projectKey);
       if (args.channel !== undefined) where.channelId = normalizeChannelId(args.channel);
       const links = await ctx.db.notificationChannel.findMany({ where, orderBy: { createdAt: "asc" } });
-      const counts = await ctx.db.notificationDelivery.groupBy({
-        by: ["channelId", "state"],
-        where: { state: { in: ["pending", "failed"] } },
-        _count: true,
-      });
+      // Counts only for the listed links' own (provider, channel) pairs, so a
+      // caller never learns about deliveries to channels it cannot list.
+      const pairKey = (r: { provider: string; channelId: string }) => `${r.provider}\u0000${r.channelId}`;
+      const pairs = [
+        ...new Map(links.map((l) => [pairKey(l), { provider: l.provider, channelId: l.channelId }])).values(),
+      ];
+      const counts =
+        pairs.length === 0
+          ? []
+          : await ctx.db.notificationDelivery.groupBy({
+              by: ["provider", "channelId", "state"],
+              where: { state: { in: ["pending", "failed"] }, OR: pairs },
+              _count: true,
+            });
       const byChannel = new Map<string, { pending: number; failed: number }>();
       for (const row of counts) {
-        const entry = byChannel.get(row.channelId) ?? { pending: 0, failed: 0 };
+        const entry = byChannel.get(pairKey(row)) ?? { pending: 0, failed: 0 };
         if (row.state === "pending") entry.pending = row._count;
         else if (row.state === "failed") entry.failed = row._count;
-        byChannel.set(row.channelId, entry);
+        byChannel.set(pairKey(row), entry);
       }
       const channels = links.map((l) => ({
         ...l,
-        pending: byChannel.get(l.channelId)?.pending ?? 0,
-        failed: byChannel.get(l.channelId)?.failed ?? 0,
+        pending: byChannel.get(pairKey(l))?.pending ?? 0,
+        failed: byChannel.get(pairKey(l))?.failed ?? 0,
       }));
       return textResult({ channels });
     },
@@ -273,16 +287,21 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       try {
         await chat.postMessage(link.channelId, { text: "✅ wardby is connected to this channel." });
       } catch (err) {
-        if (err instanceof ChatError) {
-          if (err.code === "channel_unreachable") {
-            await ctx.db.notificationChannel.update({
-              where: { id: link.id },
-              data: { lastError: err.slackError, lastErrorAt: new Date() },
-            });
-          }
-          throw new McpError(400, `${err.code}: ${err.slackError}`);
+        if (!(err instanceof ChatError)) throw err;
+        if (err.code === "channel_unreachable") {
+          await ctx.db.notificationChannel.update({
+            where: { id: link.id },
+            data: { lastError: err.slackError, lastErrorAt: new Date() },
+          });
         }
-        throw err;
+        throw new McpError(400, `${err.code}: ${err.slackError}`);
+      }
+      // The bot can post here again: clear any recorded delivery error.
+      if (link.lastError !== null || link.lastErrorAt !== null) {
+        await ctx.db.notificationChannel.update({
+          where: { id: link.id },
+          data: { lastError: null, lastErrorAt: null },
+        });
       }
       return textResult({ tested: true });
     },

@@ -8,7 +8,14 @@ import type { SlackConfig } from "../../config/providers.js";
 import { ChatError, type ChatErrorCode, type ChatMessage, type ChatProvider } from "./types.js";
 
 const CHANNEL_UNREACHABLE = new Set(["channel_not_found", "not_in_channel", "is_archived"]);
-const AUTH_FAILED = new Set(["invalid_auth", "not_authed", "token_revoked", "token_expired", "account_inactive", "missing_scope"]);
+const AUTH_FAILED = new Set([
+  "invalid_auth",
+  "not_authed",
+  "token_revoked",
+  "token_expired",
+  "account_inactive",
+  "missing_scope",
+]);
 const TIMEOUT_MS = 10_000;
 
 function classify(slackError: string): ChatErrorCode {
@@ -44,7 +51,11 @@ export class SlackChatProvider implements ChatProvider {
     }
     if (res.status === 429) {
       const seconds = Number(res.headers.get("retry-after") ?? "1");
-      throw new ChatError("rate_limited", "ratelimited", (Number.isFinite(seconds) && seconds > 0 ? seconds : 1) * 1000);
+      throw new ChatError(
+        "rate_limited",
+        "ratelimited",
+        (Number.isFinite(seconds) && seconds > 0 ? seconds : 1) * 1000,
+      );
     }
     if (!res.ok) throw new ChatError("transient", `http_${res.status}`);
     const json = (await res.json().catch(() => ({ ok: false, error: "invalid_json" }))) as Record<string, unknown>;

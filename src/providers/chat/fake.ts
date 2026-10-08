@@ -7,7 +7,8 @@ import type { ChatError, ChatMessage, ChatProvider } from "./types.js";
 
 export class FakeChatProvider implements ChatProvider {
   readonly name = "slack" as const;
-  readonly posts: Array<{ channelId: string; ts: string; msg: ChatMessage; threadTs?: string; broadcast?: boolean }> = [];
+  readonly posts: Array<{ channelId: string; ts: string; msg: ChatMessage; threadTs?: string; broadcast?: boolean }> =
+    [];
   readonly updates: Array<{ channelId: string; ts: string; msg: ChatMessage }> = [];
   readonly channels = new Map<string, { id: string; name: string; isPrivate: boolean }>();
 

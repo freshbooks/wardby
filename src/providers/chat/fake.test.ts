@@ -6,7 +6,9 @@ describe("FakeChatProvider", () => {
   it("records posts with incrementing ts and resolves channelInfo/authTest", async () => {
     const chat = new FakeChatProvider();
     expect(await chat.postMessage("C1", { text: "one" })).toEqual({ ts: "1.000" });
-    expect(await chat.postMessage("C1", { text: "two" }, { threadTs: "1.000", broadcast: true })).toEqual({ ts: "2.000" });
+    expect(await chat.postMessage("C1", { text: "two" }, { threadTs: "1.000", broadcast: true })).toEqual({
+      ts: "2.000",
+    });
     expect(chat.posts).toEqual([
       { channelId: "C1", ts: "1.000", msg: { text: "one" }, threadTs: undefined, broadcast: undefined },
       { channelId: "C1", ts: "2.000", msg: { text: "two" }, threadTs: "1.000", broadcast: true },

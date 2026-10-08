@@ -6,8 +6,9 @@
  * DATABASE_URL.
  *
  * Other database suites may leave pending Slack deliveries behind while they
- * run in parallel; the scoped fake rate-limits any channel that is not this
- * suite's, so those rows are never posted and never consume a queued failure.
+ * run in parallel; every dispatcher here is scoped to this suite's channel
+ * prefix (channelIdPrefix) and pruning to its own events, so neither touches
+ * another suite's rows.
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -28,8 +29,10 @@ class ScopedFake extends FakeChatProvider {
     super();
   }
   private guard(channelId: string): void {
-    if (!channelId.startsWith(this.prefix)) throw new ChatError("rate_limited", "foreign_test_channel", 3_600_000);
+    if (!channelId.startsWith(this.prefix)) throw new Error(`dispatcher escaped its test scope: ${channelId}`);
   }
+  /** Thrown (once) by the next postMessage: a non-ChatError failure. */
+  throwNext: Error | null = null;
   /** Runs before each in-scope threaded reply. */
   beforeReply: (() => Promise<void>) | null = null;
   override async postMessage(
@@ -38,6 +41,9 @@ class ScopedFake extends FakeChatProvider {
     opts?: { threadTs?: string; broadcast?: boolean },
   ): Promise<{ ts: string }> {
     this.guard(channelId);
+    const raw = this.throwNext;
+    this.throwNext = null;
+    if (raw) throw raw;
     const hook = opts?.threadTs ? this.beforeReply : null;
     if (hook) {
       this.beforeReply = null;
@@ -76,10 +82,11 @@ describe.skipIf(!process.env.DATABASE_URL)("notification dispatcher (database)",
     holder: `${holder}-${s}`,
     now: () => clock,
     sleep: async () => {},
+    channelIdPrefix: prefix,
   });
 
   /** A fresh project + work item + channel link; returns the channel and item key. */
-  async function seedThread(): Promise<{ channelId: string; itemKey: string }> {
+  async function seedThread(): Promise<{ channelId: string; itemKey: string; projectKey: string }> {
     const n = ++counter;
     const projectKey = `DSP${tag}${n}`;
     projects.push(projectKey);
@@ -97,7 +104,7 @@ describe.skipIf(!process.env.DATABASE_URL)("notification dispatcher (database)",
     await db.notificationChannel.create({
       data: { provider: "slack", channelId, issueProvider: "jira", projectKey, authorizedById: owner },
     });
-    return { channelId, itemKey };
+    return { channelId, itemKey, projectKey };
   }
 
   async function record(itemKey: string, payload: WorkflowPayload, name: string): Promise<void> {
@@ -208,6 +215,52 @@ describe.skipIf(!process.env.DATABASE_URL)("notification dispatcher (database)",
     expect(rows.map((r) => r.state)).toEqual(["delivered", "delivered"]);
     expect(rows[0].messageTs).toBe(posts[1].ts);
     expect(rows[1].messageTs).toBe(posts[2].ts);
+  });
+
+  it("posts the parent and replies under the agent's name, else wardby", async () => {
+    const { channelId, itemKey } = await seedThread();
+    await record(itemKey, picked, "picked");
+    await record(itemKey, opened, "opened");
+
+    await drain(deps);
+
+    const posts = fake.posts.filter((p) => p.channelId === channelId);
+    expect(posts.map((p) => p.msg.username)).toEqual(["builder", "builder", "wardby"]);
+  });
+
+  it("holds every thread on a rate-limited channel until Retry-After passes", async () => {
+    const a = await seedThread();
+    const itemB = `${a.projectKey}-2`;
+    await db.workItem.create({
+      data: { provider: "jira", key: itemB, scopeKey: a.projectKey, title: "Refunds", url: null },
+    });
+    await record(a.itemKey, picked, "picked");
+    await record(itemB, picked, "picked");
+    fake.failNext("postMessage", new ChatError("rate_limited", "ratelimited", 7000));
+
+    const t0 = clock;
+    await dispatchOnce(deps);
+    // A later pass before Retry-After must not try the channel's other thread either.
+    clock = new Date(t0.getTime() + 3000);
+    expect(await dispatchOnce(deps)).toBe(0);
+    expect(fake.posts.filter((p) => p.channelId === a.channelId)).toHaveLength(0);
+
+    clock = new Date(t0.getTime() + 7000);
+    await drain(deps);
+    const rows = await deliveriesFor(a.channelId);
+    expect(rows.map((r) => r.state)).toEqual(["delivered", "delivered"]);
+    expect(deps.state?.channelBlockedUntil?.size ?? 0).toBe(0);
+  });
+
+  it("stores only the first line (≤200 chars) of a non-chat failure", async () => {
+    const { channelId, itemKey } = await seedThread();
+    await record(itemKey, picked, "picked");
+    fake.throwNext = new Error(`${"x".repeat(250)}\n    at stack frame`);
+
+    await dispatchOnce(deps);
+
+    const [row] = await deliveriesFor(channelId);
+    expect(row).toMatchObject({ state: "pending", attempts: 1, lastError: "x".repeat(200) });
   });
 
   it("defers a rate-limited delivery without counting an attempt", async () => {
@@ -396,7 +449,7 @@ describe.skipIf(!process.env.DATABASE_URL)("notification dispatcher (database)",
       data: { nextAttemptAt: at(86_400_000) },
     });
 
-    expect(await pruneWorkflowEvents(db, clock)).toBeGreaterThanOrEqual(1);
+    expect(await pruneWorkflowEvents(db, clock, 30, { dedupeKey: { endsWith: `-${s}` } })).toBe(1);
 
     expect(await db.workflowEvent.findUnique({ where: { id: done.id } })).toBeNull();
     expect(await db.notificationDelivery.count({ where: { eventId: done.id } })).toBe(0);

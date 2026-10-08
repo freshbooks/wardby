@@ -18,6 +18,8 @@ export type ThreadStatus =
   | "failed ❌";
 
 const TERMINAL: ReadonlySet<ThreadStatus> = new Set(["merged ✅", "closed"]);
+/** Events that start a new attempt (a new pickup, a new PR) and so reopen a merged/closed thread. */
+const REOPENS: ReadonlySet<WorkflowPayload["kind"]> = new Set(["issue_picked_up", "pr_opened"]);
 
 export function escapeMrkdwn(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -30,10 +32,11 @@ function link(url: string | null, label: string): string {
 }
 
 export function nextStatus(prev: ThreadStatus | null, p: WorkflowPayload): ThreadStatus {
-  if (prev && TERMINAL.has(prev)) return prev;
+  const terminal = prev !== null && TERMINAL.has(prev);
+  if (terminal && !REOPENS.has(p.kind)) return prev;
   switch (p.kind) {
     case "issue_picked_up":
-      return prev ?? "picked up";
+      return terminal ? "picked up" : (prev ?? "picked up");
     case "pr_opened":
       return "PR open";
     case "review_posted":
@@ -103,6 +106,22 @@ export function renderEvent(p: WorkflowPayload, spend: string | null): { text: s
   }
   const text = spend ? `${line}\n_${escapeMrkdwn(spend)}_` : line;
   return { text, blocks: [section(text)] };
+}
+
+/**
+ * The Slack display name for a message about this event: the agent's name
+ * when the event names one, otherwise "wardby". Only takes effect when
+ * WARDBY_SLACK_CUSTOMIZE is on (chat:write.customize); no icon is set.
+ */
+export function senderName(p: WorkflowPayload): string {
+  switch (p.kind) {
+    case "issue_picked_up":
+    case "run_failed":
+    case "review_posted":
+      return p.agentName;
+    default:
+      return "wardby";
+  }
 }
 
 export function broadcasts(p: WorkflowPayload): boolean {

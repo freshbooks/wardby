@@ -459,6 +459,38 @@ describe("runAgent", () => {
     }
   });
 
+  it("emits run_failed from the catch path when the engine throws", async () => {
+    const db = fakeDb([{ id: "a1", name: "lead", systemPrompt: "sys", model: "m", budgetUsd: 1, maxTurns: 10 }]);
+    (db as any).runHostCheck = { findUnique: async () => null };
+    const engine = {
+      run: async () => {
+        throw new Error("engine exploded\n    at frame");
+      },
+    };
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const run = await runAgent(
+        "lead",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      );
+      expect(run.status).toBe("failed");
+      expect(events).toEqual([
+        {
+          dedupeKey: `run_failed:${run.id}`,
+          runId: run.id,
+          agentId: "a1",
+          payload: { kind: "run_failed", agentName: "lead", status: "failed", reason: "engine exploded" },
+        },
+      ]);
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
+
   it("passes the agent's own budgetUsd unchanged to the engine when it has no budget group", async () => {
     const db = fakeDb([{ id: "a1", name: "solo", systemPrompt: "s", model: "m", budgetUsd: 5, maxTurns: 10 }]);
     let capturedBudget: number | undefined;
@@ -1500,5 +1532,28 @@ describe("native runs record and keep their catalog entry", () => {
     expect(engine.run).not.toHaveBeenCalled();
     const row: any = await db.run.findUnique({ where: { id: run.id } });
     expect(row.pricingVersion ?? null).toBeNull();
+  });
+
+  it("emits run_failed when a run ends early on an unavailable model", async () => {
+    const db = fakeDb([agent]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const { llm } = routed(disabled);
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const finished = await executeRun(run.id, providers(llm, { run: vi.fn(async () => succeeded) }), db);
+      expect(finished.status).toBe("failed");
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        dedupeKey: `run_failed:${run.id}`,
+        runId: run.id,
+        agentId: "a1",
+        payload: { kind: "run_failed", status: "failed", reason: expect.stringMatching(/^model_unavailable: /) },
+      });
+    } finally {
+      setWorkflowEventSink(null);
+    }
   });
 });

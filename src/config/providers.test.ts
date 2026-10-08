@@ -531,7 +531,9 @@ describe("loadSlackConfig", () => {
     ).toEqual({ botToken: "xoxb-x", apiBaseUrl: "https://slack.example.test/api", customize: true });
   });
   it("refuses a non-https base", () => {
-    expect(() => loadSlackConfig({ WARDBY_SLACK_BOT_TOKEN: "xoxb-x", WARDBY_SLACK_API_BASE_URL: "http://x/api" })).toThrow(/https/);
+    expect(() =>
+      loadSlackConfig({ WARDBY_SLACK_BOT_TOKEN: "xoxb-x", WARDBY_SLACK_API_BASE_URL: "http://x/api" }),
+    ).toThrow(/https/);
   });
 });
 

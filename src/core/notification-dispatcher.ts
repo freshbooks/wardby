@@ -21,12 +21,15 @@
  *   first failure in a pass, so a reply never overtakes an older one.
  * - Pacing: at most one Slack call per second per channel (posts and updates).
  * - Errors: rate_limited defers by Retry-After without counting an attempt and
- *   stops the channel for the pass; transient (and any non-ChatError) backs
+ *   holds the whole channel (every thread on it) until Retry-After passes;
+ *   transient (and any non-ChatError) backs
  *   off exponentially and fails at MAX_ATTEMPTS; channel_unreachable fails
  *   every pending delivery for the channel and stamps lastError on its links;
  *   auth_failed pauses the whole dispatcher for 5 minutes (no attempt counted),
  *   then re-checks each provider with auth.test.
- * - The pause lives on `deps.state` (created on first use), not in module
+ * - Sender: with WARDBY_SLACK_CUSTOMIZE on, a message's display name is the
+ *   agent the event names (picked up, review, failure), else "wardby".
+ * - The pause and channel holds live on `deps.state` (created on first use), not in module
  *   state: one dispatcher (or one test) per deps object.
  */
 import { Prisma, type PrismaClient } from "#prisma";
@@ -38,9 +41,16 @@ import {
 } from "../providers/chat/types.js";
 import { tryAcquireLease } from "./lease.js";
 import { logger } from "./logger.js";
-import { broadcasts, nextStatus, renderEvent, renderParent, type ThreadStatus } from "./notification-templates.js";
+import {
+  broadcasts,
+  nextStatus,
+  renderEvent,
+  renderParent,
+  senderName,
+  type ThreadStatus,
+} from "./notification-templates.js";
 import { spendLine } from "./issue-status.js";
-import type { ThreadSubject, WorkflowPayload } from "./workflow-events.js";
+import { shortReason, type ThreadSubject, type WorkflowPayload } from "./workflow-events.js";
 
 const log = logger.child({ module: "notification-dispatcher" });
 
@@ -59,6 +69,8 @@ const PRUNE_EVERY_MS = 3_600_000;
 export interface DispatcherState {
   /** While set and in the future, passes deliver nothing. */
   pausedUntil?: Date;
+  /** provider\0channel → no Slack call to that channel before this time (rate limit Retry-After). */
+  channelBlockedUntil?: Map<string, Date>;
 }
 
 export interface DispatcherDeps {
@@ -68,6 +80,8 @@ export interface DispatcherDeps {
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>; // pacing; tests pass a no-op
   state?: DispatcherState;
+  /** Test-only: deliver only rows whose channelId starts with this (keeps parallel DB suites apart). */
+  channelIdPrefix?: string;
 }
 
 /** Exponential back-off: 5s · 2^(attempts-1), capped at 1h. */
@@ -91,6 +105,14 @@ interface Pass {
 type Outcome = "ok" | "stop_thread" | "stop_pass";
 
 const channelKey = (d: { provider: string; channelId: string }) => `${d.provider}\u0000${d.channelId}`;
+
+/** Holds every thread on the channel until `retryAfterMs` from now (across passes). */
+function holdChannel(pass: Pass, d: Delivery, retryAfterMs: number | undefined): void {
+  const key = channelKey(d);
+  pass.blocked.add(key);
+  const holds = (pass.state.channelBlockedUntil ??= new Map());
+  holds.set(key, new Date(pass.now.getTime() + (retryAfterMs ?? CHANNEL_GAP_MS)));
+}
 
 async function pace(pass: Pass, key: string): Promise<void> {
   const last = pass.lastCall.get(key);
@@ -126,7 +148,10 @@ async function openThread(pass: Pass, provider: ChatProvider, d: Delivery, paylo
   const status = nextStatus(null, payload);
   const subject = await subjectOf(db, d);
   await pace(pass, channelKey(d));
-  const { ts } = await provider.postMessage(d.channelId, renderParent(subject, status));
+  const { ts } = await provider.postMessage(d.channelId, {
+    ...renderParent(subject, status),
+    username: senderName(payload),
+  });
   const where = { provider: d.provider, channelId: d.channelId, threadKey: d.threadKey };
   try {
     return await db.notificationThread.create({ data: { ...where, parentTs: ts, status } });
@@ -178,7 +203,7 @@ async function refreshParent(pass: Pass, provider: ChatProvider, d: Delivery): P
       });
       return;
     }
-    if (err instanceof ChatError && err.code === "rate_limited") pass.blocked.add(channelKey(d));
+    if (err instanceof ChatError && err.code === "rate_limited") holdChannel(pass, d, err.retryAfterMs);
     log.warn({ err, ...key }, "could not update the thread parent status");
   }
 }
@@ -193,7 +218,8 @@ async function deliver(pass: Pass, provider: ChatProvider, d: Delivery): Promise
       (await openThread(pass, provider, d, payload));
     const spend = d.includeCost && d.event.runId ? (await spendLine(db, d.event.runId)) || null : null;
     await pace(pass, channelKey(d));
-    const { ts } = await provider.postMessage(d.channelId, renderEvent(payload, spend), {
+    const msg = { ...renderEvent(payload, spend), username: senderName(payload) };
+    const { ts } = await provider.postMessage(d.channelId, msg, {
       threadTs: thread.parentTs,
       broadcast: broadcasts(payload),
     });
@@ -212,10 +238,10 @@ async function handleFailure(pass: Pass, d: Delivery, err: unknown): Promise<Out
   const { db } = pass.deps;
   const { now } = pass;
   const chat = err instanceof ChatError ? err : null;
-  const message = chat?.slackError ?? (err instanceof Error ? err.message : String(err));
+  const message = chat?.slackError ?? shortReason(err instanceof Error ? err.message : String(err)) ?? "unknown error";
   switch (chat?.code) {
     case "rate_limited":
-      pass.blocked.add(channelKey(d));
+      holdChannel(pass, d, chat.retryAfterMs);
       await db.notificationDelivery.update({
         where: { id: d.id },
         data: { nextAttemptAt: new Date(now.getTime() + (chat.retryAfterMs ?? CHANNEL_GAP_MS)) },
@@ -296,8 +322,11 @@ export async function dispatchOnce(deps: DispatcherDeps): Promise<number> {
     if (!(await recheckAuth(deps, state, now))) return 0;
   }
 
+  const holds = state.channelBlockedUntil;
+  for (const [key, until] of holds ?? []) if (until <= now) holds?.delete(key);
+  const scope = deps.channelIdPrefix ? { channelId: { startsWith: deps.channelIdPrefix } } : {};
   const due = await db.notificationDelivery.findMany({
-    where: { state: "pending", nextAttemptAt: { lte: now } },
+    where: { state: "pending", nextAttemptAt: { lte: now }, ...scope },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: BATCH,
     include: { event: true },
@@ -315,7 +344,7 @@ export async function dispatchOnce(deps: DispatcherDeps): Promise<number> {
   for (const group of threads.values()) {
     const head = group[0];
     const provider = deps.chat[head.provider as ChatProviderName];
-    if (!provider || pass.blocked.has(channelKey(head))) continue;
+    if (!provider || pass.blocked.has(channelKey(head)) || holds?.has(channelKey(head))) continue;
     // An older pending delivery that is not yet due holds the whole thread.
     const older = await db.notificationDelivery.findFirst({
       where: {
@@ -344,11 +373,19 @@ export async function dispatchOnce(deps: DispatcherDeps): Promise<number> {
   return attempted;
 }
 
-/** Deletes events (and their deliveries) older than `days` with no pending delivery. */
-export async function pruneWorkflowEvents(db: PrismaClient, now: Date, days = 30): Promise<number> {
+/**
+ * Deletes events (and their deliveries) older than `days` with no pending
+ * delivery. `only` narrows the candidates further (tests scope it to their own rows).
+ */
+export async function pruneWorkflowEvents(
+  db: PrismaClient,
+  now: Date,
+  days = 30,
+  only: Prisma.WorkflowEventWhereInput = {},
+): Promise<number> {
   const cutoff = new Date(now.getTime() - days * 86_400_000);
   const { count } = await db.workflowEvent.deleteMany({
-    where: { createdAt: { lt: cutoff }, deliveries: { none: { state: "pending" } } },
+    where: { ...only, createdAt: { lt: cutoff }, deliveries: { none: { state: "pending" } } },
   });
   return count;
 }

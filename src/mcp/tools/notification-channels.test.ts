@@ -33,6 +33,7 @@ interface ChannelRow {
 }
 
 interface DeliveryRow {
+  provider?: string;
   channelId: string;
   state: string;
 }
@@ -105,17 +106,22 @@ function fakeDb(
       },
     },
     notificationDelivery: {
-      groupBy: async ({ where }: { where?: { state?: { in: string[] } } } = {}) => {
+      groupBy: async ({
+        where,
+      }: { where?: { state?: { in: string[] }; OR?: { provider: string; channelId: string }[] } } = {}) => {
         const allowed = where?.state?.in;
+        const pairs = where?.OR;
         const counts = new Map<string, number>();
         for (const d of deliveries) {
+          const provider = d.provider ?? "slack";
           if (allowed && !allowed.includes(d.state)) continue;
-          const key = `${d.channelId}|${d.state}`;
+          if (pairs && !pairs.some((p) => p.provider === provider && p.channelId === d.channelId)) continue;
+          const key = `${provider}|${d.channelId}|${d.state}`;
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }
         return [...counts.entries()].map(([key, _count]) => {
-          const [channelId, state] = key.split("|");
-          return { channelId, state, _count };
+          const [provider, channelId, state] = key.split("|");
+          return { provider, channelId, state, _count };
         });
       },
     },
@@ -238,7 +244,17 @@ describe("notification channel tools", () => {
     expect(rows).toHaveLength(0);
   });
 
-  it("accepts the channel id with no name when channelInfo is auth_failed", async () => {
+  it("rejects a link when channelInfo fails auth for a reason other than a missing scope", async () => {
+    const { client, rows, chatProvider } = await setup([NATIVE]);
+    chatProvider.failNext("channelInfo", new ChatError("auth_failed", "token_revoked"));
+    const r = await call(client, "link_notification_channel", { channel: "C123ABCDEF", projectKey: "PAY" });
+    expect(r.isError).toBeTruthy();
+    expect(text(r)).toContain("token_revoked");
+    expect(text(r)).toContain("errors/slack-auth-failed");
+    expect(rows).toHaveLength(0);
+  });
+
+  it("accepts the channel id with no name when channelInfo is missing_scope", async () => {
     const { client, rows, chatProvider } = await setup([NATIVE]);
     chatProvider.failNext("channelInfo", new ChatError("auth_failed", "missing_scope"));
     const r = await call(client, "link_notification_channel", { channel: "C123ABCDEF", projectKey: "PAY" });
@@ -416,6 +432,22 @@ describe("notification channel tools", () => {
     expect(listed.channels[0]).toMatchObject({ channelId: "CAGENT0001", pending: 2, failed: 1 });
   });
 
+  it("counts only deliveries for the listed links' provider + channel", async () => {
+    const { client } = await setup([{ id: "a1", ownerId: "admin1" }], {
+      roles: [],
+      scopes: ["agents:read"],
+      links: [PROJECT_LINK, AGENT_LINK],
+      deliveries: [
+        { channelId: "CAGENT0001", state: "pending" },
+        { provider: "other", channelId: "CAGENT0001", state: "pending" },
+        { provider: "other", channelId: "CAGENT0001", state: "failed" },
+      ],
+    });
+    const r = await call(client, "list_notification_channels", { agentId: "a1" });
+    const listed = JSON.parse(text(r)) as { channels: { channelId: string; pending: number; failed: number }[] };
+    expect(listed.channels).toEqual([expect.objectContaining({ channelId: "CAGENT0001", pending: 1, failed: 0 })]);
+  });
+
   it("needs admin to list without an agentId", async () => {
     const { client } = await setup([NATIVE], { roles: [], scopes: ["agents:read"], links: [PROJECT_LINK] });
     const r = await call(client, "list_notification_channels", {});
@@ -439,6 +471,15 @@ describe("notification channel tools", () => {
       channelId: "C123ABCDEF",
       msg: { text: "✅ wardby is connected to this channel." },
     });
+  });
+
+  it("clears a recorded lastError when the test message posts", async () => {
+    const { client, rows } = await setup([NATIVE], {
+      links: [{ ...PROJECT_LINK, lastError: "not_in_channel", lastErrorAt: new Date("2026-01-01") }],
+    });
+    const r = await call(client, "test_notification_channel", { id: "l1" });
+    expect(r.isError).toBeFalsy();
+    expect(rows[0]).toMatchObject({ lastError: null, lastErrorAt: null });
   });
 
   it("surfaces not_in_channel from the test tool and stamps lastError on the link", async () => {

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { broadcasts, escapeMrkdwn, nextStatus, renderEvent, renderParent } from "./notification-templates.js";
+import {
+  broadcasts,
+  escapeMrkdwn,
+  nextStatus,
+  renderEvent,
+  renderParent,
+  senderName,
+} from "./notification-templates.js";
 import { shortReason, type WorkflowPayload } from "./workflow-events.js";
 
 const pr = { prLabel: "acme/api#12", prUrl: "https://github.com/acme/api/pull/12" };
@@ -80,6 +87,32 @@ describe("nextStatus", () => {
     expect(nextStatus("merged ✅", { kind: "run_failed", agentName: "a", status: "failed", reason: null })).toBe(
       "merged ✅",
     );
+  });
+  it("a new PR or a new pickup reopens a terminal thread", () => {
+    expect(nextStatus("closed", { kind: "pr_opened", ...pr, movedTo: null })).toBe("PR open");
+    expect(nextStatus("merged ✅", { kind: "issue_picked_up", agentName: "a", trigger: "assigned" })).toBe("picked up");
+  });
+  it("late reviews, fix rounds and duplicate closes keep a terminal status", () => {
+    const late: WorkflowPayload[] = [
+      { kind: "review_posted", agentName: "r", verdict: "APPROVE", ...pr, ciPending: false },
+      { kind: "review_fix", prLabel: "x", round: 1, maxRounds: 2, state: "started" },
+      { kind: "pr_closed", ...pr, merged: false, movedTo: null },
+      { kind: "run_failed", agentName: "a", status: "failed", reason: null },
+    ];
+    for (const p of late) expect(nextStatus("merged ✅", p)).toBe("merged ✅");
+  });
+});
+
+describe("senderName", () => {
+  it("names the agent when the event has one, otherwise wardby", () => {
+    expect(senderName({ kind: "issue_picked_up", agentName: "builder", trigger: "assigned" })).toBe("builder");
+    expect(senderName({ kind: "run_failed", agentName: "builder", status: "failed", reason: null })).toBe("builder");
+    expect(
+      senderName({ kind: "review_posted", agentName: "reviewer", verdict: "COMMENT", ...pr, ciPending: false }),
+    ).toBe("reviewer");
+    expect(senderName({ kind: "pr_opened", ...pr, movedTo: null })).toBe("wardby");
+    expect(senderName({ kind: "pr_closed", ...pr, merged: true, movedTo: null })).toBe("wardby");
+    expect(senderName({ kind: "review_fix", prLabel: "x", round: 1, maxRounds: 2, state: "started" })).toBe("wardby");
   });
 });
 

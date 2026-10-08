@@ -209,7 +209,8 @@ export function loadSlackConfig(env: NodeJS.ProcessEnv = process.env): SlackConf
   const base = env.WARDBY_SLACK_API_BASE_URL?.trim();
   const customizeRaw = env.WARDBY_SLACK_CUSTOMIZE?.trim().toLowerCase();
   if (!token) {
-    if (base || customizeRaw) throw new Error("WARDBY_SLACK_API_BASE_URL/WARDBY_SLACK_CUSTOMIZE need WARDBY_SLACK_BOT_TOKEN.");
+    if (base || customizeRaw)
+      throw new Error("WARDBY_SLACK_API_BASE_URL/WARDBY_SLACK_CUSTOMIZE need WARDBY_SLACK_BOT_TOKEN.");
     return null;
   }
   if (!token.startsWith("xoxb-")) throw new Error("WARDBY_SLACK_BOT_TOKEN must be a bot token (xoxb-…).");
