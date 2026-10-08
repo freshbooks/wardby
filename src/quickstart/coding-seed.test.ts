@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import { THOROUGH_REVIEWER_PROMPT } from "./reviewer-prompt.js";
 import {
   BUILDER_AGENT,
   BUILDER_PROMPT,
   REVIEWER_AGENT,
   REVIEWER_PROMPT,
+  SHORT_REVIEWER_PROMPT_V1,
   seedCodingAgents,
   type AgentData,
   type CodingSeedInput,
@@ -155,6 +157,30 @@ describe("seedCodingAgents", () => {
     expect(agents.get(BUILDER_AGENT)!.budgetUsd).toBe(9);
     expect(profiles.size).toBe(0);
     expect(result.reviewer.status).toBe("created");
+  });
+
+  it("gives the reviewer the thorough review prompt", async () => {
+    const { db, agents } = memoryDb();
+    await seedCodingAgents(db, input);
+    expect(REVIEWER_PROMPT).toBe(THOROUGH_REVIEWER_PROMPT);
+    expect(agents.get(REVIEWER_AGENT)).toMatchObject({ systemPrompt: THOROUGH_REVIEWER_PROMPT, maxTurns: 25 });
+  });
+
+  it("moves a reviewer an earlier quickstart created onto the thorough prompt", async () => {
+    const { db, agents, links } = memoryDb();
+    const { id } = await db.createAgent({
+      name: REVIEWER_AGENT,
+      kind: "native",
+      model: "m",
+      budgetUsd: 1,
+      systemPrompt: SHORT_REVIEWER_PROMPT_V1,
+      maxTurns: 12,
+      ownerId: "owner-1",
+    });
+    const result = await seedCodingAgents(db, input);
+    expect(result.reviewer).toEqual({ id, status: "updated" });
+    expect(agents.get(REVIEWER_AGENT)).toMatchObject({ systemPrompt: THOROUGH_REVIEWER_PROMPT, maxTurns: 25 });
+    expect(links.size).toBe(1);
   });
 
   it("refuses a model the coding provider does not support", async () => {
