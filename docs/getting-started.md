@@ -368,8 +368,9 @@ the same commit (never your working tree):
   URLs and local paths are skipped; an included file (`-r other.txt`) is not
   followed.
 
-It keeps bare package names only (no versions), drops names that are not valid
-in their ecosystem, and skips non-registry sources (`file:`, `git`, URL and
+It keeps package names without versions (a Python requirement keeps the extras
+it names, such as `psycopg[binary]`, so the packages those extras add can be
+installed too), drops names that are not valid in their ecosystem, and skips non-registry sources (`file:`, `git`, URL and
 path dependencies). It prints the counts and up to a dozen names, then asks
 "Allow local-builder to install these packages through Wardby's registry?
 [Y/n]". The allowed names go on the builder's `codingProfile.packageAllowlist`.

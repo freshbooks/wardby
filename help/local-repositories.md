@@ -157,7 +157,8 @@ then:
 requires` build packages (or `setuptools` and `wheel` when there is no
   `[build-system]` table), and
   `requirements*.txt`, read from the committed root) as `local-builder`'s
-  package allowlist: bare names only, up to 200 per ecosystem. It lists them
+  package allowlist: names without versions (Python extras such as
+  `psycopg[binary]` are kept), up to 200 per ecosystem. It lists them
   and asks "Allow local-builder to install these packages through Wardby's
   registry? [Y/n]"; every registry safeguard still applies. If you decline, or
   run non-interactively without `--allow-repo-packages`, the allowlist stays

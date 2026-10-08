@@ -3,7 +3,7 @@ id: coding-packages
 title: Approve packages for coding agents
 summary: Let Codex coding workers install vetted npm and PyPI dependencies through Wardby's registry proxy.
 audience: operator
-tags: [coding-agents, packages, npm, pypi, supply-chain, refusals, lockfile]
+tags: [coding-agents, packages, npm, pypi, supply-chain, refusals, lockfile, extras, pip-extras]
 appliesTo: >=0.2.1
 ---
 
@@ -35,14 +35,24 @@ if its own checks failed. A package reachable only through a refused one is
 refused too, so a high-severity advisory deep in a toolchain blocks every run
 that installs it.
 
+## PyPI extras
+
+A PyPI entry may name extras, as pip does: `psycopg[binary]`,
+`uvicorn[standard]>=0.30`. An extra allows only the dependencies that
+package's own metadata declares under that extra (for `psycopg[binary]`, the
+`psycopg-binary` wheel); a bare `psycopg` entry follows no extra, so
+`psycopg-binary` is refused with `wardby_package_not_allowed`. Extras a
+dependency line names (`uvicorn[standard]` in another package's metadata) are
+followed the same way. Every safeguard still applies to what an extra adds.
+
 The quickstart's coding step offers the packages a local repository declares
 (`package.json`, `pyproject.toml` including its build-system packages,
-`requirements*.txt`) as `local-builder`'s
-allowlist after asking, or with `--allow-repo-packages` in a non-interactive
+`requirements*.txt`, keeping Python extras such as `psycopg[binary]`) as
+`local-builder`'s allowlist after asking, or with `--allow-repo-packages` in a non-interactive
 run. See [Local repositories](local-repositories.md).
 
 Review agents see the pull request's CI results in `repo_pr_read` and are
 told to trust CI over the sandbox's **Tests**.
 
 Read [`docs/coding-packages.md`](../docs/coding-packages.md) for allowlist
-syntax, package-policy controls, lockfile behavior, and refusal errors.
+syntax (including [PyPI extras](../docs/coding-packages.md#pypi-extras)), package-policy controls, lockfile behavior, and refusal errors.
