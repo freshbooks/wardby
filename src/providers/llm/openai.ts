@@ -105,6 +105,7 @@ interface ResponsesUsage {
   input_tokens: number;
   output_tokens: number;
   // cache_write_tokens is reported by the API but not yet in the SDK's types.
+  // Both details are subsets of input_tokens (see toUsage).
   input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 }
 
@@ -220,17 +221,24 @@ export class OpenAiLlmProvider implements CatalogLlmAdapter {
     }
   }
 
+  /**
+   * OpenAI reports both `cached_tokens` and `cache_write_tokens` as subsets
+   * of `input_tokens`. wardby's LlmUsage convention (claude-messages.ts,
+   * computeCost) is that `inputTokens` includes cache reads but NOT cache
+   * writes, which are billed separately at the write rate — so the writes
+   * come out of `inputTokens` here, or computeCost would charge them twice.
+   */
   private toUsage(model: string, raw: ResponsesUsage | null | undefined): LlmUsage {
-    const inputTokens = raw?.input_tokens ?? 0;
+    const cachedInputTokens = raw?.input_tokens_details?.cached_tokens ?? 0;
+    const cacheWriteTokens = raw?.input_tokens_details?.cache_write_tokens ?? 0;
+    const inputTokens = Math.max((raw?.input_tokens ?? 0) - cacheWriteTokens, 0);
     // output_tokens already includes reasoning tokens.
     const outputTokens = raw?.output_tokens ?? 0;
-    const cachedInputTokens = raw?.input_tokens_details?.cached_tokens ?? 0;
-    const cacheWrite = raw?.input_tokens_details?.cache_write_tokens;
     const tokens = {
       inputTokens,
       outputTokens,
       cachedInputTokens,
-      ...(cacheWrite !== undefined && cacheWrite > 0 ? { cacheWriteTokens: cacheWrite } : {}),
+      ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
     };
     return { ...tokens, costUsd: this.priceUsd(model, tokens) };
   }

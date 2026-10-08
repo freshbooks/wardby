@@ -142,10 +142,10 @@ describe("OpenAiLlmProvider (Responses API) stream parsing", () => {
     }
   });
 
-  it("reports cached and cache-write tokens and prices reasoning tokens at the output rate", async () => {
+  it("prices reasoning tokens (inside output_tokens) at the output rate", async () => {
     const usage = {
       input_tokens: 1_000_000,
-      input_tokens_details: { cached_tokens: 400_000, cache_write_tokens: 200_000 },
+      input_tokens_details: { cached_tokens: 400_000 },
       // output_tokens already includes the reasoning tokens.
       output_tokens: 1_000_000,
       output_tokens_details: { reasoning_tokens: 900_000 },
@@ -157,14 +157,57 @@ describe("OpenAiLlmProvider (Responses API) stream parsing", () => {
     const done = events.at(-1);
     expect(done?.type).toBe("done");
     if (done?.type === "done") {
+      expect(done.usage).toMatchObject({ inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 1_000_000 });
+      // fresh 0.6M × $2 + cached 0.4M × $0.5 + output 1M × $10
+      expect(done.usage.costUsd).toBeCloseTo(1.2 + 0.2 + 10, 9);
+    }
+  });
+
+  // Live usage from gpt-5.6-luna, the same ~3.5k-token prefix sent twice:
+  // OpenAI reports cache_write_tokens and cached_tokens as subsets of
+  // input_tokens. wardby's LlmUsage keeps cache writes outside inputTokens,
+  // so the adapter must subtract them or computeCost bills them twice.
+  it("takes cache-write tokens out of inputTokens (live fixture: first call writes the cache)", async () => {
+    const usage = {
+      input_tokens: 3510,
+      input_tokens_details: { cache_write_tokens: 3507, cached_tokens: 0 },
+      output_tokens: 5,
+    };
+    const { client } = fakeResponsesClient([completed(usage)]);
+    const llm = new OpenAiLlmProvider("k", client).withEntry(reasoningEntry());
+    const events = await collect(llm, { model: "reasoner", messages: [] });
+
+    const done = events.at(-1);
+    expect(done?.type).toBe("done");
+    if (done?.type === "done") {
       expect(done.usage).toMatchObject({
-        inputTokens: 1_000_000,
-        cachedInputTokens: 400_000,
-        cacheWriteTokens: 200_000,
-        outputTokens: 1_000_000,
+        inputTokens: 3,
+        cachedInputTokens: 0,
+        cacheWriteTokens: 3507,
+        outputTokens: 5,
       });
-      // fresh 0.6M × $2 + cached 0.4M × $0.5 + write 0.2M × $3 + output 1M × $10
-      expect(done.usage.costUsd).toBeCloseTo(1.2 + 0.2 + 0.6 + 10, 9);
+      // fresh 3 × $2 + write 3507 × $3 + output 5 × $10, per MTok
+      expect(done.usage.costUsd).toBeCloseTo((3 * 2 + 3507 * 3 + 5 * 10) / 1_000_000, 12);
+    }
+  });
+
+  it("prices cached tokens at the cache-read rate (live fixture: second call reads the cache)", async () => {
+    const usage = {
+      input_tokens: 3510,
+      input_tokens_details: { cache_write_tokens: 0, cached_tokens: 3507 },
+      output_tokens: 5,
+    };
+    const { client } = fakeResponsesClient([completed(usage)]);
+    const llm = new OpenAiLlmProvider("k", client).withEntry(reasoningEntry());
+    const events = await collect(llm, { model: "reasoner", messages: [] });
+
+    const done = events.at(-1);
+    expect(done?.type).toBe("done");
+    if (done?.type === "done") {
+      expect(done.usage).toMatchObject({ inputTokens: 3510, cachedInputTokens: 3507, outputTokens: 5 });
+      expect("cacheWriteTokens" in done.usage).toBe(false);
+      // fresh 3 × $2 + cached 3507 × $0.5 + output 5 × $10, per MTok
+      expect(done.usage.costUsd).toBeCloseTo((3 * 2 + 3507 * 0.5 + 5 * 10) / 1_000_000, 12);
     }
   });
 
