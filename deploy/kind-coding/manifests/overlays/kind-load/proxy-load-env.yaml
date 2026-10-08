@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  template:
+    spec:
+      containers:
+        - name: proxy
+          env:
+            - name: WARDBY_LOAD_TEST
+              value: "1"
+            - name: WARDBY_CODING_PROXY_MOCK_UPSTREAM
+              value: "1"
+            - name: WARDBY_LOAD_MOCK_LATENCY_MS
+              value: "5000"
