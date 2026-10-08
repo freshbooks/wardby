@@ -106,9 +106,17 @@ function sseBody(events: SseEvent[]): string {
   return events.map((e, i) => `event: ${e.type}\ndata: ${JSON.stringify({ ...e, sequence_number: i })}\n\n`).join("");
 }
 
-function sseHandler(events: SseEvent[], options: { gzip?: boolean } = {}): Handler {
+interface SseHandlerOptions {
+  gzip?: boolean;
+  /** A pre-framed body to send instead of `sseBody(events)` (e.g. with \r\n line endings). */
+  body?: string;
+  /** Write the body in pieces of this many bytes, one event-loop turn apart, so frames, JSON and UTF-8 straddle reads. */
+  chunkSize?: number;
+}
+
+function sseHandler(events: SseEvent[], options: SseHandlerOptions = {}): Handler {
   return (_req, res) => {
-    const body = sseBody(events);
+    const body = Buffer.from(options.body ?? sseBody(events));
     const headers: Record<string, string> = {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache",
@@ -117,11 +125,29 @@ function sseHandler(events: SseEvent[], options: { gzip?: boolean } = {}): Handl
     if (options.gzip) {
       headers["content-encoding"] = "gzip";
       res.writeHead(200, headers);
-      res.end(gzipSync(Buffer.from(body)));
+      res.end(gzipSync(body));
       return;
     }
     res.writeHead(200, headers);
-    res.end(body);
+    const size = options.chunkSize;
+    if (!size) {
+      res.end(body);
+      return;
+    }
+    res.socket?.setNoDelay(true);
+    let offset = 0;
+    const writeNext = (): void => {
+      if (res.destroyed) return;
+      const piece = body.subarray(offset, offset + size);
+      offset += size;
+      if (offset >= body.length) {
+        res.end(piece);
+        return;
+      }
+      res.write(piece);
+      setImmediate(writeNext);
+    };
+    writeNext();
   };
 }
 
@@ -341,13 +367,53 @@ describe("OpenAI adapter through the real SDK: successful streams", () => {
     expect(done?.type === "done" && done.usage.costUsd).toBeCloseTo(BILLED_COST, 12);
   });
 
-  it("decodes a gzip-encoded SSE body (headers must survive the transport)", async () => {
+  it("decodes a gzip-encoded SSE body through the real fetch path", async () => {
     server.script(sseHandler([created(), textDelta("zipped"), completed(BILLED_USAGE)], { gzip: true }));
 
     const events = await collect(provider());
 
     expect(events[0]).toEqual({ type: "text", delta: "zipped" });
     expect(events.at(-1)).toMatchObject({ type: "done", usage: { costUsd: expect.closeTo(BILLED_COST, 12) } });
+  });
+
+  it("reassembles frames split at arbitrary byte boundaries (7-byte reads, UTF-8, \\r\\n framing)", async () => {
+    const CHUNK = 7;
+    const events = [created(), textDelta("Hel"), textDelta("café ✓ naïve — 日本語"), completed(BILLED_USAGE)];
+    // One event framed with \r\n line endings (allowed by the SSE spec), the rest with \n.
+    const body = events
+      .map((e, i) => {
+        const frame = `event: ${e.type}\ndata: ${JSON.stringify({ ...e, sequence_number: i })}\n\n`;
+        return i === 2 ? frame.replaceAll("\n", "\r\n") : frame;
+      })
+      .join("");
+    // Keep the fixture honest: a multi-byte character and the usage JSON
+    // both straddle a chunk boundary.
+    const bytes = Buffer.from(body);
+    const boundaries = Array.from({ length: Math.floor(bytes.length / CHUNK) }, (_, k) => (k + 1) * CHUNK);
+    expect(boundaries.some((b) => b < bytes.length && (bytes[b] & 0xc0) === 0x80)).toBe(true);
+    const usageStart = bytes.indexOf('"usage":{"input_tokens"');
+    const usageEnd = bytes.indexOf("}", bytes.indexOf('"total_tokens"', usageStart));
+    expect(boundaries.some((b) => b > usageStart && b <= usageEnd)).toBe(true);
+    expect(body).toContain("\r\n\r\n");
+    server.script(sseHandler([], { body, chunkSize: CHUNK }));
+
+    const parsed = await collect(provider());
+
+    expect(parsed).toEqual([
+      { type: "text", delta: "Hel" },
+      { type: "text", delta: "café ✓ naïve — 日本語" },
+      {
+        type: "done",
+        stopReason: "stop",
+        usage: {
+          inputTokens: 2010,
+          outputTokens: 205,
+          cachedInputTokens: 2000,
+          cacheWriteTokens: 1500,
+          costUsd: expect.closeTo(BILLED_COST, 12),
+        },
+      },
+    ]);
   });
 });
 
@@ -700,7 +766,10 @@ describe("OpenAI SDK transport", () => {
    * tests by vitest.setup.ts). If that dispatcher were h2-capable, the
    * Dispatcher1Wrapper header loss would strip content-encoding and
    * retry-after from OpenAI responses — so assert the SDK really goes
-   * through it, and that it is the h1-only one.
+   * through it, and that it is the h1-only one. The replay server is
+   * cleartext HTTP/1.1, so h2 is never negotiated here whatever the
+   * dispatcher allows: the gzip body below only proves decoding through the
+   * real fetch path, and the `allowsH2 === false` assertion is the h2 guard.
    */
   it("sends OpenAI requests through wardby's h1-only global dispatcher", async () => {
     const dispatcher = getGlobalDispatcher();
