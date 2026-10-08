@@ -665,6 +665,8 @@ model NativeGatewayCall {
   /// A replayable result. Never a secret value.
   result            Json?
   childRunId        String?
+  /// A delegation's sub-agent, recorded at admission (it holds a place while waiting for budget).
+  childAgentId      String?
   createdAt         DateTime                @default(now())
   updatedAt         DateTime                @updatedAt
   completedAt       DateTime?

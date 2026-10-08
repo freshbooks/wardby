@@ -117,9 +117,21 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaGatewayLedger (database)", () 
   it("tracks a delegation's child run and budget wait on its call", async () => {
     const { created } = await session();
     await ledger.claim(created.id, "d-1", "builtin.call");
-    await ledger.setDelegation(created.id, "d-1", { status: "waiting_budget" });
-    expect(await ledger.delegation(created.id, "d-1")).toEqual({ status: "waiting_budget", childRunId: null });
-    await ledger.setDelegation(created.id, "d-1", { status: "pending", childRunId: "child-run-1" });
-    expect(await ledger.delegation(created.id, "d-1")).toEqual({ status: "pending", childRunId: "child-run-1" });
+    await ledger.claim(created.id, "d-2", "builtin.call");
+    await ledger.setDelegation(created.id, "d-1", { status: "waiting_budget", childAgentId: "agent-a" });
+    await ledger.setDelegation(created.id, "d-2", { status: "waiting_budget", childAgentId: "agent-b" });
+    expect(await ledger.delegation(created.id, "d-1")).toMatchObject({
+      status: "waiting_budget",
+      childRunId: null,
+      childAgentId: "agent-a",
+    });
+    expect(await ledger.waitingChildAgentIds(created.id, "d-1")).toEqual(["agent-b"]);
+    await ledger.setDelegation(created.id, "d-1", {
+      status: "pending",
+      childAgentId: "agent-a",
+      childRunId: "child-run-1",
+    });
+    expect(await ledger.delegation(created.id, "d-1")).toMatchObject({ status: "pending", childRunId: "child-run-1" });
+    expect(await ledger.openDelegationChildren(created.id)).toEqual(["child-run-1"]);
   });
 });

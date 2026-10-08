@@ -60,6 +60,9 @@ export type ClaimOutcome = { outcome: "claimed" } | { outcome: "in_flight" } | {
 export interface DelegationState {
   status: "pending" | "waiting_budget" | "completed";
   childRunId: string | null;
+  childAgentId: string | null;
+  /** When the delegation was first called: its wait bounds count from here. */
+  createdAt: Date;
 }
 
 const LEDGER_TX = { maxWait: 5_000, timeout: 20_000 } as const;
@@ -205,15 +208,19 @@ export class PrismaGatewayLedger {
     });
   }
 
-  /** A delegation's durable progress: waiting for budget, or started as `childRunId`. */
+  /** A delegation's durable progress: its sub-agent, whether it waits for budget, and its child run once started. */
   async setDelegation(
     sessionId: string,
     callId: string,
-    state: { status: "pending" | "waiting_budget"; childRunId?: string },
+    state: { status: "pending" | "waiting_budget"; childAgentId: string; childRunId?: string },
   ): Promise<void> {
     await this.db.nativeGatewayCall.updateMany({
       where: { sessionId, callId, status: { in: ["pending", "waiting_budget"] } },
-      data: { status: state.status, ...(state.childRunId ? { childRunId: state.childRunId } : {}) },
+      data: {
+        status: state.status,
+        childAgentId: state.childAgentId,
+        ...(state.childRunId ? { childRunId: state.childRunId } : {}),
+      },
     });
   }
 
@@ -222,7 +229,25 @@ export class PrismaGatewayLedger {
     if (!row) return null;
     const status =
       row.status === "waiting_budget" ? "waiting_budget" : row.status === "completed" ? "completed" : "pending";
-    return { status, childRunId: row.childRunId };
+    return { status, childRunId: row.childRunId, childAgentId: row.childAgentId, createdAt: row.createdAt };
+  }
+
+  /** The sub-agents other delegations of this run are waiting for budget to start. */
+  async waitingChildAgentIds(sessionId: string, exceptCallId: string): Promise<string[]> {
+    const rows = await this.db.nativeGatewayCall.findMany({
+      where: { sessionId, status: "waiting_budget", callId: { not: exceptCallId }, childAgentId: { not: null } },
+      select: { childAgentId: true },
+    });
+    return rows.map((row) => row.childAgentId as string);
+  }
+
+  /** Delegations of this session whose child run is started and not yet reported. */
+  async openDelegationChildren(sessionId: string): Promise<string[]> {
+    const rows = await this.db.nativeGatewayCall.findMany({
+      where: { sessionId, status: "pending", childRunId: { not: null } },
+      select: { childRunId: true },
+    });
+    return rows.map((row) => row.childRunId as string);
   }
 }
 
