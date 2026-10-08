@@ -52,6 +52,15 @@ function allowlistName(ecosystem: Ecosystem, name: string): string | null {
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
+/**
+ * A note goes to the terminal, and file names and scan errors can carry
+ * repository text (a TOML key's \u001b escape decodes to a real ESC): keep
+ * printable ASCII only, so a repository cannot send terminal control sequences.
+ */
+function printable(note: string): string {
+  return note.replace(/[^\x20-\x7e]/g, "?");
+}
+
 export async function readRepoPackages(dir: string, sha: string): Promise<RepoPackages> {
   let entries;
   try {
@@ -93,5 +102,5 @@ export async function readRepoPackages(dir: string, sha: string): Promise<RepoPa
       allowlist[ecosystem] = names;
     }
   }
-  return { allowlist, notes };
+  return { allowlist, notes: notes.map(printable) };
 }

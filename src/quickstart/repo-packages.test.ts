@@ -102,6 +102,17 @@ describe("readRepoPackages", () => {
     expect(notes.join("\n")).toMatch(/package\.json/);
   });
 
+  it("never echoes control characters from the repository in a note", async () => {
+    // A quoted TOML key with a \u001b escape decodes to a real ESC byte, which the scan error names.
+    commit({
+      "pyproject.toml": '[tool.poetry.dependencies]\n"a\\u001b[31m\\u0007" = "1"\n"a\\u001b[31m\\u0007" = "2"\n',
+    });
+    const { notes } = await readRepoPackages(repo, head());
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/pyproject\.toml/);
+    expect(notes[0]).toMatch(/^[\x20-\x7e]*$/);
+  });
+
   it(`offers up to ${MAX_REPO_PACKAGES} names per ecosystem and none above that`, async () => {
     const many = (count: number) => Object.fromEntries(Array.from({ length: count }, (_, i) => [`pkg-${i}`, "1"]));
     commit({

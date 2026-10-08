@@ -107,7 +107,8 @@ The quickstart's coding step (see
 dependencies the chosen local repository declares at the root of its base
 commit — `package.json` (`dependencies`, `devDependencies`,
 `optionalDependencies`), `pyproject.toml` (`[project]` dependencies, optional
-dependency groups, Poetry dependencies and groups) and `requirements*.txt` —
+dependency groups, Poetry dependencies and groups, and Poetry's legacy
+`[tool.poetry.dev-dependencies]`) and `requirements*.txt` —
 and offers them as `local-builder`'s allowlist: bare names only (PyPI names
 PEP 503-normalized), invalid names dropped, at most 200 per ecosystem. It asks
 before adding them; a `--non-interactive` run adds them only with

@@ -328,8 +328,9 @@ the same commit (never your working tree):
 - `package.json`: `dependencies`, `devDependencies` and `optionalDependencies`
   (not peer dependencies) for npm;
 - `pyproject.toml`: `[project] dependencies`, every
-  `[project.optional-dependencies]` group, `[tool.poetry.dependencies]` and
-  Poetry's dependency groups for PyPI;
+  `[project.optional-dependencies]` group, `[tool.poetry.dependencies]`,
+  Poetry's dependency groups and the legacy `[tool.poetry.dev-dependencies]`
+  for PyPI;
 - every `requirements*.txt` for PyPI. Options such as `-r`, `-c` and `-e`,
   URLs and local paths are skipped; an included file (`-r other.txt`) is not
   followed.
