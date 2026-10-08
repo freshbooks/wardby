@@ -10,6 +10,9 @@ const worker = `ghcr.io/o/r/wardby-coding-worker@${digest("b")}`;
 const claudeWorker = `ghcr.io/o/r/wardby-claude-coding-worker@${digest("c")}`;
 const claudeToolRunner = `ghcr.io/o/r/wardby-claude-tool-runner@${digest("d")}`;
 
+const workerNodePython = `ghcr.io/o/r/wardby-coding-worker-node-python@${digest("e")}`;
+const claudeToolRunnerNodePython = `ghcr.io/o/r/wardby-claude-tool-runner-node-python@${digest("f")}`;
+
 function root(): string {
   return mkdtempSync(join(tmpdir(), "wardby-images-"));
 }
@@ -174,8 +177,93 @@ describe("resolveQuickstartImages", () => {
       worker: "wardby-coding-worker:local",
       claudeWorker: "wardby-claude-coding-worker:local",
       claudeToolRunner: "wardby-claude-tool-runner:local",
+      workerNodePython: "wardby-coding-worker-node-python:local",
+      claudeToolRunnerNodePython: "wardby-claude-tool-runner-node-python:local",
       source: "build",
     });
+  });
+
+  it("returns the Node + Python images from the package file when present", () => {
+    const dir = root();
+    writePackageFile(dir, {
+      runtime,
+      worker,
+      claudeWorker,
+      claudeToolRunner,
+      workerNodePython,
+      claudeToolRunnerNodePython,
+    });
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toEqual({
+      runtime,
+      worker,
+      claudeWorker,
+      claudeToolRunner,
+      workerNodePython,
+      claudeToolRunnerNodePython,
+      source: "package",
+    });
+  });
+
+  it("treats each Node + Python image as optional on its own", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, workerNodePython });
+    const result = resolveQuickstartImages({ env: {}, packageRoot: dir });
+    expect(result).toEqual({ runtime, worker, workerNodePython, source: "package" });
+    expect(result).not.toHaveProperty("claudeToolRunnerNodePython");
+    writePackageFile(dir, { runtime, worker });
+    const bare = resolveQuickstartImages({ env: {}, packageRoot: dir });
+    expect(bare).not.toHaveProperty("workerNodePython");
+    expect(bare).not.toHaveProperty("claudeToolRunnerNodePython");
+  });
+
+  it("rejects the whole package file when a Node + Python image is not digest-pinned", () => {
+    for (const bad of [
+      { workerNodePython: "ghcr.io/o/r/wardby-coding-worker-node-python:v1" },
+      { claudeToolRunnerNodePython: "ghcr.io/o/r/wardby-claude-tool-runner-node-python:v1" },
+      { workerNodePython: 7 },
+      { claudeToolRunnerNodePython: null },
+    ]) {
+      const dir = root();
+      writePackageFile(dir, { runtime, worker, ...bad });
+      expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toHaveProperty("unavailable");
+    }
+  });
+
+  it("passes Node + Python environment overrides through, in every source", () => {
+    const env = {
+      CODING_WORKER_IMAGE_NODE_PYTHON_3_12: "wp:1",
+      CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12: "ctp:1",
+    };
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, workerNodePython, claudeToolRunnerNodePython });
+    expect(resolveQuickstartImages({ env, packageRoot: dir })).toMatchObject({
+      workerNodePython: "wp:1",
+      claudeToolRunnerNodePython: "ctp:1",
+      source: "package",
+    });
+    expect(
+      resolveQuickstartImages({
+        env: { ...env, WARDBY_RUNTIME_IMAGE: "r:1", CODING_WORKER_IMAGE: "w:1" },
+        packageRoot: dir,
+      }),
+    ).toEqual({
+      runtime: "r:1",
+      worker: "w:1",
+      workerNodePython: "wp:1",
+      claudeToolRunnerNodePython: "ctp:1",
+      source: "env",
+    });
+  });
+
+  it("takes each Node + Python image from the environment independently, ignoring blanks", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, workerNodePython, claudeToolRunnerNodePython });
+    expect(
+      resolveQuickstartImages({
+        env: { CODING_WORKER_IMAGE_NODE_PYTHON_3_12: "wp:1", CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12: " " },
+        packageRoot: dir,
+      }),
+    ).toMatchObject({ workerNodePython: "wp:1", claudeToolRunnerNodePython, source: "package" });
   });
 
   it("reports unavailable otherwise", () => {
