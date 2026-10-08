@@ -69,14 +69,15 @@ it widens what the agent can download.
 
 `packageAllowlist` is keyed by ecosystem (`npm`, `pypi`), each an array of
 approved top-level entries. An entry is a bare package name, a name with a
-version range in that ecosystem's own syntax, or (npm only) a scope wildcard:
+version range in that ecosystem's own syntax, (PyPI only) a name with extras,
+or (npm only) a scope wildcard:
 
 ```json
 {
   "codingProfile": {
     "packageAllowlist": {
       "npm": ["react@^19", "@testing-library/*"],
-      "pypi": ["flask>=3"]
+      "pypi": ["flask>=3", "psycopg[binary]>=3.2"]
     }
   }
 }
@@ -85,6 +86,9 @@ version range in that ecosystem's own syntax, or (npm only) a scope wildcard:
 - `react@^19` — npm semver range syntax.
 - `@testing-library/*` — every package under that npm scope.
 - `flask>=3` — PEP 440 specifier syntax for PyPI.
+- `psycopg[binary]>=3.2` — a PyPI package with the extras it is installed
+  with, in PEP 508 form: `name[extra1,extra2]`, optionally followed by a
+  specifier. See [PyPI extras](#pypi-extras).
 - A bare name with no range (`"lodash"`) allows any version, subject to the
   other safeguards below.
 - npm names are matched exactly, including case. npm treats some legacy
@@ -99,6 +103,100 @@ version is approved, the proxy reads its dependency graph from registry
 metadata and grows the run's allowance automatically as npm or pip requests
 each dependency's metadata, so you don't have to enumerate transitive
 dependencies yourself.
+
+### PyPI extras
+
+A PyPI package can declare optional dependencies under named _extras_:
+`pip install "psycopg[binary]"` also installs `psycopg-binary`, which
+`psycopg` declares only under its `binary` extra. Without the extra on the
+allowlist, the proxy follows only a package's plain dependencies, so
+`psycopg-binary` would be refused with `wardby_package_not_allowed` even
+though `psycopg` is allowed.
+
+Name the extras on the entry, exactly as you would to pip:
+
+```json
+{ "pypi": ["psycopg[binary]", "uvicorn[standard]>=0.30", "celery[redis,msgpack]"] }
+```
+
+- Each extra must be a valid extra name (letters, digits, and `.`, `_` or `-`
+  between them), at most 32 per entry. Extras are compared after PEP 685
+  normalization (lower case, runs of `-`, `_` and `.` become `-`), so
+  `[Foo_Bar]` and `[foo-bar]` are the same extra.
+- An extra allows only the dependencies the package's own metadata declares
+  under that extra (`Requires-Dist: psycopg-binary==3.2.3; implementation_name
+!= "pypy" and extra == "binary"`). The rest of such a line's environment
+  marker is not evaluated, so the extra's dependencies are allowed on every
+  platform; pip still installs only what applies. Dependencies under any
+  other extra stay refused.
+- An entry without brackets follows no extras at all — neither its own nor
+  its dependencies'. When a plain entry's metadata asks for a dependency with
+  extras (`fastapi` declaring `uvicorn[standard]>=0.30`), the dependency is
+  allowed as the bare package, exactly as for any plain dependency, and the
+  packages under its extra stay refused. To allow them, name the extra on the
+  allowlist: `fastapi[standard]`, or `uvicorn[standard]` directly.
+- Dependencies' extras are followed only below a package the run allows with
+  extras: an entry that names extras, or a dependency such a package's
+  metadata asks for with extras. Below `fastapi[standard]`, a
+  `uvicorn[standard]` dependency line allows `uvicorn`'s `standard` packages
+  too. A dependency reached that way without extras of its own gets only its
+  plain dependencies.
+- The same package may appear in several entries; their extras are combined.
+- An extra that a dependency line asks for is followed only once the proxy has
+  served that parent's metadata. If pip reads the dependency before its parent
+  (for example because the dependency is also an allowlist entry) and the
+  extra's packages are refused with `403 wardby_package_not_allowed`, name the
+  extra on the allowlist directly, e.g. `uvicorn[standard]`.
+- The extra markers the proxy recognises are `extra == "name"`,
+  `extra === "name"`, and the reversed forms `"name" == extra` and
+  `"name" === extra` (single or double quotes, inside `and`/`or` and
+  parentheses).
+- A marker that mentions `extra` in any other form (`"name" in extra`,
+  `extra in "a b"`, a bare `extra`, or a marker with an unbalanced quote) is
+  treated as gated on no extra: that line is never followed, for any entry,
+  plain or not. Allowlist the package it names directly if you need it.
+- The proxy reads a wheel's `METADATA` only up to the end of its headers (the
+  first empty line); `Requires-Dist` text in the package description after
+  them is ignored.
+
+The last two rules apply to every PyPI allowlist, including ones without any
+extras, and are deliberately fail-closed: a dependency line the proxy cannot
+read with certainty is not followed. If a package that installed before is now
+refused with `403 wardby_package_not_allowed` because its parent declares it
+that way, add it to the allowlist directly.
+
+Extras on allowlist entries need the coding proxy and the control plane at the
+same Wardby version. A proxy from before extras support cannot parse a
+`name[extra]` entry at all: the whole allowlist fails to load, so **every**
+registry request of a run with such an entry fails, not just that package.
+Upgrade the proxy before (or with) the control plane. For the same reason,
+once any coding profile stores an extras entry, downgrading the control plane
+or proxy below the release that added extras is unsafe; remove the extras
+entries first.
+
+Every safeguard below (release age, advisories, wheels only, the record of
+what was fetched) applies to packages reached through an extra.
+
+### The quickstart offers a repository's declared packages
+
+The quickstart's coding step (see
+[Get started](getting-started.md#packages-the-repository-declares)) reads the
+dependencies the chosen local repository declares at the root of its base
+commit — `package.json` (`dependencies`, `devDependencies`,
+`optionalDependencies`), `pyproject.toml` (`[project]` dependencies, optional
+dependency groups, Poetry dependencies and groups, and Poetry's legacy
+`[tool.poetry.dev-dependencies]`, plus its `[build-system] requires` build
+packages, or `setuptools` and `wheel` when there is no `[build-system]` table)
+and `requirements*.txt` —
+and offers them as `local-builder`'s allowlist: names without versions (PyPI
+names PEP 503-normalized, keeping the extras a requirement names, such as
+`psycopg[binary]`, merged per package), invalid names dropped, at most 200 per
+ecosystem. It asks
+before adding them; a `--non-interactive` run adds them only with
+`--allow-repo-packages`. Every safeguard on this page still applies to those
+entries. A re-run of the quickstart replaces the builder's allowlist with the
+repository's current set (or an empty one if declined), so make lasting
+additions on a builder you created yourself, or re-apply them after a re-run.
 
 ### Lockfile installs: verified, then approved exactly
 
@@ -429,7 +527,7 @@ see on a failed install:
 
 | Code                                 | Status | Meaning / what to do                                                                                                                                                                                                                                                                                                               |
 | ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `wardby_package_not_allowed`         | 403    | The package isn't on the allowlist and isn't reachable from an allowlisted package's dependency graph. Add it (or its top-level dependent) to `packageAllowlist`.                                                                                                                                                                  |
+| `wardby_package_not_allowed`         | 403    | The package isn't on the allowlist and isn't reachable from an allowlisted package's dependency graph. Add it (or its top-level dependent) to `packageAllowlist`. For a PyPI package an extra pulls in (`psycopg-binary` for `psycopg[binary]`), name the extra on the entry instead.                                              |
 | `wardby_file_not_allowed`            | 403    | The specific file type is never served for this ecosystem (for example a PyPI sdist). Nothing to configure; use a wheel.                                                                                                                                                                                                           |
 | `wardby_version_filtered`            | 404    | Every matching version is too new (younger than `minReleaseAgeDays`) or withheld by the vulnerability audit. Wait for it to age past the threshold, or lower `minReleaseAgeDays` if you understand the risk.                                                                                                                       |
 | `wardby_package_not_found`           | 404    | The upstream registry has no such package name. Check the spelling (npm names are case-sensitive).                                                                                                                                                                                                                                 |

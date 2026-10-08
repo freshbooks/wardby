@@ -49,11 +49,12 @@ The quickstart's sample agent is a native agent: it calls a model and nothing
 else. To have agents write code or review it, pick the path that matches what
 you have:
 
-| You want                                          | You need                                                           | Path                                              |
-| ------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------- |
-| A coding agent and a review agent, tried locally  | Docker, an OpenAI **or** Anthropic key, a git repository on disk   | [A](#path-a-local-repository-no-github-app)       |
-| A coding agent that opens pull requests on GitHub | Path A's setup, plus a GitHub App installed on the repository      | [B](#path-b-coding-agent-on-a-github-repository)  |
-| A review agent that reviews GitHub pull requests  | A GitHub App with webhooks, and Wardby reachable over public HTTPS | [C](#path-c-review-agent-on-github-pull-requests) |
+| You want                                                | You need                                                           | Path                                               |
+| ------------------------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------- |
+| A coding agent and a review agent, tried locally        | Docker, an OpenAI **or** Anthropic key, a git repository on disk   | [A](#path-a-local-repository-no-github-app)        |
+| A coding agent that opens pull requests on GitHub       | Path A's setup, plus a GitHub App installed on the repository      | [B](#path-b-coding-agent-on-a-github-repository)   |
+| A review agent that reviews GitHub pull requests        | A GitHub App with webhooks, and Wardby reachable over public HTTPS | [C](#path-c-review-agent-on-github-pull-requests)  |
+| A coding agent for a language other than Node or Python | Path A's setup with Codex, and Docker to build an image            | [D](#path-d-another-language-build-your-own-image) |
 
 Codex agents need only an OpenAI key and Claude Code agents only an Anthropic
 key; you don't need both.
@@ -70,7 +71,10 @@ key; you don't need both.
    Or run plain `quickstart` and answer **yes** to "Set up coding + review
    agents against a local git repo?". It asks for Codex or Claude Code, pulls
    only that provider's images, starts the coding proxy, and creates two agents:
-   `local-builder` (writes code) and `local-reviewer` (reviews it).
+   `local-builder` (writes code) and `local-reviewer` (reviews it). If the
+   repository is a Python project, the builder gets a Node + Python 3.12
+   workspace so it can run the project's tests (see
+   [Python projects](#python-projects)).
 
 2. Ask your MCP client (the quickstart can register Wardby with Codex or Claude
    Code) to run the builder. The quickstart prints the exact call, for example:
@@ -152,6 +156,26 @@ or another host with a public URL.
 
 To try reviews before you have a public URL, use path A's `local-reviewer` on
 any local branch.
+
+### Path D: another language: build your own image
+
+Wardby's worker images have Node, or Node and Python 3.12. For a Go, Java, Rust
+or other project, build a worker image with that toolchain on Wardby's driver
+base image, and point the builder at it with `codingProfile.workerImageRef`.
+This works for **Codex** agents only today: a Claude Code agent runs its
+commands in its tool runner, which a custom worker image does not change.
+
+1. Complete path A with Codex (`--coding-provider codex`).
+2. Run `npx @wardby/cli@latest doctor`. It prints the base image to build on:
+   "Base image for your own worker images: …@sha256:…".
+3. Write and build the Dockerfile as described in
+   [Bring-your-own worker images](coding-worker-byo-images.md), then set the
+   builder's `codingProfile.workerImageRef` with `update_agent` to the image's
+   local ID (`docker image inspect --format '{{.Id}}' <image>`).
+
+Your MCP assistant can do these steps for you: ask it "Help me build a Wardby
+worker image for Go" (or your language). It follows the `build-worker-image`
+help article, checks the image, and runs a test task with it.
 
 ## Unattended setup
 
@@ -261,7 +285,10 @@ This step needs Docker, and an `OPENAI_API_KEY` (Codex) or `ANTHROPIC_API_KEY`
    `CODING_CLAUDE_TOOL_RUNNER_IMAGE`, to use images of your own;
 3. starts the coding proxy and runs the coding preflight;
 4. creates `local-builder` (a coding agent, $2 budget) and `local-reviewer` (a
-   review agent, $1 budget) for a repository in the trusted folders (a trusted
+   review agent, $1.50 budget, on Claude Sonnet 5 or `gpt-5.6-terra` by default:
+   a step above the builder's model, so a review costs more per call but stays
+   within its budget; `--model` does not change it: change it with
+   `update_agent` — a quickstart re-run resets it) for a repository in the trusted folders (a trusted
    folder that is a git repository, or one directly inside it; with several,
    quickstart asks, or non-interactively uses the first in sorted order and
    prints it. Re-run with `--trust <repo>` to choose another: folders passed on
@@ -269,6 +296,14 @@ This step needs Docker, and an `OPENAI_API_KEY` (Codex) or `ANTHROPIC_API_KEY`
 5. prints two `trigger_agent` calls: one asks `local-builder` for a change, the
    other asks `local-reviewer` to review the branch `wardby/run-<run id>` the
    run pushed into your repository.
+
+`local-reviewer` uses a thorough, repository-agnostic review prompt: it checks
+correctness, security against the OWASP Top 10, performance, duplication,
+modularity, AI-generated slop, code quality, test coverage and process, cites
+your `docs/knowledge/` concepts when you have them, and ends with APPROVE or
+CHANGES_REQUESTED. The prompt is quoted in the `architecture-agent` help
+article. A re-run of quickstart moves a reviewer created by an earlier version
+onto it; a `local-reviewer` you changed yourself is left alone.
 
 **Trust model.** Wardby only touches repositories inside the folders you trust.
 Agents see committed history only: untracked files such as `.env.local` never
@@ -284,6 +319,79 @@ branch" for these agents is the branch checked out when quickstart runs. If the
 repository already has a services file, quickstart prints what it declares, or
 why it is invalid.
 
+#### Python projects
+
+Quickstart reads the committed root of the repository (never your working tree)
+and treats it as a Python project when it holds `pyproject.toml`, `setup.py`,
+`setup.cfg`, `Pipfile` or a `requirements*.txt` file. For a Python project it
+prepares the Node + Python 3.12 workspace image for the provider you chose
+(`toolchain: node-python`, version `3.12`) and creates `local-builder` on it, for
+both Codex and Claude Code. The builder can then run the project's tests:
+`pytest` and `ruff` are installed. Quickstart prints
+"Python project detected: local-builder uses a Node + Python 3.12 workspace".
+
+The image is recorded in `.wardby/.env`. To use your own build of it, set the
+variable for your provider to an immutable digest (`repo@sha256:...`) or a local
+image id before running quickstart:
+
+| Provider    | Variable                                           |
+| ----------- | -------------------------------------------------- |
+| Codex       | `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`             |
+| Claude Code | `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` |
+
+If your wardby version ships no Python workspace image, quickstart prints
+"Python project detected, but this version has no Python workspace image" and
+creates the builder on the default Node workspace: it can edit code but not run
+Python tests. Upgrade, or set the variable above.
+
+Other languages (Go, Rust, Java and so on) are not detected. Use a
+bring-your-own image through `workerImageRef`; see
+[Path D](#path-d-another-language-build-your-own-image) and
+[Bring-your-own worker images](coding-worker-byo-images.md). That is Codex-only
+today: a Claude Code agent cannot use a custom toolchain yet.
+
+#### Packages the repository declares
+
+Coding agents can install only the packages on their allowlist (see
+[Installing packages in coding runs](coding-packages.md)), and a new agent's
+allowlist is empty. So that `local-builder` can install the project's
+dependencies, quickstart reads the ones the repository declares at the root of
+the same commit (never your working tree):
+
+- `package.json`: `dependencies`, `devDependencies` and `optionalDependencies`
+  (not peer dependencies) for npm;
+- `pyproject.toml`: `[project] dependencies`, every
+  `[project.optional-dependencies]` group, `[tool.poetry.dependencies]`,
+  Poetry's dependency groups and the legacy `[tool.poetry.dev-dependencies]`
+  for PyPI, plus the packages pip needs to build the project:
+  `[build-system] requires` (such as `setuptools`, `hatchling` or
+  `poetry-core`), or `setuptools` and `wheel` when the file has no
+  `[build-system]` table (pip then uses the legacy setuptools backend);
+- every `requirements*.txt` for PyPI. Options such as `-r`, `-c` and `-e`,
+  URLs and local paths are skipped; an included file (`-r other.txt`) is not
+  followed.
+
+It keeps package names without versions (a Python requirement keeps the extras
+it names, such as `psycopg[binary]`, so the packages those extras add can be
+installed too), drops names that are not valid in their ecosystem, and skips non-registry sources (`file:`, `git`, URL and
+path dependencies). It prints the counts and up to a dozen names, then asks
+"Allow local-builder to install these packages through Wardby's registry?
+[Y/n]". The allowed names go on the builder's `codingProfile.packageAllowlist`.
+Versions still come from your lockfile or the package manager's resolver, and
+every registry safeguard (release age, advisories, the record of what was
+fetched) still applies.
+
+- More than 200 names in one ecosystem: quickstart adds none from it and says
+  why.
+- A manifest it cannot read (an unusual `pyproject.toml` layout, for example):
+  it prints a one-line note and skips that file.
+- Answering no, or a `--non-interactive` run without `--allow-repo-packages`,
+  leaves the allowlist empty. Add packages later with `update_agent` and
+  `codingProfile.packageAllowlist`.
+- A re-run sets an existing quickstart `local-builder`'s allowlist to what the
+  repository declares now (or empty if you decline), replacing entries you
+  added by hand.
+
 Options for unattended use:
 
 ```sh
@@ -291,7 +399,8 @@ OPENAI_API_KEY="..." npx --yes @wardby/cli@latest quickstart \
   --non-interactive --yes \
   --coding --trust ~/projects/my-repo \
   --coding-provider codex \
-  --starter-services postgres
+  --starter-services postgres \
+  --allow-repo-packages
 ```
 
 - `--coding` runs the step without asking and `--no-coding` skips it. With
@@ -301,6 +410,9 @@ OPENAI_API_KEY="..." npx --yes @wardby/cli@latest quickstart \
 - `--coding-provider codex|claude-code` picks the coding agent; by default it
   uses the provider whose key is available.
 - `--starter-services postgres,redis|none` answers the starter-file question.
+- `--allow-repo-packages` allows the repository's declared packages without
+  asking; `--no-allow-repo-packages` allows none. Non-interactive runs allow
+  none unless the flag is given.
 
 `doctor` and `status` then also report the trusted folders, the worker image,
 the coding proxy, and each local agent's repository, and `down` stops the proxy
@@ -319,9 +431,25 @@ and need the GitHub App, worker image, and job launcher from
 [Coding-agent setup](coding-agent-setup.md). Their event triggers need GitHub to
 reach your instance at a public HTTPS URL.
 
-The assistant the quickstart connected can walk you through either recipe. Ask it
-"Set up the Wardby architecture keeper for this repository" or "Set up a Wardby
-builder for this repository"; it follows the `agent-recipes` help article.
+The quickstart ends with a short menu of things to ask the assistant it
+connected, each with the help article the assistant follows:
+
+1. "Run local-builder with a task, then have local-reviewer review the branch"
+   (`local-repositories`; shown only when the coding step ran).
+2. "Let local-builder install more packages" (`coding-packages`).
+3. "Help me build a Wardby worker image for Go (or Java, Rust…)"
+   (`build-worker-image`).
+4. "Set up a scheduled Wardby agent" (`creating-agents`).
+5. "Set up a Wardby architecture reviewer and keeper for this repo"
+   (`architecture-agent`, which has a local-repository variant).
+6. "Help me plan out a GKE deployment" (`deploy-gke` and
+   `deployment-targets`).
+
+Without an MCP client, read an article with
+`npx @wardby/cli@latest help open <article>`. The GitHub setups above are not
+in the menu; ask for one directly, for example "Set up the Wardby architecture
+keeper for this repository", and the assistant follows the `agent-recipes`
+help article.
 
 ## Next steps
 

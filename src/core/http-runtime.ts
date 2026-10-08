@@ -27,8 +27,14 @@
  * client never did, so the connection is upgraded underneath a fetch
  * implementation that never asked for it. That is why only real APIs broke: the
  * GitHub App client (refusing every coding run before launch), the
- * OpenAI/Anthropic/Bedrock SDKs, and remote-JWKS verification in delegating auth
- * mode. Plain h1 — every local test server — is unaffected.
+ * Anthropic/Bedrock SDKs, and remote-JWKS verification in delegating auth mode.
+ * Plain h1 — every local test server — is unaffected. The OpenAI SDK was NOT
+ * among them at the time: openai@4 shipped its own node-fetch plus an
+ * agentkeepalive agent and never touched the global dispatcher. openai@5+
+ * (wardby pins 7.x) dropped that stack for the built-in `fetch`, so OpenAI
+ * traffic now rides this dispatcher too and depends on it staying h1-only —
+ * `providers/llm/openai.sdk-stream.test.ts` asserts the SDK's requests go
+ * through it.
  *
  * FIX. Keep the built-in `fetch` and give it a dispatcher that stays on the
  * protocol it was written for: undici 8's own `Agent` with `allowH2: false`.
@@ -38,8 +44,9 @@
  *
  * WHY NOT replace the globals. Installing undici's `fetch`/`Headers`/`Response`/
  * `Request`/`FormData` process-wide also works, but it swaps the classes under
- * the MCP SDK, the OpenAI/Anthropic/Bedrock SDKs (all of which brand-check
- * `Headers`/`Response`), `FormData`/`Blob` uploads, `AbortSignal` semantics and
+ * the MCP SDK, the OpenAI (7.x)/Anthropic/Bedrock SDKs (all of which use the
+ * built-in fetch and brand-check `Headers`/`Response`), `FormData`/`Blob`
+ * uploads, `AbortSignal` semantics and
  * every cross-realm `instanceof` — real risk, for no gain over one dispatcher
  * option. It would also move all control-plane egress to h2.
  *
@@ -58,8 +65,8 @@
  * silently restore the corruption — the price of fixing this with a dispatcher
  * instead of owning the fetch stack. Nothing in the runtime image does that
  * today: the only other `setGlobalDispatcher` call in the tree is
- * `node-fetch-native` under the `prisma` CLI, which `deploy/Dockerfile:25`
- * asserts is absent from the runtime image. (Prisma 7's client runtime and
+ * `node-fetch-native` under the `prisma` CLI, which the runtime stage of
+ * `deploy/Dockerfile` asserts is absent. (Prisma 7's client runtime and
  * `@prisma/adapter-pg` contain none; Prisma 6's `runtime/binary.*` did.)
  *
  * Restoring Node's OWN dispatcher instead is not possible, though not for the

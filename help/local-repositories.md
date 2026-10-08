@@ -135,14 +135,42 @@ then:
   `CODING_CLAUDE_WORKER_IMAGE` plus `CODING_CLAUDE_TOOL_RUNNER_IMAGE`, override
   them with your own digests;
 - starts the coding proxy and runs the coding preflight;
+- detects Python projects: if the repository's committed root holds
+  `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` or a `requirements*.txt`,
+  `local-builder` gets a Node + Python 3.12 workspace (`toolchain: node-python`)
+  for Codex and Claude Code, with `pytest` and `ruff`, so it can run the tests.
+  The images come from `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` (Codex) and
+  `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (Claude Code); set them to
+  override. If this version has no Python image, quickstart says so and the
+  builder uses the Node workspace (it can edit but not run Python tests). Other
+  languages need a bring-your-own image via `workerImageRef`, which is
+  Codex-only today: Claude Code agents cannot use a custom toolchain yet. See
+  the BYO worker images guide in the long-form docs;
 - finds the repository: a trusted folder that is a git repository, or the
   repositories directly inside a trusted folder (hidden folders are skipped).
   With several it asks which to use; non-interactively it uses the first in
   sorted order and prints the choice. Re-run with `--trust <repo>` to pick
   another: folders passed on a run take precedence over saved ones;
+- offers the packages the repository declares (`package.json` dependencies,
+  `pyproject.toml` dependencies including optional groups and Poetry, with
+  Poetry's legacy `[tool.poetry.dev-dependencies]`, the `[build-system]
+requires` build packages (or `setuptools` and `wheel` when there is no
+  `[build-system]` table), and
+  `requirements*.txt`, read from the committed root) as `local-builder`'s
+  package allowlist: names without versions (Python extras such as
+  `psycopg[binary]` are kept), up to 200 per ecosystem. It lists them
+  and asks "Allow local-builder to install these packages through Wardby's
+  registry? [Y/n]"; every registry safeguard still applies. If you decline, or
+  run non-interactively without `--allow-repo-packages`, the allowlist stays
+  empty: add packages later with `update_agent` and
+  `codingProfile.packageAllowlist`. A re-run replaces the allowlist with what
+  the repository declares now. A manifest quickstart cannot read is skipped
+  with a note. See [Approve packages for coding agents](coding-packages.md);
 - creates `local-builder` (a coding agent, $2 budget) and `local-reviewer`
-  (a review agent, $1 budget) for the repository and prints the two
-  `trigger_agent` calls to try; and
+  (a review agent, $1.50 budget, on Claude Sonnet 5 or `gpt-5.6-terra` by
+  default, with the thorough review prompt quoted in
+  [Set up an architecture agent](architecture-agent.md#reviewer-system-prompt))
+  for the repository and prints the two `trigger_agent` calls to try; and
 - if the repository has no `.wardby/services.yaml`, offers a starter one with
   PostgreSQL and/or Redis. It is committed to the branch
   `wardby/quickstart-services` without touching your working tree. Merge that
@@ -151,11 +179,14 @@ then:
   branch" is whichever branch is checked out when quickstart runs.
 
 Flags: `--coding` (run the step), `--no-coding` (skip it), `--trust <dir>`
-(repeatable), `--coding-provider codex|claude-code` and
-`--starter-services postgres,redis|none`. In `--non-interactive` mode the step
+(repeatable), `--coding-provider codex|claude-code`,
+`--starter-services postgres,redis|none` and `--allow-repo-packages` (or
+`--no-allow-repo-packages`). In `--non-interactive` mode the step
 only runs with `--coding`, and it needs at least one `--trust`. `doctor` and
 `status` report the trusted folders, worker image, coding proxy and each local
-agent's repository, and `down` stops the proxy with the database.
+agent's repository, and `down` stops the proxy with the database. Quickstart
+ends with a menu of next things to ask your assistant, each naming the help
+article it follows; see [Get started](getting-started.md).
 
 ## Errors
 

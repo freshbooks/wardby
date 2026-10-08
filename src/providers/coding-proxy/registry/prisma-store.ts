@@ -1,6 +1,7 @@
 import type { PrismaClient } from "#prisma";
 import type { PackageAllowlist } from "../../../coding/registry/allowlist.js";
-import type { DeclaredDependency } from "../../../coding/registry/types.js";
+import type { DeclaredDependency, FileDependency } from "../../../coding/registry/types.js";
+import { extraAllowanceName, extraOfAllowanceName } from "./store.js";
 import type {
   ApprovedVersion,
   PlanRefusedVersion,
@@ -37,6 +38,8 @@ export class PrismaRegistryStore implements RegistryStore {
   }
 
   async isAllowedDependency(runId: string, ecosystem: string, name: string): Promise<boolean> {
+    // An extra's row (`name[extra]`) is never a package allowance.
+    if (name.includes("[")) return false;
     const row = await this.db.registryAllowance.findUnique({
       where: { runId_ecosystem_name: { runId, ecosystem, name } },
       select: { runId: true },
@@ -50,6 +53,27 @@ export class PrismaRegistryStore implements RegistryStore {
       data: [...new Set(names)].map((name) => ({ runId, ecosystem, name })),
       skipDuplicates: true,
     });
+  }
+
+  async allowedExtras(runId: string, ecosystem: string, name: string): Promise<string[]> {
+    const rows = await this.db.registryAllowance.findMany({
+      where: { runId, ecosystem, name: { startsWith: `${name}[` } },
+      select: { name: true },
+    });
+    return rows
+      .map((row) => extraOfAllowanceName(row.name, name))
+      .filter((extra): extra is string => extra !== null)
+      .sort();
+  }
+
+  async addExtraAllowances(runId: string, ecosystem: string, dependencies: readonly FileDependency[]): Promise<void> {
+    await this.addAllowances(
+      runId,
+      ecosystem,
+      dependencies.flatMap((dependency) =>
+        dependency.extras.map((extra) => extraAllowanceName(dependency.name, extra)),
+      ),
+    );
   }
 
   async recordFetch(record: RegistryFetchRecord): Promise<void> {

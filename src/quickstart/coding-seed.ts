@@ -9,17 +9,19 @@
  */
 import { CodingProfileSchema } from "../coding/profile.js";
 import { codingProviderSupportsModel, type CodingProvider } from "../coding/provider.js";
+import { THOROUGH_REVIEWER_PROMPT } from "./reviewer-prompt.js";
 
 export const BUILDER_AGENT = "local-builder";
 export const REVIEWER_AGENT = "local-reviewer";
 const BUILDER_BUDGET_USD = 2;
-const REVIEWER_BUDGET_USD = 1;
-const REVIEWER_MAX_TURNS = 12;
+const REVIEWER_BUDGET_USD = 1.5;
+const REVIEWER_MAX_TURNS = 25;
 
 export const BUILDER_PROMPT =
   "You are the Wardby quickstart coding agent, working in a local git repository. Make the smallest change that completes the task, follow the repository's existing style, add or update tests when behavior changes, and run the tests before you finish. End with a short summary of what you changed and how you verified it.";
 
-export const REVIEWER_PROMPT = [
+/** The reviewer prompt earlier quickstart versions seeded; a reviewer still carrying it is quickstart's to update. */
+export const SHORT_REVIEWER_PROMPT_V1 = [
   "You are the Wardby quickstart review agent. Your task names one pull request: its number, its repository (local:/path), and its head commit.",
   "1. Call repo_pr_read with that repository and prNumber to get the description and the diff.",
   "2. When a change needs more context, read the surrounding code with repo_read_file at the head commit (repo_list_files lists what exists).",
@@ -27,6 +29,13 @@ export const REVIEWER_PROMPT = [
   "4. Call repo_publish_review exactly once with the head commit, a verdict (APPROVE when nothing needs to change, CHANGES_REQUESTED for real defects, COMMENT otherwise), a one-line summary, a markdown body, and inline comments on changed lines, each with a severity (CRITICAL, MAJOR, MINOR, NIT).",
   "If repo_publish_review returns stale_head, stop: the branch moved on.",
 ].join("\n");
+
+/**
+ * When you change THOROUGH_REVIEWER_PROMPT, add its previous text to the former prompts passed to
+ * upsertAgent for the reviewer (alongside SHORT_REVIEWER_PROMPT_V1), as a literal copy: otherwise a re-run
+ * treats every reviewer seeded with it as foreign and leaves it on the old prompt.
+ */
+export const REVIEWER_PROMPT = THOROUGH_REVIEWER_PROMPT;
 
 /** The database operations seeding needs; the default implementation is Prisma (quickstart/coding.ts). */
 export interface SeedDb {
@@ -65,6 +74,11 @@ export interface CodingSeedInput {
   baseRef: string;
   /** Catalog service names the builder's runs may start. */
   services: string[];
+  /** The builder's workspace toolchain; omitted = the default Node workspace. */
+  toolchain?: "node" | "node-python";
+  toolchainVersion?: string | null;
+  /** The builder's package allowlist (keyed by ecosystem); omitted = none. A re-run replaces it. */
+  packageAllowlist?: Record<string, string[]>;
 }
 
 export type SeedOutcome = { id: string; status: "created" | "updated" } | { status: "skipped"; reason: string };
@@ -74,9 +88,15 @@ export interface CodingSeedResult {
   reviewer: SeedOutcome;
 }
 
-async function upsertAgent(db: SeedDb, data: AgentData): Promise<SeedOutcome> {
+/**
+ * Creates or updates a quickstart agent. An existing agent is quickstart's when its kind matches and its
+ * prompt is the current one or one of `formerPrompts` (a prompt an earlier quickstart seeded, which is
+ * then replaced); any other agent of that name is left alone.
+ */
+async function upsertAgent(db: SeedDb, data: AgentData, formerPrompts: string[] = []): Promise<SeedOutcome> {
   const existing = await db.findAgent(data.name);
-  if (existing && (existing.systemPrompt !== data.systemPrompt || existing.kind !== data.kind)) {
+  const former = existing !== null && formerPrompts.includes(existing.systemPrompt);
+  if (existing && ((existing.systemPrompt !== data.systemPrompt && !former) || existing.kind !== data.kind)) {
     return {
       status: "skipped",
       reason: `an agent named "${data.name}" already exists and was not created by quickstart; it was left unchanged`,
@@ -84,7 +104,7 @@ async function upsertAgent(db: SeedDb, data: AgentData): Promise<SeedOutcome> {
   }
   if (existing) {
     const { name: _name, systemPrompt: _prompt, kind: _kind, ownerId: _owner, ...changes } = data;
-    await db.updateAgent(existing.id, changes);
+    await db.updateAgent(existing.id, former ? { ...changes, systemPrompt: data.systemPrompt } : changes);
     return { id: existing.id, status: "updated" };
   }
   const created = await db.createAgent(data);
@@ -106,6 +126,8 @@ export async function seedCodingAgents(
     repository: input.repository,
     baseRef: input.baseRef,
     services: input.services,
+    ...(input.toolchain ? { toolchain: input.toolchain, toolchainVersion: input.toolchainVersion ?? null } : {}),
+    ...(input.packageAllowlist ? { packageAllowlist: input.packageAllowlist } : {}),
   });
 
   const builder = await upsertAgent(db, {
@@ -126,15 +148,20 @@ export async function seedCodingAgents(
     });
   }
 
-  const reviewer = await upsertAgent(db, {
-    name: REVIEWER_AGENT,
-    kind: "native",
-    model: input.reviewerModel,
-    budgetUsd: REVIEWER_BUDGET_USD,
-    systemPrompt: REVIEWER_PROMPT,
-    maxTurns: REVIEWER_MAX_TURNS,
-    ownerId: input.ownerId,
-  });
+  const reviewer = await upsertAgent(
+    db,
+    {
+      name: REVIEWER_AGENT,
+      kind: "native",
+      model: input.reviewerModel,
+      budgetUsd: REVIEWER_BUDGET_USD,
+      systemPrompt: REVIEWER_PROMPT,
+      maxTurns: REVIEWER_MAX_TURNS,
+      ownerId: input.ownerId,
+    },
+    // Every reviewer prompt an earlier quickstart seeded: append the previous text whenever REVIEWER_PROMPT changes.
+    [SHORT_REVIEWER_PROMPT_V1],
+  );
   if (reviewer.status !== "skipped") {
     // Write access: repo_publish_review is a write tool on the link.
     await db.upsertLocalLink(reviewer.id, { repository: profile.repository, access: "write", stamp });

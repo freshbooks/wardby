@@ -6,6 +6,7 @@
  */
 import { join } from "node:path";
 
+import { imageVariable } from "../config/providers.js";
 import type { CodingProvider } from "../coding/provider.js";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import type { CodingDeps } from "./coding.js";
@@ -94,4 +95,44 @@ export function prepareImages(
     if (image) pullOrPresent(deps, image);
   }
   return images;
+}
+
+/** The Node + Python 3.12 workspace image for a provider: what the server's toolchain selection reads. */
+export const NODE_PYTHON_ENV: Record<CodingProvider, string> = {
+  codex: "CODING_WORKER_IMAGE_NODE_PYTHON_3_12",
+  "claude-code": "CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12",
+};
+
+/**
+ * Prepares the chosen provider's Node + Python image (Codex: the worker; Claude Code: the tool runner,
+ * whose worker is the one already prepared). Returns undefined when this install has none. An env
+ * override wins over every source, including a source build; a source build is pinned by local image id.
+ * Throws CodingSkip when the image exists but cannot be built, pulled, or pinned.
+ */
+export function prepareNodePythonImage(
+  provider: CodingProvider,
+  config: Record<string, string>,
+  deps: CodingDeps,
+): string | undefined {
+  const name = NODE_PYTHON_ENV[provider];
+  const resolved = resolveQuickstartImages({ env: deps.env, packageRoot: deps.packageRoot });
+  if ("unavailable" in resolved) return undefined;
+  const claude = provider === "claude-code";
+  const fromEnv = imageVariable(deps.env[name]);
+  if (!fromEnv && resolved.source === "build") {
+    const tag = claude ? resolved.claudeToolRunnerNodePython : resolved.workerNodePython;
+    if (!tag) return undefined;
+    if (claude) build(deps, "src/claude-tool-runner/Dockerfile", tag, "node-python");
+    else build(deps, "src/coding-worker/Dockerfile.node-python", tag);
+    return imageId(deps, tag);
+  }
+  const image =
+    fromEnv ||
+    (claude ? resolved.claudeToolRunnerNodePython : resolved.workerNodePython) ||
+    imageVariable(config[name]);
+  if (!image) return undefined;
+  if (!isImmutableDockerImage(image))
+    throw new CodingSkip(`${name} must be an immutable digest (repo@sha256:...) or local image id`);
+  pullOrPresent(deps, image);
+  return image;
 }

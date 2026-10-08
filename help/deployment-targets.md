@@ -19,9 +19,9 @@ Wardby has one local path and two production-ready deployment shapes:
   identity provider. The Compose and Caddy configuration is a reference
   baseline, not a managed platform.
 - **Google Kubernetes Engine Autopilot:** the supported Google Cloud path. It
-  provisions GKE, private-IP Cloud SQL, Artifact Registry, isolated Codex
-  workers, HTTPS Gateway, and GCP-native secret and network controls. See
-  [Deploy on GKE](deploy-gke.md).
+  provisions GKE, private-IP Cloud SQL, Artifact Registry, isolated Codex and
+  Claude Code workers, HTTPS Gateway, and GCP-native secret and network
+  controls. See [Deploy on GKE](deploy-gke.md).
 
 AWS is supported as a portable runtime target and has a Bedrock Claude adapter,
 but Wardby does not ship a native AWS deployment module. Other cloud providers

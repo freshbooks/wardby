@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   composeProjectName,
+  defaultModel,
+  defaultReviewerModel,
   ensureWardbyIgnored,
   parseEnvFile,
   quickstartPaths,
@@ -12,6 +14,13 @@ import {
 } from "./config.js";
 
 describe("quickstart configuration", () => {
+  it("defaults the reviewer to a mid-tier model per provider, above the base default", () => {
+    expect(defaultReviewerModel("anthropic")).toBe("claude-sonnet-5");
+    expect(defaultReviewerModel("openai")).toBe("gpt-5.6-terra");
+    expect(defaultModel("anthropic")).toBe("claude-haiku-4-5");
+    expect(defaultModel("openai")).toBe("gpt-5.6-luna");
+  });
+
   it("creates stable, project-specific Compose names", () => {
     const first = composeProjectName("/tmp/Hello App");
     expect(first).toMatch(/^wardby-hello-app-[a-f0-9]{10}$/);

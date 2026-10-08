@@ -70,6 +70,25 @@ describe("codingDoctorLines", () => {
     ]);
   });
 
+  it("shows the builder's toolchain", async () => {
+    const env = { LOCAL_REPO_ROOTS: scratch, JOB_LAUNCHER: "docker", CODING_WORKER_IMAGE: WORKER };
+    const lines = await codingDoctorLines(
+      env,
+      deps([
+        {
+          name: "local-builder",
+          repository: `local:${repo}`,
+          ref: "main",
+          toolchain: "node-python",
+          toolchainVersion: "3.12",
+        },
+        { name: "plain", repository: `local:${repo}`, ref: "main", toolchain: "node", toolchainVersion: null },
+      ]),
+    );
+    expect(lines).toContain("✓ local-builder: toolchain node-python 3.12");
+    expect(lines).toContain("✓ plain: toolchain node");
+  });
+
   it("reports a missing or invalid services.yaml and a stopped proxy", async () => {
     const env = { LOCAL_REPO_ROOTS: scratch, JOB_LAUNCHER: "docker", CODING_WORKER_IMAGE: "worker:latest" };
     const lines = await codingDoctorLines(env, deps([{ name: "b", repository: `local:${repo}` }], false));
