@@ -11,8 +11,9 @@ appliesTo: >=0.2.1
 
 The supported Google Cloud deployment creates a GKE Autopilot cluster, private
 Cloud SQL for PostgreSQL, Artifact Registry, HTTPS Gateway, Google Secret
-Manager synchronization, and isolated gVisor-backed **Codex** coding-worker
-pods. It also applies namespace RBAC and default-deny network policies.
+Manager synchronization, and isolated gVisor-backed coding-worker pods for
+Codex and Claude Code. It also applies namespace RBAC and default-deny network
+policies.
 
 Use a dedicated billed project, a hostname you control, remote Terraform state,
 and a GitHub App installed only on repositories that agents need. Review
@@ -37,9 +38,32 @@ already write the tables and columns it adds (such as per-model usage for
 [cost attribution](cost-attribution.md), or a run's live turn count). Until the
 grants are applied, the coding proxy's writes are refused and coding runs fail.
 
-Claude Code's two-container executor is currently Docker-only; Kubernetes
-coding workers use the Codex path. Configure an identity provider and GitHub
-App before allowing people to use the public endpoint.
+The Kubernetes launcher runs Codex and Claude Code coding workers; a Claude
+Code pod adds a tool-runner sidecar with its own image. Configure an identity
+provider and GitHub App before allowing people to use the public endpoint.
+
+## Plan it with your assistant
+
+If you are an assistant connected to Wardby over MCP and the user asked to plan
+a GKE deployment, produce a written plan; do not create cloud resources. Read
+[Choose a deployment target](deployment-targets.md) first and confirm GKE is
+the right target. Then ask for, one at a time, and record:
+
+1. The Google Cloud project (dedicated, with billing) and region, and who
+   holds the IAM roles to apply Terraform.
+2. The public hostname and who controls its DNS.
+3. The identity provider for people signing in (see
+   [Configure identity and privileged access](identity-and-access.md)).
+4. The GitHub App: which repositories it is installed on (see
+   [Connect GitHub repositories](github.md)).
+5. Which coding providers the agents use (Codex, Claude Code or both), and
+   which provider keys and worker images that needs.
+6. Where Terraform state lives, and the monthly cloud budget and alerts.
+7. Optional: Jira.
+
+The plan lists those answers, the ordered steps above with the values filled
+in, the commands the user will run themselves, and the open questions. Point
+the user to the full guide below for every step.
 
 Follow the complete, ordered guide at
 [`docs/getting-started-gke.md`](../docs/getting-started-gke.md). It includes

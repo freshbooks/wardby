@@ -26,6 +26,7 @@ import { codingStep, quickstartComposeFiles, type CodingDeps, type CodingStepOpt
 import { prismaCatalogImages, prismaLocalAgents, prismaSeedCodingAgents } from "./coding-db.js";
 import { codingDoctorLines } from "./coding-doctor.js";
 import { baseImageLine, resolveQuickstartImages } from "./images.js";
+import { scenarioMenuLines } from "./scenarios.js";
 import { parseStarterChoice } from "./starter-services.js";
 import {
   FETCH_NOTICE,
@@ -492,7 +493,9 @@ export async function quickstartCommand(args: string[]): Promise<void> {
     else console.log(`Skipped the billed run. Start it later with: npx @wardby/cli@latest run ${DEMO_AGENT}`);
   }
 
-  await codingStep(paths, state, codingOptions, codingDeps(paths));
+  const coding = await codingStep(paths, state, codingOptions, codingDeps(paths));
+  const codingRan =
+    coding?.seed !== undefined && coding.seed.builder.status !== "skipped" && coding.seed.reviewer.status !== "skipped";
 
   const client = parseClient(values.client) ?? (await chooseClient(nonInteractive));
   const mcpConfigured = client !== "none" && configureMcpClients(client, paths);
@@ -501,24 +504,7 @@ export async function quickstartCommand(args: string[]): Promise<void> {
   console.log("  npx @wardby/cli@latest status");
   console.log("  npx @wardby/cli@latest doctor");
   console.log("  npx @wardby/cli@latest down");
-  for (const line of nextStepLines(mcpConfigured)) console.log(line);
-}
-
-/** The closing "build your first agent" hint; the assistant prompts only make sense once an MCP client is configured. */
-export function nextStepLines(mcpConfigured: boolean): string[] {
-  const guide = "the guide: npx @wardby/cli@latest help open agent-recipes";
-  const lines = ["", "Next: build your first agent."];
-  if (mcpConfigured) {
-    lines.push(
-      "Ask your assistant one of:",
-      '  "Set up the Wardby architecture keeper for this repository"',
-      '  "Set up a Wardby builder for this repository"',
-      `Or read ${guide}`,
-    );
-  } else {
-    lines.push(`Read ${guide}`);
-  }
-  return lines;
+  for (const line of scenarioMenuLines({ codingRan, mcpConfigured })) console.log(line);
 }
 
 async function databaseHealthy(paths: QuickstartPaths): Promise<boolean> {
