@@ -10,7 +10,13 @@
 import { localGitBytes } from "../coding/local-git.js";
 import { npmAdapter } from "../coding/registry/npm.js";
 import { isPypiProjectName, MAX_EXTRAS, normalizePypiName, parseExtras } from "../coding/registry/pypi.js";
-import { packageJsonNames, pyprojectNames, requirementsNames } from "./manifests.js";
+import {
+  packageJsonNames,
+  packageJsonOwnNames,
+  pyprojectNames,
+  pyprojectOwnNames,
+  requirementsNames,
+} from "./manifests.js";
 import { rootEntries } from "./python-detect.js";
 
 export const MAX_REPO_PACKAGES = 200;
@@ -31,11 +37,13 @@ export interface RepoPackages {
 interface Manifest {
   ecosystem: Ecosystem;
   read: (text: string) => string[];
+  /** The repository's own package names the manifest declares (never offered). */
+  own?: (text: string) => string[];
 }
 
 function manifestFor(name: string): Manifest | null {
-  if (name === "package.json") return { ecosystem: "npm", read: packageJsonNames };
-  if (name === "pyproject.toml") return { ecosystem: "pypi", read: pyprojectNames };
+  if (name === "package.json") return { ecosystem: "npm", read: packageJsonNames, own: packageJsonOwnNames };
+  if (name === "pyproject.toml") return { ecosystem: "pypi", read: pyprojectNames, own: pyprojectOwnNames };
   if (/^requirements.*\.txt$/.test(name)) return { ecosystem: "pypi", read: requirementsNames };
   return null;
 }
@@ -91,6 +99,9 @@ export async function readRepoPackages(dir: string, sha: string): Promise<RepoPa
   const found: Record<Ecosystem, Set<string>> = { npm: new Set(), pypi: new Set() };
   /** PyPI name -> the extras any manifest names for it. */
   const pypiExtras = new Map<string, Set<string>>();
+  /** The repository's own package names (PyPI ones normalized): offering
+   *  them would let a public package of the same name into the sandbox. */
+  const own: Record<Ecosystem, Set<string>> = { npm: new Set(), pypi: new Set() };
   const notes: string[] = [];
   const manifests = entries
     .filter((entry) => entry.type === "blob" && REGULAR_FILE.test(entry.mode) && OBJECT_ID.test(entry.object))
@@ -101,7 +112,11 @@ export async function readRepoPackages(dir: string, sha: string): Promise<RepoPa
     let names: string[];
     try {
       const bytes = await localGitBytes(dir, ["cat-file", "blob", entry.object], MAX_MANIFEST_BYTES);
-      names = manifest.read(decoder.decode(bytes).replace(/^\uFEFF/, ""));
+      const text = decoder.decode(bytes).replace(/^\uFEFF/, "");
+      names = manifest.read(text);
+      for (const name of manifest.own?.(text) ?? []) {
+        own[manifest.ecosystem].add(manifest.ecosystem === "pypi" ? normalizePypiName(name) : name);
+      }
     } catch (error) {
       const reason = error instanceof Error && !("code" in error) ? `: ${error.message}` : "";
       notes.push(`Could not read the dependencies in ${entry.name}${reason}; it was skipped.`);
@@ -124,7 +139,7 @@ export async function readRepoPackages(dir: string, sha: string): Promise<RepoPa
 
   const allowlist: RepoPackages["allowlist"] = {};
   for (const ecosystem of ["npm", "pypi"] as const) {
-    const names = [...found[ecosystem]].sort();
+    const names = [...found[ecosystem]].filter((name) => !own[ecosystem].has(name)).sort();
     if (names.length > MAX_REPO_PACKAGES) {
       notes.push(
         `The repository declares ${names.length} ${ECOSYSTEM_LABELS[ecosystem]} packages, more than the ${MAX_REPO_PACKAGES} the quickstart offers; none of them were added.`,

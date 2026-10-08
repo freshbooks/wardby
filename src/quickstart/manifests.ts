@@ -103,6 +103,18 @@ export function packageJsonNames(text: string): string[] {
   return names;
 }
 
+/** package.json's own `name`, when it is a string: the quickstart never offers
+ *  the repository's own package for its allowlist (dependency confusion). */
+export function packageJsonOwnNames(text: string): string[] {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  return isPlainObject(doc) && typeof doc.name === "string" ? [doc.name] : [];
+}
+
 // ---------------------------------------------------------------- TOML scan
 
 class Opaque {
@@ -456,4 +468,18 @@ export function pyprojectNames(text: string): string[] {
   if (buildSystem === undefined) names.push("setuptools", "wheel");
   else names.push(...requirementList(get(buildSystem, "requires"), "build-system.requires"));
   return names;
+}
+
+/**
+ * The project's own names in pyproject.toml (`[project].name` and
+ * `[tool.poetry].name`), as written: the quickstart never offers the
+ * repository's own project for its allowlist (dependency confusion), even when
+ * an optional-dependency group refers back to it with extras. Throws when the
+ * file cannot be scanned.
+ */
+export function pyprojectOwnNames(text: string): string[] {
+  const root = new Scanner(text).scan();
+  return [get(root, "project", "name"), get(root, "tool", "poetry", "name")].filter(
+    (name): name is string => typeof name === "string",
+  );
 }

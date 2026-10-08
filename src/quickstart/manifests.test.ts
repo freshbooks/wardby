@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { packageJsonNames, pyprojectNames, requirementName, requirementsNames } from "./manifests.js";
+import {
+  packageJsonNames,
+  packageJsonOwnNames,
+  pyprojectNames,
+  pyprojectOwnNames,
+  requirementName,
+  requirementsNames,
+} from "./manifests.js";
 
 describe("requirementName (PEP 508)", () => {
   it.each([
@@ -325,5 +332,20 @@ describe("packageJsonNames", () => {
   it("throws on invalid JSON or a non-object document", () => {
     expect(() => packageJsonNames("{")).toThrow();
     expect(() => packageJsonNames("[]")).toThrow();
+  });
+});
+
+describe("own project names", () => {
+  it("reads [project].name and [tool.poetry].name from pyproject.toml", () => {
+    expect(pyprojectOwnNames(`[project]\nname = "My_Proj"\n[tool.poetry]\nname = "other"\n`)).toEqual([
+      "My_Proj",
+      "other",
+    ]);
+    expect(pyprojectOwnNames(`[project]\ndependencies = []\n`)).toEqual([]);
+  });
+  it("reads package.json's own name", () => {
+    expect(packageJsonOwnNames(JSON.stringify({ name: "app", dependencies: {} }))).toEqual(["app"]);
+    expect(packageJsonOwnNames(JSON.stringify({ dependencies: {} }))).toEqual([]);
+    expect(packageJsonOwnNames(JSON.stringify({ name: 7 }))).toEqual([]);
   });
 });

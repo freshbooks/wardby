@@ -82,6 +82,33 @@ describe("readRepoPackages", () => {
     expect(() => CodingProfileSchema.parse({ repository: "org/repo", packageAllowlist: allowlist })).not.toThrow();
   });
 
+  it("never offers the repository's own PyPI project, even self-referenced with extras", async () => {
+    commit({
+      "pyproject.toml": `[project]\nname = "My_Proj"\ndependencies = ["flask"]\n[project.optional-dependencies]\nx = ["httpx"]\nall = ["my.proj[x,y]"]\n[build-system]\nrequires = ["hatchling"]\n`,
+      "requirements.txt": "my-proj\nMY_PROJ[x]\nrequests\n",
+    });
+    const { allowlist } = await readRepoPackages(repo, head());
+    expect(allowlist).toEqual({ pypi: ["flask", "hatchling", "httpx", "requests"] });
+  });
+
+  it("never offers a Poetry project's own name", async () => {
+    commit({
+      "pyproject.toml": `[tool.poetry]\nname = "poet"\n[tool.poetry.dependencies]\npython = "^3.12"\nPoet = { version = "*", extras = ["a"] }\nfine = "1"\n[build-system]\nrequires = ["poetry-core"]\n`,
+    });
+    expect((await readRepoPackages(repo, head())).allowlist).toEqual({ pypi: ["fine", "poetry-core"] });
+  });
+
+  it("never offers the root package.json's own name (exact match)", async () => {
+    commit({
+      "package.json": JSON.stringify({
+        name: "app",
+        dependencies: { app: "1", express: "1" },
+        devDependencies: { App: "1" },
+      }),
+    });
+    expect((await readRepoPackages(repo, head())).allowlist).toEqual({ npm: ["App", "express"] });
+  });
+
   it("drops names that are not valid in their ecosystem", async () => {
     commit({
       "package.json": JSON.stringify({ dependencies: { "bad name": "^1", ".hidden": "1", ok: "1", "@Scope/x": "1" } }),
