@@ -23,7 +23,13 @@ FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
+# Same openai src/ + *.map prune as the runtime stage below (see the reasoning
+# there); this image never loads openai at all, so it is size only.
+RUN npm ci --ignore-scripts \
+    && rm -rf node_modules/openai/src \
+    && find node_modules/openai -type f -name '*.map' -delete \
+    && test -f node_modules/openai/index.mjs && test ! -d node_modules/openai/src \
+    && test -z "$(find node_modules/openai -name '*.map' -print -quit)"
 COPY prisma ./prisma
 COPY prisma.config.ts ./
 # npm ci ran with --ignore-scripts, so Prisma's schema engine (which `migrate deploy` needs) isn't
