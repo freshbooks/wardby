@@ -204,6 +204,10 @@ The proxy only enables it when both `WARDBY_LOAD_TEST=1` and
 one. Never set them on a real deployment. Codex agents only.
 
 Run the load test with `scripts/load/run-level-b.sh` (see its header).
+Re-run `deploy/kind-coding/up.sh` from the same checkout first, so the proxy
+image includes the mock upstream. While the test runs, the script replaces
+the proxy's model keys with a placeholder and aborts unless every proxy pod
+logs `proxy.mock_upstream_enabled`; it restores the original keys on exit.
 
 ## What the preflight proves — and what to do if it fails
 

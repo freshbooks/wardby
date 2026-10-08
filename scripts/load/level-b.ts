@@ -2,8 +2,9 @@
  * Level B load test: N real coding-run pods on a local kind cluster, through
  * the real coding proxy, whose model upstream is a guarded mock
  * (src/providers/coding-proxy/mock-upstream.ts) that always answers
- * `outcome: "no_changes"` for Codex/OpenAI Responses requests (ruling R1).
- * Codex agents only.
+ * `outcome: "no_changes"` for Codex/OpenAI Responses requests. Codex agents
+ * only: the mock has no Anthropic Messages stream (it answers those with a
+ * 501), so a Claude Code run could not finish against it.
  *
  * `wardby run` (the CLI) refuses coding agents on purpose, so trigger_agent
  * over MCP is the only way to start one -- this script spawns
@@ -11,22 +12,38 @@
  * scripts/local-trigger-agent.mjs does, and fires LOAD_RUNS trigger_agent
  * calls round-robin across them.
  *
- * Ruling R2 verified (see the PR description for file:line evidence): a run
- * triggered over `wardby mcp` stdio is driven to completion by an in-memory,
- * unawaited poll loop (ContainerExecutor.execute) living inside that same
- * stdio child process, with no setInterval/cron of its own -- `wardby mcp`
- * never starts the scheduler or reconciler. That loop only needs the child
- * process to stay alive, which this script's own get_run polling already
- * requires. The one `wardby serve` Task 6 starts separately supplies the
- * reconciler as a safety net (45 s heartbeat timeout) for a run whose owning
- * stdio child dies early; it plays no part in the common path.
+ * Why per-run execution lives in the stdio children: a run triggered over
+ * `wardby mcp` stdio is driven to completion by an in-memory, unawaited poll
+ * loop (ContainerExecutor.execute in src/providers/executor/container.ts)
+ * living inside that same stdio child process, with no setInterval/cron of
+ * its own -- `wardby mcp` never starts the scheduler or reconciler. That loop
+ * only needs the child process to stay alive, which this script's own
+ * get_run polling already requires. The `wardby serve` process(es)
+ * run-level-b.sh starts separately (LOAD_SERVE_PROCESSES, default 1; 2
+ * exercises scheduler leader election) supply the scheduler lease, the
+ * queue drain and the reconciler (45 s heartbeat timeout) as a safety net
+ * for a run whose owning stdio child dies early; they play no part in the
+ * common path.
  *
- * Run it through scripts/load/run-level-b.sh (Task 6), which creates the
- * throwaway database, the kind cluster/overlay, the single `wardby serve`,
- * and this script's env, then tears everything down after. Refuses any
+ * The children run from source (tsx with the wardby-source condition), the
+ * same code `wardby serve` runs in run-level-b.sh -- never bin/wardby.js,
+ * which loads dist/ and could be stale relative to the checkout.
+ *
+ * Run it through scripts/load/run-level-b.sh, which creates the throwaway
+ * database, the mock-upstream overlay, the `wardby serve` process(es), and
+ * this script's env, then tears everything down after. Refuses any
  * DATABASE_URL whose database name does not contain "load" (same check as
  * Level A): it reads live cluster/DB state freely but never mutates rows
  * beyond what trigger_agent itself does.
+ *
+ * Pod timing: the Kubernetes launcher deletes each run pod as soon as the
+ * run finishes (cleanupRun in src/providers/jobs/kubernetes.ts), so the pods
+ * cannot be read after the fact. The sampling loop instead records, per pod
+ * name, the first-seen creation/PodScheduled/Ready/terminated times from
+ * the pod list it already fetches, and the end of the test joins them to
+ * runs by the launcher's own deterministic pod name (kubernetesRunNames).
+ * Precision is bounded by SAMPLE_MS for the terminated time, which a pod
+ * deleted between two samples may never show (left null).
  *
  * Resilience: every probe (kubectl, pg_stat_activity, the queue/active-slot
  * counts, get_run polling, the final per-run Run read) is individually
@@ -52,8 +69,8 @@ import { kubernetesRunNames } from "../../src/providers/jobs/kubernetes-isolatio
 
 // Not a byte-for-byte copy of Level A's bare /load/ test: that regex also
 // matches "notload" (the substring "load" at the end of a non-"load" word),
-// so "postgresql://x/notload" -- the exact refusal case the brief's dry
-// check exercises -- would slip through it. This requires "load" to be its
+// so "postgresql://x/notload" -- a database name that plainly is not a
+// throwaway load database -- would slip through it. This requires "load" to be its
 // own segment (bounded by a non-alphanumeric character or the string's
 // ends), which still accepts "wardby_load"/"wardby_load_b" but refuses
 // "notload"/"payload"/"overload".
@@ -69,7 +86,10 @@ function requireEnv(name: string): string {
   if (!v) throw new Error(`${name} is required (set by scripts/load/run-level-b.sh).`);
   return v;
 }
-function requireEnvInt(name: string): number {
+/** A positive integer env var; `fallback` (if given) when unset or empty. NaN/0/negative/fractional are refused, never defaulted. */
+function requireEnvInt(name: string, fallback?: number): number {
+  const fromEnv = process.env[name];
+  if ((fromEnv === undefined || fromEnv === "") && fallback !== undefined) return fallback;
   const raw = requireEnv(name);
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
@@ -84,7 +104,7 @@ const LOAD_AGENT_ID = requireEnv("LOAD_AGENT_ID");
 const LOAD_OUT = requireEnv("LOAD_OUT");
 const KUBERNETES_CONTEXT = requireEnv("KUBERNETES_CONTEXT");
 const LOAD_NAMESPACE = process.env.LOAD_NAMESPACE ?? "wardby-coding";
-const LOAD_TIMEOUT_SEC = Number(process.env.LOAD_TIMEOUT_SEC ?? 1800);
+const LOAD_TIMEOUT_SEC = requireEnvInt("LOAD_TIMEOUT_SEC", 1800);
 const POLL_MS = 2_000;
 const SAMPLE_MS = 5_000;
 const PROXY_POD_LABEL = "app.kubernetes.io/name=wardby-coding-proxy";
@@ -194,20 +214,6 @@ async function topProxyPods(): Promise<ProxyPodUsage[]> {
     });
 }
 
-interface PodListItem {
-  status?: { phase?: string };
-}
-
-async function runPodPhaseCounts(): Promise<Record<string, number>> {
-  const pods = await kubectlJson<{ items: PodListItem[] }>(["get", "pods", "-l", RUN_POD_LABEL, "-o", "json"]);
-  const counts: Record<string, number> = {};
-  for (const pod of pods.items) {
-    const phase = pod.status?.phase ?? "Unknown";
-    counts[phase] = (counts[phase] ?? 0) + 1;
-  }
-  return counts;
-}
-
 interface PodCondition {
   type: string;
   status: string;
@@ -216,36 +222,69 @@ interface PodCondition {
 interface ContainerStatus {
   state?: { terminated?: { finishedAt?: string } };
 }
-interface PodDetail {
-  status?: { conditions?: PodCondition[]; containerStatuses?: ContainerStatus[] };
+interface PodListItem {
+  metadata?: { name?: string; creationTimestamp?: string };
+  status?: { phase?: string; conditions?: PodCondition[]; containerStatuses?: ContainerStatus[] };
 }
 
 interface PodTimestamps {
+  createdAt: string | null;
   scheduledAt: string | null;
   readyAt: string | null;
   containersFinishedAt: string | null;
 }
 
-/** The run's deterministic pod name/timestamps, or null if the pod is gone (GC'd after finishing). */
-async function runPodTimestamps(runId: string): Promise<PodTimestamps | null> {
-  const podName = kubernetesRunNames(runId).pod;
-  let pod: PodDetail;
+/**
+ * Pod name -> timestamps, accumulated across samples (see the header's "Pod
+ * timing"): each field keeps the first non-null value seen, except
+ * containersFinishedAt, which keeps the latest container finish seen.
+ */
+const podTimings = new Map<string, PodTimestamps>();
+
+function recordPodTimings(pods: PodListItem[]): void {
+  for (const pod of pods) {
+    const name = pod.metadata?.name;
+    if (!name) continue;
+    const condition = (type: string) =>
+      pod.status?.conditions?.find((c) => c.type === type && c.status === "True")?.lastTransitionTime ?? null;
+    const finished = (pod.status?.containerStatuses ?? [])
+      .map((c) => c.state?.terminated?.finishedAt)
+      .filter((v): v is string => typeof v === "string")
+      .sort();
+    const latestFinished = finished.length > 0 ? finished[finished.length - 1]! : null;
+    const prev = podTimings.get(name);
+    podTimings.set(name, {
+      createdAt: prev?.createdAt ?? pod.metadata?.creationTimestamp ?? null,
+      scheduledAt: prev?.scheduledAt ?? condition("PodScheduled"),
+      readyAt: prev?.readyAt ?? condition("Ready"),
+      containersFinishedAt:
+        prev?.containersFinishedAt && (!latestFinished || prev.containersFinishedAt >= latestFinished)
+          ? prev.containersFinishedAt
+          : latestFinished,
+    });
+  }
+}
+
+/** Phase counts for this sample; also feeds podTimings from the same pod list. */
+async function runPodPhaseCounts(): Promise<Record<string, number>> {
+  const pods = await kubectlJson<{ items: PodListItem[] }>(["get", "pods", "-l", RUN_POD_LABEL, "-o", "json"]);
+  recordPodTimings(pods.items);
+  const counts: Record<string, number> = {};
+  for (const pod of pods.items) {
+    const phase = pod.status?.phase ?? "Unknown";
+    counts[phase] = (counts[phase] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/** The run's pod timestamps as sampled, joined by the launcher's deterministic pod name; null if never seen. */
+function runPodTimestamps(runId: string): PodTimestamps | null {
   try {
-    pod = await kubectlJson<PodDetail>(["get", "pod", podName, "-o", "json"]);
+    return podTimings.get(kubernetesRunNames(runId).pod) ?? null;
   } catch {
+    // kubernetesRunNames refuses a malformed run id; such a run never had a pod.
     return null;
   }
-  const condition = (type: string) =>
-    pod.status?.conditions?.find((c) => c.type === type && c.status === "True")?.lastTransitionTime ?? null;
-  const finishedTimes = (pod.status?.containerStatuses ?? [])
-    .map((c) => c.state?.terminated?.finishedAt)
-    .filter((v): v is string => typeof v === "string")
-    .sort();
-  return {
-    scheduledAt: condition("PodScheduled"),
-    readyAt: condition("Ready"),
-    containersFinishedAt: finishedTimes.length > 0 ? finishedTimes[finishedTimes.length - 1]! : null,
-  };
 }
 
 // --- Postgres sampling -------------------------------------------------
@@ -327,9 +366,14 @@ interface RunRecord {
 }
 
 function connectClient(): { client: Client; transport: StdioClientTransport } {
+  // From source, exactly as run-level-b.sh starts `wardby serve`
+  // (`npx tsx --conditions=wardby-source src/cli.ts serve`), so every
+  // control plane in the test runs the same code. The local tsx binary is
+  // what `npx tsx` resolves to; calling it directly saves one wrapper
+  // process between the transport's close() signal and the server.
   const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [resolve(projectRoot, "bin", "wardby.js"), "mcp"],
+    command: resolve(projectRoot, "node_modules", ".bin", "tsx"),
+    args: ["--conditions=wardby-source", "src/cli.ts", "mcp"],
     cwd: projectRoot,
     env: childEnv(),
     stderr: "inherit",
@@ -518,9 +562,9 @@ async function main(): Promise<void> {
 
     // Final per-run read: Run fields straight from the DB (authoritative,
     // independent of how polling over MCP went -- covers runs the poll
-    // loop above abandoned) and the pod's own timestamps, if it still
-    // exists. Guarded per run: one DB hiccup must not drop every other
-    // run's already-correct data.
+    // loop above abandoned), joined with the pod timestamps the sampling
+    // loop collected (the pods themselves are gone by now). Guarded per
+    // run: one DB hiccup must not drop every other run's already-correct data.
     await mapLimit(runs, 8, async (run) => {
       if (!run.runId) return;
       try {
@@ -538,10 +582,7 @@ async function main(): Promise<void> {
       } catch (err) {
         warnOnce(`final Run read (run ${run.index})`, err);
       }
-      run.pod = await runPodTimestamps(run.runId).catch((err: unknown) => {
-        warnOnce("kubectl get pod (per-run)", err);
-        return null;
-      });
+      run.pod = runPodTimestamps(run.runId);
     });
   } catch (err) {
     incomplete = err instanceof Error ? err.message : String(err);
