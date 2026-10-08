@@ -38,8 +38,13 @@ class ScopedFake extends FakeChatProvider {
     this.guard(channelId);
     return super.postMessage(channelId, msg, opts);
   }
+  /** Runs before each in-scope chat.update (after the delivery it follows is marked delivered). */
+  beforeUpdate: (() => Promise<void>) | null = null;
   override async updateMessage(channelId: string, ts: string, msg: ChatMessage): Promise<void> {
     this.guard(channelId);
+    const hook = this.beforeUpdate;
+    this.beforeUpdate = null;
+    if (hook) await hook();
     return super.updateMessage(channelId, ts, msg);
   }
 }
@@ -263,6 +268,42 @@ describe.skipIf(!process.env.DATABASE_URL)("notification dispatcher (database)",
     const posts = fake.posts.filter((p) => p.channelId === channelId);
     expect(posts).toHaveLength(3);
     expect(new Set(posts.map((p) => p.msg.text)).size).toBe(3);
+  });
+
+  it("stops a pass whose lease expired mid-pass so a second holder never double-posts", async () => {
+    const { channelId, itemKey } = await seedThread();
+    await record(itemKey, picked, "picked");
+    await record(itemKey, opened, "opened");
+    await record(itemKey, merged, "merged");
+    const other = makeDeps("dsp-holder-b");
+    // After "opened" is delivered (its status edit is next), A's lease lapses and B runs a full pass.
+    fake.beforeUpdate = async () => {
+      await db.schedulerLease.updateMany({ where: { scope: DISPATCH_LEASE_SCOPE }, data: { expiresAt: new Date(0) } });
+      expect(await dispatchOnce(other)).toBe(1);
+    };
+
+    expect(await dispatchOnce(deps)).toBe(2);
+    await drain(other);
+
+    const posts = fake.posts.filter((p) => p.channelId === channelId);
+    expect(posts).toHaveLength(4);
+    expect(new Set(posts.map((p) => p.msg.text)).size).toBe(4);
+    const rows = await deliveriesFor(channelId);
+    expect(rows.map((r) => r.state)).toEqual(["delivered", "delivered", "delivered"]);
+  });
+
+  it("stops starting deliveries once a pass has run for 20 s", async () => {
+    const a = await seedThread();
+    const b = await seedThread();
+    await record(a.itemKey, picked, "picked");
+    await record(b.itemKey, picked, "picked");
+    const start = clock;
+    let calls = 0;
+    deps.now = () => (++calls === 1 ? start : new Date(start.getTime() + 21_000));
+
+    expect(await dispatchOnce(deps)).toBe(1);
+    const states = [...(await deliveriesFor(a.channelId)), ...(await deliveriesFor(b.channelId))].map((r) => r.state);
+    expect(states).toEqual(["delivered", "pending"]);
   });
 
   it("fails a delivery at the attempt cap", async () => {

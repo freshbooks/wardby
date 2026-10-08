@@ -4,7 +4,11 @@
  *
  * Rules:
  * - Lease-gated: only the holder of the "notification-dispatch" SchedulerLease
- *   delivers, so replicas never double-post.
+ *   delivers. The lease is renewed before every delivery and the pass ends
+ *   when renewal fails; a pass also stops after PASS_BUDGET_MS so a delivery
+ *   always starts well inside the lease TTL. Replicas therefore don't
+ *   double-post while the lease is held. Delivery is still at-least-once: a
+ *   failed "delivered" write after a successful post retries (and reposts).
  * - Threads: the first delivery for a (provider, channel, threadKey) posts a
  *   parent message and stores its ts in NotificationThread; every event is a
  *   reply under it. When an event changes the thread's status, the parent is
@@ -41,6 +45,8 @@ const log = logger.child({ module: "notification-dispatcher" });
 export const DISPATCH_LEASE_SCOPE = "notification-dispatch";
 export const MAX_ATTEMPTS = 10;
 const LEASE_TTL_MS = 30_000;
+/** A pass stops starting deliveries after this long; the rest wait for the next tick. */
+const PASS_BUDGET_MS = 20_000;
 const BATCH = 100;
 const AUTH_PAUSE_MS = 5 * 60_000;
 const AUTH_RECHECK_RETRY_MS = 30_000;
@@ -265,7 +271,8 @@ async function recheckAuth(deps: DispatcherDeps, state: DispatcherState, now: Da
 /** One pass: deliver what is due. Returns the number of deliveries attempted. */
 export async function dispatchOnce(deps: DispatcherDeps): Promise<number> {
   const state = (deps.state ??= {});
-  const now = (deps.now ?? (() => new Date()))();
+  const clock = deps.now ?? (() => new Date());
+  const now = clock();
   const { db } = deps;
   if (!(await tryAcquireLease(db, DISPATCH_LEASE_SCOPE, deps.holder, LEASE_TTL_MS))) return 0;
   if (state.pausedUntil) {
@@ -307,6 +314,11 @@ export async function dispatchOnce(deps: DispatcherDeps): Promise<number> {
     if (older) continue;
     for (const d of group) {
       if (pass.blocked.has(channelKey(d))) break;
+      if (attempted > 0 && clock().getTime() - now.getTime() >= PASS_BUDGET_MS) return attempted;
+      if (!(await tryAcquireLease(db, DISPATCH_LEASE_SCOPE, deps.holder, LEASE_TTL_MS))) {
+        log.warn({ holder: deps.holder }, "lost the dispatch lease mid-pass; stopping");
+        return attempted;
+      }
       attempted++;
       const outcome = await deliver(pass, provider, d);
       if (outcome === "stop_pass") return attempted;
