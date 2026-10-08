@@ -113,7 +113,8 @@ export function defaultTrustedFolder(cwd: string): string | null {
 export function codingEnvUpdates(input: {
   roots: string[];
   provider: string;
-  workerImage: string;
+  /** The Codex worker; absent for claude-code, which doesn't need one. */
+  workerImage?: string;
   runtimeImage: string;
   claudeWorkerImage?: string;
   claudeToolRunnerImage?: string;
@@ -121,10 +122,10 @@ export function codingEnvUpdates(input: {
   const updates: Record<string, string> = {
     LOCAL_REPO_ROOTS: input.roots.join(delimiter),
     JOB_LAUNCHER: "docker",
-    CODING_WORKER_IMAGE: input.workerImage,
     WARDBY_RUNTIME_IMAGE: input.runtimeImage,
     CODING_PROXY_CONTAINER,
   };
+  if (input.provider !== "claude-code" && input.workerImage) updates.CODING_WORKER_IMAGE = input.workerImage;
   if (input.provider === "claude-code" && input.claudeWorkerImage && input.claudeToolRunnerImage) {
     updates.CODING_CLAUDE_WORKER_IMAGE = input.claudeWorkerImage;
     updates.CODING_CLAUDE_TOOL_RUNNER_IMAGE = input.claudeToolRunnerImage;
@@ -452,7 +453,7 @@ export async function codingStep(
     const provider = await chooseProvider(opts, config, deps);
     const images = prepareImages(provider, config, deps);
 
-    writeQuickstartEnv(paths, {
+    const next: Record<string, string> = {
       ...config,
       ...codingEnvUpdates({
         roots,
@@ -462,13 +463,23 @@ export async function codingStep(
         claudeWorkerImage: images.claudeWorker,
         claudeToolRunnerImage: images.claudeToolRunner,
       }),
-    });
+    };
+    // Earlier releases pointed CODING_WORKER_IMAGE at the Claude worker on a Claude-only setup; that
+    // would start the wrong driver for a Codex run. A real Codex worker from an earlier Codex run stays.
+    const staleClaude = [config.CODING_CLAUDE_WORKER_IMAGE, images.claudeWorker].filter(Boolean);
+    if (provider === "claude-code" && staleClaude.includes(next.CODING_WORKER_IMAGE)) delete next.CODING_WORKER_IMAGE;
+    writeQuickstartEnv(paths, next);
     deps.log(`✓ Trusted folders: ${roots.join(", ")}`);
 
     startProxy(paths, state, deps);
     deps.log(`✓ Coding proxy is running (${CODING_PROXY_CONTAINER})`);
     const preflight = await dockerCodingPreflight(
-      { workerImage: images.worker, proxyContainer: CODING_PROXY_CONTAINER },
+      {
+        workerImage: images.worker,
+        claudeWorkerImage: images.claudeWorker,
+        claudeToolRunnerImage: images.claudeToolRunner,
+        proxyContainer: CODING_PROXY_CONTAINER,
+      },
       async (image) => deps.run("docker", ["image", "inspect", image]).status === 0,
     );
     if (preflight) throw new CodingSkip(`coding preflight failed: ${preflight}`);

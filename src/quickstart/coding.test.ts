@@ -165,6 +165,19 @@ describe("codingEnvUpdates", () => {
   });
 });
 
+describe("codingEnvUpdates without a Codex worker", () => {
+  it("writes no CODING_WORKER_IMAGE for claude-code", () => {
+    const updates = codingEnvUpdates({
+      roots: ["/a"],
+      provider: "claude-code",
+      runtimeImage: RUNTIME,
+      claudeWorkerImage: "sha256:c",
+      claudeToolRunnerImage: "sha256:t",
+    });
+    expect(updates).not.toHaveProperty("CODING_WORKER_IMAGE");
+  });
+});
+
 describe("codingStep (non-interactive)", () => {
   it("--no-coding leaves the env untouched and runs nothing", async () => {
     writeQuickstartEnv(paths(), { OPENAI_API_KEY: "sk-test" });
@@ -313,9 +326,11 @@ describe("codingStep (non-interactive)", () => {
       deps,
     );
     const pulled = calls.filter((call) => call[1] === "pull").map((call) => call[2]);
-    expect(pulled).toEqual(expect.arrayContaining([RUNTIME, WORKER, claudeWorker, claudeToolRunner]));
+    expect(pulled).toEqual(expect.arrayContaining([RUNTIME, claudeWorker, claudeToolRunner]));
+    // A Claude-only setup does not pull the Codex worker or point CODING_WORKER_IMAGE anywhere.
+    expect(pulled).not.toContain(WORKER);
     const env = readQuickstartEnv(paths());
-    expect(env.CODING_WORKER_IMAGE).toBe(WORKER);
+    expect(env.CODING_WORKER_IMAGE).toBeUndefined();
     expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(claudeWorker);
     expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(claudeToolRunner);
   });
@@ -385,15 +400,96 @@ describe("codingStep (non-interactive)", () => {
     const tags = calls.filter((call) => call[1] === "build").map((call) => call[call.indexOf("--tag") + 1]);
     expect(tags).toEqual([
       "wardby-runtime:local",
-      "wardby-coding-worker:local",
       "wardby-claude-coding-worker:local",
       "wardby-claude-tool-runner:local",
     ]);
     const env = readQuickstartEnv(paths());
-    // CODING_WORKER_IMAGE stays the Codex worker so a later Codex agent works.
-    expect(env.CODING_WORKER_IMAGE).toBe(BUILT_ID);
+    // The Codex worker is optional on a Claude-only server; nothing builds or writes it.
+    expect(env.CODING_WORKER_IMAGE).toBeUndefined();
     expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(BUILT_ID);
     expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(BUILT_ID);
+  });
+
+  it("preflights the Claude Code images it prepared, not a Codex worker", async () => {
+    const claudeWorker = `ghcr.io/wardby/wardby-claude-coding-worker@sha256:${"4".repeat(64)}`;
+    const claudeToolRunner = `ghcr.io/wardby/wardby-claude-tool-runner@sha256:${"5".repeat(64)}`;
+    writeFileSync(
+      join(packageRoot, "dist", "quickstart-images.json"),
+      JSON.stringify({ runtime: RUNTIME, worker: WORKER, claudeWorker, claudeToolRunner }),
+    );
+    writeQuickstartEnv(paths(), { ANTHROPIC_API_KEY: "sk-ant" });
+    const { deps, calls } = harness();
+    await codingStep(
+      paths(),
+      state,
+      { nonInteractive: true, coding: true, trust: [repoA], provider: "claude-code" },
+      deps,
+    );
+    expect(calls).toContainEqual(["docker", "image", "inspect", claudeWorker]);
+    expect(calls).toContainEqual(["docker", "image", "inspect", claudeToolRunner]);
+    expect(calls.some((call) => call.includes(WORKER))).toBe(false);
+  });
+
+  it("drops a CODING_WORKER_IMAGE an earlier Claude-only run pointed at the Claude worker", async () => {
+    const claudeWorker = `ghcr.io/wardby/wardby-claude-coding-worker@sha256:${"4".repeat(64)}`;
+    const claudeToolRunner = `ghcr.io/wardby/wardby-claude-tool-runner@sha256:${"5".repeat(64)}`;
+    writeFileSync(
+      join(packageRoot, "dist", "quickstart-images.json"),
+      JSON.stringify({ runtime: RUNTIME, worker: WORKER, claudeWorker, claudeToolRunner }),
+    );
+    const oldClaude = `sha256:${"8".repeat(64)}`;
+    writeQuickstartEnv(paths(), {
+      ANTHROPIC_API_KEY: "sk-ant",
+      CODING_WORKER_IMAGE: oldClaude,
+      CODING_CLAUDE_WORKER_IMAGE: oldClaude,
+      CODING_CLAUDE_TOOL_RUNNER_IMAGE: `sha256:${"9".repeat(64)}`,
+    });
+    const { deps } = harness();
+    await codingStep(
+      paths(),
+      state,
+      { nonInteractive: true, coding: true, trust: [repoA], provider: "claude-code" },
+      deps,
+    );
+    const env = readQuickstartEnv(paths());
+    expect(env.CODING_WORKER_IMAGE).toBeUndefined();
+    expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(claudeWorker);
+  });
+
+  it("keeps a Codex CODING_WORKER_IMAGE from an earlier Codex run when Claude Code is set up", async () => {
+    const claudeWorker = `ghcr.io/wardby/wardby-claude-coding-worker@sha256:${"4".repeat(64)}`;
+    const claudeToolRunner = `ghcr.io/wardby/wardby-claude-tool-runner@sha256:${"5".repeat(64)}`;
+    writeFileSync(
+      join(packageRoot, "dist", "quickstart-images.json"),
+      JSON.stringify({ runtime: RUNTIME, worker: WORKER, claudeWorker, claudeToolRunner }),
+    );
+    writeQuickstartEnv(paths(), { ANTHROPIC_API_KEY: "sk-ant", CODING_WORKER_IMAGE: WORKER });
+    const { deps, calls } = harness();
+    await codingStep(
+      paths(),
+      state,
+      { nonInteractive: true, coding: true, trust: [repoA], provider: "claude-code" },
+      deps,
+    );
+    expect(readQuickstartEnv(paths()).CODING_WORKER_IMAGE).toBe(WORKER);
+    expect(calls.filter((call) => call[1] === "pull").map((call) => call[2])).not.toContain(WORKER);
+  });
+
+  it("leaves Claude Code images from an earlier run untouched when Codex is set up", async () => {
+    const claudeWorker = `sha256:${"4".repeat(64)}`;
+    const claudeToolRunner = `sha256:${"5".repeat(64)}`;
+    writeQuickstartEnv(paths(), {
+      OPENAI_API_KEY: "sk-test",
+      CODING_CLAUDE_WORKER_IMAGE: claudeWorker,
+      CODING_CLAUDE_TOOL_RUNNER_IMAGE: claudeToolRunner,
+    });
+    const { deps, calls } = harness();
+    await codingStep(paths(), state, { nonInteractive: true, coding: true, trust: [repoA], provider: "codex" }, deps);
+    const env = readQuickstartEnv(paths());
+    expect(env.CODING_WORKER_IMAGE).toBe(WORKER);
+    expect(env.CODING_CLAUDE_WORKER_IMAGE).toBe(claudeWorker);
+    expect(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE).toBe(claudeToolRunner);
+    expect(calls.filter((call) => call[1] === "pull").map((call) => call[2])).toEqual([RUNTIME, WORKER]);
   });
 
   it("builds only the runtime and coding worker for codex from a source checkout", async () => {

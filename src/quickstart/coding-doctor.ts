@@ -60,13 +60,29 @@ export async function codingDoctorLines(
   for (const root of missing) lines.push(bad(`Trusted folder ${root}`, "does not exist"));
   if (roots.length === 0 && missing.length === 0) lines.push(bad("Trusted folders", "LOCAL_REPO_ROOTS is empty"));
 
-  const worker = env.CODING_WORKER_IMAGE;
-  if (!worker) lines.push(bad("Coding worker image", "CODING_WORKER_IMAGE is not set"));
-  else if (!isImmutableDockerImage(worker)) {
-    lines.push(bad("Coding worker image", "CODING_WORKER_IMAGE must be an immutable digest or image id"));
-  } else if (deps.run("docker", ["image", "inspect", worker]).status !== 0) {
-    lines.push(bad("Coding worker image", "Docker cannot inspect it; re-run quickstart"));
-  } else lines.push(ok("Coding worker image"));
+  // Each provider's images are optional (Codex: CODING_WORKER_IMAGE; Claude Code: its pair); check what is set.
+  const claudeSet = Boolean(env.CODING_CLAUDE_WORKER_IMAGE || env.CODING_CLAUDE_TOOL_RUNNER_IMAGE);
+  const checkImage = (label: string, name: string) => {
+    const image = env[name];
+    if (!image) lines.push(bad(label, `${name} is not set`));
+    else if (!isImmutableDockerImage(image)) lines.push(bad(label, `${name} must be an immutable digest or image id`));
+    else if (deps.run("docker", ["image", "inspect", image]).status !== 0) {
+      lines.push(bad(label, "Docker cannot inspect it; re-run quickstart"));
+    } else lines.push(ok(label));
+  };
+  if (env.CODING_WORKER_IMAGE) checkImage("Coding worker image", "CODING_WORKER_IMAGE");
+  if (claudeSet) {
+    checkImage("Claude Code worker image", "CODING_CLAUDE_WORKER_IMAGE");
+    checkImage("Claude Code tool runner image", "CODING_CLAUDE_TOOL_RUNNER_IMAGE");
+  }
+  if (!env.CODING_WORKER_IMAGE && !claudeSet) {
+    lines.push(
+      bad(
+        "Coding worker image",
+        "set CODING_WORKER_IMAGE for Codex, or CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE for Claude Code",
+      ),
+    );
+  }
 
   const proxy = deps.run("docker", ["inspect", "--format", "{{.State.Running}}", CODING_PROXY_CONTAINER]);
   const running = proxy.status === 0 && proxy.stdout.trim() === "true";

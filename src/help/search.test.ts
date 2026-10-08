@@ -189,3 +189,25 @@ describe("local repositories help", () => {
     }
   });
 });
+
+describe("coding provider not configured help", () => {
+  it("is found by both codes and the variables an operator would search for", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const id = "errors/coding-provider-not-configured";
+    const markdown = catalog.pages.find((entry) => entry.id === id)?.markdown;
+    for (const code of ["coding_provider_not_configured:codex", "coding_provider_not_configured:claude-code"]) {
+      expect(markdown, code).toContain(`\`${code}\``);
+    }
+    for (const query of [
+      "coding_provider_not_configured",
+      "coding_provider_not_configured:codex",
+      "coding_provider_not_configured:claude-code",
+      "CODING_WORKER_IMAGE",
+      "CODING_CLAUDE_WORKER_IMAGE",
+    ]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe(id);
+    }
+  });
+});

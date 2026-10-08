@@ -1765,6 +1765,80 @@ describe("resolveCodingWorkerImage", () => {
     ).toBe(CLAUDE_IMAGE);
   });
 
+  it("refuses a Codex run with coding_provider_not_configured:codex when no Codex worker image is set", async () => {
+    const { executor } = await harness(
+      {},
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      { workerImage: undefined },
+    );
+    expect(() =>
+      executor.resolveCodingWorkerImage?.({
+        provider: "codex",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: null,
+      }),
+    ).toThrow(/^coding_provider_not_configured:codex$/);
+  });
+
+  it("still resolves an agent's BYO image and toolchain images for Codex without CODING_WORKER_IMAGE", async () => {
+    const pythonImage = `registry.example/worker-python@sha256:${"b".repeat(64)}`;
+    const byo = `registry.example/byo@sha256:${"e".repeat(64)}`;
+    const { executor } = await harness(
+      {},
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      { workerImage: undefined, additionalWorkerImages: { "node-python": { "3.12": pythonImage } } },
+    );
+    expect(
+      executor.resolveCodingWorkerImage?.({
+        provider: "codex",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: byo,
+      }),
+    ).toBe(byo);
+    expect(
+      executor.resolveCodingWorkerImage?.({
+        provider: "codex",
+        toolchain: "node-python",
+        toolchainVersion: "3.12",
+        workerImageRef: null,
+      }),
+    ).toBe(pythonImage);
+    expect(
+      executor.resolveCodingWorkerImage?.({
+        provider: "claude-code",
+        toolchain: "node",
+        toolchainVersion: null,
+        workerImageRef: null,
+      }),
+    ).toBe(CLAUDE_IMAGE);
+  });
+
+  it("constructs with only the Claude Code images and still rejects a mutable Claude image", async () => {
+    const claudeOnly = await harness(
+      {},
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      { workerImage: undefined },
+    );
+    expect(claudeOnly.executor).toBeInstanceOf(ContainerExecutor);
+    await expect(
+      harness(
+        {},
+        IMAGE,
+        new InMemoryCodingRunObserver(),
+        { workerImage: "claude:latest", toolImage: CLAUDE_TOOL_IMAGE },
+        { workerImage: undefined },
+      ),
+    ).rejects.toThrow("coding_worker_image_invalid");
+  });
+
   it("constructor throws if any additionalWorkerImages entry is not an immutable digest", async () => {
     const root = await mkdtemp(join(tmpdir(), "wardby-container-executor-"));
     roots.push(root);
@@ -1801,6 +1875,37 @@ describe("jobSpec image selection", () => {
     const { executor, jobs } = await harness({ workerImage: null });
     await executor.start("run-1");
     expect(jobs.lastSpec?.image).toBe(IMAGE);
+  });
+});
+
+describe("jobSpec without a Codex worker image", () => {
+  it("refuses a Codex run with no snapshotted image before launching", async () => {
+    const { executor, jobs, store } = await harness(
+      { workerImage: null },
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      undefined,
+      {
+        workerImage: undefined,
+      },
+    );
+    await executor.start("run-1");
+    expect(jobs.lastSpec).toBeUndefined();
+    expect(store.run.status).not.toBe("running");
+    // Persisted as a configuration (preflight) failure; the log carries the real code.
+    expect((store.terminations[0] as { error: string }).error).toMatch(/^coding_failure_preflight:/);
+    expect(logged.some((entry) => String(entry.payload.reason).includes("coding_provider_not_configured:codex"))).toBe(
+      true,
+    );
+  });
+
+  it("launches a Codex run with its snapshotted image", async () => {
+    const byo = `registry.example/byo@sha256:${"e".repeat(64)}`;
+    const { executor, jobs } = await harness({ workerImage: byo }, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      workerImage: undefined,
+    });
+    await executor.start("run-1");
+    expect(jobs.lastSpec?.image).toBe(byo);
   });
 });
 

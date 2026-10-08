@@ -28,7 +28,7 @@ describe("buildConfiguredExecutor", () => {
     ).toThrow("CODING_PROXY_CONTAINER is required when JOB_LAUNCHER=docker.");
   });
 
-  it("requires CODING_WORKER_IMAGE for Kubernetes", () => {
+  it("requires a Codex or a Claude Code worker image for Kubernetes", () => {
     expect(() =>
       buildConfiguredExecutor({
         native,
@@ -36,7 +36,64 @@ describe("buildConfiguredExecutor", () => {
         env: { ...baseEnv, JOB_LAUNCHER: "kubernetes" },
         kubernetesApi: new FakeKubernetesApi(),
       }),
-    ).toThrow("CODING_WORKER_IMAGE is required when JOB_LAUNCHER=kubernetes.");
+    ).toThrow(
+      "CODING_WORKER_IMAGE (Codex) or both CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE (Claude Code) are required when JOB_LAUNCHER=kubernetes.",
+    );
+  });
+
+  it("requires a Codex or a Claude Code worker image for Docker", () => {
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: { ...baseEnv, JOB_LAUNCHER: "docker", CODING_PROXY_CONTAINER: "proxy" },
+      }),
+    ).toThrow(
+      "CODING_WORKER_IMAGE (Codex) or both CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE (Claude Code) are required when JOB_LAUNCHER=docker.",
+    );
+  });
+
+  it("does not count half of the Claude Code pair as a configured provider", () => {
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: { ...baseEnv, JOB_LAUNCHER: "kubernetes", CODING_CLAUDE_WORKER_IMAGE: REGISTRY_IMAGE },
+        kubernetesApi: new FakeKubernetesApi(),
+      }),
+    ).toThrow("are required when JOB_LAUNCHER=kubernetes.");
+  });
+
+  it("builds for Kubernetes with only the Claude Code images", () => {
+    const api = new FakeKubernetesApi();
+    const executor = buildConfiguredExecutor({
+      native,
+      db,
+      env: {
+        ...baseEnv,
+        JOB_LAUNCHER: "kubernetes",
+        CODING_CLAUDE_WORKER_IMAGE: REGISTRY_IMAGE,
+        CODING_CLAUDE_TOOL_RUNNER_IMAGE: REGISTRY_IMAGE,
+      },
+      kubernetesApi: api,
+    });
+    expect(executor).toBeInstanceOf(RoutingExecutor);
+    expect(api.objects.size).toBe(0);
+  });
+
+  it("builds for Docker with only the Claude Code images", () => {
+    const executor = buildConfiguredExecutor({
+      native,
+      db,
+      env: {
+        ...baseEnv,
+        JOB_LAUNCHER: "docker",
+        CODING_PROXY_CONTAINER: "proxy",
+        CODING_CLAUDE_WORKER_IMAGE: LOCAL_IMAGE,
+        CODING_CLAUDE_TOOL_RUNNER_IMAGE: LOCAL_IMAGE,
+      },
+    });
+    expect(executor).toBeInstanceOf(RoutingExecutor);
   });
 
   it("rejects a bare local image ID for Kubernetes", () => {

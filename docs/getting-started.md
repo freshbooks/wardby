@@ -137,12 +137,15 @@ This step needs Docker, and an `OPENAI_API_KEY` (Codex) or `ANTHROPIC_API_KEY`
 1. asks which folders to trust (it offers the git root of the current
    directory) and writes them to `.wardby/.env` as `LOCAL_REPO_ROOTS`, together
    with `JOB_LAUNCHER=docker`;
-2. gets the images: the runtime and coding worker images, plus (for Claude Code)
-   the Claude worker and tool-runner images, pulled by digest from a published
-   release or built from a wardby source checkout. Choosing Codex skips the
-   Claude images. Set `WARDBY_RUNTIME_IMAGE` and `CODING_WORKER_IMAGE` (and
-   `CODING_CLAUDE_WORKER_IMAGE` plus `CODING_CLAUDE_TOOL_RUNNER_IMAGE` for
-   Claude Code) to use images of your own;
+2. gets the images for the provider you chose, pulled by digest from a
+   published release or built from a wardby source checkout: the runtime image
+   plus the Codex worker for Codex, or the runtime image plus the Claude worker
+   and tool-runner images for Claude Code. Each setup pulls only its own
+   provider's images, so a Claude-only setup never needs the Codex worker (and
+   does not set `CODING_WORKER_IMAGE`); images another provider set up on an
+   earlier run are kept. Set `WARDBY_RUNTIME_IMAGE` together with
+   `CODING_WORKER_IMAGE`, or `CODING_CLAUDE_WORKER_IMAGE` plus
+   `CODING_CLAUDE_TOOL_RUNNER_IMAGE`, to use images of your own;
 3. starts the coding proxy and runs the coding preflight;
 4. creates `local-builder` (a coding agent, $2 budget) and `local-reviewer` (a
    review agent, $1 budget) for a repository in the trusted folders (a trusted

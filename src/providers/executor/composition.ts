@@ -21,7 +21,8 @@ import type { KubernetesApi } from "../jobs/kubernetes-api.js";
 import { ClientNodeKubernetesApi } from "../jobs/kubernetes-client.js";
 import { isRegistryDigest } from "../jobs/kubernetes-isolation.js";
 import { assertPlatformConfig, platformProfile } from "../jobs/kubernetes-platform.js";
-import { runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
+import { preflightCanaryImage, runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
+import { CODING_WORKER_IMAGES_REQUIRED } from "../../coding/docker-preflight.js";
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
 import { buildVcsProvider } from "../vcs/index.js";
@@ -53,7 +54,11 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
 
   const github = loadGitHubVcsConfig(env);
   const config = loadContainerExecutorConfig(env);
-  if (!config.workerImage) throw new Error(`CODING_WORKER_IMAGE is required when JOB_LAUNCHER=${providerConfig.jobs}.`);
+  // Each provider's images are optional, but a coding launcher with neither can run nothing.
+  const claudeConfigured = Boolean(config.claudeWorkerImage && config.claudeToolRunnerImage);
+  if (!config.workerImage && !claudeConfigured) {
+    throw new Error(`${CODING_WORKER_IMAGES_REQUIRED} when JOB_LAUNCHER=${providerConfig.jobs}.`);
+  }
   const proxyContainer = config.proxyContainer;
   if (providerConfig.jobs === "docker" && !proxyContainer) {
     throw new Error("CODING_PROXY_CONTAINER is required when JOB_LAUNCHER=docker.");
@@ -69,7 +74,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   const onServiceState = prismaServiceStateReporter(options.db);
   let jobs: WorkspaceJobLauncher;
   if (providerConfig.jobs === "kubernetes") {
-    if (!isRegistryDigest(config.workerImage)) {
+    if (config.workerImage !== undefined && !isRegistryDigest(config.workerImage)) {
       throw new Error("CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.");
     }
     for (const image of [config.claudeWorkerImage, config.claudeToolRunnerImage]) {
@@ -93,7 +98,8 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       maxDiskMb: config.maxDiskMb,
     });
     const api = options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: kubernetes.context });
-    const workerImage = config.workerImage;
+    // The canary needs some worker image to run node in; the Claude worker stands in on a Claude-only server.
+    const workerImage = preflightCanaryImage(config) as string;
     jobs = new KubernetesJobLauncher({
       onServiceState,
       api,

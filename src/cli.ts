@@ -30,9 +30,17 @@ import {
   loadProviderConfig,
 } from "./config/providers.js";
 import { drainCodingQueue } from "./core/coding-queue.js";
-import { dockerCodingPreflight } from "./coding/docker-preflight.js";
+import {
+  CODING_WORKER_IMAGES_REQUIRED,
+  configuredCodingImages,
+  dockerCodingPreflight,
+} from "./coding/docker-preflight.js";
 import { ClientNodeKubernetesApi } from "./providers/jobs/kubernetes-client.js";
-import { describePreflightFailure, kubernetesPreflight } from "./providers/jobs/kubernetes-preflight.js";
+import {
+  describePreflightFailure,
+  kubernetesPreflight,
+  preflightCanaryImage,
+} from "./providers/jobs/kubernetes-preflight.js";
 import {
   RoutingLlmProvider,
   isLlmEffort,
@@ -666,10 +674,13 @@ async function codingOps(args: string[]): Promise<void> {
     fail("coding operations require JOB_LAUNCHER=docker or kubernetes.");
   }
   const container = loadContainerExecutorConfig();
-  if (config.jobs === "kubernetes") {
-    if (!container.workerImage) fail("CODING_WORKER_IMAGE is required when JOB_LAUNCHER=kubernetes.");
-  } else if (!container.workerImage || !container.proxyContainer) {
-    fail("CODING_WORKER_IMAGE and CODING_PROXY_CONTAINER are required when JOB_LAUNCHER=docker.");
+  // Either provider's images are enough: CODING_WORKER_IMAGE (Codex) or the Claude Code pair.
+  const canaryImage = preflightCanaryImage(container);
+  if (!container.workerImage && !(container.claudeWorkerImage && container.claudeToolRunnerImage)) {
+    fail(`${CODING_WORKER_IMAGES_REQUIRED} when JOB_LAUNCHER=${config.jobs}.`);
+  }
+  if (config.jobs === "docker" && !container.proxyContainer) {
+    fail("CODING_PROXY_CONTAINER is required when JOB_LAUNCHER=docker.");
   }
 
   if (operation === "preflight" && config.jobs === "kubernetes") {
@@ -680,14 +691,14 @@ async function codingOps(args: string[]): Promise<void> {
       checks = await kubernetesPreflight({
         api,
         config: kubernetes,
-        workerImage: container.workerImage,
+        workerImage: canaryImage as string,
         maxDiskMb: container.maxDiskMb,
         timeoutMs: kubernetes.preflightTimeoutMs,
       });
     } catch (error) {
       fail(`coding preflight failed: ${describePreflightFailure(error)}`);
     }
-    console.log(`coding preflight passed (${checks.join(", ")}) for ${container.workerImage}`);
+    console.log(`coding preflight passed (${checks.join(", ")}) for ${canaryImage}`);
     return;
   }
 
@@ -701,7 +712,11 @@ async function codingOps(args: string[]): Promise<void> {
       }
     });
     if (failure) fail(failure);
-    console.log(`coding preflight passed for ${container.workerImage}`);
+    console.log(
+      `coding preflight passed for ${configuredCodingImages(container)
+        .map(([, image]) => image)
+        .join(", ")}`,
+    );
     return;
   }
 

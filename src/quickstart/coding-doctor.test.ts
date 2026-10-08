@@ -84,4 +84,26 @@ describe("codingDoctorLines", () => {
     const again = await codingDoctorLines(env, deps([{ name: "b", repository: `local:${repo}` }]));
     expect(again.find((line) => line.startsWith("✗ b: .wardby/services.yaml"))).toMatch(/only top-level key/);
   });
+
+  it("checks the Claude Code images on a Claude-only setup without asking for CODING_WORKER_IMAGE", async () => {
+    const env = {
+      LOCAL_REPO_ROOTS: scratch,
+      JOB_LAUNCHER: "docker",
+      CODING_CLAUDE_WORKER_IMAGE: WORKER,
+      CODING_CLAUDE_TOOL_RUNNER_IMAGE: "tools:latest",
+    };
+    const lines = await codingDoctorLines(env, deps([]));
+    expect(lines.some((line) => line.includes("CODING_WORKER_IMAGE"))).toBe(false);
+    expect(lines).toContain("✓ Claude Code worker image");
+    expect(lines).toContain(
+      "✗ Claude Code tool runner image (CODING_CLAUDE_TOOL_RUNNER_IMAGE must be an immutable digest or image id)",
+    );
+  });
+
+  it("names both options when no worker image is configured", async () => {
+    const lines = await codingDoctorLines({ LOCAL_REPO_ROOTS: scratch, JOB_LAUNCHER: "docker" }, deps([]));
+    expect(lines).toContain(
+      "✗ Coding worker image (set CODING_WORKER_IMAGE for Codex, or CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE for Claude Code)",
+    );
+  });
 });

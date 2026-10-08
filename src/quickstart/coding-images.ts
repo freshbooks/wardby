@@ -1,7 +1,7 @@
 /**
- * The coding step's images: the wardby runtime (coding proxy) and the coding
- * worker, plus Claude Code's worker and tool runner when that provider is
- * chosen. Pulled by digest from a release, or built from a source checkout
+ * The coding step's images: the wardby runtime (coding proxy) plus the chosen
+ * provider's own images -- the Codex worker, or Claude Code's worker and tool
+ * runner. Pulled by digest from a release, or built from a source checkout
  * and pinned by local image id (the Docker launcher refuses mutable tags).
  */
 import { join } from "node:path";
@@ -16,7 +16,9 @@ export class CodingSkip extends Error {}
 
 export interface PreparedImages {
   runtime: string;
-  worker: string;
+  /** The Codex worker; only for codex. */
+  worker?: string;
+  /** Claude Code's worker and tool runner; only for claude-code. */
   claudeWorker?: string;
   claudeToolRunner?: string;
 }
@@ -43,6 +45,7 @@ function pullOrPresent(deps: CodingDeps, image: string): void {
   throw new CodingSkip(`could not pull ${image}`);
 }
 
+/** Only the chosen provider's images: a Claude-only setup never builds or pulls the Codex worker. */
 export function prepareImages(
   provider: CodingProvider,
   config: Record<string, string>,
@@ -52,23 +55,27 @@ export function prepareImages(
   if ("unavailable" in resolved) throw new CodingSkip(resolved.unavailable);
   if (resolved.source === "build") {
     build(deps, "deploy/Dockerfile", resolved.runtime, "runtime");
-    build(deps, "src/coding-worker/Dockerfile", resolved.worker);
-    const images: PreparedImages = { runtime: resolved.runtime, worker: imageId(deps, resolved.worker) };
-    if (provider === "claude-code") {
-      const claudeWorker = resolved.claudeWorker ?? "wardby-claude-coding-worker:local";
-      const claudeToolRunner = resolved.claudeToolRunner ?? "wardby-claude-tool-runner:local";
-      build(deps, "src/claude-coding-worker/Dockerfile", claudeWorker);
-      build(deps, "src/claude-tool-runner/Dockerfile", claudeToolRunner);
-      images.claudeWorker = imageId(deps, claudeWorker);
-      images.claudeToolRunner = imageId(deps, claudeToolRunner);
+    if (provider !== "claude-code") {
+      build(deps, "src/coding-worker/Dockerfile", resolved.worker);
+      return { runtime: resolved.runtime, worker: imageId(deps, resolved.worker) };
     }
-    return images;
+    const claudeWorker = resolved.claudeWorker ?? "wardby-claude-coding-worker:local";
+    const claudeToolRunner = resolved.claudeToolRunner ?? "wardby-claude-tool-runner:local";
+    build(deps, "src/claude-coding-worker/Dockerfile", claudeWorker);
+    build(deps, "src/claude-tool-runner/Dockerfile", claudeToolRunner);
+    return {
+      runtime: resolved.runtime,
+      claudeWorker: imageId(deps, claudeWorker),
+      claudeToolRunner: imageId(deps, claudeToolRunner),
+    };
   }
-  if (!isImmutableDockerImage(resolved.worker)) {
-    throw new CodingSkip("CODING_WORKER_IMAGE must be an immutable digest (repo@sha256:...) or local image id");
-  }
-  const images: PreparedImages = { runtime: resolved.runtime, worker: resolved.worker };
-  if (provider === "claude-code") {
+  let images: PreparedImages;
+  if (provider !== "claude-code") {
+    if (!isImmutableDockerImage(resolved.worker)) {
+      throw new CodingSkip("CODING_WORKER_IMAGE must be an immutable digest (repo@sha256:...) or local image id");
+    }
+    images = { runtime: resolved.runtime, worker: resolved.worker };
+  } else {
     const claudeWorker = resolved.claudeWorker || config.CODING_CLAUDE_WORKER_IMAGE;
     const claudeToolRunner = resolved.claudeToolRunner || config.CODING_CLAUDE_TOOL_RUNNER_IMAGE;
     if (!claudeWorker || !claudeToolRunner) {
@@ -81,7 +88,7 @@ export function prepareImages(
         "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be immutable digests (repo@sha256:...) or local image ids",
       );
     }
-    Object.assign(images, { claudeWorker, claudeToolRunner });
+    images = { runtime: resolved.runtime, claudeWorker, claudeToolRunner };
   }
   for (const image of [images.runtime, images.worker, images.claudeWorker, images.claudeToolRunner]) {
     if (image) pullOrPresent(deps, image);

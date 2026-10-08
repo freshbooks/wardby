@@ -171,10 +171,20 @@ The image commands create local tags. Resolve every enabled image with
 `sha256:...` ID in `.env.local`; do not use the mutable tag at runtime. Add the
 following values, replacing image IDs and GitHub values:
 
+Set the images for the providers you use: `CODING_WORKER_IMAGE` for Codex
+agents, and the `CODING_CLAUDE_*` pair for Claude Code agents. Each provider's
+images are optional, but at least one provider must be configured. A Claude-only
+deployment can leave `CODING_WORKER_IMAGE` unset (and skip
+`npm run worker:image:local`); a Codex agent there is then refused with
+`coding_provider_not_configured:codex` unless it names its own worker image
+(see [Coding provider not configured](../help/errors/coding-provider-not-configured.md)).
+
 ```dotenv
 # Leave this as local until every value below is set and reviewed.
 JOB_LAUNCHER=local
+# Codex agents only:
 CODING_WORKER_IMAGE=sha256:replace-with-worker-image-id
+# Claude Code agents only (both or neither):
 CODING_CLAUDE_WORKER_IMAGE=sha256:replace-with-claude-worker-image-id
 CODING_CLAUDE_TOOL_RUNNER_IMAGE=sha256:replace-with-claude-tool-runner-image-id
 # Only for Claude Code agents on the node-python toolchain (version 3.12):
@@ -206,7 +216,9 @@ change `JOB_LAUNCHER=docker` and run:
 npm run cli -- coding preflight
 ```
 
-The preflight checks that Docker can inspect the immutable worker image. A real
+The preflight checks that every configured worker image (the Codex worker and/or
+the Claude Code worker and tool runner) is immutable and that Docker can inspect
+it. A real
 run additionally verifies the proxy's isolated-network attachment immediately
 before launching the worker.
 

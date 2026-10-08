@@ -28,4 +28,42 @@ describe("dockerCodingPreflight", () => {
       /cannot inspect/,
     );
   });
+
+  it("passes with only the Claude Code images", async () => {
+    const inspected: string[] = [];
+    const tool = `sha256:${"c".repeat(64)}`;
+    const result = await dockerCodingPreflight(
+      { claudeWorkerImage: ID, claudeToolRunnerImage: tool, proxyContainer: "p" },
+      async (image) => {
+        inspected.push(image);
+        return true;
+      },
+    );
+    expect(result).toBeNull();
+    expect(inspected).toEqual([ID, tool]);
+  });
+
+  it("checks every configured image", async () => {
+    const tool = `sha256:${"c".repeat(64)}`;
+    const result = await dockerCodingPreflight(
+      { workerImage: ID, claudeWorkerImage: ID, claudeToolRunnerImage: tool, proxyContainer: "p" },
+      async (image) => image !== tool,
+    );
+    expect(result).toBe(`Docker cannot inspect coding worker image "${tool}".`);
+  });
+
+  it("refuses a mutable Claude Code image", async () => {
+    const result = await dockerCodingPreflight(
+      { claudeWorkerImage: "claude:latest", claudeToolRunnerImage: ID, proxyContainer: "p" },
+      async () => true,
+    );
+    expect(result).toMatch(/CODING_CLAUDE_WORKER_IMAGE must use an immutable/);
+  });
+
+  it("names both options when neither provider's images are set", async () => {
+    const result = await dockerCodingPreflight({ claudeWorkerImage: ID, proxyContainer: "p" }, async () => true);
+    expect(result).toBe(
+      "CODING_WORKER_IMAGE (Codex) or both CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE (Claude Code) are required when JOB_LAUNCHER=docker.",
+    );
+  });
 });

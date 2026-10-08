@@ -126,11 +126,13 @@ then:
 
 - asks which folders to trust (offering the git root of the current directory)
   and writes `LOCAL_REPO_ROOTS` and `JOB_LAUNCHER=docker` to `.wardby/.env`;
-- gets the images, pulled by digest from a release or built from a wardby
-  source checkout: the runtime and coding worker images, plus the Claude worker
-  and tool-runner images when you choose Claude Code (Codex skips them).
-  `WARDBY_RUNTIME_IMAGE` and `CODING_WORKER_IMAGE` (and, for Claude Code,
-  `CODING_CLAUDE_WORKER_IMAGE` plus `CODING_CLAUDE_TOOL_RUNNER_IMAGE`) override
+- gets only the chosen provider's images, pulled by digest from a release or
+  built from a wardby source checkout: the runtime image plus the Codex worker
+  for Codex, or the runtime image plus the Claude worker and tool-runner images
+  for Claude Code. A Claude-only setup does not need or set
+  `CODING_WORKER_IMAGE`; images another provider set up on an earlier run are
+  kept. `WARDBY_RUNTIME_IMAGE` together with `CODING_WORKER_IMAGE`, or
+  `CODING_CLAUDE_WORKER_IMAGE` plus `CODING_CLAUDE_TOOL_RUNNER_IMAGE`, override
   them with your own digests;
 - starts the coding proxy and runs the coding preflight;
 - finds the repository: a trusted folder that is a git repository, or the
