@@ -77,7 +77,7 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox gateway over HTTP (da
     },
     secrets: identityCipher,
     memory: noMemory,
-  } as NativeRunProviders;
+  };
   // Children run in this process, as a control-plane executor would run them.
   const executor: Executor = {
     start: async (runId) => void (await executeRun(runId, providers, db)),
