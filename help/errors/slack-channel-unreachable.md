@@ -1,9 +1,9 @@
 ---
 id: errors/slack-channel-unreachable
-title: Slack channel unreachable
+title: Channel unreachable — bot not invited or archived
 summary: wardby's bot can no longer post to a linked Slack channel — it was removed, archived, or never invited — and that channel's pending deliveries have failed.
 audience: operator
-tags: [error, slack, notifications, channel, not_in_channel, channel_not_found, is_archived]
+tags: [error, notifications, channel, channel-error, not_in_channel, channel_not_found, is_archived]
 appliesTo: ">=0.6.0"
 ---
 

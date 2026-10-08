@@ -1,9 +1,9 @@
 ---
 id: errors/slack-not-configured
-title: Slack is not configured
+title: Notification bot token not configured
 summary: link_notification_channel, unlink_notification_channel, and test_notification_channel are refused because wardby has no Slack bot token configured.
 audience: operator
-tags: [error, slack, notifications, configuration, WARDBY_SLACK_BOT_TOKEN]
+tags: [error, notifications, configuration, config, setup, WARDBY_SLACK_BOT_TOKEN]
 appliesTo: ">=0.6.0"
 ---
 

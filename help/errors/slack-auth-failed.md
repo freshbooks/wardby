@@ -1,9 +1,9 @@
 ---
 id: errors/slack-auth-failed
-title: Slack authentication failed
+title: Bot authentication failed — invalid or revoked token
 summary: wardby's Slack bot token is invalid, revoked, disabled, or missing a required scope, so delivery to every linked channel is paused.
 audience: operator
-tags: [error, slack, notifications, auth, invalid_auth, token_revoked, missing_scope]
+tags: [error, notifications, auth, authentication, invalid_auth, token_revoked, missing_scope]
 appliesTo: ">=0.6.0"
 ---
 
