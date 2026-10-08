@@ -1,3 +1,5 @@
+import { logger } from "./logger.js";
+
 export const WORKFLOW_EVENT_KINDS = [
   "issue_picked_up",
   "run_failed",
@@ -57,4 +59,36 @@ export const threadKeys = {
 export function shortReason(error: string | null | undefined): string | null {
   const first = (error ?? "").split("\n", 1)[0].trim();
   return first ? first.slice(0, 200) : null;
+}
+
+export interface WorkflowEventInput {
+  dedupeKey: string;
+  payload: WorkflowPayload;
+  /** The run the event is about (its attribution names the work item). */
+  runId?: string;
+  /** The agent the event is about (agent links match on it). */
+  agentId?: string;
+  /** Known work item; otherwise resolved from runId's RunAttribution, then the PR's IssuePullRequest. */
+  workItem?: { provider: string; key: string };
+  pullRequest?: { codeProvider: string; repository: string; number: number };
+}
+
+export type WorkflowEventSink = (input: WorkflowEventInput) => Promise<void>;
+
+const log = logger.child({ module: "workflow-events" });
+let sink: WorkflowEventSink | null = null;
+
+/** Installed once per process by startNotifications; null uninstalls (tests). */
+export function setWorkflowEventSink(next: WorkflowEventSink | null): void {
+  sink = next;
+}
+
+/** Never throws; a no-op until a sink is installed. */
+export async function emitWorkflowEvent(input: WorkflowEventInput): Promise<void> {
+  if (!sink) return;
+  try {
+    await sink(input);
+  } catch (err) {
+    log.warn({ err, dedupeKey: input.dedupeKey }, "workflow event record failed");
+  }
 }
