@@ -12,6 +12,8 @@ export interface QuickstartImages {
   /** Node + Python 3.12 workspace images (Codex worker, Claude Code tool runner); each optional on its own. */
   workerNodePython?: string;
   claudeToolRunnerNodePython?: string;
+  /** The coding-worker driver image every worker is built on: the base for a bring-your-own worker image. */
+  driver?: string;
   source: "env" | "package" | "build";
 }
 
@@ -19,14 +21,20 @@ const DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
 
 type PackageImages = Pick<
   QuickstartImages,
-  "runtime" | "worker" | "claudeWorker" | "claudeToolRunner" | "workerNodePython" | "claudeToolRunnerNodePython"
+  | "runtime"
+  | "worker"
+  | "claudeWorker"
+  | "claudeToolRunner"
+  | "workerNodePython"
+  | "claudeToolRunnerNodePython"
+  | "driver"
 >;
 
 function readPackageImages(packageRoot: string): PackageImages | undefined {
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(packageRoot, "dist", "quickstart-images.json"), "utf8"));
     if (typeof parsed !== "object" || parsed === null) return undefined;
-    const { runtime, worker, claudeWorker, claudeToolRunner, workerNodePython, claudeToolRunnerNodePython } =
+    const { runtime, worker, claudeWorker, claudeToolRunner, workerNodePython, claudeToolRunnerNodePython, driver } =
       parsed as Record<string, unknown>;
     if (typeof runtime !== "string" || typeof worker !== "string") return undefined;
     // An image is never resolved by tag: a tag can be repointed after release.
@@ -50,10 +58,42 @@ function readPackageImages(packageRoot: string): PackageImages | undefined {
       }
       result.claudeToolRunnerNodePython = claudeToolRunnerNodePython;
     }
+    // The driver is optional (an older release has none), and pinned when present.
+    if (driver !== undefined) {
+      if (typeof driver !== "string" || !DIGEST_REF.test(driver)) return undefined;
+      result.driver = driver;
+    }
     return result;
   } catch {
     return undefined;
   }
+}
+
+/** The digest-pinned image a worker Dockerfile's first FROM line names; undefined when it is not pinned. */
+export function driverFromDockerfile(text: string): string | undefined {
+  const image = /^FROM\s+(\S+)/im.exec(text)?.[1];
+  return image && /^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$/.test(image) ? image : undefined;
+}
+
+function hasSource(packageRoot: string): boolean {
+  return (
+    existsSync(join(packageRoot, "deploy", "Dockerfile")) &&
+    existsSync(join(packageRoot, "src", "coding-worker", "Dockerfile"))
+  );
+}
+
+function sourceDriver(packageRoot: string): string | undefined {
+  try {
+    return driverFromDockerfile(readFileSync(join(packageRoot, "src", "coding-worker", "Dockerfile"), "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/** `wardby doctor`'s line naming the base image for your own worker images; undefined when it is not known. */
+export function baseImageLine(resolved: QuickstartImages | { unavailable: string }): string | undefined {
+  if ("unavailable" in resolved || !resolved.driver) return undefined;
+  return `Base image for your own worker images: ${resolved.driver}`;
 }
 
 /**
@@ -82,14 +122,21 @@ export function resolveQuickstartImages(opts: {
   };
   const envClaude = claudeWorker && claudeToolRunner ? { claudeWorker, claudeToolRunner } : {};
   if (runtimeImage && workerImage) {
-    return { runtime: runtimeImage, worker: workerImage, ...envClaude, ...envNodePython, source: "env" };
+    const driver =
+      readPackageImages(packageRoot)?.driver ?? (hasSource(packageRoot) ? sourceDriver(packageRoot) : undefined);
+    return {
+      runtime: runtimeImage,
+      worker: workerImage,
+      ...envClaude,
+      ...envNodePython,
+      ...(driver ? { driver } : {}),
+      source: "env",
+    };
   }
   const pinned = readPackageImages(packageRoot);
   if (pinned) return { ...pinned, ...envClaude, ...envNodePython, source: "package" };
-  if (
-    existsSync(join(packageRoot, "deploy", "Dockerfile")) &&
-    existsSync(join(packageRoot, "src", "coding-worker", "Dockerfile"))
-  ) {
+  if (hasSource(packageRoot)) {
+    const driver = sourceDriver(packageRoot);
     return {
       runtime: "wardby-runtime:local",
       worker: "wardby-coding-worker:local",
@@ -97,6 +144,7 @@ export function resolveQuickstartImages(opts: {
       claudeToolRunner: "wardby-claude-tool-runner:local",
       workerNodePython: "wardby-coding-worker-node-python:local",
       claudeToolRunnerNodePython: "wardby-claude-tool-runner-node-python:local",
+      ...(driver ? { driver } : {}),
       source: "build",
     };
   }

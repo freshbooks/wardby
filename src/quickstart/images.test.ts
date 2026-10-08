@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveQuickstartImages } from "./images.js";
+import { baseImageLine, driverFromDockerfile, resolveQuickstartImages } from "./images.js";
 
 const digest = (c: string) => `sha256:${c.repeat(64)}`;
 const runtime = `ghcr.io/o/r/wardby-runtime@${digest("a")}`;
@@ -12,6 +12,7 @@ const claudeToolRunner = `ghcr.io/o/r/wardby-claude-tool-runner@${digest("d")}`;
 
 const workerNodePython = `ghcr.io/o/r/wardby-coding-worker-node-python@${digest("e")}`;
 const claudeToolRunnerNodePython = `ghcr.io/o/r/wardby-claude-tool-runner-node-python@${digest("f")}`;
+const driver = `ghcr.io/o/r/wardby-coding-worker-driver@${digest("1")}`;
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), "wardby-images-"));
@@ -270,5 +271,60 @@ describe("resolveQuickstartImages", () => {
     const result = resolveQuickstartImages({ env: {}, packageRoot: root() });
     expect(result).toHaveProperty("unavailable");
     expect((result as { unavailable: string }).unavailable).toMatch(/clone of the wardby repository/);
+  });
+
+  it("returns the driver base image from the package file when present", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, driver });
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toEqual({
+      runtime,
+      worker,
+      driver,
+      source: "package",
+    });
+  });
+
+  it("rejects the whole package file when the driver is not digest-pinned", () => {
+    for (const bad of ["ghcr.io/o/r/wardby-coding-worker-driver:v11", 7, null]) {
+      const dir = root();
+      writePackageFile(dir, { runtime, worker, driver: bad });
+      expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toHaveProperty("unavailable");
+    }
+  });
+
+  it("reads the driver from the worker Dockerfile's FROM line in a source checkout", () => {
+    const dir = root();
+    writeSource(dir);
+    writeFileSync(join(dir, "src", "coding-worker", "Dockerfile"), `# comment\nFROM ${driver} AS runtime\nUSER 1\n`);
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toMatchObject({ driver, source: "build" });
+  });
+
+  it("gives the driver with environment overrides too, from the package or source", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, driver });
+    expect(
+      resolveQuickstartImages({ env: { WARDBY_RUNTIME_IMAGE: "r:1", CODING_WORKER_IMAGE: "w:1" }, packageRoot: dir }),
+    ).toEqual({ runtime: "r:1", worker: "w:1", driver, source: "env" });
+  });
+
+  it("finds the pinned driver in this checkout's worker Dockerfile", () => {
+    const text = readFileSync(new URL("../coding-worker/Dockerfile", import.meta.url), "utf8");
+    expect(driverFromDockerfile(text)).toMatch(
+      /^ghcr\.io\/wardby\/wardby\/wardby-coding-worker-driver@sha256:[0-9a-f]{64}$/,
+    );
+  });
+
+  it("finds no driver in a Dockerfile whose first FROM is not digest-pinned", () => {
+    expect(driverFromDockerfile("FROM scratch\n")).toBeUndefined();
+    expect(driverFromDockerfile(`FROM node:24\nFROM ${driver}\n`)).toBeUndefined();
+    expect(driverFromDockerfile("RUN true\n")).toBeUndefined();
+  });
+
+  it("prints the base image line only when the driver is known", () => {
+    expect(baseImageLine({ runtime, worker, driver, source: "package" })).toBe(
+      `Base image for your own worker images: ${driver}`,
+    );
+    expect(baseImageLine({ runtime, worker, source: "package" })).toBeUndefined();
+    expect(baseImageLine({ unavailable: "x" })).toBeUndefined();
   });
 });

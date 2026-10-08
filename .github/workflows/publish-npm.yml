@@ -133,7 +133,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       # Ship the pushed digests in the tarball (dist/ is in "files"). The
-      # quickstart resolves images by digest only, never by tag.
+      # quickstart resolves images by digest only, never by tag. `driver` is the
+      # pinned base of the worker images (src/coding-worker/Dockerfile's FROM),
+      # which `wardby doctor` prints for building your own worker image.
       - name: Record image digests
         env:
           IMAGE_PREFIX: ghcr.io/${{ github.repository }}
@@ -144,12 +146,14 @@ jobs:
           WORKER_NODE_PYTHON_DIGEST: ${{ needs.images.outputs.worker-node-python }}
           CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST: ${{ needs.images.outputs.claude-tool-runner-node-python }}
         run: >-
-          node -e 'const { mkdirSync, writeFileSync } = require("node:fs");
+          node -e 'const { mkdirSync, readFileSync, writeFileSync } = require("node:fs");
           const { IMAGE_PREFIX, RUNTIME_DIGEST, WORKER_DIGEST, CLAUDE_WORKER_DIGEST, CLAUDE_TOOL_RUNNER_DIGEST,
           WORKER_NODE_PYTHON_DIGEST, CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST } = process.env;
           for (const d of [RUNTIME_DIGEST, WORKER_DIGEST, CLAUDE_WORKER_DIGEST, CLAUDE_TOOL_RUNNER_DIGEST,
           WORKER_NODE_PYTHON_DIGEST, CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST])
           if (!/^sha256:[0-9a-f]{64}$/.test(d)) throw new Error(`bad digest ${d}`);
+          const driver = /^FROM\s+(\S+)/im.exec(readFileSync("src/coding-worker/Dockerfile", "utf8"))?.[1] ?? "";
+          if (!/^[a-z0-9][a-z0-9._\/:-]*@sha256:[0-9a-f]{64}$/.test(driver)) throw new Error(`bad driver ${driver}`);
           mkdirSync("dist", { recursive: true });
           writeFileSync("dist/quickstart-images.json", JSON.stringify({
           runtime: `${IMAGE_PREFIX}/wardby-runtime@${RUNTIME_DIGEST}`,
@@ -157,7 +161,8 @@ jobs:
           claudeWorker: `${IMAGE_PREFIX}/wardby-claude-coding-worker@${CLAUDE_WORKER_DIGEST}`,
           claudeToolRunner: `${IMAGE_PREFIX}/wardby-claude-tool-runner@${CLAUDE_TOOL_RUNNER_DIGEST}`,
           workerNodePython: `${IMAGE_PREFIX}/wardby-coding-worker-node-python@${WORKER_NODE_PYTHON_DIGEST}`,
-          claudeToolRunnerNodePython: `${IMAGE_PREFIX}/wardby-claude-tool-runner-node-python@${CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST}` }) + "\n");'
+          claudeToolRunnerNodePython: `${IMAGE_PREFIX}/wardby-claude-tool-runner-node-python@${CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST}`,
+          driver }) + "\n");'
       - run: npm run test:package
         env:
           DATABASE_URL: postgresql://wardby:test-only@localhost:5432/package

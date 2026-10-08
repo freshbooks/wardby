@@ -25,6 +25,7 @@ import {
 import { codingStep, quickstartComposeFiles, type CodingDeps, type CodingStepOptions } from "./coding.js";
 import { prismaCatalogImages, prismaLocalAgents, prismaSeedCodingAgents } from "./coding-db.js";
 import { codingDoctorLines } from "./coding-doctor.js";
+import { baseImageLine, resolveQuickstartImages } from "./images.js";
 import { parseStarterChoice } from "./starter-services.js";
 import {
   FETCH_NOTICE,
@@ -583,6 +584,8 @@ export async function doctorCommand(args: string[]): Promise<void> {
     failed ||= line.startsWith("✗");
     console.log(line);
   }
+  const base = baseImageLine(resolveQuickstartImages({ env: runtimeEnv(paths), packageRoot }));
+  if (base) console.log(base);
   if (failed) process.exitCode = 1;
 }
 
