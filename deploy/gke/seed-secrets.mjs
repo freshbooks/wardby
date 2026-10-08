@@ -8,8 +8,9 @@
 // source of truth once seeded. An empty secret is filled from, in order, the live
 // cluster's wardby-control-plane-env Secret (so today's SECRET_APP_KEY and auth
 // keys carry over), .env.local, or -- for the two auth keys only -- a new random
-// key. An optional group (Jira) is seeded only when every one of its values has
-// a source, and left empty when none does; anything in between is an error.
+// key. An optional group (Jira, Slack) is seeded only when every one of its
+// values has a source, and left empty when none does; anything in between is
+// an error.
 //
 // Values travel over stdin and stdout only, never in a process argument, and are
 // never printed. Every decision is made before anything is written, so a missing
@@ -41,6 +42,11 @@ export const SECRETS = [
   { id: "jira-api-token", env: "WARDBY_JIRA_API_TOKEN", source: "optional", group: "jira" },
   { id: "jira-api-token-expires-at", env: "WARDBY_JIRA_API_TOKEN_EXPIRES_AT", source: "optional", group: "jira" },
   { id: "jira-webhook-secret", env: "WARDBY_JIRA_WEBHOOK_SECRET", source: "optional", group: "jira" },
+  // Slack workflow notifications (docs/slack-notifications.md). Optional: an
+  // operator who doesn't post to Slack leaves it empty, and up.sh then skips
+  // the wardby-slack-env ExternalSecret. WARDBY_SLACK_CUSTOMIZE and
+  // WARDBY_SLACK_API_BASE_URL are not secrets and are not seeded.
+  { id: "slack-bot-token", env: "WARDBY_SLACK_BOT_TOKEN", source: "optional", group: "slack" },
 ];
 
 const CONTROL_PLANE_SECRET = "wardby-control-plane-env";

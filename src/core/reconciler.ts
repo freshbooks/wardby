@@ -51,6 +51,7 @@ import { closeOpenHostCheck } from "./review-host-checks.js";
 import { completeHostStatus } from "./host-status.js";
 import { closeOrphanedIssueStatuses } from "./issue-status.js";
 import { fileSelfDefect } from "./self-defects.js";
+import { emitRunFinishedEvents } from "./workflow-run-events.js";
 import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 
@@ -248,13 +249,21 @@ export async function reconcileOnce(
         data: { status: "lost", error: reason, finishedAt: now },
       });
       lost += result.count;
-      if (result.count > 0)
+      if (result.count > 0) {
         await fileSelfDefect(
           db,
           issueTrackers,
           { ...run, status: "lost", error: reason, finishedAt: now },
           SELF_DEFECT_WAIT,
         );
+        await emitRunFinishedEvents(db, {
+          id: run.id,
+          agentId: run.agentId,
+          status: "lost",
+          error: reason,
+          parentRunId: run.parentRunId,
+        });
+      }
       continue;
     }
 
@@ -264,13 +273,21 @@ export async function reconcileOnce(
     });
     lost += result.count;
     // Only after this pass made the row lost (not when another instance won the race); bounded, never throws.
-    if (result.count > 0)
+    if (result.count > 0) {
       await fileSelfDefect(
         db,
         issueTrackers,
         { ...run, status: "lost", error: reason, finishedAt: now },
         SELF_DEFECT_WAIT,
       );
+      await emitRunFinishedEvents(db, {
+        id: run.id,
+        agentId: run.agentId,
+        status: "lost",
+        error: reason,
+        parentRunId: run.parentRunId,
+      });
+    }
   }
   await closeOrphanedHostChecks(db, reviewHosts, now);
   await closeOrphanedHostStatuses(db, reviewHosts, now);

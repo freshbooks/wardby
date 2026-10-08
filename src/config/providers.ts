@@ -197,6 +197,35 @@ export function loadJiraConfig(env: NodeJS.ProcessEnv = process.env): JiraConfig
   };
 }
 
+export interface SlackConfig {
+  botToken: string;
+  apiBaseUrl: string;
+  customize: boolean;
+}
+
+/** Slack workflow notifications; null when WARDBY_SLACK_BOT_TOKEN is unset (and no other Slack variable is). */
+export function loadSlackConfig(env: NodeJS.ProcessEnv = process.env): SlackConfig | null {
+  const token = env.WARDBY_SLACK_BOT_TOKEN?.trim();
+  const base = env.WARDBY_SLACK_API_BASE_URL?.trim();
+  const customizeRaw = env.WARDBY_SLACK_CUSTOMIZE?.trim().toLowerCase();
+  if (!token) {
+    if (base || customizeRaw)
+      throw new Error("WARDBY_SLACK_API_BASE_URL/WARDBY_SLACK_CUSTOMIZE need WARDBY_SLACK_BOT_TOKEN.");
+    return null;
+  }
+  if (!token.startsWith("xoxb-")) throw new Error("WARDBY_SLACK_BOT_TOKEN must be a bot token (xoxb-…).");
+  let apiBaseUrl = "https://slack.com/api";
+  if (base) {
+    const url = new URL(base);
+    if (url.protocol !== "https:") throw new Error("WARDBY_SLACK_API_BASE_URL must be an https URL.");
+    apiBaseUrl = base.replace(/\/+$/, "");
+  }
+  if (customizeRaw && customizeRaw !== "true" && customizeRaw !== "false") {
+    throw new Error("WARDBY_SLACK_CUSTOMIZE must be true or false.");
+  }
+  return { botToken: token, apiBaseUrl, customize: customizeRaw === "true" };
+}
+
 export interface ContainerExecutorConfig {
   workerImage?: string;
   claudeWorkerImage?: string;

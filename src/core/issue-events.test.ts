@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { IssueEvent, IssueTracker } from "../providers/issue-tracker/types.js";
 import { issueTaskText, routeIssueEvent } from "./issue-events.js";
 import { splitTaskOverride } from "./untrusted-content.js";
+import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 
 const { txStub } = vi.hoisted(() => ({ txStub: { runIssueStatus: { create: vi.fn(async () => undefined) } } }));
 vi.mock("./dispatch.js", () => ({
@@ -82,7 +83,7 @@ function setup(links: Link[], jqlMatches = true, prs: Pr[] = [], prFails = false
               trustedAccountIds: [],
               commentVisibilityRole: null,
               ...l,
-              agent: { ownerId: l.ownerId === undefined ? "p1" : l.ownerId, kind: l.kind ?? "native" },
+              agent: { ownerId: l.ownerId === undefined ? "p1" : l.ownerId, kind: l.kind ?? "native", name: "lead" },
             })),
           ),
         },
@@ -104,7 +105,30 @@ describe("routeIssueEvent", () => {
     expect(txStub.runIssueStatus.create).toHaveBeenCalledWith({
       data: { runId: "run-a1", provider: "jira", issueKey: "PROJ-7", visibilityRole: "Developers" },
     });
-    expect(r.followUps).toHaveLength(1);
+    expect(r.followUps).toHaveLength(2);
+  });
+  it("emits issue_picked_up from a follow-up, off the webhook response path", async () => {
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const { deps } = setup([{ triggers: ["created"] }]);
+      const r = await routeIssueEvent(event({}), deps);
+      expect(events).toEqual([]);
+      await Promise.allSettled(r.followUps.map((f) => f()));
+      expect(events).toEqual([
+        {
+          dedupeKey: "issue_picked_up:run-a1",
+          runId: "run-a1",
+          agentId: "a1",
+          workItem: { provider: "jira", key: "PROJ-7" },
+          payload: { kind: "issue_picked_up", agentName: "lead", trigger: "issue created" },
+        },
+      ]);
+    } finally {
+      setWorkflowEventSink(null);
+    }
   });
   it("matches a transition by status name, case-insensitively, and not otherwise", async () => {
     const link = { triggers: ["transitioned"], triggerStatuses: ["ready for agent"] };

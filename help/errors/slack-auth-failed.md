@@ -1,0 +1,48 @@
+---
+id: errors/slack-auth-failed
+title: Bot authentication failed — invalid or revoked token
+summary: wardby's Slack bot token is invalid, revoked, disabled, or missing a required scope, so delivery to every linked channel is paused.
+audience: operator
+tags: [error, notifications, auth, authentication, invalid_auth, token_revoked, missing_scope]
+appliesTo: ">=0.6.0"
+---
+
+# Bot authentication failed — invalid or revoked token
+
+Slack returned `invalid_auth`, `token_revoked`, `account_inactive`,
+`missing_scope`, or `not_authed` for `WARDBY_SLACK_BOT_TOKEN`. This is
+different from a single channel being unreachable: it means the token
+itself no longer works, so wardby pauses delivery to **every** linked
+channel rather than attempting and failing each one. Deliveries already
+queued stay pending — nothing is lost — and wardby automatically re-checks
+the token every five minutes with Slack's `auth.test`, resuming delivery as
+soon as it succeeds.
+
+A **missing scope** (`missing_scope`) does not fix itself this way:
+`auth.test` needs no scope, so the re-check succeeds, the next delivery fails
+again, and delivery pauses again. Add the scope and reinstall the app (steps
+1–2 below).
+
+The same errors while linking a channel refuse the link, except
+`missing_scope` from a missing `channels:read`/`groups:read`, which only
+skips validating the channel id.
+
+wardby logs this once per pause, not on every retry.
+
+## What to do
+
+1. In Slack, check the app's **OAuth & Permissions** page: is the bot
+   installed, and does it still have `chat:write` at minimum?
+2. If the app's scopes changed (for example after editing
+   [`app-manifest.yaml`](../../deploy/slack/app-manifest.yaml)), reinstall
+   the app to the workspace to apply them.
+3. If the token was revoked or the app was uninstalled, reinstall it and
+   copy a fresh Bot User OAuth Token.
+4. If Slack issued a new token, set it as `WARDBY_SLACK_BOT_TOKEN` and
+   restart wardby; the startup log line `chat notifications acting as`
+   confirms it. If the token is unchanged (a scope added and the app
+   reinstalled), no restart is needed: pending deliveries go out after the
+   next check.
+
+See [Send workflow updates to Slack](../../docs/slack-notifications.md) for
+the full guide.

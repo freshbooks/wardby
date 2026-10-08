@@ -13,6 +13,7 @@ import type { ProviderRegistry } from "../providers/index.js";
 import type { RepoAccessGate } from "../core/repo-access.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { HostUserAuthorizerRegistry, ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { ChatProviderRegistry } from "../providers/chat/types.js";
 
 export type McpProviders = Pick<
   ProviderRegistry,
@@ -21,6 +22,8 @@ export type McpProviders = Pick<
   reviewHosts?: ReviewHostRegistry;
   /** Issue trackers (Jira); empty or absent = no issue-tracker integration. */
   issueTrackers?: IssueTrackerRegistry;
+  /** Chat providers for workflow notifications (Slack); empty or absent = notifications off. */
+  chat?: ChatProviderRegistry;
   /** Identity linking (link_host_account); empty or absent = linking disabled. */
   hostUserAuthorizers?: HostUserAuthorizerRegistry;
   /**

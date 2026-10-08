@@ -58,6 +58,7 @@ model Agent {
   repositories AgentRepository[]
   deferredReviews DeferredReview[]
   issueProjects AgentIssueProject[]
+  notificationChannels NotificationChannel[]
 
   /// Self-defects opt-in: the Jira project and issue type wardby files the agent's own failures into. Both or neither.
   defectProjectKey String?
@@ -1562,4 +1563,97 @@ model LocalReview {
   createdAt     DateTime         @default(now())
 
   @@index([pullRequestId, createdAt])
+}
+
+/// A Slack (chat) channel that receives workflow notifications for a Jira
+/// project or for one agent. Exactly one subject: (issueProvider, projectKey)
+/// or agentId (enforced in code and by a CHECK constraint). Admin-approved.
+/// See docs/slack-notifications.md.
+model NotificationChannel {
+  id             String    @id @default(cuid())
+  /// "slack" today; validated in code.
+  provider       String
+  /// Slack channel id (C…/G…), upper-case.
+  channelId      String
+  /// Last known channel name, display only.
+  channelName    String?
+  issueProvider  String?
+  projectKey     String?
+  agentId        String?
+  agent          Agent?    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// Subset of the workflow event kinds; empty = all.
+  events         String[]  @default([])
+  /// Append the run's spend line to messages.
+  includeCost    Boolean   @default(false)
+  /// Set by the dispatcher on a permanent channel error; cleared by re-linking.
+  lastError      String?
+  lastErrorAt    DateTime?
+  authorizedById String
+  authorizedAt   DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+
+  @@unique([provider, channelId, issueProvider, projectKey])
+  @@unique([provider, channelId, agentId])
+  @@index([issueProvider, projectKey])
+  @@index([agentId])
+}
+
+/// One workflow fact (a card picked up, a PR opened, ...). Written only when
+/// at least one channel matches. No FKs to Run/Agent: audit-style rows.
+model WorkflowEvent {
+  id               String                 @id @default(cuid())
+  kind             String
+  /// Idempotency key: repeated recordings of the same fact are no-ops.
+  dedupeKey        String                 @unique
+  runId            String?
+  agentId          String?
+  workItemProvider String?
+  workItemKey      String?
+  codeProvider     String?
+  repository       String?
+  prNumber         Int?
+  /// Template inputs only: never secrets, code, review bodies or run output.
+  payload          Json
+  createdAt        DateTime               @default(now())
+  deliveries       NotificationDelivery[]
+
+  @@index([createdAt])
+}
+
+/// One event's delivery to one channel (the outbox row the dispatcher works).
+model NotificationDelivery {
+  id            String        @id @default(cuid())
+  eventId       String
+  event         WorkflowEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  provider      String
+  channelId     String
+  threadKey     String
+  includeCost   Boolean       @default(false)
+  /// "pending" | "delivered" | "failed"
+  state         String        @default("pending")
+  attempts      Int           @default(0)
+  nextAttemptAt DateTime      @default(now())
+  lastError     String?
+  messageTs     String?
+  deliveredAt   DateTime?
+  createdAt     DateTime      @default(now())
+
+  @@unique([eventId, provider, channelId])
+  @@index([state, nextAttemptAt])
+  @@index([provider, channelId, threadKey, createdAt])
+}
+
+/// The parent message of a work item's (or PR's) thread in one channel.
+model NotificationThread {
+  id        String   @id @default(cuid())
+  provider  String
+  channelId String
+  threadKey String
+  parentTs  String
+  /// Current status line shown on the parent message.
+  status    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider, channelId, threadKey])
 }

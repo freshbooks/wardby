@@ -176,6 +176,21 @@ seeded: add it to the control plane's `env` in
 `deploy/kind-coding/manifests/overlays/gke-autopilot/control-plane.yaml` if you
 need it.
 
+To post [workflow notifications to Slack](slack-notifications.md), also add the
+Slack app's bot token. It is optional:
+
+```dotenv
+WARDBY_SLACK_BOT_TOKEN="xoxb-..."
+```
+
+When it is in Secret Manager, `up.sh` syncs it into a separate Secret,
+`wardby-slack-env`, that only the control plane reads; when it is not, it
+leaves that Secret out and Slack stays off. `WARDBY_SLACK_CUSTOMIZE` and
+`WARDBY_SLACK_API_BASE_URL` are not secrets and are not seeded: add them to the
+control plane's `env` in the same `control-plane.yaml` if you need them. If you
+later remove the bot token, remove these two entries too: the control plane
+refuses to start with either one set and no token.
+
 Generate `SECRET_APP_KEY` with:
 
 ```sh
@@ -623,7 +638,9 @@ kubectl -n wardby-coding rollout restart deploy/wardby-coding-proxy deploy/wardb
 
 For a Jira setting, add the version to its `wardby-jira-*` secret, wait on
 `wardby-jira-env` instead, and restart only `deploy/wardby-control-plane`.
-Rotate the token and its `jira-api-token-expires-at` together.
+Rotate the token and its `jira-api-token-expires-at` together. The Slack bot
+token works the same way: add the version to `wardby-slack-bot-token`, wait on
+`wardby-slack-env`, and restart only `deploy/wardby-control-plane`.
 
 Pods read their environment only at start, hence the restart. The LLM API
 keys and the database URL are read by both Deployments; the other secrets only

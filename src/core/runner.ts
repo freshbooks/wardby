@@ -79,6 +79,7 @@ import {
 import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
 import { fileSelfDefect } from "./self-defects.js";
+import { emitRunFinishedEvents } from "./workflow-run-events.js";
 import { startReviewFixAfterReview } from "./review-fix.js";
 import { updateRelatedPullRequests } from "./related-pull-requests.js";
 import { recordNativeModelUsage } from "./model-usage.js";
@@ -1389,6 +1390,8 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
   // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
   // filed twice. Bounded and never throws.
   if (claimed) await fileSelfDefect(db, issueTrackers, finished);
+  // Only the finalizer that made the row terminal notifies. Never throws.
+  if (claimed) await emitRunFinishedEvents(db, finished);
   return finished;
 }
 
@@ -1836,6 +1839,7 @@ async function executeTrackedRun(
     await closeOpenHostCheck(db, finished, reviewHosts);
     await completeHostStatus(db, finished, reviewHosts);
     await completeIssueStatus(db, finished, issueTrackers);
+    await emitRunFinishedEvents(db, finished);
     return finished;
   };
   // Decided by the run's own snapshot, before any work or spend (no pricing pin, no engine): a

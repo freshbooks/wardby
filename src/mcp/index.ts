@@ -34,6 +34,7 @@ import { buildNativeSandboxExecutor } from "../native-worker/composition.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildIssueTrackers } from "../providers/issue-tracker/index.js";
 import { buildHostUserAuthorizers, buildReviewHosts } from "../providers/review-host/index.js";
+import { buildChatProviders } from "../providers/chat/index.js";
 import { createRepoAccessGate } from "../core/repo-access.js";
 import { userCallbackPath } from "../core/host-identity-links.js";
 import type { NativeRunProviders } from "../core/runner.js";
@@ -67,12 +68,14 @@ import { registerSubAgentTools } from "./tools/subagents.js";
 import { registerGrantTools } from "./tools/grants.js";
 import { registerRepositoryTools } from "./tools/repositories.js";
 import { registerIssueProjectTools } from "./tools/issue-projects.js";
+import { registerNotificationChannelTools } from "./tools/notification-channels.js";
 import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { createStdioSecretElicitationHost } from "./tools/secret-elicitation-server.js";
 import { SECRET_ELICITATION_PATH } from "./tools/secret-elicitation-form.js";
+import { installWorkflowEventRecorder } from "../core/notifications.js";
 import { logger } from "../core/logger.js";
 
 const mcpLog = logger.child({ module: "mcp-index" });
@@ -144,6 +147,7 @@ export function registerAllTools(
   registerGrantTools(mcp);
   registerRepositoryTools(mcp);
   registerIssueProjectTools(mcp);
+  registerNotificationChannelTools(mcp);
   registerHostAccountTools(mcp);
   registerMemoryTools(mcp);
   registerSecretsTools(mcp, {
@@ -175,6 +179,11 @@ export function buildMcpProviders(): McpProviderComposition {
   const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   const hostUserAuthorizers = buildHostUserAuthorizers();
+  // Installed here (not just serve/scheduler) so `wardby mcp`, which handles
+  // webhooks, records events too; only serve and the scheduler command start
+  // the dispatcher.
+  const chat = buildChatProviders();
+  installWorkflowEventRecorder(prisma, chat);
   // One gate (and one cache) for the whole process: set-time checks in the
   // MCP tools, repo_* calls in native runs, coding runs, and host events.
   const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });
@@ -219,6 +228,7 @@ export function buildMcpProviders(): McpProviderComposition {
       issueTrackers,
       hostUserAuthorizers,
       repoAccess,
+      chat,
     },
   };
 }

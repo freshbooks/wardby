@@ -12,6 +12,7 @@ import {
   loadShutdownDrainSeconds,
   loadKubernetesJobConfig,
   loadJiraConfig,
+  loadSlackConfig,
 } from "./providers.js";
 
 describe("provider config", () => {
@@ -500,6 +501,39 @@ describe("loadJiraConfig", () => {
     expect(loadJiraConfig({ ...base, WARDBY_JIRA_API_TOKEN_EXPIRES_AT: "2027-09-01" })?.tokenExpiresAt).toEqual(
       new Date("2027-09-01T00:00:00.000Z"),
     );
+  });
+});
+
+describe("loadSlackConfig", () => {
+  it("is null when no Slack variable is set", () => {
+    expect(loadSlackConfig({})).toBeNull();
+  });
+  it("parses a bot token with defaults", () => {
+    expect(loadSlackConfig({ WARDBY_SLACK_BOT_TOKEN: "xoxb-1-2-abc" })).toEqual({
+      botToken: "xoxb-1-2-abc",
+      apiBaseUrl: "https://slack.com/api",
+      customize: false,
+    });
+  });
+  it("refuses a non-bot token", () => {
+    expect(() => loadSlackConfig({ WARDBY_SLACK_BOT_TOKEN: "xoxp-user" })).toThrow(/xoxb-/);
+  });
+  it("refuses Slack options without a token", () => {
+    expect(() => loadSlackConfig({ WARDBY_SLACK_CUSTOMIZE: "true" })).toThrow(/WARDBY_SLACK_BOT_TOKEN/);
+  });
+  it("accepts an https base override and customize=true", () => {
+    expect(
+      loadSlackConfig({
+        WARDBY_SLACK_BOT_TOKEN: "xoxb-x",
+        WARDBY_SLACK_API_BASE_URL: "https://slack.example.test/api/",
+        WARDBY_SLACK_CUSTOMIZE: "true",
+      }),
+    ).toEqual({ botToken: "xoxb-x", apiBaseUrl: "https://slack.example.test/api", customize: true });
+  });
+  it("refuses a non-https base", () => {
+    expect(() =>
+      loadSlackConfig({ WARDBY_SLACK_BOT_TOKEN: "xoxb-x", WARDBY_SLACK_API_BASE_URL: "http://x/api" }),
+    ).toThrow(/https/);
   });
 });
 
