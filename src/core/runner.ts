@@ -20,7 +20,7 @@
 import { z } from "zod";
 import type { Prisma, PrismaClient, Run, RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
-import type { EngineProgress, LoadedTool } from "../providers/engine/types.js";
+import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engine/types.js";
 import { runStepInline, type StepRunner } from "../providers/engine/types.js";
 import { isLlmEffort } from "../providers/llm/types.js";
 import { validateParams } from "../sandbox/zod-params.js";
@@ -1249,6 +1249,90 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
   return { toolsByName, builtinHandler, runUserTool, runSandboxTool };
 }
 
+/**
+ * Live progress for observers (MCP get_run, the viewer). Absolute totals, so a DBOS replay
+ * re-writing them is harmless. Written into the run's own cost columns on purpose: the run
+ * tree's shared budget (computeRunTreeSpend) then counts a running parent's spend so far, as it
+ * already does for coding runs, whose proxy ledger writes their totals live. Best-effort: a
+ * failed write only delays what observers see, and finishRun writes the final totals anyway.
+ */
+export async function recordNativeRunProgress(db: RunnerDb, runId: string, progress: EngineProgress): Promise<void> {
+  try {
+    await db.run.updateMany({
+      where: { id: runId, status: "running" },
+      data: {
+        turns: progress.turns,
+        tokensIn: progress.usage.tokensIn,
+        tokensOut: progress.usage.tokensOut,
+        costUsd: progress.usage.costUsd,
+        heartbeatAt: new Date(),
+      },
+    });
+  } catch (err) {
+    runnerLog.warn({ err, runId }, "failed to record run progress");
+  }
+}
+
+/** What finishing a native run needs: the run, and the integrations its trigger may have opened. */
+export interface NativeRunFinishContext {
+  runId: string;
+  db: RunnerDb;
+  providers: NativeRunProviders;
+  reviewHosts: ReviewHostRegistry | undefined;
+  repoAccess: RepoAccessGate | undefined;
+  issueTrackers: IssueTrackerRegistry | undefined;
+}
+
+/** Everything after the terminal write, shared by the normal and backstop paths. */
+async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Run, claimed: boolean): Promise<Run> {
+  const { runId, db, providers, reviewHosts, repoAccess, issueTrackers } = ctx;
+  await closeOpenHostCheck(db, finished, reviewHosts);
+  await completeHostStatus(db, finished, reviewHosts);
+  await completeIssueStatus(db, finished, issueTrackers);
+  // After the issue status, so IssuePullRequest rows for this run exist. Bounded and never throws.
+  if (claimed) await updateRelatedPullRequests(db, finished, reviewHosts, issueTrackers);
+  if (claimed && providers.executor && reviewHosts && repoAccess) {
+    await startReviewFixAfterReview(runId, {
+      db,
+      executor: providers.executor,
+      hosts: reviewHosts,
+      repoAccess,
+      issueTrackers,
+    });
+  }
+  // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
+  // filed twice. Bounded and never throws.
+  if (claimed) await fileSelfDefect(db, issueTrackers, finished);
+  return finished;
+}
+
+/** The terminal write for an engine result, then its usage, host/issue status, and follow-ups. */
+export async function finishNativeRun(ctx: NativeRunFinishContext, model: string, result: EngineResult): Promise<Run> {
+  const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
+    status: result.status,
+    tokensIn: result.usage.tokensIn,
+    tokensOut: result.usage.tokensOut,
+    costUsd: result.usage.costUsd,
+    error: result.error ?? null,
+    finalText: result.finalText || null,
+    turns: result.turns,
+    finishedAt: new Date(),
+  });
+  // Per-model usage is written on the same path as Run.costUsd: any future mid-run cost write must write usage too.
+  await recordNativeModelUsage(ctx.db, ctx.runId, model, result.usage);
+  return settleFinishedNativeRun(ctx, finished, claimed);
+}
+
+/** The backstop terminal write for a run that threw. A cancellation is not a failure: it carries the operator's own reason. */
+export async function failNativeRun(ctx: NativeRunFinishContext, err: unknown): Promise<Run> {
+  const { run: finished, claimed } = await finishRunClaimed(ctx.db, ctx.runId, {
+    status: err instanceof RunCancelledError ? "cancelled" : "failed",
+    error: err instanceof Error ? err.message : String(err),
+    finishedAt: new Date(),
+  });
+  return settleFinishedNativeRun(ctx, finished, claimed);
+}
+
 /** Drives an existing Run (created by `createRun` or the scheduler) to a terminal state. */
 export async function executeRun(
   runId: string,
@@ -1327,6 +1411,7 @@ async function executeTrackedRun(
   // never be flipped back to `running`.
   await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data: { status: "running" } });
 
+  const finishContext: NativeRunFinishContext = { runId, db, providers, reviewHosts, repoAccess, issueTrackers };
   try {
     const { runSandboxTool } = createNativeRunTools({
       runId,
@@ -1339,27 +1424,7 @@ async function executeTrackedRun(
       issueTrackers,
     });
 
-    // Live progress for observers (MCP get_run, the viewer). Absolute totals, so a DBOS replay
-    // re-writing them is harmless. Written into the run's own cost columns on purpose: the run
-    // tree's shared budget (computeRunTreeSpend) then counts a running parent's spend so far, as it
-    // already does for coding runs, whose proxy ledger writes their totals live. Best-effort: a
-    // failed write only delays what observers see, and finishRun writes the final totals anyway.
-    const onProgress = async (progress: EngineProgress): Promise<void> => {
-      try {
-        await db.run.updateMany({
-          where: { id: runId, status: "running" },
-          data: {
-            turns: progress.turns,
-            tokensIn: progress.usage.tokensIn,
-            tokensOut: progress.usage.tokensOut,
-            costUsd: progress.usage.costUsd,
-            heartbeatAt: new Date(),
-          },
-        });
-      } catch (err) {
-        runnerLog.warn({ err, runId }, "failed to record run progress");
-      }
-    };
+    const onProgress = (progress: EngineProgress) => recordNativeRunProgress(db, runId, progress);
     const engineResult = await providers.engine.run({
       agent: loaded.agent,
       tools: loaded.tools,
@@ -1379,65 +1444,13 @@ async function executeTrackedRun(
       step,
     });
 
-    const { run: finished, claimed } = await finishRunClaimed(db, runId, {
-      status: engineResult.status,
-      tokensIn: engineResult.usage.tokensIn,
-      tokensOut: engineResult.usage.tokensOut,
-      costUsd: engineResult.usage.costUsd,
-      error: engineResult.error ?? null,
-      finalText: engineResult.finalText || null,
-      turns: engineResult.turns,
-      finishedAt: new Date(),
-    });
-    // Per-model usage is written on the same path as Run.costUsd: any future mid-run cost write must write usage too.
-    await recordNativeModelUsage(db, runId, loaded.agent.model, engineResult.usage);
-    await closeOpenHostCheck(db, finished, reviewHosts);
-    await completeHostStatus(db, finished, reviewHosts);
-    await completeIssueStatus(db, finished, issueTrackers);
-    // After the issue status, so IssuePullRequest rows for this run exist. Bounded and never throws.
-    if (claimed) await updateRelatedPullRequests(db, finished, reviewHosts, issueTrackers);
-    if (claimed && providers.executor && reviewHosts && repoAccess) {
-      await startReviewFixAfterReview(runId, {
-        db,
-        executor: providers.executor,
-        hosts: reviewHosts,
-        repoAccess,
-        issueTrackers,
-      });
-    }
-    // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
-    // filed twice. Bounded and never throws.
-    if (claimed) await fileSelfDefect(db, issueTrackers, finished);
-    return finished;
+    return await finishNativeRun(finishContext, loaded.agent.model, engineResult);
   } catch (err) {
     // Defensive backstop: the engine is expected to catch its own errors
     // and return a "failed" EngineResult, but an unexpected throw here
     // (a real bug, or tool-loading failing outside the per-tool try above)
-    // must still never leave the run dangling in "running". A cancellation
-    // is not a failure: it carries the operator's own reason.
-    const { run: finished, claimed } = await finishRunClaimed(db, runId, {
-      status: err instanceof RunCancelledError ? "cancelled" : "failed",
-      error: err instanceof Error ? err.message : String(err),
-      finishedAt: new Date(),
-    });
-    await closeOpenHostCheck(db, finished, reviewHosts);
-    await completeHostStatus(db, finished, reviewHosts);
-    await completeIssueStatus(db, finished, issueTrackers);
-    // After the issue status, so IssuePullRequest rows for this run exist. Bounded and never throws.
-    if (claimed) await updateRelatedPullRequests(db, finished, reviewHosts, issueTrackers);
-    if (claimed && providers.executor && reviewHosts && repoAccess) {
-      await startReviewFixAfterReview(runId, {
-        db,
-        executor: providers.executor,
-        hosts: reviewHosts,
-        repoAccess,
-        issueTrackers,
-      });
-    }
-    // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
-    // filed twice. Bounded and never throws.
-    if (claimed) await fileSelfDefect(db, issueTrackers, finished);
-    return finished;
+    // must still never leave the run dangling in "running".
+    return failNativeRun(finishContext, err);
   }
 }
 
