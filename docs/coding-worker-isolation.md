@@ -968,13 +968,26 @@ scheduled coding runs through its own Kubernetes executor without ever
 starting an MCP server, so without this it would still pay the lazy cost on
 its first scheduled run. The result is logged once at start-up — an info
 line on success, a warning naming the failure code (e.g.
-`kubernetes_isolation_unsupported:<check>`) otherwise — and either way the
-outcome is the same memoized promise described above: a failed start-up
-preflight still fails every coding run in that process until it is restarted
-(after the underlying configuration is fixed), exactly as a preflight
-failure discovered on the first `launch()` always has. This never runs for a
-one-shot CLI command (`wardby run`, `wardby coding preflight`, migrations,
-imports) — only for a process that stays up to serve or dispatch runs.
+`kubernetes_isolation_unsupported:<check>`) otherwise.
+
+**A start-up warm-up's failure is logged and retried on the next run, not
+left stuck until restart.** This is the one way a preflight failure is
+_not_ memoized: a transient cluster problem at process start (the API
+server briefly unreachable, a slow CNI not yet programmed, and the like)
+must not fail every coding run for the rest of that process's life, so a
+failed warm-up clears its own failed attempt once it has logged it, and the
+_next_ `launch()` runs the preflight fresh — succeeding if the cluster has
+since recovered. A `launch()` that was already waiting on that same
+in-flight warm-up attempt still fails with that attempt's error (it shares
+the same preflight call), exactly as it always has; it's only the attempt
+_after_ that one which retries. A preflight failure `launch()` triggers
+itself — because no warm-up ran, or because a warm-up's cleared failure was
+never retried before the next `launch()` found the cluster still broken —
+keeps the original behavior exactly: it stays memoized, failing every
+subsequent `launch()` in that process until it is restarted. This never
+runs for a one-shot CLI command (`wardby run`, `wardby coding preflight`,
+migrations, imports) — only for a process that stays up to serve or
+dispatch runs.
 
 **A hung pod create during preflight can leave a preflight pod and its
 NetworkPolicy behind.** If `createPod` never settles (rather than failing),

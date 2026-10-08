@@ -33,11 +33,16 @@ line when the preflight passes, or a warning naming the failure code (the
 same `kubernetes_isolation_unsupported:<check>` codes `wardby coding
 preflight` reports) when it does not.
 
-A failed start-up preflight still fails every coding run in that process —
-restart the process after fixing the underlying configuration; a running
-process never re-probes the cluster on its own. Run `wardby coding
-preflight` at any time for a one-off, non-memoized check against the same
-cluster.
+A failed start-up preflight is logged and retried on the next coding run,
+not left failing until a restart: fix the underlying configuration and the
+next run checks the cluster again on its own. If a run was already
+starting at the moment the start-up preflight failed, that one run still
+fails with the logged error — it was waiting on that same check — but the
+run after it retries. This differs from a preflight failure a coding run
+triggers itself (no start-up check ran, or the cluster is still broken when
+the next run checks it): that failure does stick, failing every subsequent
+run in that process until it is restarted. Run `wardby coding preflight` at
+any time for a one-off check against the same cluster.
 
 ## Runs that stop at the turn limit
 

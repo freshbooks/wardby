@@ -466,7 +466,7 @@ describe("KubernetesJobLauncher", () => {
     expect(calls).toBe(1);
   });
 
-  it("warmUp never rejects when the preflight fails, and a following launch still fails the same way", async () => {
+  it("warmUp never rejects when the preflight fails, and logs the failure code (never the raw cause)", async () => {
     const h = await harness();
     let calls = 0;
     const warnings: string[] = [];
@@ -485,11 +485,92 @@ describe("KubernetesJobLauncher", () => {
     });
     await expect(launcher.warmUp()).resolves.toBeUndefined();
     expect(calls).toBe(1);
-    // The warning carries the error's own code (KUBERNETES_ISOLATION_ERROR), never the raw cause.
     expect(warnings.some((w) => w.includes("kubernetes_isolation_unsupported"))).toBe(true);
     expect(warnings.some((w) => w.includes("canary_reached_internet"))).toBe(false);
+  });
+
+  it("a failed warmUp is not left stuck memoized: the next launch retries the preflight and can succeed", async () => {
+    const h = await harness();
+    let calls = 0;
+    let failNext = true;
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
+      preflight: async () => {
+        calls += 1;
+        if (failNext) throw new Error("canary_reached_internet");
+        return { proxyIp: "10.96.0.50" };
+      },
+    });
+    await launcher.warmUp();
+    expect(calls).toBe(1);
+    // A transient cluster problem at start-up must not stick until restart: the cluster has since
+    // recovered, and the next launch() must see that, not the warm-up's stale memoized failure.
+    failNext = false;
+    await launcher.launch(h.spec);
+    expect(calls).toBe(2);
+  });
+
+  it("launch()'s own preflight failure stays memoized (no retry), unlike warmUp's", async () => {
+    const h = await harness();
+    let calls = 0;
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
+      preflight: async () => {
+        calls += 1;
+        throw new Error("canary_reached_internet");
+      },
+    });
+    // No warmUp() here: launch() starts its own preflight attempt directly.
+    await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
     await expect(launcher.launch(h.spec)).rejects.toThrow("kubernetes_isolation_unsupported");
     expect(calls).toBe(1);
+  });
+
+  it("a launch already awaiting a failing warmUp shares that failure; a following launch retries", async () => {
+    const h = await harness();
+    let calls = 0;
+    let rejectFirst!: (error: Error) => void;
+    let resolveSecond!: (value: { proxyIp: string }) => void;
+    const launcher = new KubernetesJobLauncher({
+      onWarning: () => {},
+      api: h.api,
+      config: { namespace: "wardby-coding", proxyService: "wardby-coding-proxy", platform: "generic" },
+      workspaceRoot: h.workspaceRoot,
+      resolveCapability: async () => CAPABILITY,
+      sleep: async () => {},
+      createArchive: () => ({ stream: Readable.from([Buffer.alloc(0)]), done: Promise.resolve(0) }),
+      preflight: async () => {
+        calls += 1;
+        if (calls === 1) return new Promise((_resolve, reject) => void (rejectFirst = reject));
+        return new Promise((resolve) => void (resolveSecond = resolve));
+      },
+    });
+    const warm = launcher.warmUp();
+    const launch = launcher.launch(h.spec);
+    rejectFirst(new Error("canary_reached_internet"));
+    await warm;
+    // The launch that was already awaiting the warm-up's in-flight attempt shares that same
+    // failure, exactly as it would without warmUp in the picture.
+    await expect(launch).rejects.toThrow("kubernetes_isolation_unsupported");
+    expect(calls).toBe(1);
+
+    // Cleared by the failed warm-up: the next launch starts a fresh attempt, which can succeed.
+    const retry = launcher.launch(h.spec);
+    resolveSecond({ proxyIp: "10.96.0.50" });
+    await retry;
+    expect(calls).toBe(2);
   });
 
   it("shares one preflight between a concurrent warmUp and launch", async () => {
