@@ -317,6 +317,43 @@ bring-your-own image through `workerImageRef`; see
 [Bring-your-own worker images](coding-worker-byo-images.md). That is Codex-only
 today: a Claude Code agent cannot use a custom toolchain yet.
 
+#### Packages the repository declares
+
+Coding agents can install only the packages on their allowlist (see
+[Installing packages in coding runs](coding-packages.md)), and a new agent's
+allowlist is empty. So that `local-builder` can install the project's
+dependencies, quickstart reads the ones the repository declares at the root of
+the same commit (never your working tree):
+
+- `package.json`: `dependencies`, `devDependencies` and `optionalDependencies`
+  (not peer dependencies) for npm;
+- `pyproject.toml`: `[project] dependencies`, every
+  `[project.optional-dependencies]` group, `[tool.poetry.dependencies]` and
+  Poetry's dependency groups for PyPI;
+- every `requirements*.txt` for PyPI. Options such as `-r`, `-c` and `-e`,
+  URLs and local paths are skipped; an included file (`-r other.txt`) is not
+  followed.
+
+It keeps bare package names only (no versions), drops names that are not valid
+in their ecosystem, and skips non-registry sources (`file:`, `git`, URL and
+path dependencies). It prints the counts and up to a dozen names, then asks
+"Allow local-builder to install these packages through Wardby's registry?
+[Y/n]". The allowed names go on the builder's `codingProfile.packageAllowlist`.
+Versions still come from your lockfile or the package manager's resolver, and
+every registry safeguard (release age, advisories, the record of what was
+fetched) still applies.
+
+- More than 200 names in one ecosystem: quickstart adds none from it and says
+  why.
+- A manifest it cannot read (an unusual `pyproject.toml` layout, for example):
+  it prints a one-line note and skips that file.
+- Answering no, or a `--non-interactive` run without `--allow-repo-packages`,
+  leaves the allowlist empty. Add packages later with `update_agent` and
+  `codingProfile.packageAllowlist`.
+- A re-run sets an existing quickstart `local-builder`'s allowlist to what the
+  repository declares now (or empty if you decline), replacing entries you
+  added by hand.
+
 Options for unattended use:
 
 ```sh
@@ -324,7 +361,8 @@ OPENAI_API_KEY="..." npx --yes @wardby/cli@latest quickstart \
   --non-interactive --yes \
   --coding --trust ~/projects/my-repo \
   --coding-provider codex \
-  --starter-services postgres
+  --starter-services postgres \
+  --allow-repo-packages
 ```
 
 - `--coding` runs the step without asking and `--no-coding` skips it. With
@@ -334,6 +372,9 @@ OPENAI_API_KEY="..." npx --yes @wardby/cli@latest quickstart \
 - `--coding-provider codex|claude-code` picks the coding agent; by default it
   uses the provider whose key is available.
 - `--starter-services postgres,redis|none` answers the starter-file question.
+- `--allow-repo-packages` allows the repository's declared packages without
+  asking; `--no-allow-repo-packages` allows none. Non-interactive runs allow
+  none unless the flag is given.
 
 `doctor` and `status` then also report the trusted folders, the worker image,
 the coding proxy, and each local agent's repository, and `down` stops the proxy

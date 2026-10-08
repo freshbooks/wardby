@@ -100,6 +100,22 @@ metadata and grows the run's allowance automatically as npm or pip requests
 each dependency's metadata, so you don't have to enumerate transitive
 dependencies yourself.
 
+### The quickstart offers a repository's declared packages
+
+The quickstart's coding step (see
+[Get started](getting-started.md#packages-the-repository-declares)) reads the
+dependencies the chosen local repository declares at the root of its base
+commit — `package.json` (`dependencies`, `devDependencies`,
+`optionalDependencies`), `pyproject.toml` (`[project]` dependencies, optional
+dependency groups, Poetry dependencies and groups) and `requirements*.txt` —
+and offers them as `local-builder`'s allowlist: bare names only (PyPI names
+PEP 503-normalized), invalid names dropped, at most 200 per ecosystem. It asks
+before adding them; a `--non-interactive` run adds them only with
+`--allow-repo-packages`. Every safeguard on this page still applies to those
+entries. A re-run of the quickstart replaces the builder's allowlist with the
+repository's current set (or an empty one if declined), so make lasting
+additions on a builder you created yourself, or re-apply them after a re-run.
+
 ### Lockfile installs: verified, then approved exactly
 
 `npm ci` (or `npm install` with a complete `package-lock.json`) skips

@@ -151,6 +151,17 @@ then:
   With several it asks which to use; non-interactively it uses the first in
   sorted order and prints the choice. Re-run with `--trust <repo>` to pick
   another: folders passed on a run take precedence over saved ones;
+- offers the packages the repository declares (`package.json` dependencies,
+  `pyproject.toml` dependencies including optional groups and Poetry, and
+  `requirements*.txt`, read from the committed root) as `local-builder`'s
+  package allowlist: bare names only, up to 200 per ecosystem. It lists them
+  and asks "Allow local-builder to install these packages through Wardby's
+  registry? [Y/n]"; every registry safeguard still applies. If you decline, or
+  run non-interactively without `--allow-repo-packages`, the allowlist stays
+  empty: add packages later with `update_agent` and
+  `codingProfile.packageAllowlist`. A re-run replaces the allowlist with what
+  the repository declares now. A manifest quickstart cannot read is skipped
+  with a note. See [Approve packages for coding agents](coding-packages.md);
 - creates `local-builder` (a coding agent, $2 budget) and `local-reviewer`
   (a review agent, $1 budget) for the repository and prints the two
   `trigger_agent` calls to try; and
@@ -162,8 +173,9 @@ then:
   branch" is whichever branch is checked out when quickstart runs.
 
 Flags: `--coding` (run the step), `--no-coding` (skip it), `--trust <dir>`
-(repeatable), `--coding-provider codex|claude-code` and
-`--starter-services postgres,redis|none`. In `--non-interactive` mode the step
+(repeatable), `--coding-provider codex|claude-code`,
+`--starter-services postgres,redis|none` and `--allow-repo-packages` (or
+`--no-allow-repo-packages`). In `--non-interactive` mode the step
 only runs with `--coding`, and it needs at least one `--trust`. `doctor` and
 `status` report the trusted folders, worker image, coding proxy and each local
 agent's repository, and `down` stops the proxy with the database.

@@ -35,6 +35,11 @@ if its own checks failed. A package reachable only through a refused one is
 refused too, so a high-severity advisory deep in a toolchain blocks every run
 that installs it.
 
+The quickstart's coding step offers the packages a local repository declares
+(`package.json`, `pyproject.toml`, `requirements*.txt`) as `local-builder`'s
+allowlist after asking, or with `--allow-repo-packages` in a non-interactive
+run. See [Local repositories](local-repositories.md).
+
 Review agents see the pull request's CI results in `repo_pr_read` and are
 told to trust CI over the sandbox's **Tests**.
 
