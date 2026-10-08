@@ -112,7 +112,7 @@ WORKDIR /workspace
 ENTRYPOINT ["node", "/opt/wardby/coding-worker/main.js"]
 ```
 
-The last six lines are required as they are. For other toolchains, apply the
+The `USER`, `ENV NODE_ENV=…`, `WORKDIR` and `ENTRYPOINT` lines are required as they are. For other toolchains, apply the
 same recipe (adapt these, then prove them in step 4):
 
 - **Rust:** `CARGO_TARGET_DIR=/workspace/.cache/cargo-target` and
