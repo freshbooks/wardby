@@ -124,7 +124,9 @@ const jiraEnv = {
   WARDBY_JIRA_API_TOKEN_EXPIRES_AT: "2027-01-01",
   WARDBY_JIRA_WEBHOOK_SECRET: "jira-webhook-secret-value-0000",
 };
+const slackEnv = { WARDBY_SLACK_BOT_TOKEN: "xoxb-slack-token-secret-value" };
 const required = SECRETS.filter((s) => !s.group);
+const inGroup = (group) => SECRETS.filter((s) => s.group === group);
 
 describe("seed", () => {
   it("writes nothing when any secret has no source", async () => {
@@ -164,7 +166,7 @@ describe("seed", () => {
     const env = { ...fullEnv, ...jiraEnv };
     const result = await seed({ ...base, env, exec, generate: () => "c".repeat(64), log: () => {} });
     expect(result.enabledGroups).toEqual(["jira"]);
-    expect(calls.filter((c) => c.args.includes("add"))).toHaveLength(SECRETS.length);
+    expect(calls.filter((c) => c.args.includes("add"))).toHaveLength(required.length + inGroup("jira").length);
     for (const call of calls)
       for (const value of Object.values(jiraEnv)) expect(call.args.join(" ")).not.toContain(value);
   });
@@ -185,6 +187,30 @@ describe("seed", () => {
       "WARDBY_JIRA_WEBHOOK_SECRET",
     );
     expect(calls.some((c) => c.args.includes("add"))).toBe(false);
+  });
+
+  it("leaves Slack empty when its bot token is not set", async () => {
+    const { exec, calls } = fakeExec({});
+    const result = await seed({ ...base, env: fullEnv, exec, generate: () => "c".repeat(64), log: () => {} });
+    expect(result.enabledGroups).not.toContain("slack");
+    expect(calls.some((c) => c.args.includes("add") && c.args.some((a) => a.includes("slack")))).toBe(false);
+  });
+
+  it("seeds the Slack bot token over stdin and reports the group when it is set", async () => {
+    const { exec, calls } = fakeExec({});
+    const env = { ...fullEnv, ...slackEnv };
+    const result = await seed({ ...base, env, exec, generate: () => "c".repeat(64), log: () => {} });
+    expect(result.enabledGroups).toEqual(["slack"]);
+    const added = calls.find((c) => c.args.includes("add") && c.args.includes("wardby-slack-bot-token"));
+    expect(added.input).toBe(slackEnv.WARDBY_SLACK_BOT_TOKEN);
+    for (const call of calls) expect(call.args.join(" ")).not.toContain(slackEnv.WARDBY_SLACK_BOT_TOKEN);
+  });
+
+  it("reports Jira and Slack together when both are set", async () => {
+    const { exec } = fakeExec({});
+    const env = { ...fullEnv, ...jiraEnv, ...slackEnv };
+    const result = await seed({ ...base, env, exec, generate: () => "c".repeat(64), log: () => {} });
+    expect(result.enabledGroups).toEqual(["jira", "slack"]);
   });
 
   it("leaves secrets that already have versions alone", async () => {

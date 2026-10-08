@@ -34,6 +34,8 @@ locals {
     "jira-api-token",
     "jira-api-token-expires-at",
     "jira-webhook-secret",
+    # Optional (seed-secrets.mjs): left empty when Slack notifications are unused.
+    "slack-bot-token",
   ])
 
   # The namespace and service account are fixed by the manifests in

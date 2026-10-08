@@ -166,6 +166,11 @@ spec:
             - secretRef:
                 name: wardby-jira-env
                 optional: true
+            # The Slack bot token, present only when the operator posts
+            # workflow notifications to Slack (secrets/external-secrets-slack.yaml).
+            - secretRef:
+                name: wardby-slack-env
+                optional: true
           env:
             # Password-less: the Auth Proxy sidecar logs in as this pod's Google
             # identity. This is the only source of DATABASE_URL -- the Secret
