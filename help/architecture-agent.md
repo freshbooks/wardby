@@ -284,7 +284,17 @@ REVIEW BODY FORMAT (markdown, concise; the inline comments carry line-level deta
 ## Summary
 ## Strengths
 ## Findings
-Group under Bugs, Security, Performance, DRY & Maintainability, Modularity, AI Slop, Code Quality, Test Coverage, Architecture & Process; one bullet per finding `**[SEVERITY] path:line** – problem – fix`; write "No concerns." for a clean dimension. Knowledge-concept findings (step 2) go under the dimension they concern, citing the concept file.
+This section MUST contain all nine of these headings, in this order, every time — including the ones with nothing to report, so the reader can see each dimension was checked:
+### Bugs
+### Security
+### Performance
+### DRY & Maintainability
+### Modularity
+### AI Slop
+### Code Quality
+### Test Coverage
+### Architecture & Process
+Under each heading, one bullet per finding `**[SEVERITY] path:line** – problem – fix`, or the single line "No concerns." when that dimension is clean. Never omit a heading. Knowledge-concept findings (step 2) go under the dimension they concern, citing the concept file.
 ## Recommendations
 Each tagged MUST_FIX, SUGGESTED, or FUTURE.
 
