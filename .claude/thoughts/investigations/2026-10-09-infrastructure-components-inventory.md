@@ -51,11 +51,11 @@ Sources: `package.json`, `deploy/**`, `.github/workflows/*`, `src/providers/**`,
 |---|---|---|
 | PostgreSQL | 16 in local/CI/GCP/GKE; documented minimum 13 (`gen_random_uuid`); Prisma 7.10.0 + `@prisma/adapter-pg` + `pg` 8.23.0; 54 models, 66 migrations; also locks, upserts, `LISTEN/NOTIFY` | `prisma/`, `src/core/db.ts` |
 | DBOS system schema | optional executor state in a `dbos` schema of the same (or a separate) Postgres; `@dbos-inc/dbos-sdk` 4.27.6 | `src/providers/executor/dbos.ts` |
-| Redis, MySQL, Postgres (per-run services) | optional services a coding run can start; built-in catalog seeded by migration; not wardby's own storage *(image references not enumerated)* | `src/coding/services/builtins.ts`, migration `20260927050000_coding_run_services` |
+| Per-run services: PostgreSQL, Redis, MySQL 8 | **Not wardby's own storage.** Throwaway containers a coding run can start next to its worker to test the repository under work (declared in the repo's `.wardby/services.yaml`). Built-in catalog entries use pinned `docker.io/library/*` image digests (`redis`, `mysql` 8, `postgres`); seeded by migration. This is the only place MySQL is used today. | `src/coding/services/builtins.ts:61-92`, migration `20260927050000_coding_run_services`, `docs/coding-services.md:127` |
 | Local filesystem | coding artifacts and job state (`CODING_ARTIFACT_ROOT`, `CODING_JOB_STATE_ROOT`, `VCS_WORK_ROOT`); `BLOB_STORE` and `DATASTORE` are provider seams | `src/config/providers.ts` |
 | Model catalog | shipped pricing/model catalog persisted in the database | `src/providers/llm/catalog-*.ts` |
 
-`mysql2` appears only under `package.json` `overrides` (pinned 3.24.4); it is not a dependency.
+**MySQL is not a supported database for wardby itself.** Core storage is PostgreSQL only; MySQL support as a core database is a parked proposal (see Historical Context) with no code, schema or deploy changes. `mysql2` appears only under `package.json` `overrides` (pinned 3.24.4, an audit pin); it is not a dependency.
 
 ### 3. External services (outbound over HTTPS)
 
@@ -165,11 +165,12 @@ Providers in use: `google`, `random`, `tls`, `null`.
 
 - `.claude/thoughts/investigations/2026-10-09-database-layer-postgres-coupling.md` — Postgres usage, migrations, event bus, deploy references
 - `.claude/thoughts/investigations/2026-10-09-observability-metrics-logging-telemetry.md` — metrics, logging, network policies, entry points
-- `.claude/thoughts/investigations/2026-10-09-mysql-adoption-blockers.md`, `2026-10-09-mysql-core-database-spec.md`, `2026-10-09-scrapable-metrics-spec.md` — related plans
+- `.claude/thoughts/investigations/2026-10-09-mysql-adoption-blockers.md`, `2026-10-09-mysql-core-database-spec.md` — **proposals only, not implemented** (MySQL as a core database)
+- `.claude/thoughts/investigations/2026-10-09-scrapable-metrics-spec.md` — proposal only, not implemented
 
 ## Open Questions
 
-- Per-run service images (Postgres, Redis, MySQL and others) in the built-in catalog were not enumerated.
+- The full per-run service catalog (versions and any entries beyond `postgres`, `redis`, `mysql`, plus `postgres-postgis` mentioned in docs) was not enumerated; image digests were seen only for `redis` and `mysql`.
 - The email provider has only a types file; whether any implementation exists elsewhere was not checked.
 - The exact tool versions the GKE scripts require (Terraform, gcloud, Helm, kubectl) were not verified.
 - Whether `deploy/production` is deployed anywhere, and which of the reference targets FreshBooks actually runs, is not recorded in the repo.
