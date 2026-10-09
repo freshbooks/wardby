@@ -3,7 +3,7 @@
 # Stands up a wardby control plane on GKE Autopilot, from Terraform through to a
 # serving MCP endpoint.
 #
-#   HOSTNAME=app.example.com deploy/gke/up.sh
+#   WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
 # re-pushed (digests change only if the source did), values already in Secret
@@ -38,7 +38,19 @@ OVERLAY="deploy/kind-coding/manifests/overlays/gke-autopilot"
 NAMESPACE="wardby-coding"
 TOTAL_STEPS=12
 
-: "${HOSTNAME:?set HOSTNAME to the hostname the MCP endpoint is published on (e.g. app.example.com)}"
+# Not HOSTNAME: bash and zsh set that to the machine's own name, so a required-variable check on
+# it always passes and the machine name ends up in the Gateway, routes and auth audience.
+: "${WARDBY_HOSTNAME:?set WARDBY_HOSTNAME to the hostname the MCP endpoint is published on (e.g. app.example.com)}"
+if ! [[ "$WARDBY_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]; then
+  echo "up.sh: WARDBY_HOSTNAME must be a lowercase DNS name with at least one dot, no scheme or path (got \"$WARDBY_HOSTNAME\")." >&2
+  exit 1
+fi
+case "$WARDBY_HOSTNAME" in
+  *.lan | *.local | *.localdomain | *.internal | localhost | localhost.*)
+    echo "up.sh: WARDBY_HOSTNAME \"$WARDBY_HOSTNAME\" is a local name, not a public hostname." >&2
+    exit 1
+    ;;
+esac
 
 echo "==> 1/${TOTAL_STEPS} terraform: cluster, image registry, database"
 terraform -chdir="$TF_DIR" init -input=false >/dev/null
@@ -118,6 +130,28 @@ kubectl config use-context "$KUBE_CONTEXT" >/dev/null
 # the ClusterIP. Measured: the endpoint connects on 443 while the ClusterIP times
 # out, both with 0.0.0.0/0 allowed and with an explicit Service-CIDR rule.
 API_HOST="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' | sed -e 's|https://||' -e 's|:.*||')"
+
+# hostname-change check: moving the public hostname breaks DNS, every client's configured
+# endpoint, and every issued token (their audience names the old host), so a run that would
+# change it stops for confirmation. Terraform (step 1) does not use the hostname.
+LIVE_HOSTNAME="$(kubectl -n "$NAMESPACE" get gateway wardby-control-plane -o jsonpath='{.spec.listeners[0].hostname}' 2>/dev/null || true)"
+if [[ -n "$LIVE_HOSTNAME" && "$LIVE_HOSTNAME" != "$WARDBY_HOSTNAME" ]]; then
+  echo "up.sh: the live deployment is published on ${LIVE_HOSTNAME}; this run would move it to ${WARDBY_HOSTNAME}." >&2
+  echo "       DNS, every client's endpoint, and every issued token are tied to ${LIVE_HOSTNAME}." >&2
+  if [[ "${WARDBY_HOSTNAME_CHANGE:-}" == "$WARDBY_HOSTNAME" ]]; then
+    echo "       Confirmed by WARDBY_HOSTNAME_CHANGE." >&2
+  elif [[ -t 0 ]]; then
+    read -r -p "       Type the new hostname to continue (anything else stops): " HOSTNAME_ANSWER
+    if [[ "$HOSTNAME_ANSWER" != "$WARDBY_HOSTNAME" ]]; then
+      echo "up.sh: hostname change not confirmed; nothing was rendered or applied." >&2
+      exit 1
+    fi
+  else
+    echo "up.sh: hostname change not confirmed. Re-run in a terminal, or set WARDBY_HOSTNAME_CHANGE=${WARDBY_HOSTNAME}." >&2
+    exit 1
+  fi
+fi
+# end hostname-change check
 
 echo "==> 3/${TOTAL_STEPS} build and push images (linux/amd64)"
 # Every image is built for linux/amd64 (deploy/gke/docker-bake.hcl): an arm64
@@ -388,7 +422,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
         -e "s|value: wardby-coding-worker-image$|value: ${WORKER_IMAGE}|" \
         -e "s|value: wardby-native-worker-image$|value: ${NATIVE_WORKER_IMAGE}|" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
-        -e "s|wardby-control-plane-hostname|${HOSTNAME}|g" \
+        -e "s|wardby-control-plane-hostname|${WARDBY_HOSTNAME}|g" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
   | iam_substitutions)"
 assert_no_placeholders "$OVERLAY_MANIFEST"
@@ -525,9 +559,9 @@ expect_status() {
   echo "up.sh: expected HTTP ${want}, got ${got:-no response}: $*" >&2
   return 1
 }
-expect_status 200 "https://${HOSTNAME}/.well-known/oauth-protected-resource"
+expect_status 200 "https://${WARDBY_HOSTNAME}/.well-known/oauth-protected-resource"
 for i in $(seq 1 12); do
-  got="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://${HOSTNAME}/.well-known/oauth-protected-resource" 2>/dev/null || true)"
+  got="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://${WARDBY_HOSTNAME}/.well-known/oauth-protected-resource" 2>/dev/null || true)"
   if [[ "$got" != "200" ]]; then
     echo "up.sh: discovery answered ${got:-no response} ${i} checks after it first answered 200; the endpoint is not stable." >&2
     exit 1
@@ -535,7 +569,7 @@ for i in $(seq 1 12); do
   sleep 5
 done
 echo "    discovery answers 200, steadily for a minute"
-expect_status 401 -X POST "https://${HOSTNAME}/mcp" -H 'content-type: application/json' \
+expect_status 401 -X POST "https://${WARDBY_HOSTNAME}/mcp" -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' -d "$MCP_INIT"
 echo "    unauthenticated MCP is refused with 401"
 
@@ -543,14 +577,14 @@ cat <<EOF
 
 Done. The control plane is running in ${CLUSTER}.
 
-  MCP endpoint : https://${HOSTNAME}/mcp
+  MCP endpoint : https://${WARDBY_HOSTNAME}/mcp
   database     : ${DB_IP} (private IP, reached only through the Auth Proxy)
   images       : ${REGISTRY}
   secrets      : Secret Manager, prefix ${SECRET_PREFIX} (synced by External Secrets)
 
 Still manual, because neither belongs in a script:
 
-  * The Gateway needs a DNS A record for ${HOSTNAME} pointing at the reserved
+  * The Gateway needs a DNS A record for ${WARDBY_HOSTNAME} pointing at the reserved
     address, and a Google-managed certificate. Use DNS authorization rather than
     load-balancer authorization -- the latter needs the hostname to already
     resolve, which it will not before the endpoint exists.
