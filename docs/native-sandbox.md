@@ -437,8 +437,11 @@ the database, so running several never overfills it. Each pass starts workers up
 to the size, retires idle workers that are older than the max age, gone, or over
 the size (oldest first), and removes leftovers. Changing the worker image, CPU or
 memory, runtime class, priority class, platform, namespace, gateway, or max age
-retires all idle workers of the old configuration automatically. Lowering the
-size to `0` removes leftover pool workers at the next start. A short-lived
+retires all idle workers of the old configuration automatically, about a
+minute after they started (a grace that keeps two replicas from retiring each
+other's workers mid rolling update); they are never claimed meanwhile. Lowering the
+size to `0` retires leftover pool workers within a pass, including any that a
+replica still running the old size refills during a rolling update. A short-lived
 command such as `wardby run` claims workers but does not warm new ones.
 
 ### Naming, labels, and logs
