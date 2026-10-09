@@ -217,8 +217,9 @@ export class PooledWorkerLauncher implements ManagedWorkerLauncher {
     this.timer = undefined;
   }
 
+  /** Asks for a pass soon, only in the process running maintenance: a short-lived CLI never warms workers. */
   private nudge(): void {
-    void this.tick();
+    if (this.timer) void this.tick();
   }
 
   /** One maintenance pass; resolves once reaping and retiring are done (warming continues behind it). */
