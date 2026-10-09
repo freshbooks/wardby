@@ -230,9 +230,54 @@ describe.skipIf(!process.env.DATABASE_URL)("PooledWorkerLauncher (database)", ()
       warmTimeoutMs: 10_000,
       newToken,
     });
+    pools.push(shrink);
     await shrink.start();
+    shrink.stop();
     expect(await db.nativeWarmWorker.count({ where: { specHash: p.specHash } })).toBe(0);
     expect(launcher.warm.size).toBe(0);
+  });
+
+  it("at size 0, keeps retiring workers another replica refills (a rolling update from a bigger size)", async () => {
+    const launcher = new FakeLauncher();
+    const { pool: other } = pool(2, launcher);
+    await warmed(other);
+    expect(launcher.warm.size).toBe(2);
+    const shrunk = new PooledWorkerLauncher({
+      ledger,
+      launcher,
+      size: 0,
+      maxAgeMs: 60_000,
+      warmTimeoutMs: 10_000,
+      newToken,
+      intervalMs: 20,
+    });
+    pools.push(shrunk);
+    await shrunk.start();
+    expect(launcher.warm.size).toBe(0);
+    // The old replica, still running at size 2, refills after the new one's start-up pass.
+    await warmed(other);
+    expect(launcher.warm.size).toBe(2);
+    await vi.waitFor(() => expect(launcher.warm.size).toBe(0), { timeout: 2_000, interval: 20 });
+    expect(await db.nativeWarmWorker.count({ where: { specHash: other.specHash } })).toBe(0);
+    // A live pool passes over every row: stop it before other tests run.
+    shrunk.stop();
+  });
+
+  it("leaves another configuration's fresh idle worker alone, and retires it after the grace", async () => {
+    const launcher = new FakeLauncher();
+    const { pool: before } = pool(1, launcher);
+    await warmed(before);
+    const [old] = launcher.warm.keys();
+    let offset = 0;
+    // The same launcher under a new configuration (another image, say): another spec.
+    const { pool: after } = pool(1, launcher, { now: () => Date.now() + offset });
+    expect(after.specHash).not.toBe(before.specHash);
+    await warmed(after);
+    expect(launcher.warm.has(old)).toBe(true);
+    offset = 61_000;
+    await warmed(after);
+    expect(launcher.warm.has(old)).toBe(false);
+    expect(await db.nativeWarmWorker.count({ where: { specHash: before.specHash } })).toBe(0);
   });
 
   it("never claims a worker past the max age, and replaces it", async () => {

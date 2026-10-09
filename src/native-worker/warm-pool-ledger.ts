@@ -78,6 +78,10 @@ export class PrismaWarmPoolLedger {
     await this.db.nativeWarmWorker.deleteMany({ where: { id } });
   }
 
+  count(): Promise<number> {
+    return this.db.nativeWarmWorker.count();
+  }
+
   /** Every pool row, with its run's status (the maintenance tick's view; the pool is small). */
   workers(): Promise<(WarmWorkerRow & { run: { status: string } | null })[]> {
     return this.db.nativeWarmWorker.findMany({ include: { run: { select: { status: true } } } });

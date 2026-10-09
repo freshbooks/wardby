@@ -48,6 +48,8 @@ export interface WarmWorkerLauncher {
 
 /** A pool worker waits this much longer than the max age, so a claim never meets one about to exit. */
 const WAIT_MARGIN_MS = 5 * 60_000;
+/** How long another configuration's idle worker is left alone before it is retired (rolling updates). */
+const OTHER_SPEC_GRACE_MS = 60_000;
 /** How long a removed worker that may hold a capability has to be confirmed gone before a cold launch. */
 const GONE_TIMEOUT_MS = 30_000;
 
@@ -83,6 +85,8 @@ export class PooledWorkerLauncher implements ManagedWorkerLauncher {
   private readonly warming = new Set<Promise<void>>();
   /** Tokens this process is still starting: never reaped as abandoned, however slow. */
   private readonly warmingHere = new Set<string>();
+  /** The first pass (orphan sweep included) has run. */
+  private swept = false;
 
   constructor(private readonly options: WarmPoolOptions) {
     this.networkReadyAtLaunch = options.launcher.networkReadyAtLaunch;
@@ -203,10 +207,15 @@ export class PooledWorkerLauncher implements ManagedWorkerLauncher {
     return this.cold.resolveGatewayUrl?.bind(this.cold);
   }
 
-  /** Starts maintenance: one tick now, then every interval while the pool has a size. */
+  /**
+   * Starts maintenance: one pass now, then one every interval. At size 0 a pass is a single count
+   * of pool rows until one appears: a replica still running a bigger size during a rolling update
+   * can refill the pool after this replica's first pass, and only a later pass retires those.
+   */
   async start(): Promise<void> {
     await this.tick();
-    if (this.options.size > 0 && !this.timer) {
+    this.swept = true;
+    if (!this.timer) {
       this.timer = setInterval(() => this.nudge(), this.options.intervalMs ?? 15_000);
       this.timer.unref?.();
     }
@@ -246,6 +255,8 @@ export class PooledWorkerLauncher implements ManagedWorkerLauncher {
 
   private async maintain(): Promise<void> {
     const { ledger, size } = this.options;
+    // With no pool configured, a pass costs one count until another replica leaves rows behind.
+    if (size === 0 && this.swept && (await ledger.count()) === 0) return;
     // Listed before the rows are read: a row always exists before its worker, so a worker listed
     // here with no row below is an orphan, never one another replica is still creating.
     const live = new Set(await this.cold.listWarm());
@@ -264,8 +275,13 @@ export class PooledWorkerLauncher implements ManagedWorkerLauncher {
         }
       } else if (row.status === "retiring") {
         await this.discard(row.id);
+      } else if (row.specHash !== this.specHash) {
+        // Another configuration's worker is never claimed here. It is retired once it is past the
+        // grace, not at once: during a rolling update the old and new replicas would otherwise
+        // retire each other's fresh workers and refill their own, over and over.
+        if (row.createdAt.getTime() < now - OTHER_SPEC_GRACE_MS) await this.retire(row, "stale");
       } else {
-        const stale = row.specHash !== this.specHash || row.createdAt.getTime() <= bornAfter;
+        const stale = row.createdAt.getTime() <= bornAfter;
         const running = !stale && (await this.cold.inspectWarm(row.id).catch(() => undefined))?.state === "running";
         if (running) keepIdle.push(row);
         else await this.retire(row, stale ? "stale" : "gone");
