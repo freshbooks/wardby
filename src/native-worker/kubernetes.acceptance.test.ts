@@ -53,7 +53,9 @@ describe.skipIf(!enabled)("native sandbox on kind (acceptance)", () => {
   let providers: NativeRunProviders;
   let launcher: KubernetesNativeWorkerLauncher;
   let executor: NativeSandboxExecutor;
-  const api = new ClientNodeKubernetesApi({ context: CONTEXT });
+  // Built in beforeAll, not here: the describe body runs even when skipped, and with no kubeconfig
+  // (CI) the client throws at construction.
+  let api: ClientNodeKubernetesApi;
   const ledger = new PrismaGatewayLedger(prisma);
   const newLauncher = () =>
     new KubernetesNativeWorkerLauncher({
@@ -70,6 +72,7 @@ describe.skipIf(!enabled)("native sandbox on kind (acceptance)", () => {
   beforeAll(async () => {
     if (!/@sha256:[0-9a-f]{64}$/.test(IMAGE))
       throw new Error("set NATIVE_TEST_KIND_WORKER_IMAGE to the digest up.sh printed");
+    api = new ClientNodeKubernetesApi({ context: CONTEXT });
     await startModelCatalog(prisma);
     const regs = resolveLlmRegistrations();
     if (regs.kind !== "registrations") throw new Error("no LLM credentials");
