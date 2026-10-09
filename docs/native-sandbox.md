@@ -364,26 +364,132 @@ room for another worker pod. Raise the ResourceQuota together with
 `NATIVE_SANDBOX_MAX_CONCURRENT` (and `CODING_MAX_CONCURRENT`, which shares the
 namespace): each worker pod needs its CPU and memory limits from the quota.
 
+## Warm pool
+
+By default every sandbox run starts its own worker, so a run waits for the
+worker to be created and, on Kubernetes, for pod scheduling, the image pull, and
+the in-pod isolation proof. The warm pool keeps a few idle, already-isolated
+workers ready so a run can take one instead. It works with both
+`NATIVE_SANDBOX_LAUNCHER=docker` and `kubernetes`.
+
+### Enable it
+
+Set `NATIVE_SANDBOX_WARM_POOL_SIZE` on the server to the number of idle workers
+to keep (0 to 50; the default `0` means no pool and every run cold-starts as
+before). `NATIVE_SANDBOX_WARM_MAX_AGE_MS` (60000 to 21600000, default `1800000`,
+30 minutes) is how long an idle worker may wait: an older one is replaced and
+never claimed. A pool worker that nobody claims also exits by itself five
+minutes after its max age.
+
+The worker image must support pool workers: rebuild or update
+`wardby-native-worker` with the release that adds the pool. An older image still
+runs cold runs but cannot be a pool worker. The release adds a database
+migration (the `NativeWarmWorker` table); apply it with `prisma migrate deploy`
+as with any upgrade.
+
+### Sizing and idle cost
+
+`NATIVE_SANDBOX_MAX_CONCURRENT` still counts only active runs. Idle pool workers
+are extra running containers or pods on top of it. On Kubernetes the namespace
+ResourceQuota must have room for `NATIVE_SANDBOX_MAX_CONCURRENT` plus
+`NATIVE_SANDBOX_WARM_POOL_SIZE` worker pods, plus the gateway and any coding
+runs. A pool worker that does not fit is skipped and logged; it never fails a
+run.
+
+Each idle worker reserves its CPU and memory continuously. On GKE Autopilot you
+pay for each idle pod's requests (500m and 512Mi in the reference overlay). In
+return, a claimed run skips pod scheduling, the image pull, node boot, and the
+in-pod isolation probe; on Autopilot a cold gVisor node can take about two
+minutes to come up. Start with a small size and raise it if runs still
+cold-start under load.
+
+### How claims keep the isolation guarantees
+
+- A pool worker is started and its isolation proven before any run exists (on
+  Kubernetes it is attested and probed from inside the pod, the same as a cold
+  pod). It holds no run data and no gateway capability.
+- A run claims an idle worker atomically through the database, so claims are
+  safe across server replicas and processes. A worker is never given to two
+  runs.
+- The run's input, including its one-time gateway capability, is delivered by
+  exec over stdin only after the claim. It never travels in the environment,
+  the command line, labels, or a Kubernetes Secret.
+- At claim the worker is re-checked: still running, and the pod and
+  NetworkPolicy still as built (Docker: attached only to its own network). It is
+  not probed again; the max age bounds how old the isolation proof can be.
+- The worker is single-use and destroyed after the run, exactly like a cold one.
+
+### Fallback
+
+- No idle worker, or the claimed one fails the re-check: the run cold-launches
+  as if there were no pool.
+- Delivery fails: the worker is removed and, once it is confirmed gone, the run
+  cold-launches. If it cannot be confirmed gone within 30 seconds, the run fails
+  with
+  [`native_sandbox_warm_delivery_failed`](../help/errors/native-sandbox-warm-delivery-failed.md)
+  rather than risk a second worker holding the same capability.
+
+### Upkeep
+
+Every `wardby serve`, `wardby scheduler`, and `wardby mcp` process with the
+sandbox configured keeps the pool up every 15 seconds. They coordinate through
+the database, so running several never overfills it. Each pass starts workers up
+to the size, retires idle workers that are older than the max age, gone, or over
+the size (oldest first), and removes leftovers. Changing the worker image, CPU or
+memory, runtime class, priority class, platform, namespace, gateway, or max age
+retires all idle workers of the old configuration automatically. Lowering the
+size to `0` removes leftover pool workers at the next start. A short-lived
+command such as `wardby run` claims workers but does not warm new ones.
+
+### Naming, labels, and logs
+
+Pool workers are named `wardby-nwarm-<token>`. Kubernetes pods carry
+`wardby.io/pool=warm` and `wardby.io/warm-worker=<token>`, and still carry
+`wardby.io/component=native-run`, so the gateway NetworkPolicy admits them.
+Docker containers carry `io.wardby.pool=warm`. No new RBAC is needed: the
+permissions in [Server permissions](#3-server-permissions) already cover it.
+
+List idle workers with
+`kubectl get pods -n <namespace> -l wardby.io/pool=warm` or
+`docker ps --filter label=io.wardby.pool=warm`.
+
+Pool logs use the module `native-warm-pool`, with an `event` field:
+
+| `event`    | Meaning                                                                        |
+| ---------- | ------------------------------------------------------------------------------ |
+| `warmed`   | A pool worker became ready (with the time it took, in ms).                     |
+| `claimed`  | A run took an idle worker.                                                     |
+| `miss`     | No idle worker was available; the run cold-launched.                           |
+| `fallback` | A claimed worker failed the re-check or delivery; see the run's outcome above. |
+| `retired`  | An idle worker was replaced (with the reason: `stale`, `gone`, or `excess`).   |
+| `reaped`   | An abandoned or orphaned pool worker was removed.                              |
+
+If runs keep logging `miss`, the pool is smaller than demand, workers cannot be
+started (look for "starting a warm worker failed", and check the ResourceQuota),
+or the server running upkeep is not up.
+
 ## Configuration reference
 
-| Variable                                | Launcher   | Required | Default                                                                                                         | Purpose                                                                                                                                            |
-| --------------------------------------- | ---------- | -------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NATIVE_SANDBOX_LAUNCHER`               | both       | Yes      | unset (sandbox off)                                                                                             | `docker` or `kubernetes`. Independent of `JOB_LAUNCHER`.                                                                                           |
-| `NATIVE_SANDBOX_WORKER_IMAGE`           | both       | Yes      |                                                                                                                 | Pinned worker image. Docker: `repo@sha256:...` or a local image id. Kubernetes: a registry digest `repo@sha256:...` only.                          |
-| `NATIVE_GATEWAY_CONTAINER`              | Docker     | Yes      |                                                                                                                 | Name of the running gateway container the server connects to each run's network.                                                                   |
-| `NATIVE_SANDBOX_NAMESPACE`              | Kubernetes | No       | `KUBERNETES_NAMESPACE`, else `wardby-coding`                                                                    | Namespace for run pods and the gateway.                                                                                                            |
-| `KUBERNETES_CONTEXT`                    | Kubernetes | No       | in-cluster or current context                                                                                   | Kubeconfig context the server uses.                                                                                                                |
-| `NATIVE_SANDBOX_RUNTIME_CLASS`          | Kubernetes | No       | `KUBERNETES_RUNTIME_CLASS`, else none                                                                           | RuntimeClass for run pods (for example gVisor).                                                                                                    |
-| `NATIVE_GATEWAY_SERVICE`                | Kubernetes | No       | `wardby-native-gateway`                                                                                         | Name of the gateway Service in the run namespace.                                                                                                  |
-| `NATIVE_GATEWAY_URL`                    | both       | No       | Docker: `http://wardby-native-gateway:8790/native-gateway/v1/call`; Kubernetes: the Service's ClusterIP on 8790 | What workers dial. Change only if the gateway is reachable another way. Must be an `http(s)` URL.                                                  |
-| `NATIVE_SANDBOX_CPUS`                   | both       | No       | `1`                                                                                                             | CPU limit per worker (Kubernetes: request and limit).                                                                                              |
-| `NATIVE_SANDBOX_MEMORY_MB`              | both       | No       | `512`                                                                                                           | Memory limit per worker (Docker: swap disabled; Kubernetes: request and limit).                                                                    |
-| `NATIVE_SANDBOX_PIDS`                   | Docker     | No       | `128`                                                                                                           | Process limit per worker. Docker only: Kubernetes has no per-pod process limit.                                                                    |
-| `NATIVE_SANDBOX_MAX_CONCURRENT`         | both       | No       | unset (no cap)                                                                                                  | At most this many sandbox runs at once across all replicas (counts active gateway sessions). A start past it fails with `native_sandbox_capacity`. |
-| `NATIVE_SANDBOX_READY_TIMEOUT_MS`       | Kubernetes | No       | `120000` (range 1000-1800000)                                                                                   | How long a worker pod may take to start running. Use about `600000` on GKE Autopilot, where a cold gVisor node takes about two minutes.            |
-| `NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS` | Kubernetes | No       | `30000` (range 1000-600000)                                                                                     | How long the in-pod isolation proof may take.                                                                                                      |
-| `NATIVE_SANDBOX_PRIORITY_CLASS`         | Kubernetes | No       | `KUBERNETES_RUN_PRIORITY_CLASS`, else none                                                                      | PriorityClass for worker pods. Must not be a `system-` class.                                                                                      |
-| `KUBERNETES_PLATFORM`                   | Kubernetes | No       | none                                                                                                            | `gke-autopilot` conforms worker pod resources to Autopilot's rules and requires the gVisor runtime class. Shared with coding runs.                 |
+| Variable                                | Launcher   | Required | Default                                                                                                         | Purpose                                                                                                                                                   |
+| --------------------------------------- | ---------- | -------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NATIVE_SANDBOX_LAUNCHER`               | both       | Yes      | unset (sandbox off)                                                                                             | `docker` or `kubernetes`. Independent of `JOB_LAUNCHER`.                                                                                                  |
+| `NATIVE_SANDBOX_WORKER_IMAGE`           | both       | Yes      |                                                                                                                 | Pinned worker image. Docker: `repo@sha256:...` or a local image id. Kubernetes: a registry digest `repo@sha256:...` only.                                 |
+| `NATIVE_GATEWAY_CONTAINER`              | Docker     | Yes      |                                                                                                                 | Name of the running gateway container the server connects to each run's network.                                                                          |
+| `NATIVE_SANDBOX_NAMESPACE`              | Kubernetes | No       | `KUBERNETES_NAMESPACE`, else `wardby-coding`                                                                    | Namespace for run pods and the gateway.                                                                                                                   |
+| `KUBERNETES_CONTEXT`                    | Kubernetes | No       | in-cluster or current context                                                                                   | Kubeconfig context the server uses.                                                                                                                       |
+| `NATIVE_SANDBOX_RUNTIME_CLASS`          | Kubernetes | No       | `KUBERNETES_RUNTIME_CLASS`, else none                                                                           | RuntimeClass for run pods (for example gVisor).                                                                                                           |
+| `NATIVE_GATEWAY_SERVICE`                | Kubernetes | No       | `wardby-native-gateway`                                                                                         | Name of the gateway Service in the run namespace.                                                                                                         |
+| `NATIVE_GATEWAY_URL`                    | both       | No       | Docker: `http://wardby-native-gateway:8790/native-gateway/v1/call`; Kubernetes: the Service's ClusterIP on 8790 | What workers dial. Change only if the gateway is reachable another way. Must be an `http(s)` URL.                                                         |
+| `NATIVE_SANDBOX_CPUS`                   | both       | No       | `1`                                                                                                             | CPU limit per worker (Kubernetes: request and limit).                                                                                                     |
+| `NATIVE_SANDBOX_MEMORY_MB`              | both       | No       | `512`                                                                                                           | Memory limit per worker (Docker: swap disabled; Kubernetes: request and limit).                                                                           |
+| `NATIVE_SANDBOX_PIDS`                   | Docker     | No       | `128`                                                                                                           | Process limit per worker. Docker only: Kubernetes has no per-pod process limit.                                                                           |
+| `NATIVE_SANDBOX_MAX_CONCURRENT`         | both       | No       | unset (no cap)                                                                                                  | At most this many sandbox runs at once across all replicas (counts active gateway sessions). A start past it fails with `native_sandbox_capacity`.        |
+| `NATIVE_SANDBOX_WARM_POOL_SIZE`         | both       | No       | `0` (no pool; range 0-50)                                                                                       | Idle, already-isolated workers kept ready for runs to claim. See [Warm pool](#warm-pool). On Kubernetes, size the ResourceQuota for this many extra pods. |
+| `NATIVE_SANDBOX_WARM_MAX_AGE_MS`        | both       | No       | `1800000` (range 60000-21600000)                                                                                | An idle pool worker older than this is replaced and never claimed.                                                                                        |
+| `NATIVE_SANDBOX_READY_TIMEOUT_MS`       | Kubernetes | No       | `120000` (range 1000-1800000)                                                                                   | How long a worker pod may take to start running. Use about `600000` on GKE Autopilot, where a cold gVisor node takes about two minutes.                   |
+| `NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS` | Kubernetes | No       | `30000` (range 1000-600000)                                                                                     | How long the in-pod isolation proof may take.                                                                                                             |
+| `NATIVE_SANDBOX_PRIORITY_CLASS`         | Kubernetes | No       | `KUBERNETES_RUN_PRIORITY_CLASS`, else none                                                                      | PriorityClass for worker pods. Must not be a `system-` class.                                                                                             |
+| `KUBERNETES_PLATFORM`                   | Kubernetes | No       | none                                                                                                            | `gke-autopilot` conforms worker pod resources to Autopilot's rules and requires the gVisor runtime class. Shared with coding runs.                        |
 
 Gateway-side variables (`NATIVE_GATEWAY_LISTEN`, `NATIVE_GATEWAY_DENY_PORT`) are
 set on the gateway, not the server.
@@ -421,19 +527,20 @@ never talks to the provider directly.
 
 ## Failure modes
 
-| Error code                                                                                   | Meaning                                                                                                      | What to do                                                                               |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| [`native_sandbox_unavailable`](../help/errors/native-sandbox-unavailable.md)                 | Agent is in `sandbox` mode but the server has no native sandbox. Fails before any spend.                     | Configure the sandbox (steps above) or set the agent back to `control-plane`.            |
-| [`native_sandbox_worker_exited`](../help/errors/native-sandbox-worker-exited.md)             | The worker ended without producing a result.                                                                 | Check the tool code and the worker's memory and PID limits; run again.                   |
-| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)     | The run passed its 60-minute maximum; the worker was stopped.                                                | Split the work into smaller runs or sub-agents.                                          |
-| [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)                 | The worker container or pod disappeared (for example its host or node restarted). It is never relaunched.    | Trigger the run again; check the Docker host or node stability.                          |
-| [`native_sandbox_image_not_pinned`](../help/errors/native-sandbox-image-not-pinned.md)       | `NATIVE_SANDBOX_WORKER_IMAGE` is a mutable tag.                                                              | Use a `repo@sha256:...` digest or a local image id.                                      |
-| [`native_sandbox_docker_failed`](../help/errors/native-sandbox-docker-failed.md)             | A Docker command (pull, network create, connect, run) failed.                                                | Read the message, then check the Docker daemon, image availability, and gateway name.    |
-| [`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)   | Kubernetes: the pod's egress isolation could not be proven in time; the pod was removed.                     | Check that the CNI enforces NetworkPolicy and the gateway Service exposes 8790 and 8791. |
-| [`native_sandbox_isolation_mismatch`](../help/errors/native-sandbox-isolation-mismatch.md)   | Kubernetes: the stored pod or NetworkPolicy differs from what Wardby built (an admission change).            | Exempt the run namespace's native-run pods from mutating policies.                       |
-| [`native_sandbox_gateway_unavailable`](../help/errors/native-sandbox-gateway-unavailable.md) | Kubernetes: the gateway Service is missing or has no ClusterIP.                                              | Create the Service (ClusterIP, not headless) or fix `NATIVE_GATEWAY_SERVICE`.            |
-| [`native_sandbox_worker_unready`](../help/errors/native-sandbox-worker-unready.md)           | Kubernetes: the worker pod did not reach Running in time.                                                    | Check image pull, quotas, and scheduling with `kubectl describe pod`.                    |
-| [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md)                       | `NATIVE_SANDBOX_MAX_CONCURRENT` runs are already active, or the namespace ResourceQuota is full. Not queued. | Wait and retry, or raise the cap together with the ResourceQuota.                        |
+| Error code                                                                                     | Meaning                                                                                                       | What to do                                                                               |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| [`native_sandbox_unavailable`](../help/errors/native-sandbox-unavailable.md)                   | Agent is in `sandbox` mode but the server has no native sandbox. Fails before any spend.                      | Configure the sandbox (steps above) or set the agent back to `control-plane`.            |
+| [`native_sandbox_worker_exited`](../help/errors/native-sandbox-worker-exited.md)               | The worker ended without producing a result.                                                                  | Check the tool code and the worker's memory and PID limits; run again.                   |
+| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)       | The run passed its 60-minute maximum; the worker was stopped.                                                 | Split the work into smaller runs or sub-agents.                                          |
+| [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)                   | The worker container or pod disappeared (for example its host or node restarted). It is never relaunched.     | Trigger the run again; check the Docker host or node stability.                          |
+| [`native_sandbox_image_not_pinned`](../help/errors/native-sandbox-image-not-pinned.md)         | `NATIVE_SANDBOX_WORKER_IMAGE` is a mutable tag.                                                               | Use a `repo@sha256:...` digest or a local image id.                                      |
+| [`native_sandbox_docker_failed`](../help/errors/native-sandbox-docker-failed.md)               | A Docker command (pull, network create, connect, run) failed.                                                 | Read the message, then check the Docker daemon, image availability, and gateway name.    |
+| [`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)     | Kubernetes: the pod's egress isolation could not be proven in time; the pod was removed.                      | Check that the CNI enforces NetworkPolicy and the gateway Service exposes 8790 and 8791. |
+| [`native_sandbox_isolation_mismatch`](../help/errors/native-sandbox-isolation-mismatch.md)     | Kubernetes: the stored pod or NetworkPolicy differs from what Wardby built (an admission change).             | Exempt the run namespace's native-run pods from mutating policies.                       |
+| [`native_sandbox_gateway_unavailable`](../help/errors/native-sandbox-gateway-unavailable.md)   | Kubernetes: the gateway Service is missing or has no ClusterIP.                                               | Create the Service (ClusterIP, not headless) or fix `NATIVE_GATEWAY_SERVICE`.            |
+| [`native_sandbox_worker_unready`](../help/errors/native-sandbox-worker-unready.md)             | Kubernetes: the worker pod did not reach Running in time.                                                     | Check image pull, quotas, and scheduling with `kubectl describe pod`.                    |
+| [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md)                         | `NATIVE_SANDBOX_MAX_CONCURRENT` runs are already active, or the namespace ResourceQuota is full. Not queued.  | Wait and retry, or raise the cap together with the ResourceQuota.                        |
+| [`native_sandbox_warm_delivery_failed`](../help/errors/native-sandbox-warm-delivery-failed.md) | A claimed warm worker could not receive the run's input and could not be confirmed stopped within 30 seconds. | Trigger the run again; check the node or Docker host and pod exec access.                |
 
 A run's error appears in its `error` field in `get_run` and `list_runs`.
 

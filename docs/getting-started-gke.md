@@ -619,6 +619,11 @@ class, `KUBERNETES_PLATFORM=gke-autopilot`, and the run priority class.
   already covers the gateway's two replicas and that many 500m / 512Mi worker
   pods. Raise the quota together with `NATIVE_SANDBOX_MAX_CONCURRENT` or
   `CODING_MAX_CONCURRENT`.
+- **Warm pool.** To keep idle, already-isolated workers ready so runs skip pod
+  scheduling and the isolation probe, set `NATIVE_SANDBOX_WARM_POOL_SIZE` (0 to
+  50, default 0) in the control-plane manifest and raise the `wardby-coding`
+  ResourceQuota by that many 500m / 512Mi pods. Each idle worker is billed
+  continuously. See [Warm pool](native-sandbox.md#warm-pool).
 - **Check isolation.** `npm run test:native-cluster` runs launcher-only
   isolation checks against the deployed gateway; set `NATIVE_TEST_WORKER_IMAGE`
   to the worker digest and `NATIVE_TEST_FORBIDDEN` to the database's private

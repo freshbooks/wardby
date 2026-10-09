@@ -11,6 +11,8 @@
  *   NATIVE_TEST_PRIORITY_CLASS   (optional: the run priority class)
  *   NATIVE_TEST_FORBIDDEN        (optional: host:port,... a worker must not reach, e.g. the database)
  *
+ * Warm pool pods (phase 6) are covered too: proven before any run exists, given an input by exec.
+ *
  * A worker here never gets a session: its input dials the gateway's deny port, which its policy
  * blocks, so it keeps retrying (and stays running) while the tests look at it from outside and in.
  */
@@ -26,9 +28,11 @@ import {
   NATIVE_PROBE_OUTSIDE,
   nativeEnforcementProbe,
   nativeKubernetesNames,
+  nativeWarmWorkerName,
 } from "./kubernetes-isolation.js";
 import { KubernetesNativeWorkerLauncher } from "./kubernetes-launcher.js";
 import type { WorkerInput } from "./protocol.js";
+import { WARM_INPUT_FILE, WARM_WORKER_UNCLAIMED_EXIT } from "./warm-delivery.js";
 
 const enabled = process.env.WARDBY_NATIVE_CLUSTER_TEST === "1";
 const CONTEXT = process.env.NATIVE_TEST_CONTEXT ?? "kind-wardby";
@@ -74,6 +78,12 @@ describe.skipIf(!enabled)("native sandbox isolation on a cluster (acceptance, no
   const tag = randomUUID().slice(0, 8);
   const proven: string[] = [];
   const launched: string[] = [];
+  const warmed: string[] = [];
+  const warmToken = () => {
+    const token = randomUUID().replace(/-/g, "").slice(0, 20);
+    warmed.push(token);
+    return token;
+  };
   let api: ClientNodeKubernetesApi;
   let launcher: KubernetesNativeWorkerLauncher;
   let gatewayHost: string;
@@ -138,6 +148,7 @@ describe.skipIf(!enabled)("native sandbox isolation on a cluster (acceptance, no
 
   afterAll(async () => {
     for (const runId of launched) await launcher?.remove(runId).catch(() => {});
+    for (const token of warmed) await launcher?.removeWarm(token).catch(() => {});
   });
 
   it(
@@ -246,6 +257,51 @@ describe.skipIf(!enabled)("native sandbox isolation on a cluster (acceptance, no
       expect(await gone("pod", pod)).toBe(true);
       expect(await gone("secret", names.secret)).toBe(true);
       expect(await gone("networkpolicy", names.policy)).toBe(true);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "starts a warm pod proven before any run, holding no input; delivers one by exec, once; re-attests it",
+    async () => {
+      const token = warmToken();
+      const pod = nativeWarmWorkerName(token);
+      const provenBefore = proven.length;
+      await launcher.startWarm(token, 600_000);
+      expect(kubectl(["get", "pod", pod, "-o", "jsonpath={.status.phase}"])).toBe("Running");
+      expect(proven).toHaveLength(provenBefore); // proving a warm pod marks no run ready
+      expect(await launcher.listWarm()).toContain(token);
+      expect((await launcher.listWorkers()).map((w) => w.name)).not.toContain(pod);
+      const hasInput = () =>
+        execCode(pod, ["node", "-e", `require("fs").accessSync(${JSON.stringify(WARM_INPUT_FILE)})`]) === 0;
+      expect(hasInput()).toBe(false);
+      expect(kubectl(["get", "pod", pod, "-o", "jsonpath={.spec.volumes[*].name}"])).toBe("tmp");
+      expect(await launcher.reattestWarm(token, 600_000)).toBe(true);
+      const runId = `ncl-${tag}-warm`;
+      await launcher.deliver(token, input(runId));
+      expect(hasInput()).toBe(true);
+      await expect(launcher.deliver(token, input(runId))).rejects.toThrow(/native_sandbox_warm_delivery_failed/);
+      // It read its input and now dials the (blocked) deny port: running, not exited.
+      await new Promise((r) => setTimeout(r, 3000));
+      expect((await launcher.inspectWarm(token)).state).toBe("running");
+      await launcher.removeWarm(token);
+      expect(await gone("pod", pod)).toBe(true);
+      expect(await gone("networkpolicy", pod)).toBe(true);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "lets an unclaimed warm pod exit on its own after its wait",
+    async () => {
+      const token = warmToken();
+      await launcher.startWarm(token, 15_000);
+      let state = await launcher.inspectWarm(token);
+      for (let i = 0; i < 60 && state.state === "running"; i += 1) {
+        await new Promise((r) => setTimeout(r, 1000));
+        state = await launcher.inspectWarm(token);
+      }
+      expect(state).toEqual({ state: "exited", exitCode: WARM_WORKER_UNCLAIMED_EXIT });
     },
     TEST_TIMEOUT_MS,
   );

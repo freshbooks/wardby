@@ -87,12 +87,12 @@ describe("native gateway on GKE Autopilot", () => {
     expect(Number(env.NATIVE_SANDBOX_MEMORY_MB)).toBeGreaterThanOrEqual(cpus * 1024);
     const quota = load("quota.yaml")[0].spec.hard;
     const baseQuota = load("../../base/quota.yaml")[0].spec.hard;
-    // The gateway's two replicas (500m each with the sidecar, as Autopilot rounds them) plus the cap's workers.
-    const nativeCpu = 2 * 0.5 + Number(env.NATIVE_SANDBOX_MAX_CONCURRENT) * cpus;
+    // The gateway's two replicas (500m each with the sidecar, as Autopilot rounds them) plus the
+    // cap's workers and the warm pool's idle ones.
+    const workers = Number(env.NATIVE_SANDBOX_MAX_CONCURRENT) + Number(env.NATIVE_SANDBOX_WARM_POOL_SIZE);
+    const nativeCpu = 2 * 0.5 + workers * cpus;
     expect(Number(quota["requests.cpu"])).toBeGreaterThanOrEqual(Number(baseQuota["requests.cpu"]) + nativeCpu);
-    expect(Number(quota.pods)).toBeGreaterThanOrEqual(
-      Number(baseQuota.pods) + 2 + Number(env.NATIVE_SANDBOX_MAX_CONCURRENT),
-    );
+    expect(Number(quota.pods)).toBeGreaterThanOrEqual(Number(baseQuota.pods) + 2 + workers);
     expect(quota["limits.cpu"]).toBe(quota["requests.cpu"]);
   });
 });

@@ -3,7 +3,7 @@ id: native-sandbox
 title: Run native agents in a sandbox
 summary: Turn on sandbox mode so a native agent's turn loop and tools run in a single-use, credential-free Docker container or Kubernetes pod behind a native gateway.
 audience: operator
-tags: [native-agents, sandbox, isolation, docker, kubernetes, native-gateway, security]
+tags: [native-agents, sandbox, isolation, docker, kubernetes, native-gateway, security, warm-pool]
 appliesTo: ">=0.5.4"
 ---
 
@@ -71,6 +71,24 @@ A start past the concurrent cap or the namespace quota fails with
 The full procedure, topology, and local compose overlay are in
 [Native sandbox](../docs/native-sandbox.md).
 
+### Warm pool
+
+Set `NATIVE_SANDBOX_WARM_POOL_SIZE` (0 to 50, default 0 = off) to keep that many
+idle, already-isolated workers ready, with either launcher. A run claims one
+atomically through the database; its input and one-time gateway capability are
+delivered over exec stdin only after the claim, and the worker is still
+single-use. `NATIVE_SANDBOX_WARM_MAX_AGE_MS` (60000 to 21600000, default 1800000) replaces idle workers older than that. With no idle worker, or one that
+fails the claim-time re-check, the run cold-launches as usual. If delivery fails
+and the worker cannot be confirmed gone within 30 seconds, the run fails with
+[native_sandbox_warm_delivery_failed](errors/native-sandbox-warm-delivery-failed.md).
+
+Idle workers are extra pods or containers: the Kubernetes ResourceQuota needs
+room for `NATIVE_SANDBOX_MAX_CONCURRENT` plus the pool size, and each idle
+worker reserves its CPU and memory (billed on GKE Autopilot). Rebuild the worker
+image so it can be a pool worker. Pool workers are named `wardby-nwarm-<token>`
+and labelled `wardby.io/pool=warm`; logs use module `native-warm-pool`. Details
+are in [Native sandbox](../docs/native-sandbox.md#warm-pool).
+
 ## What to expect
 
 - The worker is read-only, non-root (uid 10001), has all capabilities dropped, a
@@ -108,6 +126,7 @@ codes:
 - [native_sandbox_gateway_unavailable](errors/native-sandbox-gateway-unavailable.md)
 - [native_sandbox_worker_unready](errors/native-sandbox-worker-unready.md)
 - [native_sandbox_capacity](errors/native-sandbox-capacity.md)
+- [native_sandbox_warm_delivery_failed](errors/native-sandbox-warm-delivery-failed.md)
 
 See also [Use native agents, tools, and data](native-capabilities.md) and
 [Understand Wardby security boundaries](security.md).

@@ -338,6 +338,10 @@ interface NativeSandboxCommonConfig {
   pids: number;
   /** NATIVE_SANDBOX_MAX_CONCURRENT: at most this many sandbox runs at once (unset = no cap). */
   maxConcurrent?: number;
+  /** NATIVE_SANDBOX_WARM_POOL_SIZE: idle, isolated workers kept ready for runs to claim (0 = no pool). */
+  warmPoolSize: number;
+  /** NATIVE_SANDBOX_WARM_MAX_AGE_MS: an idle worker older than this is replaced, never claimed. */
+  warmMaxAgeMs: number;
 }
 
 export interface DockerNativeSandboxConfig extends NativeSandboxCommonConfig {
@@ -390,6 +394,20 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
       "maxConcurrent",
       optionalPositiveInteger(env.NATIVE_SANDBOX_MAX_CONCURRENT, "NATIVE_SANDBOX_MAX_CONCURRENT"),
     ),
+    warmPoolSize:
+      optionalBoundedInteger(
+        env.NATIVE_SANDBOX_WARM_POOL_SIZE?.trim() || undefined,
+        "NATIVE_SANDBOX_WARM_POOL_SIZE",
+        0,
+        50,
+      ) ?? 0,
+    warmMaxAgeMs:
+      optionalBoundedInteger(
+        env.NATIVE_SANDBOX_WARM_MAX_AGE_MS?.trim() || undefined,
+        "NATIVE_SANDBOX_WARM_MAX_AGE_MS",
+        60_000,
+        21_600_000,
+      ) ?? 1_800_000,
   };
   if (launcher === "kubernetes") {
     // A cluster pulls by registry digest; a local image id means nothing to it.

@@ -15,7 +15,7 @@ appliesTo: ">=0.5.4"
 - **"the namespace's ResourceQuota has no room for another native worker pod"**: with `NATIVE_SANDBOX_LAUNCHER=kubernetes`, the run namespace's quota on pods, CPU, or memory is full.
 
 1. Wait for running sandbox runs to finish, then trigger the run again.
-2. To allow more at once, raise `NATIVE_SANDBOX_MAX_CONCURRENT` (unset means no cap) and raise the namespace ResourceQuota with it. Each worker pod needs its CPU and memory limits (`NATIVE_SANDBOX_CPUS`, `NATIVE_SANDBOX_MEMORY_MB`) from the quota, which coding runs and the gateway share.
+2. To allow more at once, raise `NATIVE_SANDBOX_MAX_CONCURRENT` (unset means no cap) and raise the namespace ResourceQuota with it. Each worker pod needs its CPU and memory limits (`NATIVE_SANDBOX_CPUS`, `NATIVE_SANDBOX_MEMORY_MB`) from the quota, which coding runs and the gateway share. Idle warm-pool workers (`NATIVE_SANDBOX_WARM_POOL_SIZE`) take quota too, so leave room for `NATIVE_SANDBOX_MAX_CONCURRENT` plus the pool size.
 3. Check current usage with `kubectl describe resourcequota -n <namespace>` and `kubectl get pods -n <namespace> -l wardby.io/component=native-run`.
 
 See [Run native agents in a sandbox](../native-sandbox.md) and the

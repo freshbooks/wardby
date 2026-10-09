@@ -360,6 +360,10 @@ spec:
             # Size with quota.yaml: each worker pod asks for 500m / 512Mi.
             - name: NATIVE_SANDBOX_MAX_CONCURRENT
               value: "4"
+            # Idle, already-isolated workers kept for runs to claim (0 = every run starts a cold
+            # pod). Each one is a running 500m / 512Mi pod: raise quota.yaml by the same count.
+            - name: NATIVE_SANDBOX_WARM_POOL_SIZE
+              value: "0"
             # A cold gVisor node takes about two minutes (see KUBERNETES_READY_TIMEOUT_MS).
             - name: NATIVE_SANDBOX_READY_TIMEOUT_MS
               value: "600000"

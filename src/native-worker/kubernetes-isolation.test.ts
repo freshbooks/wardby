@@ -3,6 +3,8 @@ import {
   buildNativeInputSecret,
   buildNativeRunNetworkPolicy,
   buildNativeRunPod,
+  buildNativeWarmNetworkPolicy,
+  buildNativeWarmPod,
   NATIVE_INPUT_FILE,
   nativeEnforcementProbe,
   nativeKubernetesNames,
@@ -152,5 +154,51 @@ describe("native run Kubernetes objects", () => {
     expect(() => autopilot(0.5, 512)).toThrow(/native_sandbox_platform_unsupported/);
     expect(() => autopilot(0.5, 512, "runc")).toThrow(/native_sandbox_platform_unsupported/);
     expect(pod().spec?.priorityClassName).toBeUndefined();
+  });
+});
+
+describe("native warm pool Kubernetes objects", () => {
+  const token = "0123456789abcdef0123";
+  const warm = () =>
+    buildNativeWarmPod({ token, waitMs: 60_000, namespace: "wardby-runs", image, limits, activeDeadlineSeconds: 3660 });
+
+  it("is the run pod's locked-down spec with no input mount, waiting for an input file in /tmp", () => {
+    const run = pod().spec!;
+    const spec = warm().spec!;
+    expect({ ...spec, containers: undefined, volumes: undefined, activeDeadlineSeconds: undefined }).toEqual({
+      ...run,
+      containers: undefined,
+      volumes: undefined,
+      activeDeadlineSeconds: undefined,
+    });
+    const { env, volumeMounts, ...container } = spec.containers[0];
+    const { env: _runEnv, volumeMounts: _runMounts, ...runContainer } = run.containers[0];
+    expect(container).toEqual(runContainer);
+    expect(env).toEqual([
+      { name: "NATIVE_WORKER_INPUT_FILE", value: "/tmp/wardby-input/input.json" },
+      { name: "NATIVE_WORKER_INPUT_WAIT_MS", value: "60000" },
+    ]);
+    expect(volumeMounts).toEqual([{ name: "tmp", mountPath: "/tmp" }]);
+    expect(spec.volumes!.some((v) => v.secret)).toBe(false);
+  });
+
+  it("is a native-run pod (the gateway admits it) labelled by its token, with no run hash", () => {
+    const labels = warm().metadata!.labels!;
+    expect(warm().metadata!.name).toBe(`wardby-nwarm-${token}`);
+    expect(labels).toMatchObject({
+      "wardby.io/component": "native-run",
+      "wardby.io/pool": "warm",
+      "wardby.io/warm-worker": token,
+    });
+    expect(labels["wardby.io/run-sha256"]).toBeUndefined();
+    expect(() => buildNativeWarmPod({ ...warm(), token: "../x" } as never)).toThrow(/invalid_warm_token/);
+  });
+
+  it("gets the run policy's egress, selecting its own pod", () => {
+    const policy = buildNativeWarmNetworkPolicy(token, "wardby-runs").spec!;
+    const runPolicy = buildNativeRunNetworkPolicy(runId, "wardby-runs").spec!;
+    expect(policy.egress).toEqual(runPolicy.egress);
+    expect(policy.policyTypes).toEqual(runPolicy.policyTypes);
+    expect(policy.podSelector?.matchLabels).toEqual(warm().metadata!.labels);
   });
 });
