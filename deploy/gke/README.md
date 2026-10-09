@@ -79,6 +79,12 @@ gateway's replicas and `NATIVE_SANDBOX_MAX_CONCURRENT` worker pods at 500m and
 512Mi each; raise it together with `CODING_MAX_CONCURRENT` or
 `NATIVE_SANDBOX_MAX_CONCURRENT`.
 
+To keep idle workers ready, set `NATIVE_SANDBOX_WARM_POOL_SIZE` in the control
+plane manifest. Idle workers are extra pods, so raise the ResourceQuota to cover
+`NATIVE_SANDBOX_MAX_CONCURRENT` plus `NATIVE_SANDBOX_WARM_POOL_SIZE` worker
+pods; each idle worker is billed for its 500m / 512Mi requests. See the
+[warm pool](../../docs/native-sandbox.md#warm-pool).
+
 ## Egress
 
 The namespace is default-deny. The control plane, the coding proxy, and the

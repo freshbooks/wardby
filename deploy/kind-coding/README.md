@@ -236,6 +236,11 @@ outside address do not). On a `kind` cluster whose network layer does not
 enforce `NetworkPolicy`, every sandbox run fails with
 `native_sandbox_network_unenforced`; see the Calico fallback below.
 
+To try the warm pool locally, also set `NATIVE_SANDBOX_WARM_POOL_SIZE=1` (the
+long-running server then keeps one idle isolated worker pod, labelled
+`wardby.io/pool=warm`, that the next run claims). See
+[Warm pool](../../docs/native-sandbox.md#warm-pool).
+
 An opt-in acceptance test exercises this end to end against the cluster. It is
 skipped unless the `test:native-kind` script sets its flag:
 
