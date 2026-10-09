@@ -31,6 +31,7 @@ import { DEFAULT_KNOWLEDGE_BUNDLE_PATH } from "../knowledge/concept.js";
 import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
+import { CONTENDED_TX_MAX_WAIT_MS } from "./timing.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
 
 const dispatchLog = logger.child({ module: "dispatch" });
@@ -54,6 +55,7 @@ export type DispatchTx = Pick<
   | "budgetGroup"
   | "resourceGrant"
   | "workItem"
+  | "localPullRequest"
   | "runAttribution"
   | "$queryRaw"
   | "$executeRawUnsafe"
@@ -189,6 +191,16 @@ export function isSerializationConflict(err: unknown): boolean {
 }
 
 /**
+ * Prisma's interactive-transaction error (P2028): no pooled connection within
+ * `maxWait` ("Unable to start a transaction in the given time"), or the
+ * transaction outlived its timeout. Either way nothing was committed, so the
+ * caller can retry or queue.
+ */
+export function isTransactionUnavailable(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && (err as { code?: unknown }).code === "P2028");
+}
+
+/**
  * Record an executor-level failure on a run that never reached a terminal
  * state itself. Deliberately idempotent: the same failure can arrive twice —
  * DbosExecutor.start() calls this when the workflow handle rejects, and
@@ -267,7 +279,8 @@ async function reserveCodingBudget(
 
 /**
  * Attempts for the persist transaction, and the jittered backoff between
- * them, for serialization failures and deadlocks.
+ * them, for serialization failures, deadlocks and transactions that could
+ * not start in time (P2028).
  *
  * @internal Exported only for the real-PostgreSQL tests.
  */
@@ -413,6 +426,9 @@ const UNREADABLE_DECLARATION: Readonly<Record<string, string>> = {
   github_file_too_large: `it is larger than ${MAX_SERVICE_DECLARATION_BYTES} bytes`,
   github_file_not_a_file: "it is not a file",
   github_file_not_utf8: "it is not UTF-8 text",
+  local_file_too_large: `it is larger than ${MAX_SERVICE_DECLARATION_BYTES} bytes`,
+  local_file_not_a_file: "it is not a file",
+  local_file_not_utf8: "it is not UTF-8 text",
 };
 
 /**
@@ -644,6 +660,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             agentId: agent.id,
             trigger: options.trigger ?? "manual",
             executionManaged: true,
+            // Fixed for the run's life: the executor routes on this, never on the agent's current setting.
+            nativeExecutionMode: agent.kind === "native" ? agent.nativeExecutionMode : null,
             parentRunId: options.parentRunId,
             grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],
             taskOverride: options.taskOverride,
@@ -772,7 +790,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           : undefined;
         return { run, task };
       },
-      { isolationLevel: "Serializable" },
+      { isolationLevel: "Serializable", maxWait: CONTENDED_TX_MAX_WAIT_MS },
     );
 
   let persisted: DispatchRunResult | null = null;
@@ -781,7 +799,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       persisted = await persistOnce();
       break;
     } catch (err) {
-      if (!isSerializationConflict(err) || attempt === PERSIST_ATTEMPTS - 1) throw err;
+      const retryable = isSerializationConflict(err) || isTransactionUnavailable(err);
+      if (!retryable || attempt === PERSIST_ATTEMPTS - 1) throw err;
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
     }
   }

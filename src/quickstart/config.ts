@@ -130,6 +130,11 @@ export function defaultModel(provider: QuickstartProvider): string {
   return provider === "openai" ? "gpt-5.6-luna" : "claude-haiku-4-5";
 }
 
+/** The local-reviewer's model: one tier above the base default, runnable with the same provider key. */
+export function defaultReviewerModel(provider: QuickstartProvider): string {
+  return provider === "openai" ? "gpt-5.6-terra" : "claude-sonnet-5";
+}
+
 export function providerKeyName(provider: QuickstartProvider): "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" {
   return provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
 }

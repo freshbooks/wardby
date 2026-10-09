@@ -199,6 +199,7 @@ export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null, onOp
         {run.status} · {elapsed}
         {running ? " elapsed" : ""}
       </p>
+      {run.nativeExecutionMode === "sandbox" && <p className="muted">Ran in a sandbox container</p>}
       {current.error && <ErrorLine error={current.error} />}
       {!detail && !current.error && <p className="muted">Loading…</p>}
 
@@ -277,6 +278,11 @@ export function DetailPanel({ serverUrl, run, runs, onSelect, focus = null, onOp
           <p>
             Turn {run.turns} · last activity {relativeTime(run.heartbeatAt, now)}
           </p>
+          {onOpenPod && run.nativeExecutionMode === "sandbox" && (
+            <button type="button" onClick={() => onOpenPod(run.id)}>
+              Pod ↗
+            </button>
+          )}
         </Section>
       )}
 

@@ -52,7 +52,9 @@ You do not need to clone Wardby or install PostgreSQL.
    ```
 
 2. Follow the prompts to choose a provider, start PostgreSQL, create a `$1`
-   demo agent, and optionally connect Codex or Claude Code through MCP.
+   demo agent, optionally set up a coding agent and a review agent against a
+   local git repository (no GitHub App needed), and optionally connect Codex or
+   Claude Code through MCP.
 
 3. Verify the installation:
 
@@ -332,7 +334,8 @@ production alerts, and SLOs remain operator responsibilities. See the
   repository content, credentials, diffs, and raw worker output.
 
 Read the [runtime architecture](https://github.com/wardby/wardby/blob/main/docs/architecture-runtime.md),
-[coding-worker isolation model](https://github.com/wardby/wardby/blob/main/docs/coding-worker-isolation.md), and
+[coding-worker isolation model](https://github.com/wardby/wardby/blob/main/docs/coding-worker-isolation.md),
+[native sandbox guide](https://github.com/wardby/wardby/blob/main/docs/native-sandbox.md), and
 [security deployment guide](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md) before enabling a
 production repository.
 
@@ -371,6 +374,9 @@ for the repository's own dependency-override policy.
 - QuickJS tool isolation with host allowlists and secret bindings.
 - Containerized Codex and Claude Code executors with trusted GitHub draft-PR
   finalization.
+- Optional, outbound-only [Slack workflow notifications](https://github.com/wardby/wardby/blob/main/docs/slack-notifications.md):
+  link a channel to a Jira project or an agent to follow a card from pickup
+  to merge.
 - Per-run PostgreSQL, Redis and MySQL services for coding runs, declared in the
   repository and allowed per agent, for Codex and Claude Code runs on the
   Kubernetes and Docker launchers.

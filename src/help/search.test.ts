@@ -161,3 +161,102 @@ describe("searchHelp", () => {
     expect(searchHelp(catalog, "parallel delegations")[0]?.page.id).toBe("agent-recipes");
   });
 });
+
+describe("local repositories help", () => {
+  it("is found for the obvious queries, and each error code finds its article", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+
+    for (const query of ["local repo", "worktree", "without github app", "LOCAL_REPO_ROOTS", "trusted folders"]) {
+      const ids = searchHelp(catalog, query).map((result) => result.page.id);
+      expect(ids, query).toContain("local-repositories");
+    }
+
+    for (const code of [
+      "local_repo_not_allowed",
+      "local_repo_not_found",
+      "local_ref_not_found",
+      "local_ref_invalid",
+      "local_path_invalid",
+      "local_branch_conflict",
+      "vcs_github_not_configured",
+    ]) {
+      const id = `errors/${code.replaceAll("_", "-")}`;
+      const results = searchHelp(catalog, code);
+      expect(results[0]?.page.id, code).toBe(id);
+      expect(catalog.pages.find((entry) => entry.id === id)?.markdown, id).toContain(`\`${code}\``);
+    }
+  });
+});
+
+describe("coding provider not configured help", () => {
+  it("is found by both codes and the variables an operator would search for", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const id = "errors/coding-provider-not-configured";
+    const markdown = catalog.pages.find((entry) => entry.id === id)?.markdown;
+    for (const code of ["coding_provider_not_configured:codex", "coding_provider_not_configured:claude-code"]) {
+      expect(markdown, code).toContain(`\`${code}\``);
+    }
+    for (const query of [
+      "coding_provider_not_configured",
+      "coding_provider_not_configured:codex",
+      "coding_provider_not_configured:claude-code",
+      "CODING_WORKER_IMAGE",
+      "CODING_CLAUDE_WORKER_IMAGE",
+    ]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe(id);
+    }
+  });
+});
+
+describe("build worker image help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["worker image", "custom image", "Go", "Java", "other language"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("build-worker-image");
+    }
+  });
+});
+
+describe("Slack notification help", () => {
+  it("is found by the main article for broad queries and tool names in top 3", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const id = "slack-notifications";
+    for (const query of [
+      "slack",
+      "notification",
+      "channel",
+      "link_notification_channel",
+      "test_notification_channel",
+      "slack thread",
+    ]) {
+      const results = searchHelp(catalog, query);
+      expect(
+        results.slice(0, 3).map((r) => r.page.id),
+        query,
+      ).toContain(id);
+    }
+  });
+
+  it("finds each error code in its corresponding error article", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+
+    for (const [code, articleId] of [
+      ["not_in_channel", "errors/slack-channel-unreachable"],
+      ["invalid_auth", "errors/slack-auth-failed"],
+      ["slack not configured", "errors/slack-not-configured"],
+    ] as const) {
+      const results = searchHelp(catalog, code);
+      expect(results[0]?.page.id, code).toBe(articleId);
+    }
+  });
+});

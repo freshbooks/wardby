@@ -70,6 +70,14 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
     await store.addAllowances(runId, "npm", ["loose-envify", "loose-envify"]);
     expect(await store.isAllowedDependency(runId, "npm", "loose-envify")).toBe(true);
 
+    // Extras a run allows ride in the same table, never as a fetchable name.
+    await store.addExtraAllowances(runId, "pypi", [{ name: "uvicorn", extras: ["standard", "reload"] }]);
+    await store.addExtraAllowances(runId, "pypi", [{ name: "uvicorn-x", extras: ["other"] }]);
+    expect(await store.allowedExtras(runId, "pypi", "uvicorn")).toEqual(["reload", "standard"]);
+    expect(await store.allowedExtras(runId, "npm", "uvicorn")).toEqual([]);
+    expect(await store.isAllowedDependency(runId, "pypi", "uvicorn")).toBe(false);
+    expect(await store.isAllowedDependency(runId, "pypi", "uvicorn[standard]")).toBe(false);
+
     await store.recordFetch({
       runId,
       ecosystem: "npm",

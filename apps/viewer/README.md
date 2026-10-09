@@ -8,6 +8,29 @@ no agents itself.
 
 It is built with Tauri (a Rust core and a React UI). macOS is supported first.
 
+## Download
+
+Each Wardby release on GitHub has a matching macOS build of the viewer
+attached: `wardby-viewer_<version>_macos-universal.dmg` (Apple Silicon and
+Intel), with a `.sha256` checksum. Use the viewer from the same release as
+your server.
+
+The build is **not signed or notarized**, so macOS blocks it the first time.
+After copying the app to Applications, either right-click it and choose
+**Open**, then **Open** again, or remove the download quarantine:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/wardby viewer.app"
+```
+
+To check that a download was built by this repository's release workflow:
+
+```sh
+gh attestation verify wardby-viewer_<version>_macos-universal.dmg --repo wardby/wardby
+```
+
+To build it yourself instead, follow the rest of this guide.
+
 ## Prerequisites
 
 - Node 24 (see `.nvmrc` at the repository root).
@@ -111,6 +134,15 @@ card stays on the Map, marked **Ended**, until you close it or for two
 minutes. On GKE, each pod card has a ↗ link to the pod in the Google Cloud
 console; it needs the kube context to keep the name `gcloud` gives it
 (`gke_<project>_<location>_<cluster>`).
+
+Native agents set to run in a sandbox (`nativeExecutionMode: "sandbox"`) carry
+an **SB** tag on the Runs graph, and their pods have their own **Agent
+sandboxes** area on the Map and section in the Table, marked with the same tag.
+Each run's pod links to its run, including a pod the run took from the warm
+pool; idle warm pool pods show as dots with a ready count. A sandbox run's
+**Pod ↗** button jumps to its pod. The view watches one namespace: if
+`NATIVE_SANDBOX_NAMESPACE` puts sandboxes elsewhere, the Map says so instead of
+showing them.
 
 Credential plugins (`exec` entries in your kubeconfig) run with `/opt/homebrew/bin`,
 `/usr/local/bin` and the Google Cloud SDK's `bin` directories added to `PATH`, so

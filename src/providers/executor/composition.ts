@@ -21,7 +21,8 @@ import type { KubernetesApi } from "../jobs/kubernetes-api.js";
 import { ClientNodeKubernetesApi } from "../jobs/kubernetes-client.js";
 import { isRegistryDigest } from "../jobs/kubernetes-isolation.js";
 import { assertPlatformConfig, platformProfile } from "../jobs/kubernetes-platform.js";
-import { runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
+import { preflightCanaryImage, runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
+import { CODING_WORKER_IMAGES_REQUIRED } from "../../coding/docker-preflight.js";
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
 import { buildVcsProvider } from "../vcs/index.js";
@@ -36,6 +37,12 @@ const compositionLog = logger.child({ module: "executor-composition" });
 
 export interface ConfiguredExecutorOptions {
   native: Executor;
+  /**
+   * Runs native agents whose run snapshot says `sandbox`. Composed whether or
+   * not a coding job launcher is configured. Absent: sandbox runs go to
+   * `native`, whose runner refuses them (RoutingExecutor).
+   */
+  nativeSandbox?: Executor;
   db: PrismaClient;
   env?: NodeJS.ProcessEnv;
   providerConfig?: ProviderConfig;
@@ -45,22 +52,39 @@ export interface ConfiguredExecutorOptions {
   repoAccess?: RepoAccessGate;
 }
 
-/** Builds container execution only when Docker or Kubernetes is explicitly selected. */
+/**
+ * Builds container execution only when Docker or Kubernetes is explicitly
+ * selected, and native sandbox routing whenever a sandbox executor is given.
+ */
 export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Executor {
   const env = options.env ?? process.env;
   const providerConfig = options.providerConfig ?? loadProviderConfig(env);
-  if (providerConfig.jobs !== "docker" && providerConfig.jobs !== "kubernetes") return options.native;
+  if (providerConfig.jobs !== "docker" && providerConfig.jobs !== "kubernetes") {
+    if (!options.nativeSandbox) return options.native;
+    // No coding launcher: coding runs reach the native executor, whose runner fails them with
+    // the "needs a container executor" explanation, exactly as without this wrapper.
+    return new RoutingExecutor(
+      new PrismaExecutionKindResolver(options.db),
+      options.native,
+      options.native,
+      options.nativeSandbox,
+    );
+  }
 
   const github = loadGitHubVcsConfig(env);
   const config = loadContainerExecutorConfig(env);
-  if (!config.workerImage) throw new Error(`CODING_WORKER_IMAGE is required when JOB_LAUNCHER=${providerConfig.jobs}.`);
+  // Each provider's images are optional, but a coding launcher with neither can run nothing.
+  const claudeConfigured = Boolean(config.claudeWorkerImage && config.claudeToolRunnerImage);
+  if (!config.workerImage && !claudeConfigured) {
+    throw new Error(`${CODING_WORKER_IMAGES_REQUIRED} when JOB_LAUNCHER=${providerConfig.jobs}.`);
+  }
   const proxyContainer = config.proxyContainer;
   if (providerConfig.jobs === "docker" && !proxyContainer) {
     throw new Error("CODING_PROXY_CONTAINER is required when JOB_LAUNCHER=docker.");
   }
   const workspaceRoot = resolve(github.workRoot ?? resolve(tmpdir(), "wardby-vcs"));
   const artifactRoot = resolve(config.artifactRoot ?? resolve(tmpdir(), "wardby-coding-artifacts"));
-  const vcs = buildVcsProvider(providerConfig, { ...github, workRoot: workspaceRoot });
+  const vcs = buildVcsProvider(providerConfig, { ...github, workRoot: workspaceRoot }, env);
   const capabilities = new RunCapabilityVault();
   const sessions = new CodingProxy({
     ledger: new PrismaProxyLedger(options.db),
@@ -69,7 +93,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   const onServiceState = prismaServiceStateReporter(options.db);
   let jobs: WorkspaceJobLauncher;
   if (providerConfig.jobs === "kubernetes") {
-    if (!isRegistryDigest(config.workerImage)) {
+    if (config.workerImage !== undefined && !isRegistryDigest(config.workerImage)) {
       throw new Error("CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.");
     }
     for (const image of [config.claudeWorkerImage, config.claudeToolRunnerImage]) {
@@ -93,7 +117,8 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       maxDiskMb: config.maxDiskMb,
     });
     const api = options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: kubernetes.context });
-    const workerImage = config.workerImage;
+    // The canary needs some worker image to run node in; the Claude worker stands in on a Claude-only server.
+    const workerImage = preflightCanaryImage(config) as string;
     jobs = new KubernetesJobLauncher({
       onServiceState,
       api,
@@ -154,7 +179,8 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
-    repoAccess: options.repoAccess ?? createRepoAccessGate({ db: options.db, hosts: buildReviewHosts(env) }),
+    repoAccess:
+      options.repoAccess ?? createRepoAccessGate({ db: options.db, hosts: buildReviewHosts(env, options.db) }),
     issueUrl: (provider, key) => (provider === "jira" ? issueTrackers.jira?.issueUrl(key) : undefined),
     registryReport: async (runId) => {
       const rows = await options.db.registryFetch.findMany({ where: { runId }, orderBy: { createdAt: "asc" } });
@@ -173,6 +199,11 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       });
     },
   });
-  const composed = new RoutingExecutor(new PrismaExecutionKindResolver(options.db), options.native, coding);
+  const composed = new RoutingExecutor(
+    new PrismaExecutionKindResolver(options.db),
+    options.native,
+    coding,
+    options.nativeSandbox,
+  );
   return composed;
 }

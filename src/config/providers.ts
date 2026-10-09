@@ -6,7 +6,12 @@
  * code change. The `assembleProviders` factory (which constructs the concrete
  * adapters) is added once the adapters exist.
  */
-import { KUBERNETES_PLATFORMS, type KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
+import {
+  GVISOR_RUNTIME_CLASS,
+  KUBERNETES_PLATFORMS,
+  platformProfile,
+  type KubernetesPlatform,
+} from "../providers/jobs/kubernetes-platform.js";
 
 export type JobLauncherKind = "local" | "docker" | "kubernetes";
 export type EmailProviderKind = "smtp" | "ses";
@@ -60,6 +65,9 @@ function optionalPositiveInteger(value: string | undefined, name: string): numbe
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer.`);
   return parsed;
 }
+
+/** Trusted roots for `local:` repositories (LOCAL_REPO_ROOTS, path-delimiter separated); unset = local repositories disabled. */
+export { loadLocalRepoRoots } from "../coding/local-repo.js";
 
 export function loadGitHubVcsConfig(env: NodeJS.ProcessEnv = process.env): GitHubVcsConfig {
   return {
@@ -194,6 +202,35 @@ export function loadJiraConfig(env: NodeJS.ProcessEnv = process.env): JiraConfig
   };
 }
 
+export interface SlackConfig {
+  botToken: string;
+  apiBaseUrl: string;
+  customize: boolean;
+}
+
+/** Slack workflow notifications; null when WARDBY_SLACK_BOT_TOKEN is unset (and no other Slack variable is). */
+export function loadSlackConfig(env: NodeJS.ProcessEnv = process.env): SlackConfig | null {
+  const token = env.WARDBY_SLACK_BOT_TOKEN?.trim();
+  const base = env.WARDBY_SLACK_API_BASE_URL?.trim();
+  const customizeRaw = env.WARDBY_SLACK_CUSTOMIZE?.trim().toLowerCase();
+  if (!token) {
+    if (base || customizeRaw)
+      throw new Error("WARDBY_SLACK_API_BASE_URL/WARDBY_SLACK_CUSTOMIZE need WARDBY_SLACK_BOT_TOKEN.");
+    return null;
+  }
+  if (!token.startsWith("xoxb-")) throw new Error("WARDBY_SLACK_BOT_TOKEN must be a bot token (xoxb-…).");
+  let apiBaseUrl = "https://slack.com/api";
+  if (base) {
+    const url = new URL(base);
+    if (url.protocol !== "https:") throw new Error("WARDBY_SLACK_API_BASE_URL must be an https URL.");
+    apiBaseUrl = base.replace(/\/+$/, "");
+  }
+  if (customizeRaw && customizeRaw !== "true" && customizeRaw !== "false") {
+    throw new Error("WARDBY_SLACK_CUSTOMIZE must be true or false.");
+  }
+  return { botToken: token, apiBaseUrl, customize: customizeRaw === "true" };
+}
+
 export interface ContainerExecutorConfig {
   workerImage?: string;
   claudeWorkerImage?: string;
@@ -234,15 +271,21 @@ function optionalBoundedInteger(value: string | undefined, name: string, min: nu
   return parsed;
 }
 
+/**
+ * An image variable's value, trimmed; empty or blank is unset. An env file that ships
+ * `CODING_WORKER_IMAGE=` must read as "no Codex worker", not as an invalid image.
+ */
+export function imageVariable(value: string | undefined): string | undefined {
+  return value?.trim() || undefined;
+}
+
 export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env): ContainerExecutorConfig {
   const additionalWorkerImages: Record<string, Record<string, string>> = {};
-  if (env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12) {
-    additionalWorkerImages["node-python"] = { "3.12": env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12 };
-  }
+  const nodePythonWorker = imageVariable(env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12);
+  if (nodePythonWorker) additionalWorkerImages["node-python"] = { "3.12": nodePythonWorker };
   const claudeToolRunnerImages: Record<string, Record<string, string>> = {};
-  if (env.CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12) {
-    claudeToolRunnerImages["node-python"] = { "3.12": env.CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 };
-  }
+  const nodePythonToolRunner = imageVariable(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12);
+  if (nodePythonToolRunner) claudeToolRunnerImages["node-python"] = { "3.12": nodePythonToolRunner };
   const diskMb = optionalPositiveInteger(env.CODING_DISK_MB, "CODING_DISK_MB") ?? 2048;
   // Defaults to the effective diskMb: raising the ceiling an agents:write caller can request is an
   // explicit operator choice, so upgrading with an unchanged environment changes nothing.
@@ -251,9 +294,9 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
     throw new Error(`CODING_MAX_DISK_MB (${maxDiskMb}) must be at least the effective CODING_DISK_MB (${diskMb}).`);
   }
   return {
-    workerImage: env.CODING_WORKER_IMAGE,
-    claudeWorkerImage: env.CODING_CLAUDE_WORKER_IMAGE,
-    claudeToolRunnerImage: env.CODING_CLAUDE_TOOL_RUNNER_IMAGE,
+    workerImage: imageVariable(env.CODING_WORKER_IMAGE),
+    claudeWorkerImage: imageVariable(env.CODING_CLAUDE_WORKER_IMAGE),
+    claudeToolRunnerImage: imageVariable(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE),
     claudeToolRunnerImages,
     proxyContainer: env.CODING_PROXY_CONTAINER,
     stateRoot: env.CODING_JOB_STATE_ROOT,
@@ -284,6 +327,143 @@ export interface CodingConcurrencyConfig {
  * before closing the executor (SHUTDOWN_DRAIN_SECONDS, default 600; 0 = do
  * not wait). Keep the platform's termination grace period above this.
  */
+/** The native sandbox (docs/native-sandbox.md): where sandbox-mode native runs execute. */
+interface NativeSandboxCommonConfig {
+  workerImage: string;
+  /** What a worker dials; undefined = the launcher's default (Docker: the gateway alias; Kubernetes: the Service's ClusterIP). */
+  gatewayUrl?: string;
+  cpus: number;
+  memoryMb: number;
+  /** Docker only: Kubernetes has no per-pod process limit (it is a node-level kubelet setting). */
+  pids: number;
+  /** NATIVE_SANDBOX_MAX_CONCURRENT: at most this many sandbox runs at once (unset = no cap). */
+  maxConcurrent?: number;
+  /** NATIVE_SANDBOX_WARM_POOL_SIZE: idle, isolated workers kept ready for runs to claim (0 = no pool). */
+  warmPoolSize: number;
+  /** NATIVE_SANDBOX_WARM_MAX_AGE_MS: an idle worker older than this is replaced, never claimed. */
+  warmMaxAgeMs: number;
+}
+
+export interface DockerNativeSandboxConfig extends NativeSandboxCommonConfig {
+  launcher: "docker";
+  /** The container running `wardby native-gateway`, joined to each run's network. */
+  gatewayContainer: string;
+}
+
+export interface KubernetesNativeSandboxConfig extends NativeSandboxCommonConfig {
+  launcher: "kubernetes";
+  /** Where run pods (and the native gateway) live. */
+  namespace: string;
+  context?: string;
+  /** The native gateway's Service in that namespace. */
+  gatewayService: string;
+  runtimeClassName?: string;
+  /** KUBERNETES_PLATFORM: worker pods are conformed to its admission rules. */
+  platform: KubernetesPlatform;
+  /** NATIVE_SANDBOX_PRIORITY_CLASS, else KUBERNETES_RUN_PRIORITY_CLASS. */
+  priorityClassName?: string;
+  /** How long a worker pod may take to start running (NATIVE_SANDBOX_READY_TIMEOUT_MS). */
+  readyTimeoutMs?: number;
+  /** How long its isolation may take to prove from inside (NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS). */
+  enforcementTimeoutMs?: number;
+}
+
+export type NativeSandboxConfig = DockerNativeSandboxConfig | KubernetesNativeSandboxConfig;
+
+/** Undefined when NATIVE_SANDBOX_LAUNCHER is unset (sandbox-mode runs then fail closed). Throws on a bad configuration. */
+export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): NativeSandboxConfig | undefined {
+  const launcher = env.NATIVE_SANDBOX_LAUNCHER?.trim();
+  if (!launcher) return undefined;
+  if (launcher !== "docker" && launcher !== "kubernetes") {
+    throw new Error(`NATIVE_SANDBOX_LAUNCHER must be "docker" or "kubernetes" (got "${launcher}").`);
+  }
+  const workerImage = imageVariable(env.NATIVE_SANDBOX_WORKER_IMAGE);
+  if (!workerImage)
+    throw new Error(`NATIVE_SANDBOX_WORKER_IMAGE is required when NATIVE_SANDBOX_LAUNCHER=${launcher}.`);
+  const gatewayUrl = env.NATIVE_GATEWAY_URL?.trim();
+  if (gatewayUrl && !/^https?:\/\/[^\s]+$/.test(gatewayUrl)) {
+    throw new Error(`NATIVE_GATEWAY_URL must be an http(s) URL (got "${gatewayUrl}").`);
+  }
+  const common = {
+    workerImage,
+    ...(gatewayUrl ? { gatewayUrl } : {}),
+    cpus: optionalPositiveNumber(env.NATIVE_SANDBOX_CPUS, "NATIVE_SANDBOX_CPUS", 1),
+    memoryMb: optionalPositiveInteger(env.NATIVE_SANDBOX_MEMORY_MB, "NATIVE_SANDBOX_MEMORY_MB") ?? 512,
+    pids: optionalPositiveInteger(env.NATIVE_SANDBOX_PIDS, "NATIVE_SANDBOX_PIDS") ?? 128,
+    ...optionalField(
+      "maxConcurrent",
+      optionalPositiveInteger(env.NATIVE_SANDBOX_MAX_CONCURRENT, "NATIVE_SANDBOX_MAX_CONCURRENT"),
+    ),
+    warmPoolSize:
+      optionalBoundedInteger(
+        env.NATIVE_SANDBOX_WARM_POOL_SIZE?.trim() || undefined,
+        "NATIVE_SANDBOX_WARM_POOL_SIZE",
+        0,
+        50,
+      ) ?? 0,
+    warmMaxAgeMs:
+      optionalBoundedInteger(
+        env.NATIVE_SANDBOX_WARM_MAX_AGE_MS?.trim() || undefined,
+        "NATIVE_SANDBOX_WARM_MAX_AGE_MS",
+        60_000,
+        21_600_000,
+      ) ?? 1_800_000,
+  };
+  if (launcher === "kubernetes") {
+    // A cluster pulls by registry digest; a local image id means nothing to it.
+    if (!/@sha256:[0-9a-f]{64}$/.test(workerImage)) {
+      throw new Error(
+        "NATIVE_SANDBOX_WORKER_IMAGE must be a registry digest (repo@sha256:...) when NATIVE_SANDBOX_LAUNCHER=kubernetes.",
+      );
+    }
+    const namespace = env.NATIVE_SANDBOX_NAMESPACE?.trim() || env.KUBERNETES_NAMESPACE?.trim() || "wardby-coding";
+    const runtimeClassName =
+      env.NATIVE_SANDBOX_RUNTIME_CLASS?.trim() || env.KUBERNETES_RUNTIME_CLASS?.trim() || undefined;
+    const context = env.KUBERNETES_CONTEXT?.trim() || undefined;
+    // The platform and run priority class are the coding launcher's settings, validated the same way.
+    const cluster = loadKubernetesJobConfig({
+      KUBERNETES_PLATFORM: env.KUBERNETES_PLATFORM,
+      KUBERNETES_RUN_PRIORITY_CLASS: env.NATIVE_SANDBOX_PRIORITY_CLASS?.trim() || env.KUBERNETES_RUN_PRIORITY_CLASS,
+    });
+    if (platformProfile(cluster.platform).requiresGvisor && runtimeClassName !== GVISOR_RUNTIME_CLASS) {
+      throw new Error(
+        `KUBERNETES_PLATFORM=${cluster.platform} runs native workers only under gVisor: set NATIVE_SANDBOX_RUNTIME_CLASS (or KUBERNETES_RUNTIME_CLASS) to ${GVISOR_RUNTIME_CLASS} (found ${runtimeClassName ?? "unset"}).`,
+      );
+    }
+    return {
+      launcher,
+      ...common,
+      namespace,
+      gatewayService: env.NATIVE_GATEWAY_SERVICE?.trim() || "wardby-native-gateway",
+      platform: cluster.platform,
+      ...(context ? { context } : {}),
+      ...(runtimeClassName ? { runtimeClassName } : {}),
+      ...optionalField("priorityClassName", cluster.priorityClassName),
+      ...optionalField(
+        "readyTimeoutMs",
+        optionalBoundedInteger(
+          env.NATIVE_SANDBOX_READY_TIMEOUT_MS,
+          "NATIVE_SANDBOX_READY_TIMEOUT_MS",
+          1_000,
+          1_800_000,
+        ),
+      ),
+      ...optionalField(
+        "enforcementTimeoutMs",
+        optionalBoundedInteger(
+          env.NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS,
+          "NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS",
+          1_000,
+          600_000,
+        ),
+      ),
+    };
+  }
+  const gatewayContainer = env.NATIVE_GATEWAY_CONTAINER?.trim();
+  if (!gatewayContainer) throw new Error("NATIVE_GATEWAY_CONTAINER is required when NATIVE_SANDBOX_LAUNCHER=docker.");
+  return { launcher, ...common, gatewayContainer };
+}
+
 export function loadShutdownDrainSeconds(env: NodeJS.ProcessEnv = process.env): number {
   const value = env.SHUTDOWN_DRAIN_SECONDS?.trim();
   if (!value) return 600;
@@ -331,8 +511,9 @@ export interface KubernetesJobConfig {
   preflightTimeoutMs?: number;
   readyTimeoutMs?: number;
   /**
-   * Bound for a single NetworkPolicy-enforcement probe exec (the keeper running two sequential
-   * connects). Defaults to the launcher's own 10 s, which a resource-constrained keeper (e.g. a
+   * Time budget for a single NetworkPolicy-enforcement probe (the keeper running two sequential
+   * connects); a streak's probes share one exec whose timeout the launcher derives from this.
+   * Defaults to the launcher's own 10 s, which a resource-constrained keeper (e.g. a
    * laptop `kind` cluster's default 250m CPU / 128Mi limit) can exceed even though the probe
    * itself is healthy — observed live: raising this to 60_000 was enough on `kind`. GKE Autopilot
    * is unaffected by leaving this unset. The launcher derives its overall enforcement wall-clock
@@ -513,4 +694,9 @@ export function loadDbosConfig(env: NodeJS.ProcessEnv = process.env): DbosConfig
     schemaName: env.DBOS_SCHEMA ?? "dbos",
     executorId: env.DBOS_EXECUTOR_ID ?? crypto.randomUUID(),
   };
+}
+
+/** `{ [key]: value }` when value is set, else nothing: for spreading optional fields under exactOptionalPropertyTypes. */
+function optionalField<K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } {
+  return (value === undefined ? {} : { [key]: value }) as { [P in K]?: V };
 }

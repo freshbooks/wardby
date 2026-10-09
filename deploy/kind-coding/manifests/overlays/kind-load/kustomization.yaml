@@ -1,0 +1,6 @@
+# Load testing only: the kind overlay plus the mock model upstream.
+# Never apply this to a real deployment. See deploy/kind-coding/README.md, "Load testing".
+resources:
+  - ../kind
+patches:
+  - path: proxy-load-env.yaml

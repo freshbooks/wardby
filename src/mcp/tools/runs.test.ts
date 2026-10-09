@@ -27,11 +27,14 @@ interface FakeRunRow {
   startedAt: Date;
   finishedAt: Date | null;
   triggeredById?: string | null;
+  nativeExecutionMode?: "control_plane" | "sandbox" | null;
   codingRun?: {
     result: unknown;
     jobHandle?: string;
     protectedPaths?: string[];
     queuedAt?: Date | null;
+    resultBranch?: string | null;
+    baseSha?: string | null;
     failureCategory?: string | null;
     diagnosticId?: string | null;
     debugTrace?: boolean;
@@ -48,6 +51,7 @@ interface FakeRunRow {
     createdAt: Date;
   }>;
   approvedVersions?: number;
+  localPullRequest?: Record<string, unknown> | null;
 }
 
 function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSeed[] = []) {
@@ -55,7 +59,13 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
   const runRows = new Map(runs.map((r) => [r.id, r]));
   const publicRun = (run: FakeRunRow | undefined) => {
     if (!run) return null;
-    const { codingRun: _codingRun, registryFetches: _registryFetches, approvedVersions: _approved, ...row } = run;
+    const {
+      codingRun: _codingRun,
+      localPullRequest: _lpr,
+      registryFetches: _registryFetches,
+      approvedVersions: _approved,
+      ...row
+    } = run;
     return row;
   };
   return {
@@ -81,6 +91,9 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
         where.runId.in
           .map((runId) => ({ runId, queuedAt: runRows.get(runId)?.codingRun?.queuedAt ?? null }))
           .filter((row) => row.queuedAt !== null),
+    },
+    localPullRequest: {
+      findUnique: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.localPullRequest ?? null,
     },
     registryApprovedVersion: {
       count: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.approvedVersions ?? 0,
@@ -152,6 +165,53 @@ describe("run observability tools", () => {
     expect(body.turns).toBe(3);
     expect(body.costUsd).toBe(0.01);
     expect(body.finalText).toBe("the answer");
+    await client.close();
+  });
+
+  it("get_run and list_runs return the execution mode in its operator spelling", async () => {
+    const now = new Date();
+    const run = (id: string, nativeExecutionMode: FakeRunRow["nativeExecutionMode"]): FakeRunRow => ({
+      id,
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costUsd: 0,
+      finalText: "x",
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+      nativeExecutionMode,
+    });
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [run("r1", "control_plane"), run("r2", "sandbox"), run("r3", null)],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+
+    const mode = async (runId: string) =>
+      (
+        parseText((await client.callTool({ name: "get_run", arguments: { runId } })) as never) as {
+          nativeExecutionMode: unknown;
+        }
+      ).nativeExecutionMode;
+    expect(await mode("r1")).toBe("control-plane");
+    expect(await mode("r2")).toBe("sandbox");
+    expect(await mode("r3")).toBeNull();
+    const listed = parseText((await client.callTool({ name: "list_runs", arguments: { agentId: "a1" } })) as never) as {
+      id: string;
+      nativeExecutionMode: unknown;
+    }[];
+    expect(Object.fromEntries(listed.map((r) => [r.id, r.nativeExecutionMode]))).toEqual({
+      r1: "control-plane",
+      r2: "sandbox",
+      r3: null,
+    });
     await client.close();
   });
 
@@ -450,6 +510,54 @@ describe("run observability tools", () => {
     expect(nonCodingBody).not.toHaveProperty("packages");
     expect(nonCodingBody).not.toHaveProperty("packageRefusals");
     expect(nonCodingBody).not.toHaveProperty("packagePlan");
+    await client.close();
+  });
+
+  it("get_run shows a local review's verdicts and a coding run's result branch", async () => {
+    const now = new Date();
+    const base = {
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costUsd: 0,
+      finalText: "x",
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+    };
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        {
+          ...base,
+          id: "r1",
+          localPullRequest: {
+            number: 7,
+            branch: "feature",
+            base: "main",
+            reviews: [{ verdict: "approve", summary: "ok", body: "fine", comments: [{ path: "a.ts", line: 1 }] }],
+          },
+        },
+        { ...base, id: "r2", codingRun: { result: null, resultBranch: "wardby/run-r2", baseSha: "a".repeat(40) } },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    const r1 = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r1" } })) as never) as any;
+    expect(r1.review).toEqual({
+      number: 7,
+      branch: "feature",
+      base: "main",
+      reviews: [{ verdict: "approve", summary: "ok", body: "fine", comments: [{ path: "a.ts", line: 1 }] }],
+    });
+    const r2 = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never) as any;
+    expect(r2).toMatchObject({ resultBranch: "wardby/run-r2", baseSha: "a".repeat(40) });
+    expect(r2).not.toHaveProperty("review");
     await client.close();
   });
 

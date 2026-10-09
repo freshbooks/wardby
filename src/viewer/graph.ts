@@ -34,6 +34,7 @@ const runInclude = {
   hostStatus: true,
   issueStatus: true,
   serviceStatuses: { orderBy: { createdAt: "asc" } },
+  nativeWarmWorker: { select: { name: true } },
 } satisfies Prisma.RunInclude;
 
 type RunRow = Prisma.RunGetPayload<{ include: typeof runInclude }>;
@@ -174,6 +175,13 @@ export function toGraphRun(row: RunRow, pullRequests: readonly PullRequestRow[],
     agentKind: row.agent.kind,
     model: row.codingRun?.model ?? row.agent.model,
     codingProvider: row.codingRun?.provider ?? null,
+    nativeExecutionMode:
+      row.nativeExecutionMode === "sandbox"
+        ? "sandbox"
+        : row.nativeExecutionMode === "control_plane"
+          ? "control-plane"
+          : null,
+    warmWorkerName: row.nativeWarmWorker?.name ?? null,
     status: row.status,
     trigger: triggerFor(row, sites),
     turns: row.turns,

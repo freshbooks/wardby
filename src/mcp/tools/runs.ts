@@ -1,3 +1,4 @@
+import type { NativeExecutionMode } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { agentAccess, requireAgentAccess } from "../auth/access.js";
@@ -12,6 +13,14 @@ import { textResult } from "./text-result.js";
  * (and the stdio operator) sees every run; anyone else only runs with
  * Run.triggeredById equal to themselves.
  */
+/** A run row with its execution mode in the operator spelling agent tools use; null for coding runs. */
+function withOperatorMode<T extends { nativeExecutionMode?: NativeExecutionMode | null }>(
+  run: T,
+): Omit<T, "nativeExecutionMode"> & { nativeExecutionMode: "control-plane" | "sandbox" | null } {
+  const mode = run.nativeExecutionMode;
+  return { ...run, nativeExecutionMode: mode == null ? null : mode === "sandbox" ? "sandbox" : "control-plane" };
+}
+
 export function registerRunTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_runs",
@@ -46,7 +55,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       return textResult(
         runs.map((run) => {
           const codingQueuedAt = queuedAtByRun.get(run.id);
-          return codingQueuedAt ? { ...run, codingQueuedAt } : run;
+          return codingQueuedAt ? { ...withOperatorMode(run), codingQueuedAt } : withOperatorMode(run);
         }),
       );
     },
@@ -75,7 +84,13 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           diagnosticId: true,
           debugTrace: true,
           services: true,
+          resultBranch: true,
+          baseSha: true,
         },
+      });
+      const localPr = await ctx.db.localPullRequest.findUnique({
+        where: { runId: run.id },
+        include: { reviews: { orderBy: { createdAt: "asc" } } },
       });
       const codingResult = publicCodingRunResult(codingRun?.result);
       // A pending coding run with queuedAt is waiting for a concurrency slot
@@ -105,7 +120,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       // Which services the run started with ("postgres 16"); never their images or environments.
       const services = codingRun ? storedServiceLabels(codingRun.services) : [];
       return textResult({
-        ...run,
+        ...withOperatorMode(run),
         ...(codingResult ? { codingResult } : {}),
         ...(failureCategory ? { failureCategory } : {}),
         ...(diagnosticId ? { diagnosticId } : {}),
@@ -113,6 +128,23 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         // An admin turned on the debug trace: the worker's full trace is in its pod log.
         ...(codingRun?.debugTrace ? { debugTrace: true } : {}),
         ...(services.length > 0 ? { services } : {}),
+        ...(codingRun?.resultBranch ? { resultBranch: codingRun.resultBranch } : {}),
+        ...(codingRun?.baseSha ? { baseSha: codingRun.baseSha } : {}),
+        ...(localPr
+          ? {
+              review: {
+                number: localPr.number,
+                branch: localPr.branch,
+                base: localPr.base,
+                reviews: localPr.reviews.map((r) => ({
+                  verdict: r.verdict,
+                  summary: r.summary,
+                  body: r.body,
+                  comments: r.comments,
+                })),
+              },
+            }
+          : {}),
         ...(codingRun ? { packages, packageRefusals, packagePlan } : {}),
       });
     },

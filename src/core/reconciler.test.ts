@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
+import { PrismaExecutionKindResolver, RoutingExecutor } from "../providers/executor/routing.js";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { IssueTracker } from "../providers/issue-tracker/types.js";
 
@@ -8,6 +9,7 @@ import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
 vi.mock("./host-events.js", () => ({ startDeferredReviews: vi.fn(async () => []) }));
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
+import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 
 interface FakeRun {
   id: string;
@@ -352,6 +354,30 @@ describe("reconcileOnce", () => {
 
     expect(await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor)).toBe(0);
     expect(runs[0].status).toBe("running"); // the executor's recover() owns the terminal write
+  });
+
+  it("sends a stale sandbox-mode run's handle to the sandbox executor, never to the DBOS-owning native one", async () => {
+    const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "native-sandbox" })];
+    const db = fakeDb(runs);
+    const resolver = new PrismaExecutionKindResolver({
+      run: { findUnique: async () => ({ nativeExecutionMode: "sandbox", agent: { kind: "native" } }) },
+    });
+    const nativeRecover = vi.fn(async () => ({
+      state: "lost" as const,
+      reason: 'DbosExecutor cannot recover backend "native-sandbox".',
+    }));
+    const sandboxRecover = vi.fn(async () => ({ state: "lost" as const, reason: "worker container is gone" }));
+    const executor = new RoutingExecutor(
+      resolver,
+      { start: async () => undefined, stop: async () => undefined, recover: nativeRecover },
+      { start: async () => undefined, stop: async () => undefined },
+      { start: async () => undefined, stop: async () => undefined, recover: sandboxRecover },
+    );
+
+    expect(await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor)).toBe(1);
+    expect(sandboxRecover).toHaveBeenCalledWith({ runId: "r1", backend: "native-sandbox", id: "r1" });
+    expect(nativeRecover).not.toHaveBeenCalled();
+    expect(runs[0]).toMatchObject({ status: "lost", error: "worker container is gone" });
   });
 
   it("falls back to the plain lost path for a durable-backend run when no executor can recover", async () => {
@@ -709,6 +735,40 @@ describe("reconcileOnce self-defects", () => {
     await reconcileOnce(fresh.db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
     expect(tracker.createIssue).not.toHaveBeenCalled();
     expect((fresh.db as any).agent.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("reconcileOnce workflow events", () => {
+  it("emits run_failed with status lost for a stale top-level run it marks lost", async () => {
+    const runs = [{ ...baseRun({ heartbeatAt: STALE }), agentId: "a1", parentRunId: null } as FakeRun];
+    const db = fakeDb(runs) as any;
+    db.agent = { findUnique: vi.fn(async () => ({ name: "nightly", defectProjectKey: null })) };
+    db.runHostCheck = { findUnique: vi.fn(async () => null) };
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      expect(await reconcileOnce(db as ReconcilerDb, NOW, HEARTBEAT_TIMEOUT_MS)).toBe(1);
+      expect(events).toEqual([
+        {
+          dedupeKey: "run_failed:r1",
+          runId: "r1",
+          agentId: "a1",
+          payload: {
+            kind: "run_failed",
+            agentName: "nightly",
+            status: "lost",
+            reason: expect.stringContaining("Orphaned"),
+          },
+        },
+      ]);
+      // A second pass finds nothing stale and emits nothing more.
+      await reconcileOnce(db as ReconcilerDb, NOW, HEARTBEAT_TIMEOUT_MS);
+      expect(events).toHaveLength(1);
+    } finally {
+      setWorkflowEventSink(null);
+    }
   });
 });
 

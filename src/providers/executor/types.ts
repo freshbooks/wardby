@@ -40,6 +40,13 @@ export interface Executor {
   /** Optional graceful shutdown counterpart to `launch`. */
   close?: () => Promise<void>;
   /**
+   * Fire-and-forget start-up warm-up, called only from a long-running server process's own
+   * start-up (`wardby serve`, the MCP server, `wardby scheduler`) — never from a one-shot CLI
+   * command. Delegates to the coding job launcher's own `warmUp` (e.g. Kubernetes's memoized
+   * cluster preflight); never throws.
+   */
+  warmUp?: () => Promise<void>;
+  /**
    * Resolves a coding agent's profile selection to an immutable worker
    * image digest, once, at dispatch time (src/core/dispatch.ts) — never
    * called from the hot path. Must throw on an unresolvable
@@ -63,7 +70,7 @@ export interface Executor {
   readCodingServiceDeclaration?(input: { repository: string; baseRef: string }): Promise<string | null>;
   /**
    * The raw text of one repository file at `baseRef`, or null when absent.
-   * Throws (github_file_too_large, github_file_not_a_file, github_file_not_utf8)
+   * Throws (github_file_* or local_file_*: too_large, not_a_file, not_utf8)
    * when the file is oversized or not UTF-8 text. Called by dispatch before its transaction (network call).
    * Used for the knowledge note (src/knowledge/note.ts).
    */
@@ -78,5 +85,10 @@ export interface Executor {
    * says so (Kubernetes and Docker, for Codex and Claude Code).
    */
   supportsCodingServices?(provider: CodingProvider): boolean;
+  /**
+   * Whether this executor can run sandbox-mode native runs (a native sandbox executor is composed
+   * in). MCP refuses to set an agent to sandbox mode where it cannot (docs/native-sandbox.md).
+   */
+  supportsNativeSandbox?(): boolean;
 }
 import type { CodingProvider } from "../../coding/provider.js";

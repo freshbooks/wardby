@@ -32,7 +32,14 @@ describe.skipIf(!process.env.DATABASE_URL)("loadRunDetail (PostgreSQL)", () => {
     });
     // Created out of order: childRunIds must follow startedAt.
     await db.run.create({
-      data: { id: ids.R3, agentId: ids.A, parentRunId: ids.R1, status: "running", startedAt: ago(2 * MIN) },
+      data: {
+        id: ids.R3,
+        agentId: ids.A,
+        parentRunId: ids.R1,
+        status: "running",
+        startedAt: ago(2 * MIN),
+        nativeExecutionMode: "sandbox",
+      },
     });
     await db.run.create({
       data: {
@@ -110,12 +117,21 @@ describe.skipIf(!process.env.DATABASE_URL)("loadRunDetail (PostgreSQL)", () => {
     expect(detail).toMatchObject({
       model: "agent-model",
       codingProvider: null,
+      nativeExecutionMode: null,
       declaredServices: [],
       error: "boom",
       finalText: "final words",
       coding: null,
     });
     expect(detail!.childRunIds).toEqual([ids.R2, ids.R3]);
+  });
+
+  it("exposes the run's native execution mode snapshot, null when none was recorded", async () => {
+    const sandboxed = await loadRunDetail(db, ids.R3);
+    expect(RunDetailSchema.parse(sandboxed)).toEqual(sandboxed);
+    expect(sandboxed!.nativeExecutionMode).toBe("sandbox");
+    expect((await loadRunDetail(db, ids.R1))!.nativeExecutionMode).toBeNull();
+    expect((await loadRunDetail(db, ids.R2))!.nativeExecutionMode).toBeNull();
   });
 
   it("returns a coding-agent run without a CodingRun row as native detail", async () => {

@@ -125,6 +125,23 @@ docker inspect --format '{{index .RepoDigests 0}}' \
   us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate:latest
 ```
 
+Instead of building the runtime image, you can pull the one each wardby release
+publishes (`ghcr.io/wardby/wardby/wardby-runtime:<release tag>`, for example the
+tag of the version you deploy) and push it to your own registry:
+
+```bash
+docker pull ghcr.io/wardby/wardby/wardby-runtime:v<version>
+docker tag ghcr.io/wardby/wardby/wardby-runtime:v<version> \
+  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:v<version>
+docker push us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:v<version>
+docker inspect --format '{{index .RepoDigests 0}}' \
+  us-central1-docker.pkg.dev/my-gcp-project-id/wardby/control-plane:v<version>
+```
+
+Releases also publish `wardby-coding-worker`, `wardby-claude-coding-worker` and
+`wardby-claude-tool-runner` under the same prefix, for deployments that run
+coding agents. The migration image is not published; build it as above.
+
 Use the first digest as `container_image` and the second as
 `migration_image` in your `terraform.tfvars` (not mutable tags — consistent
 with how every other image in this repo is pinned). `terraform apply` runs

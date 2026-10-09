@@ -5,6 +5,12 @@
  * or throws an actionable McpError. See core/repo-access.ts for the use-time
  * side and the rules; the host call happens here, before any transaction.
  */
+import {
+  LocalRepoError,
+  isLocalRepository,
+  loadLocalRepoRoots,
+  resolveLocalRepository,
+} from "../../coding/local-repo.js";
 import { requiredLevel, type AuthorizedVia, type RepoAccessKind } from "../../core/repo-access.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
@@ -14,6 +20,20 @@ export interface RepositoryAuthorization {
   authorizedVia: AuthorizedVia;
   authorizedById: string;
   authorizedAt: Date;
+}
+
+/**
+ * The canonical (realpath-based) name of a `local:` repository inside the
+ * current trusted roots; a 400 whose message carries the error code otherwise.
+ * Agents store this, never the caller's spelling.
+ */
+export async function canonicalLocalRepository(repository: string): Promise<string> {
+  try {
+    return (await resolveLocalRepository(repository, loadLocalRepoRoots(process.env).roots)).repository;
+  } catch (err) {
+    if (err instanceof LocalRepoError) throw new McpError(400, err.message);
+    throw new McpError(400, `local_repo_not_found: ${(err as Error).message}`);
+  }
 }
 
 export async function authorizeRepositoryForSet(
@@ -39,6 +59,11 @@ export async function authorizeRepositoryForSet(
     authorizedById: ctx.principal.id,
     authorizedAt: new Date(),
   });
+  if (isLocalRepository(input.repository)) {
+    // Trusted roots decide, never a host identity or an admin override.
+    await canonicalLocalRepository(input.repository);
+    return stamp("local_root");
+  }
   if (input.adminOverride) {
     // Role-gated: the scope alone never suffices (resource-server.ts).
     requireScope(ctx, ctx.canonicalUri, "agents:admin");

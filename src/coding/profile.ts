@@ -1,6 +1,13 @@
 import { z } from "zod";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
-import { MAX_CODING_TASK_BYTES, MAX_CODING_TURNS, normalizeGitHubRepository, normalizeGitRef } from "./protocol.js";
+import {
+  MAX_CODING_TASK_BYTES,
+  MAX_CODING_TURNS,
+  isLocalRepository,
+  normalizeGitHubRepository,
+  normalizeGitRef,
+  normalizeLocalRepository,
+} from "./protocol.js";
 import { MAX_COLLECT_EXCLUDE_PATHS, validateCollectExcludePath } from "./collect-exclude.js";
 import { CODING_PROVIDERS } from "./provider.js";
 import { WARDBY_PROTECTED_PATHS, isWellFormedProtectedPath, protectsSomePath } from "./protected-paths.js";
@@ -28,17 +35,22 @@ function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 
+/** GitHub names, or `local:/abs/path` (syntactic only; trusted roots are enforced where it is authorized and used). */
+function normalizeProfileRepository(value: string): string {
+  return isLocalRepository(value) ? normalizeLocalRepository(value) : normalizeGitHubRepository(value);
+}
+
 const repositorySchema = z
   .string()
   .refine((value) => {
     try {
-      normalizeGitHubRepository(value);
+      normalizeProfileRepository(value);
       return true;
     } catch {
       return false;
     }
-  }, "must be a canonical name or uncredentialed github.com repository")
-  .transform(normalizeGitHubRepository);
+  }, "must be a canonical name, an uncredentialed github.com repository, or local:/absolute/path")
+  .transform(normalizeProfileRepository);
 
 const baseRefSchema = z
   .string()

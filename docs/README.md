@@ -18,6 +18,8 @@
 - [Architecture knowledge bundles](knowledge.md) covers `docs/knowledge/`: the
   concept format, how coding runs and reviewers use it, `wardby knowledge check`,
   and the scheduled architecture agent.
+- [Native sandbox](native-sandbox.md) runs a native agent's turn loop and user
+  tools in a single-use, credential-free container behind a native gateway.
 - [Coding-worker isolation](coding-worker-isolation.md) documents the threat
   model and enforced worker boundary.
 - [Bring-your-own worker images](coding-worker-byo-images.md) explains how to
@@ -29,6 +31,8 @@
   the catalog, per-agent permission, variables, and errors.
 - [Jira agents](jira-agents.md) connects wardby to Jira Cloud with a service
   account and webhook, and links agents to projects.
+- [Send workflow updates to Slack](slack-notifications.md) links a Slack
+  channel to a Jira project or an agent to follow cards from pickup to merge.
 - [Observability](observability.md) covers Prometheus metrics, Grafana, cloud
   collectors, retention, and production ownership.
 - [Release verification](release-verification.md) lists the automated and live

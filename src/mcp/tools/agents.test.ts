@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import type { RepoAccessDecision, RepoAccessGate } from "../../core/repo-access.js";
 import type { HostPermission } from "../../providers/review-host/types.js";
 import { Prisma } from "#prisma";
@@ -65,6 +69,7 @@ interface FakeAgentRow {
   codingProfile: FakeCodingProfile | null;
   budgetGroupId: string | null;
   effort?: string | null;
+  nativeExecutionMode?: string;
 }
 
 interface FakeLink {
@@ -2013,8 +2018,20 @@ describe("agent CRUD tools", () => {
       await client.close();
     });
 
+    it("create_agent accepts effort on an OpenAI reasoning model", async () => {
+      const client = await setup();
+      const result = await client.callTool({
+        name: "create_agent",
+        arguments: { ...base, model: "gpt-5.6-luna", effort: "low" },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(body(result).effort).toBe("low");
+      await client.close();
+    });
+
     it.each([
       { model: "claude-haiku-4-5", effort: "low" },
+      { model: "gpt-4o", effort: "low" },
       { model: "gpt-4o", effort: "high" },
     ])("create_agent rejects effort $effort on $model", async ({ model, effort }) => {
       const client = await setup();
@@ -2102,6 +2119,167 @@ describe("agent CRUD tools", () => {
       expect(JSON.stringify(result)).toMatch(/only valid for native agents/);
       await client.close();
     });
+  });
+});
+
+describe("nativeExecutionMode", () => {
+  const body = (result: Awaited<ReturnType<Client["callTool"]>>) =>
+    JSON.parse((result.content as { text: string }[])[0].text);
+  const base = { name: "worker", systemPrompt: "s", model: "claude-sonnet-5", budgetUsd: 1 };
+  const seed = (extra: Partial<FakeAgentSeed> = {}): FakeAgentSeed => ({
+    id: "a1",
+    name: "worker",
+    systemPrompt: "s",
+    model: "claude-sonnet-5",
+    budgetUsd: 1,
+    maxTurns: 10,
+    schedule: null,
+    timezone: "UTC",
+    ownerId: "p1",
+    tools: [],
+    ...extra,
+  });
+  /** `sandbox` is the executor's supportsNativeSandbox(): true, false, or absent. */
+  async function setup(sandbox: boolean | "absent", rows: FakeAgentSeed[] = []) {
+    const db = fakeDb(rows);
+    const providers = {
+      ...fakeProviders,
+      executor: sandbox === "absent" ? {} : { supportsNativeSandbox: () => sandbox },
+    } as unknown as import("../context.js").McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"], [], providers));
+    registerAgentTools(mcp);
+    return connectClient(mcp);
+  }
+
+  it("create_agent stores sandbox when the executor supports it, and get/list show the hyphenated spelling", async () => {
+    const client = await setup(true);
+    const created = await client.callTool({
+      name: "create_agent",
+      arguments: { ...base, nativeExecutionMode: "sandbox" },
+    });
+    expect(created.isError).toBeFalsy();
+    expect(body(created).nativeExecutionMode).toBe("sandbox");
+    const id = body(created).id;
+    expect(body(await client.callTool({ name: "get_agent", arguments: { id } })).nativeExecutionMode).toBe("sandbox");
+    const listed = body(await client.callTool({ name: "list_agents", arguments: {} }));
+    expect(listed[0].nativeExecutionMode).toBe("sandbox");
+    await client.close();
+  });
+
+  it("create_agent defaults to control-plane and accepts it without a sandbox", async () => {
+    const client = await setup(false);
+    const dflt = await client.callTool({ name: "create_agent", arguments: base });
+    expect(body(dflt).nativeExecutionMode).toBe("control-plane");
+    const explicit = await client.callTool({
+      name: "create_agent",
+      arguments: { ...base, name: "other", nativeExecutionMode: "control-plane" },
+    });
+    expect(explicit.isError).toBeFalsy();
+    expect(body(explicit).nativeExecutionMode).toBe("control-plane");
+    await client.close();
+  });
+
+  it.each([false, "absent"] as const)("create_agent refuses sandbox when supportsNativeSandbox is %s", async (flag) => {
+    const client = await setup(flag);
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: { ...base, nativeExecutionMode: "sandbox" },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain("native_sandbox_unavailable:");
+    expect(JSON.stringify(result)).toContain("NATIVE_SANDBOX_LAUNCHER");
+    await client.close();
+  });
+
+  it("create_agent rejects an unknown mode and a mode on a coding agent", async () => {
+    const client = await setup(true);
+    const unknown = await client.callTool({
+      name: "create_agent",
+      arguments: { ...base, nativeExecutionMode: "vm" },
+    });
+    expect(unknown.isError).toBe(true);
+    const coding = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        ...base,
+        nativeExecutionMode: "sandbox",
+        kind: "coding",
+        codingProfile: { provider: "claude-code", repository: "your-org/your-repo" },
+      },
+    });
+    expect(coding.isError).toBe(true);
+    expect(JSON.stringify(coding)).toMatch(/nativeExecutionMode is only valid for native agents/);
+    await client.close();
+  });
+
+  it("update_agent switches modes, and refuses sandbox without executor support", async () => {
+    const supported = await setup(true, [seed()]);
+    const set = await supported.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", nativeExecutionMode: "sandbox" },
+    });
+    expect(set.isError).toBeFalsy();
+    expect(body(set).nativeExecutionMode).toBe("sandbox");
+    const back = await supported.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", nativeExecutionMode: "control-plane" },
+    });
+    expect(body(back).nativeExecutionMode).toBe("control-plane");
+    await supported.close();
+
+    const unsupported = await setup(false, [seed()]);
+    const refused = await unsupported.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", nativeExecutionMode: "sandbox" },
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused)).toContain("native_sandbox_unavailable:");
+    await unsupported.close();
+  });
+
+  it("update_agent leaves an existing sandbox agent editable when the executor lacks support", async () => {
+    const client = await setup(false, [seed({ nativeExecutionMode: "sandbox" })]);
+    const result = await client.callTool({ name: "update_agent", arguments: { id: "a1", systemPrompt: "new" } });
+    expect(result.isError).toBeFalsy();
+    expect(body(result).nativeExecutionMode).toBe("sandbox");
+    await client.close();
+  });
+
+  it("update_agent refuses a mode on a coding agent, and a sandbox agent becoming coding", async () => {
+    const codingSeed = seed({
+      kind: "coding",
+      codingProfile: {
+        provider: "claude-code",
+        repository: "your-org/your-repo",
+        baseRef: "main",
+        defaultTask: null,
+        timeoutSec: 600,
+        protectedPaths: [],
+      },
+    });
+    const coding = await setup(true, [codingSeed]);
+    const onCoding = await coding.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", nativeExecutionMode: "sandbox" },
+    });
+    expect(onCoding.isError).toBe(true);
+    expect(JSON.stringify(onCoding)).toMatch(/only valid for native agents/);
+    expect(body(await coding.callTool({ name: "get_agent", arguments: { id: "a1" } })).nativeExecutionMode).toBeNull();
+    await coding.close();
+
+    const native = await setup(true, [seed({ nativeExecutionMode: "sandbox" })]);
+    const becoming = await native.callTool({
+      name: "update_agent",
+      arguments: {
+        id: "a1",
+        kind: "coding",
+        codingProfile: { provider: "claude-code", repository: "your-org/your-repo" },
+      },
+    });
+    expect(becoming.isError).toBe(true);
+    expect(JSON.stringify(becoming)).toMatch(/nativeExecutionMode is only valid for native agents/);
+    await native.close();
   });
 });
 
@@ -2749,5 +2927,72 @@ describe("codingProfile.services", () => {
     const result = await client.callTool(allow(["postgres"]));
     expect(result.isError).toBe(true);
     await client.close();
+  });
+});
+
+describe("coding agents on local repositories", () => {
+  let root: string;
+  let repo: string;
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "local-agents-")));
+    repo = join(root, "app");
+    mkdirSync(repo);
+    execFileSync("git", ["-C", repo, "init", "-q", "-b", "main"]);
+    vi.stubEnv("LOCAL_REPO_ROOTS", root);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  async function createWith(repository: string) {
+    const db = fakeDb();
+    const gate = gateAt("unlinked");
+    const providers = { repoAccess: gate.gate } as unknown as import("../context.js").McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"], [], providers));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "local-coder",
+        systemPrompt: "Make the change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        kind: "coding",
+        codingProfile: { repository },
+      },
+    });
+    await client.close();
+    return { result, gate };
+  }
+
+  it("refuses a repository outside the trusted roots with local_repo_not_allowed", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "outside-")));
+    try {
+      const { result } = await createWith(`local:${outside}`);
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toContain("local_repo_not_allowed");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts one inside the roots, stamps local_root, and needs no GitHub identity", async () => {
+    const { result, gate } = await createWith(`local:${repo}`);
+    expect(result.isError).toBeFalsy();
+    const created = JSON.parse((result.content as { text: string }[])[0].text);
+    expect(created.codingProfile.repository).toBe(`local:${repo}`);
+    expect(created.codingProfile.repositoryAuthorizedVia).toBe("local_root");
+    expect(gate.authorizePrincipal).not.toHaveBeenCalled();
+  });
+
+  it("stores the canonical real path, not a symlinked spelling", async () => {
+    const link = join(root, "link");
+    symlinkSync(repo, link);
+    const { result } = await createWith(`local:${link}`);
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse((result.content as { text: string }[])[0].text).codingProfile.repository).toBe(`local:${repo}`);
   });
 });

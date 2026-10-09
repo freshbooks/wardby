@@ -59,6 +59,20 @@ separately; a missing one fails the run itself at dispatch, not
 `create_agent`/`update_agent`. See [Models and pricing](models.md) and
 [Model not available](errors/model-unavailable.md).
 
+## Run it on a schedule
+
+Give an agent a cron schedule with `set_schedule` (`agentId`, `schedule` such
+as `0 6 * * 1`, and `timezone`), and turn it off with `disable_schedule`. A
+coding agent needs a `codingProfile.defaultTask` first, since a scheduled run
+has no one to pass a task. A native agent's system prompt is its task. Trigger
+the agent once with `trigger_agent` and check the result before scheduling it.
+
+Schedules fire only while a Wardby scheduler runs: `wardby serve`, or
+`wardby scheduler` next to `wardby mcp`. On a quickstart install, start
+`npx @wardby/cli@latest scheduler` from the project directory and keep it
+running; the MCP server your assistant starts never fires schedules. See
+[Operate managed agents](operating-agents.md).
+
 ## Decision checklist
 
 Choose a native agent when all of these are true:
@@ -85,6 +99,11 @@ A coding agent can also keep a repository's architecture knowledge current; see
 For an `@mention` builder with a router, see [Agent recipes](help://agent-recipes) and
 [Builder and router prompts](help://builder-agent).
 
+A coding or review agent can also use a git folder on the wardby host instead of a
+GitHub repository; see [Use local git repositories](local-repositories.md).
+
 Read [Connect GitHub repositories](github.md) and
 [Troubleshoot coding workers](troubleshooting/coding-workers.md) before
 enabling repository-changing work.
+
+Sandbox mode runs a native agent's loop and tools in an isolated container; see [Run native agents in a sandbox](native-sandbox.md).

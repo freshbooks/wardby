@@ -2,12 +2,14 @@
 /**
  * Minimal CLI.
  *
- *   wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled] [--effort <level>]
+ *   wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> [--schedule "<cron>"] [--timezone <tz>] [--memory-enabled] [--effort <level>] [--native-execution-mode control-plane|sandbox]
  *   wardby agent list
+ *   wardby agent mode <name> control-plane|sandbox
  *   wardby agent schedule <name> --cron "<expr>" [--timezone <tz>] [--disable]
  *   wardby run <name>
  *   wardby runs [--agent <name>] [--limit N] [--status <s>]
  *   wardby scheduler [--scope default]
+ *   wardby native-gateway   (the native sandbox gateway only; NATIVE_GATEWAY_LISTEN)
  *   wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport; authoring/
  *                control is MCP-first from here — this floor keeps working
  *                before/without an MCP client)
@@ -21,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { execFile as execFileCallback } from "node:child_process";
 import { parseArgs } from "node:util";
 import { promisify } from "node:util";
-import type { RunStatus } from "#prisma";
+import type { NativeExecutionMode, RunStatus } from "#prisma";
 import {
   loadCodingConcurrencyConfig,
   loadContainerExecutorConfig,
@@ -30,9 +32,17 @@ import {
   loadProviderConfig,
 } from "./config/providers.js";
 import { drainCodingQueue } from "./core/coding-queue.js";
-import { isImmutableDockerImage } from "./providers/jobs/docker-isolation.js";
+import {
+  CODING_WORKER_IMAGES_REQUIRED,
+  configuredCodingImages,
+  dockerCodingPreflight,
+} from "./coding/docker-preflight.js";
 import { ClientNodeKubernetesApi } from "./providers/jobs/kubernetes-client.js";
-import { describePreflightFailure, kubernetesPreflight } from "./providers/jobs/kubernetes-preflight.js";
+import {
+  describePreflightFailure,
+  kubernetesPreflight,
+  preflightCanaryImage,
+} from "./providers/jobs/kubernetes-preflight.js";
 import {
   RoutingLlmProvider,
   isLlmEffort,
@@ -41,21 +51,28 @@ import {
 } from "./providers/llm/index.js";
 import { startModelCatalog, type CatalogStore } from "./providers/llm/catalog-store.js";
 import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/index.js";
+import { DeferredExecutor, drainDeferredRuns } from "./providers/executor/deferred.js";
+import { parseGatewayListen, startGatewayServer } from "./native-worker/http-server.js";
+import { NATIVE_GATEWAY_DENY_PORT } from "./native-worker/docker-isolation.js";
+import { startDenyPortListener } from "./providers/coding-proxy/deny-port.js";
+import { buildNativeSandboxExecutor } from "./native-worker/composition.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
 import { PostgresAgentMemory } from "./providers/memory/index.js";
 import { buildSecretCipher } from "./providers/secrets/index.js";
 import type { ProviderRegistry } from "./providers/index.js";
 import { prisma } from "./core/db.js";
-import { runAgent } from "./core/runner.js";
+import { runAgent, type NativeRunProviders } from "./core/runner.js";
 import { cancelRunOnSignal } from "./core/run-heartbeat.js";
 import { buildIssueTrackers } from "./providers/issue-tracker/index.js";
+import { buildChatProviders } from "./providers/chat/index.js";
 import { buildReviewHosts } from "./providers/review-host/index.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
 import { validateCronExpression } from "./core/cron.js";
 import { assertAgentModelAvailable } from "./core/run-pricing.js";
 import { startScheduler } from "./core/scheduler.js";
 import { startReconciler } from "./core/reconciler.js";
+import { startNotifications } from "./core/notifications.js";
 import { NativeEngine } from "./core/engine-native.js";
 import { logger } from "./core/logger.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
@@ -71,7 +88,7 @@ import {
   type AuthorizeTool,
 } from "./core/tool-admin.js";
 import { ToolCapabilitiesPatchSchema } from "./sandbox/tool-capabilities.js";
-import { startMcp } from "./mcp/index.js";
+import { startMcp, warmUpExecutor } from "./mcp/index.js";
 import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
 import { hostAccountCommand } from "./mcp/auth/host-account-cli.js";
@@ -80,6 +97,7 @@ import { everyoneGrantData } from "./core/grants.js";
 import { parseImportArgs } from "./import/cli-args.js";
 import { runImport } from "./import/index.js";
 import { CLI_USAGE } from "./cli-help.js";
+import { parseCliNativeExecutionMode } from "./cli-native-mode.js";
 import { helpCommand } from "./help/cli.js";
 
 const cliLog = logger.child({ module: "cli" });
@@ -153,6 +171,7 @@ async function agentCreate(args: string[]): Promise<void> {
       effort: { type: "string" },
       owner: { type: "string" },
       public: { type: "boolean" },
+      "native-execution-mode": { type: "string" },
     },
   });
 
@@ -168,6 +187,15 @@ async function agentCreate(args: string[]): Promise<void> {
   const maxTurns = values["max-turns"] ? Number(values["max-turns"]) : 10;
   if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
     fail(`--max-turns must be a positive integer, got "${values["max-turns"]}".`);
+  }
+
+  let nativeExecutionMode: NativeExecutionMode | undefined;
+  if (values["native-execution-mode"] !== undefined) {
+    try {
+      nativeExecutionMode = parseCliNativeExecutionMode(values["native-execution-mode"]);
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+    }
   }
 
   const timezone = values.timezone ?? "UTC";
@@ -226,6 +254,7 @@ async function agentCreate(args: string[]): Promise<void> {
         maxTurns,
         memoryEnabled: values["memory-enabled"] ?? false,
         effort: values.effort ?? null,
+        ...(nativeExecutionMode ? { nativeExecutionMode } : {}),
         ownerId: ownerId!,
       },
     });
@@ -565,6 +594,29 @@ async function agentSchedule(args: string[]): Promise<void> {
   console.log(`schedule set for "${name}": "${schedule}" (${timezone}).`);
 }
 
+/** Where a native agent's later runs execute; runs already created keep their mode. */
+async function agentMode(args: string[]): Promise<void> {
+  const [name, value, ...extra] = args;
+  if (!name || !value || extra.length > 0) {
+    fail("agent mode requires an agent name and a mode: wardby agent mode <name> control-plane|sandbox");
+  }
+  let nativeExecutionMode: NativeExecutionMode;
+  try {
+    nativeExecutionMode = parseCliNativeExecutionMode(value);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  const agent = await prisma.agent.findUnique({ where: { name } });
+  if (!agent) {
+    fail(`unknown agent "${name}".`);
+  }
+  if (agent.kind !== "native") {
+    fail(`"${name}" is a coding agent; the native execution mode only applies to native agents.`);
+  }
+  await prisma.agent.update({ where: { id: agent.id }, data: { nativeExecutionMode } });
+  console.log(`native execution mode for "${name}": ${value}.`);
+}
+
 async function agentList(): Promise<void> {
   const agents = await prisma.agent.findMany({ orderBy: { name: "asc" } });
   if (agents.length === 0) {
@@ -578,7 +630,8 @@ async function agentList(): Promise<void> {
       : "manual";
     console.log(
       `${agent.name}  ${agent.kind.padEnd(6)}  ${agent.model}  ` +
-        `$${Number(agent.budgetUsd).toFixed(4)}  ${agent.maxTurns} turns  memory ${agent.memoryEnabled ? "on" : "off"}  ${schedule}`,
+        `$${Number(agent.budgetUsd).toFixed(4)}  ${agent.maxTurns} turns  memory ${agent.memoryEnabled ? "on" : "off"}  ${schedule}` +
+        (agent.kind === "native" && agent.nativeExecutionMode === "sandbox" ? "  sandbox" : ""),
     );
   }
 }
@@ -614,7 +667,15 @@ async function run(name: string | undefined): Promise<void> {
   try {
     run = await runAgent(
       name,
-      { llm, engine, datastore, secrets, memory, reviewHosts: buildReviewHosts(), issueTrackers: buildIssueTrackers() },
+      {
+        llm,
+        engine,
+        datastore,
+        secrets,
+        memory,
+        reviewHosts: buildReviewHosts(process.env, prisma),
+        issueTrackers: buildIssueTrackers(),
+      },
       prisma,
       (delta) => {
         process.stdout.write(delta);
@@ -658,10 +719,13 @@ async function codingOps(args: string[]): Promise<void> {
     fail("coding operations require JOB_LAUNCHER=docker or kubernetes.");
   }
   const container = loadContainerExecutorConfig();
-  if (config.jobs === "kubernetes") {
-    if (!container.workerImage) fail("CODING_WORKER_IMAGE is required when JOB_LAUNCHER=kubernetes.");
-  } else if (!container.workerImage || !container.proxyContainer) {
-    fail("CODING_WORKER_IMAGE and CODING_PROXY_CONTAINER are required when JOB_LAUNCHER=docker.");
+  // Either provider's images are enough: CODING_WORKER_IMAGE (Codex) or the Claude Code pair.
+  const canaryImage = preflightCanaryImage(container);
+  if (!container.workerImage && !(container.claudeWorkerImage && container.claudeToolRunnerImage)) {
+    fail(`${CODING_WORKER_IMAGES_REQUIRED} when JOB_LAUNCHER=${config.jobs}.`);
+  }
+  if (config.jobs === "docker" && !container.proxyContainer) {
+    fail("CODING_PROXY_CONTAINER is required when JOB_LAUNCHER=docker.");
   }
 
   if (operation === "preflight" && config.jobs === "kubernetes") {
@@ -672,27 +736,32 @@ async function codingOps(args: string[]): Promise<void> {
       checks = await kubernetesPreflight({
         api,
         config: kubernetes,
-        workerImage: container.workerImage,
+        workerImage: canaryImage as string,
         maxDiskMb: container.maxDiskMb,
         timeoutMs: kubernetes.preflightTimeoutMs,
       });
     } catch (error) {
       fail(`coding preflight failed: ${describePreflightFailure(error)}`);
     }
-    console.log(`coding preflight passed (${checks.join(", ")}) for ${container.workerImage}`);
+    console.log(`coding preflight passed (${checks.join(", ")}) for ${canaryImage}`);
     return;
   }
 
   if (operation === "preflight") {
-    if (!isImmutableDockerImage(container.workerImage)) {
-      fail("CODING_WORKER_IMAGE must use an immutable repository digest or local image ID.");
-    }
-    try {
-      await execFile("docker", ["image", "inspect", container.workerImage], { maxBuffer: 1024 * 1024 });
-    } catch {
-      fail(`Docker cannot inspect coding worker image "${container.workerImage}".`);
-    }
-    console.log(`coding preflight passed for ${container.workerImage}`);
+    const failure = await dockerCodingPreflight(container, async (image) => {
+      try {
+        await execFile("docker", ["image", "inspect", image], { maxBuffer: 1024 * 1024 });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (failure) fail(failure);
+    console.log(
+      `coding preflight passed for ${configuredCodingImages(container)
+        .map(([, image]) => image)
+        .join(", ")}`,
+    );
     return;
   }
 
@@ -781,17 +850,36 @@ async function scheduler(args: string[]): Promise<void> {
   const secrets = buildSecrets();
   const datastore = buildDatastore(secrets);
   const memory = buildMemory();
-  const reviewHosts = buildReviewHosts();
+  const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
+  const chat = buildChatProviders();
   // One repository-access gate (and cache) for native repo_* calls and coding runs.
   const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });
-  const nativeExecutor = buildExecutor(
-    config,
-    { llm, engine, datastore, secrets, memory, reviewHosts, issueTrackers, repoAccess },
-    prisma,
-  );
-  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig: config, repoAccess });
+  // Patched with the composed executor below, as startMcp does: native runs read
+  // `providers.executor` at call time, so their delegate_to_* calls can dispatch coding and
+  // sandbox-mode sub-agents through the same RoutingExecutor.
+  const nativeProviders: NativeRunProviders = {
+    llm,
+    engine,
+    datastore,
+    secrets,
+    memory,
+    reviewHosts,
+    issueTrackers,
+    repoAccess,
+  };
+  const nativeExecutor = buildExecutor(config, nativeProviders, prisma);
+  const executor = buildConfiguredExecutor({
+    native: nativeExecutor,
+    db: prisma,
+    providerConfig: config,
+    repoAccess,
+    // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
+    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders }),
+  });
+  nativeProviders.executor = executor;
   await executor.launch?.();
+  warmUpExecutor(executor);
   const reconciler = startReconciler({
     db: prisma,
     executor,
@@ -799,6 +887,7 @@ async function scheduler(args: string[]): Promise<void> {
     issueTrackers,
     deferredReviews: { db: prisma, executor, hosts: reviewHosts, repoAccess, issueTrackers },
   });
+  const notifications = await startNotifications({ db: prisma, chat });
   const selfDefects = { db: prisma, issueTrackers };
   const sched = startScheduler({
     executor,
@@ -807,6 +896,8 @@ async function scheduler(args: string[]): Promise<void> {
     selfDefects,
     onLeaderTick: async () => {
       await drainCodingQueue({ db: prisma, executor, ...concurrency, selfDefects });
+      // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.
+      await drainDeferredRuns({ db: prisma, executor });
     },
   });
 
@@ -817,12 +908,61 @@ async function scheduler(args: string[]): Promise<void> {
       console.log("\nwardby scheduler shutting down...");
       sched.stop();
       reconciler.stop();
+      notifications.stop();
       void Promise.resolve(executor.close?.())
         .catch((err: unknown) => cliLog.warn({ err }, "executor close failed during scheduler shutdown"))
         .finally(() => {
           modelCatalog.close();
           resolve();
         });
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+}
+
+/**
+ * The native sandbox gateway on its own (docs/native-sandbox.md): only the internal listener
+ * sandbox workers call, on NATIVE_GATEWAY_LISTEN (default 0.0.0.0:8790). It never starts or
+ * stops a run itself — workers can reach it, so it holds no Docker socket or cluster
+ * credential: a delegation it makes is started by the scheduler leader (DeferredExecutor).
+ * It needs the server's database and LLM/integration settings, nothing more.
+ */
+async function nativeGateway(): Promise<void> {
+  const listen = parseGatewayListen(process.env.NATIVE_GATEWAY_LISTEN) ?? { host: "0.0.0.0", port: 8790 };
+  let modelCatalog: CatalogStore;
+  try {
+    modelCatalog = await startModelCatalog(prisma);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  const secrets = buildSecrets();
+  const reviewHosts = buildReviewHosts(process.env, prisma);
+  const providers: NativeRunProviders = {
+    llm: buildLlmProvider(),
+    engine: buildEngine(),
+    datastore: buildDatastore(secrets),
+    secrets,
+    memory: buildMemory(),
+    reviewHosts,
+    issueTrackers: buildIssueTrackers(),
+    repoAccess: createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
+    // Coding resolution only (worker image, service declaration): never started or stopped here.
+    executor: new DeferredExecutor(prisma, buildConfiguredExecutor({ native: noopExecutor(), db: prisma })),
+  };
+  const server = await startGatewayServer(listen, { db: prisma, providers });
+  // The deny port (NATIVE_GATEWAY_DENY_PORT, default 8791) serves nothing: a worker that can reach the
+  // gateway port but not this one proves its NetworkPolicy is programmed and port-scoped.
+  const denyPort = Number(process.env.NATIVE_GATEWAY_DENY_PORT ?? NATIVE_GATEWAY_DENY_PORT);
+  const deny = await startDenyPortListener(listen.host, denyPort);
+  console.error(`wardby native-gateway listening on ${listen.host}:${listen.port}. Press Ctrl+C to stop.`);
+  await new Promise<void>((resolve) => {
+    const shutdown = () => {
+      server.close(() => {
+        modelCatalog.close();
+        void deny.close().finally(resolve);
+      });
+      server.closeIdleConnections();
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
@@ -916,6 +1056,8 @@ async function main(): Promise<void> {
       await agentList();
     } else if (command === "agent" && rest[0] === "schedule") {
       await agentSchedule(rest.slice(1));
+    } else if (command === "agent" && rest[0] === "mode") {
+      await agentMode(rest.slice(1));
     } else if (command === "tool" && rest[0] === "create") {
       await toolCreate(rest.slice(1));
     } else if (command === "tool" && rest[0] === "attach") {
@@ -936,6 +1078,8 @@ async function main(): Promise<void> {
       await codingOps(rest);
     } else if (command === "scheduler") {
       await scheduler(rest);
+    } else if (command === "native-gateway") {
+      await nativeGateway();
     } else if (command === "mcp") {
       await mcp();
     } else if (command === "serve") {

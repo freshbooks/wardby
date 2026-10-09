@@ -5,10 +5,10 @@
  * the agents:admin escape hatch. See
  * docs/private/2026-09-26-resource-sharing-grants-spec-and-plan.md.
  */
-import { Prisma, type CodingAgentProfile } from "#prisma";
+import { Prisma, type CodingAgentProfile, type NativeExecutionMode } from "#prisma";
 import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
-import { DEFAULT_CLAUDE_MAX_TURNS, MAX_CODING_TURNS } from "../../coding/protocol.js";
+import { DEFAULT_CLAUDE_MAX_TURNS, MAX_CODING_TURNS, isLocalRepository } from "../../coding/protocol.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { assertAgentModelAvailable } from "../../core/run-pricing.js";
 import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
@@ -29,7 +29,11 @@ import { EVERYONE_KEY, atLeast, canDelegate, deleteGrantsFor, effectiveAccess } 
 import { projectTool } from "./tools.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
-import { authorizeRepositoryForSet, type RepositoryAuthorization } from "../auth/repo-authorization.js";
+import {
+  authorizeRepositoryForSet,
+  canonicalLocalRepository,
+  type RepositoryAuthorization,
+} from "../auth/repo-authorization.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -71,6 +75,24 @@ const PARALLEL_DELEGATIONS_DESCRIPTION =
   "instead of one after another (other tool calls still run in order). The run tree still shares one budget, so later " +
   "sub-agents get what earlier ones leave. Coding sub-agents still queue for CODING_MAX_CONCURRENT slots. Default false.";
 
+/** Operator-facing spellings of Agent.nativeExecutionMode (the Prisma enum is `control_plane` | `sandbox`). */
+const NATIVE_EXECUTION_MODES = ["control-plane", "sandbox"] as const;
+type OperatorExecutionMode = (typeof NATIVE_EXECUTION_MODES)[number];
+
+const toStoredMode = (mode: OperatorExecutionMode): NativeExecutionMode =>
+  mode === "sandbox" ? "sandbox" : "control_plane";
+
+/** An agent row as returned to operators: the mode in its hyphenated spelling, null for coding agents. */
+function withOperatorMode<T extends { kind: string; nativeExecutionMode?: NativeExecutionMode | null }>(
+  agent: T,
+): Omit<T, "nativeExecutionMode"> & { nativeExecutionMode: OperatorExecutionMode | null } {
+  return {
+    ...agent,
+    nativeExecutionMode:
+      agent.kind !== "native" ? null : agent.nativeExecutionMode === "sandbox" ? "sandbox" : "control-plane",
+  };
+}
+
 const agentFields = {
   name: z.string().trim().min(1).max(MAX_AGENT_NAME_CHARS),
   systemPrompt: z.string().min(1).max(MAX_SYSTEM_PROMPT_CHARS),
@@ -86,6 +108,7 @@ const agentFields = {
   budgetGroupId: z.string().min(1).max(128),
   memoryEnabled: z.boolean(),
   effort: z.enum(LLM_EFFORT_LEVELS),
+  nativeExecutionMode: z.enum(NATIVE_EXECUTION_MODES),
   defectProjectKey: z.string().regex(PROJECT_KEY, "must be an upper-case Jira project key"),
   defectIssueType: z.string().trim().min(1).max(100),
 };
@@ -126,6 +149,7 @@ const CreateAgentSchema = z
     budgetGroupId: agentFields.budgetGroupId.optional(),
     memoryEnabled: agentFields.memoryEnabled.default(false),
     effort: agentFields.effort.optional(),
+    nativeExecutionMode: agentFields.nativeExecutionMode.optional(),
     defectProjectKey: agentFields.defectProjectKey.optional(),
     defectIssueType: agentFields.defectIssueType.optional(),
     codingProfile: CodingProfileSchema.optional(),
@@ -185,6 +209,7 @@ const UpdateAgentSchema = z
     budgetGroupId: agentFields.budgetGroupId.nullable().optional(),
     memoryEnabled: agentFields.memoryEnabled.optional(),
     effort: agentFields.effort.nullable().optional(),
+    nativeExecutionMode: agentFields.nativeExecutionMode.optional(),
     defectProjectKey: agentFields.defectProjectKey.nullable().optional(),
     defectIssueType: agentFields.defectIssueType.nullable().optional(),
     codingProfile: CodingProfilePatchSchema.extend({
@@ -205,6 +230,15 @@ const REPOSITORY_ADMIN_OVERRIDE = {
     "Admins only (agents:admin with the admin role): approve codingProfile.repository without checking GitHub access, recorded as an admin approval. On an agent the admin doesn't own, only codingProfile.repository may change.",
 };
 
+/** A `local:` repository is stored as its canonical (realpath) name, and refused outside the trusted roots. */
+async function withCanonicalRepository<T extends { codingProfile?: { repository?: string } | undefined }>(
+  args: T,
+): Promise<T> {
+  const repository = args.codingProfile?.repository;
+  if (repository === undefined || !isLocalRepository(repository)) return args;
+  return { ...args, codingProfile: { ...args.codingProfile, repository: await canonicalLocalRepository(repository) } };
+}
+
 /** The profile columns a repository authorization is stamped into. */
 function profileStamp(authorization: RepositoryAuthorization) {
   return {
@@ -222,7 +256,7 @@ const profileJsonSchema = {
     repository: {
       type: "string",
       description:
-        "owner/name on GitHub. Your linked GitHub account (link_host_account) must have write access to it, unless a wardby admin approves it (repositoryAdminOverride). Re-checked on every run.",
+        "owner/name on GitHub, or local:/absolute/path for a git folder inside the server's LOCAL_REPO_ROOTS (stored by its real path; no GitHub access needed). For GitHub, your linked GitHub account (link_host_account) must have write access to it, unless a wardby admin approves it (repositoryAdminOverride). Re-checked on every run.",
     },
     baseRef: { type: "string" },
     defaultTask: { type: ["string", "null"] },
@@ -255,7 +289,8 @@ const profileJsonSchema = {
     },
     packageAllowlist: {
       type: "object",
-      description: "Approved top-level packages per ecosystem (npm, pypi). Needs packages:approve or agents:admin.",
+      description:
+        "Approved top-level packages per ecosystem (npm, pypi). A PyPI entry may name extras, e.g. psycopg[binary]. Needs packages:approve or agents:admin.",
       additionalProperties: { type: "array", maxItems: 256, items: { type: "string" } },
     },
     packagePolicy: {
@@ -316,6 +351,32 @@ function validateEffort(kind: "native" | "coding", model: string, effort: string
         (accepted.length > 0
           ? `Accepted levels: ${accepted.join(", ")}.`
           : "It accepts no effort setting; leave effort unset (or null)."),
+    );
+  }
+}
+
+const NATIVE_SANDBOX_MODE_DESCRIPTION =
+  "Where a native agent's runs execute: control-plane (default, in the server process) or sandbox (an isolated container; needs the server's native sandbox configured).";
+
+/**
+ * The mode only applies to native agents, and `sandbox` only works where the
+ * server composed a native sandbox executor; refuse it otherwise rather than
+ * store a mode whose every run would fail closed.
+ */
+function validateNativeExecutionMode(
+  ctx: McpRequestContext,
+  kind: "native" | "coding",
+  mode: OperatorExecutionMode | null | undefined,
+): void {
+  if (mode == null) return;
+  if (kind !== "native") {
+    throw new McpError(400, "nativeExecutionMode is only valid for native agents; coding agents do not use it.");
+  }
+  if (mode === "sandbox" && ctx.providers.executor.supportsNativeSandbox?.() !== true) {
+    throw new McpError(
+      400,
+      "native_sandbox_unavailable: this server has no native sandbox configured (set NATIVE_SANDBOX_LAUNCHER), " +
+        'so an agent cannot use nativeExecutionMode "sandbox".',
     );
   }
 }
@@ -412,6 +473,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           enum: [...LLM_EFFORT_LEVELS],
           description: "Reasoning effort for native agents. Unset uses the provider default.",
         },
+        nativeExecutionMode: {
+          type: "string",
+          enum: [...NATIVE_EXECUTION_MODES],
+          description: NATIVE_SANDBOX_MODE_DESCRIPTION,
+        },
         defectProjectKey: { type: "string", pattern: PROJECT_KEY.source, description: DEFECT_DESCRIPTION },
         defectIssueType: { type: "string", minLength: 1, maxLength: 100, description: DEFECT_DESCRIPTION },
         codingProfile: { ...profileJsonSchema, required: ["repository"] },
@@ -420,7 +486,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       required: ["name", "systemPrompt", "model", "budgetUsd"],
     },
     handler: async (rawArgs: unknown, ctx) => {
-      const args = parseCreateAgent(rawArgs);
+      const args = await withCanonicalRepository(parseCreateAgent(rawArgs));
       if (args.codingProfile?.workerImageRef != null) requireWorkerImageRefScope(ctx);
       const packages = args.codingProfile;
       if (
@@ -432,11 +498,16 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       validateSchedule(args.schedule, args.timezone ?? "UTC");
       requireModelAvailable(ctx, args.model, args.kind);
       validateEffort(args.kind, args.model, args.effort);
+      validateNativeExecutionMode(ctx, args.kind, args.nativeExecutionMode);
       if (args.codingProfile) await requireCatalogServiceNames(ctx.db, args.codingProfile.services);
       if (args.budgetGroupId) {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
       }
-      const { codingProfile, repositoryAdminOverride, ...agentData } = args;
+      const { codingProfile, repositoryAdminOverride, nativeExecutionMode, ...agentFieldsData } = args;
+      const agentData = {
+        ...agentFieldsData,
+        ...(nativeExecutionMode ? { nativeExecutionMode: toStoredMode(nativeExecutionMode) } : {}),
+      };
       if (repositoryAdminOverride === true && !codingProfile) {
         throw new McpError(400, "repositoryAdminOverride only applies with a codingProfile repository.");
       }
@@ -460,7 +531,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         },
         include: { codingProfile: true },
       });
-      return textResult(agent);
+      return textResult(withOperatorMode(agent));
     },
   });
 
@@ -497,6 +568,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           enum: [...LLM_EFFORT_LEVELS, null],
           description: "Reasoning effort for native agents. Null clears it back to the provider default.",
         },
+        nativeExecutionMode: {
+          type: "string",
+          enum: [...NATIVE_EXECUTION_MODES],
+          description: NATIVE_SANDBOX_MODE_DESCRIPTION,
+        },
         defectProjectKey: {
           type: ["string", "null"],
           pattern: PROJECT_KEY.source,
@@ -526,7 +602,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       required: ["id"],
     },
     handler: async (rawArgs: unknown, ctx) => {
-      const args = parseUpdateAgent(rawArgs);
+      const args = await withCanonicalRepository(parseUpdateAgent(rawArgs));
       if (args.codingProfile?.workerImageRef !== undefined) requireWorkerImageRefScope(ctx);
       const debugTraceMinutes = args.codingProfile?.debugTraceMinutes;
       if (debugTraceMinutes !== undefined) requireDebugTraceScope(ctx);
@@ -651,6 +727,15 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             );
           }
 
+          if (args.nativeExecutionMode !== undefined) {
+            validateNativeExecutionMode(ctx, nextKind, args.nativeExecutionMode);
+          } else if (nextKind === "coding" && existing.nativeExecutionMode === "sandbox") {
+            throw new McpError(
+              400,
+              'nativeExecutionMode is only valid for native agents; set nativeExecutionMode to "control-plane" before changing this agent to coding.',
+            );
+          }
+
           let nextProfile: CodingProfile | null = null;
           if (nextKind === "coding") {
             const attachedTools = await tx.agentTool.count({ where: { agentId: args.id } });
@@ -684,7 +769,17 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             throw new McpError(400, "A default task is required for an enabled coding-agent schedule.");
           }
 
-          const { id, codingProfile: _profilePatch, repositoryAdminOverride: _override, ...updates } = args;
+          const {
+            id,
+            codingProfile: _profilePatch,
+            repositoryAdminOverride: _override,
+            nativeExecutionMode: modeArg,
+            ...fieldUpdates
+          } = args;
+          const updates = {
+            ...fieldUpdates,
+            ...(modeArg ? { nativeExecutionMode: toStoredMode(modeArg) } : {}),
+          };
           const stamp = authorization ? profileStamp(authorization) : {};
           const trace = debugTraceUntil === undefined ? {} : { debugTraceUntil };
           const profileMutation =
@@ -717,7 +812,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           "coding debug trace set",
         );
       }
-      return textResult(agent);
+      return textResult(withOperatorMode(agent));
     },
   });
 
@@ -728,7 +823,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     handler: async (_args: Record<string, never>, ctx) => {
       const [where, accessOf] = await Promise.all([readableAgentsWhere(ctx), agentAccessResolver(ctx)]);
       const agents = await ctx.db.agent.findMany({ where, include: { codingProfile: true } });
-      return textResult(agents.map((agent) => ({ ...agent, access: accessOf(agent) })));
+      return textResult(agents.map((agent) => ({ ...withOperatorMode(agent), access: accessOf(agent) })));
     },
   });
 
@@ -754,7 +849,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       // A7: a tool's code and schema are its owner's, whoever can read the
       // agent (the agent's owner included). Capabilities stay visible: config.
       return textResult({
-        ...agent,
+        ...withOperatorMode(agent),
         access,
         tools: agent.tools.map((attachment) => ({
           ...attachment,
@@ -966,7 +1061,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           }
 
           return {
-            ...updated,
+            ...withOperatorMode(updated),
             repositoryApprovalsRevoked: revoked,
             bindingsRemoved,
             toolCapabilitiesSuspended,

@@ -382,10 +382,18 @@ weaker profile.
 
 ## Control Plane Configuration
 
-Set `JOB_LAUNCHER=docker`, `CODING_WORKER_IMAGE` to an immutable repository
-digest or Docker local image ID, and `CODING_PROXY_CONTAINER` to the dedicated proxy container name.
-For Claude Code, also set `CODING_CLAUDE_WORKER_IMAGE` and
-`CODING_CLAUDE_TOOL_RUNNER_IMAGE` to their immutable IDs.
+Set `JOB_LAUNCHER=docker` and `CODING_PROXY_CONTAINER` to the dedicated proxy
+container name, plus the worker images for the providers you use, each an
+immutable repository digest or Docker local image ID: `CODING_WORKER_IMAGE` for
+Codex agents, and `CODING_CLAUDE_WORKER_IMAGE` plus
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE` for Claude Code agents. At least one
+provider's images must be set or the control plane refuses to start. Without
+`CODING_WORKER_IMAGE`, a Codex agent that doesn't name its own `workerImageRef`
+is refused with `coding_provider_not_configured:codex`; see
+[Coding provider not configured](../help/errors/coding-provider-not-configured.md).
+To let agents use git repositories on the control plane's own machine
+(`local:/absolute/path`), also set `LOCAL_REPO_ROOTS` to the trusted folders; see
+[Local repositories](coding-agent-setup.md#local-repositories).
 `VCS_WORK_ROOT`, `CODING_JOB_STATE_ROOT`, and `CODING_ARTIFACT_ROOT` must be
 trusted host-only directories. Resource limits are controlled by
 `CODING_CPUS`, `CODING_MEMORY_MB`, `CODING_PIDS`, and `CODING_DISK_MB`.
@@ -469,7 +477,10 @@ a coding run's model is still available and how it is priced at dispatch; see
 
 The GitHub adapter requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`; the
 App installation is checked while preparing the workspace, before the
-billable proxy session is created. Upstream keys remain behind
+billable proxy session is created. The server still starts without them (so it
+can serve local repositories alone), but a run on a GitHub repository then fails
+with `vcs_github_not_configured`, and with neither these nor `LOCAL_REPO_ROOTS`
+set the server logs a startup warning naming both. Upstream keys remain behind
 `CODING_OPENAI_CREDENTIAL_REF` and `CODING_ANTHROPIC_CREDENTIAL_REF` and are
 never written to the database, input
 artifact, Docker arguments, or Git workspace.
@@ -557,13 +568,16 @@ sidecar, described in "Pod layout" below.
 
 ### Enabling it
 
-Set `JOB_LAUNCHER=kubernetes` and `CODING_WORKER_IMAGE` to a **registry
-digest** (`repo@sha256:<64 hex>` — a bare `sha256:` local image ID is
-rejected; a cluster cannot pull it). For Claude Code, also set
-`CODING_CLAUDE_WORKER_IMAGE` and `CODING_CLAUDE_TOOL_RUNNER_IMAGE` (and, for
-Claude agents on the `node-python` toolchain,
-`CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`) to registry digests; the
-control plane refuses to start if any of them is set to anything else.
+Set `JOB_LAUNCHER=kubernetes` and the worker images for the providers you
+use, each a **registry digest** (`repo@sha256:<64 hex>` — a bare `sha256:`
+local image ID is rejected; a cluster cannot pull it): `CODING_WORKER_IMAGE`
+for Codex agents, and `CODING_CLAUDE_WORKER_IMAGE` plus
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE` (and, for Claude agents on the `node-python`
+toolchain, `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`) for Claude Code
+agents. At least one provider's images must be set, and the control plane
+refuses to start if any image that is set is anything but a registry digest.
+Without `CODING_WORKER_IMAGE`, a Codex agent that doesn't name its own
+`workerImageRef` is refused with `coding_provider_not_configured:codex`.
 Kubernetes-specific settings (`src/config/providers.ts`,
 `loadKubernetesJobConfig`):
 
@@ -794,12 +808,12 @@ not just the harness: the worker gate could otherwise
 open on a pod whose isolation isn't active yet.
 
 The fix, before seeding or opening the worker gate: the launcher execs into
-the keeper (which shares the pod's network namespace with the worker) one
-`node -e` probe that measures **both of the coding proxy's ports against the
-proxy Service's ClusterIP, in the same pass** — `8787` (the proxy itself, which
-the run policy permits) and `8788` (the deny port, which no run policy ever
-permits). Only the outcome **(8787 connected, 8788 blocked)** counts toward the
-streak.
+the keeper (which shares the pod's network namespace with the worker) a
+`node -e` script whose every probe measures **both of the coding proxy's ports
+against the proxy Service's ClusterIP, in the same pass** — `8787` (the proxy
+itself, which the run policy permits) and `8788` (the deny port, which no run
+policy ever permits). Only the outcome **(8787 connected, 8788 blocked)** counts
+toward the streak.
 
 Stated exactly, that outcome proves: **the SYN to 8788 was dropped somewhere on
 the path, while the same destination answered on 8787.** That the drop was the
@@ -847,10 +861,21 @@ from "unserved" is not a witness — and such a cluster needs a different one.
 
 It requires **3 consecutive proven results, 500ms apart** (anything else
 resets the streak — this guards against a single dropped SYN packet on an
-allowed path being misread as "policy enforced"), bounded by
-`enforcementTimeoutMs` (default 30,000ms — configurable via
+allowed path being misread as "policy enforced"). The whole streak runs in a
+single keeper exec: the script exits successfully only after three consecutive
+proven probes, and stops at the first probe that is not proven, exiting with
+that probe's result. A broken streak is retried from zero 500ms later, bounded
+by `enforcementTimeoutMs` (default 30,000ms — configurable via
 `KubernetesJobLauncherOptions.enforcementTimeoutMs`; a drop-style CNI can
-need close to this whole window). The verdict at the bound comes from the
+need close to this whole window). Each probe has a time budget of
+`KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS` (default 10,000ms), so one streak exec
+is allowed three budgets plus the two 500ms gaps (31,000ms at the default), and
+the launcher never lets `enforcementTimeoutMs` fall below that one-streak value
+— at the defaults the effective bound is therefore 31,000ms. The bound is
+checked between streak execs, so a launch can run past it by up to one streak
+exec. An exec that exceeds its timeout fails the launch with
+`kubernetes_exec_timeout`. The
+verdict at the bound comes from the
 _last_ probe — not from whether any probe was ever unavailable, so an early
 blip while the pod's networking came up does not misdirect the operator — and
 the three non-proven outcomes stay distinct, because each sends an operator
@@ -912,7 +937,8 @@ default 90,000ms):
    `cluster-dns` witness, which does not exist on GKE Autopilot (Cloud DNS is the
    only provider there, so no kube-dns pods run) and which made the launcher read
    `kube-system`.
-4. `worker-image` — `CODING_WORKER_IMAGE` is a registry digest.
+4. `worker-image` — the canary's image is a registry digest: `CODING_WORKER_IMAGE`,
+   or `CODING_CLAUDE_WORKER_IMAGE` on a deployment without a Codex worker.
 5. `canary` — creates a real run pod + NetworkPolicy from the same builders
    as a live run, running a script that waits for policy enforcement (as
    above) then attempts DNS resolution, a connect to the proxy's deny port,
@@ -923,12 +949,45 @@ default 90,000ms):
 
 This whole preflight is **memoized per launcher instance and its failure is
 sticky**: `KubernetesJobLauncher.runPreflight()` caches the first call's
-promise (`this.preflightResult ??= ...`, `kubernetes.ts:472-487`), including
+promise (`this.preflightResult ??= ...`, `kubernetes.ts:790`), including
 a rejection — so once a launcher process has seen preflight fail, every
 subsequent `launch()` in that process fails immediately with the same error
 without re-probing the cluster. A fresh preflight requires a new process
 (or, from the CLI, a fresh `wardby coding preflight` invocation, which is
 not memoized).
+
+**A long-running server process starts this same memoized preflight at
+start-up, not on the first coding run.** `wardby serve`, `wardby mcp` (both
+transports), and `wardby scheduler` each call `KubernetesJobLauncher.warmUp()`
+right after the executor is built, fire-and-forget: it runs the identical
+preflight `launch()` would otherwise run lazily, so the first coding run
+after a restart doesn't pay the preflight's own cost (a canary pod, routinely
+tens of seconds on a resource-constrained cluster such as `kind`).
+`wardby scheduler` needs this just as much as the other two — it dispatches
+scheduled coding runs through its own Kubernetes executor without ever
+starting an MCP server, so without this it would still pay the lazy cost on
+its first scheduled run. The result is logged once at start-up — an info
+line on success, a warning naming the failure code (e.g.
+`kubernetes_isolation_unsupported:<check>`) otherwise.
+
+**A start-up warm-up's failure is logged and retried on the next run, not
+left stuck until restart.** This is the one way a preflight failure is
+_not_ memoized: a transient cluster problem at process start (the API
+server briefly unreachable, a slow CNI not yet programmed, and the like)
+must not fail every coding run for the rest of that process's life, so a
+failed warm-up clears its own failed attempt once it has logged it, and the
+_next_ `launch()` runs the preflight fresh — succeeding if the cluster has
+since recovered. A `launch()` that was already waiting on that same
+in-flight warm-up attempt still fails with that attempt's error (it shares
+the same preflight call), exactly as it always has; it's only the attempt
+_after_ that one which retries. A preflight failure `launch()` triggers
+itself — because no warm-up ran, or because a warm-up's cleared failure was
+never retried before the next `launch()` found the cluster still broken —
+keeps the original behavior exactly: it stays memoized, failing every
+subsequent `launch()` in that process until it is restarted. This never
+runs for a one-shot CLI command (`wardby run`, `wardby coding preflight`,
+migrations, imports) — only for a process that stays up to serve or
+dispatch runs.
 
 **A hung pod create during preflight can leave a preflight pod and its
 NetworkPolicy behind.** If `createPod` never settles (rather than failing),

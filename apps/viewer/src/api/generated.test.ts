@@ -21,6 +21,8 @@ describe("generated API types", () => {
       agentKind: "native",
       model: "m",
       codingProvider: null,
+      nativeExecutionMode: "sandbox",
+      warmWorkerName: null,
       declaredServices: [],
       status: "running",
       trigger: { kind: "manual" },

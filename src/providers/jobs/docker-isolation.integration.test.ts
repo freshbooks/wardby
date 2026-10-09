@@ -216,32 +216,46 @@ describe.skipIf(!enabled || !image)("Docker isolation acceptance", () => {
   }, 30_000);
 
   it("contains OOM termination to the worker", async () => {
-    // Docker's OOMKilled field is not set reliably on every hosted runner, but
-    // the daemon's own event stream records the kernel cgroup OOM decision.
+    // Docker's OOMKilled field is not set reliably on every hosted runner: the
+    // worker's PID 1 is docker-init, the kernel OOM-kills the probe beneath it,
+    // and on cgroup v2 hosts Docker often records neither OOMKilled nor (in
+    // time) an `oom` event. Prefer that evidence, polling briefly for a late
+    // event, and otherwise accept a SIGKILL exit (137): nothing in this test
+    // kills the worker any other way.
     const since = Math.floor(Date.now() / 1_000) - 1;
     const result = await runProbe("oom");
     expect(result.exitCode).not.toBe(0);
     const workerId = await docker(["container", "inspect", "--format", "{{.Id}}", currentWorker!]);
     const oomKilled = await docker(["container", "inspect", "--format", "{{.State.OOMKilled}}", currentWorker!]);
-    const events = await docker([
-      "events",
-      "--since",
-      String(since),
-      "--until",
-      String(Math.ceil(Date.now() / 1_000) + 1),
-      "--filter",
-      "type=container",
-      "--filter",
-      `container=${workerId}`,
-      "--filter",
-      "event=oom",
-      "--format",
-      "{{.Action}}",
-    ]);
+    let events = "";
+    for (let attempt = 0; attempt < 5 && oomKilled !== "true" && !events.split("\n").includes("oom"); attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1_000));
+      events = await docker([
+        "events",
+        "--since",
+        String(since),
+        "--until",
+        String(Math.ceil(Date.now() / 1_000) + 1),
+        "--filter",
+        "type=container",
+        "--filter",
+        `container=${workerId}`,
+        "--filter",
+        "event=oom",
+        "--format",
+        "{{.Action}}",
+      ]);
+    }
     const oomEvent = events.split("\n").includes("oom");
-    expect(oomEvent || oomKilled === "true", JSON.stringify({ exitCode: result.exitCode, oomKilled, events })).toBe(
-      true,
+    expect(
+      oomEvent || oomKilled === "true" || result.exitCode === 137,
+      JSON.stringify({ exitCode: result.exitCode, oomKilled, events }),
+    ).toBe(true);
+    // Contained: the run's keeper and the proxy are unaffected.
+    expect(await docker(["container", "inspect", "--format", "{{.State.Running}}", plan!.names.keeperContainer])).toBe(
+      "true",
     );
+    expect(await docker(["container", "inspect", "--format", "{{.State.Running}}", proxyContainer])).toBe("true");
     await removeCurrentWorker();
   }, 30_000);
 

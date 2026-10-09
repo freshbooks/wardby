@@ -149,6 +149,10 @@ jobs:
       - run: npm ci
       - run: node scripts/coding-worker-image-policy.mjs ../${{ matrix.dockerfile }} --kind=${{ matrix.kind }}
       - run: docker build -f ${{ matrix.dockerfile }} -t wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }} .
+      # The runtime images inherit protocol.js from the pinned driver; a protocol change needs a new
+      # driver-v* pinned, or every rebuilt worker keeps validating with the old protocol.
+      - if: matrix.kind == 'runtime'
+        run: npx tsc -p tsconfig.build.json && node scripts/check-worker-protocol.mjs wardby-coding-worker-${{ matrix.tag-suffix }}:${{ github.sha }}
       - if: matrix.tag-suffix == 'node'
         run: npm run test:docker-isolation
         env:
@@ -170,6 +174,33 @@ jobs:
         with:
           name: coding-worker-sbom-${{ matrix.tag-suffix }}
           path: coding-worker-${{ matrix.tag-suffix }}.spdx.json
+
+  # The native sandbox worker runs every sandbox-mode native run's engine and
+  # user tools, so it gets the same SBOM and critical-CVE gate as the coding images.
+  native-worker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build -f src/native-worker/Dockerfile -t wardby-native-worker:${{ github.sha }} .
+      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: wardby-native-worker:${{ github.sha }}
+          format: spdx-json
+          output-file: native-worker.spdx.json
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: wardby-native-worker:${{ github.sha }}
+          version: v0.70.0
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: native-worker-sbom
+          path: native-worker.spdx.json
 
   claude-worker-images:
     runs-on: ubuntu-latest

@@ -139,6 +139,8 @@ export interface ProxyAuditEvent {
   /** For a failed stream: the upstream response's content type and encoding headers, for diagnosis. */
   contentType?: string;
   contentEncoding?: string;
+  /** Set on every event while the load-test mock upstream is enabled. */
+  mockUpstream?: boolean;
 }
 
 export type ProxyAuditSink = (event: ProxyAuditEvent) => void;

@@ -13,6 +13,8 @@ export interface GraphSnapshot {
     agentKind: "native" | "coding";
     model: string;
     codingProvider: string | null;
+    nativeExecutionMode: ("control-plane" | "sandbox") | null;
+    warmWorkerName: string | null;
     status: "pending" | "running" | "succeeded" | "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled";
     trigger:
       | {
@@ -118,6 +120,8 @@ export interface RunDetail {
   agentKind: "native" | "coding";
   model: string;
   codingProvider: string | null;
+  nativeExecutionMode: ("control-plane" | "sandbox") | null;
+  warmWorkerName: string | null;
   status: "pending" | "running" | "succeeded" | "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled";
   trigger:
     | {
@@ -263,5 +267,21 @@ export interface InfraInfo {
     managedByLabel: {
       [k: string]: string | undefined;
     };
+  } | null;
+  native: {
+    launcher: "docker" | "kubernetes";
+    warmPoolSize: number;
+    kubernetes: {
+      namespace: string;
+      runtimeClass: string | null;
+      runLabel: string;
+      componentLabel: {
+        [k: string]: string | undefined;
+      };
+      warmPoolLabel: {
+        [k: string]: string | undefined;
+      };
+      warmWorkerLabel: string;
+    } | null;
   } | null;
 }

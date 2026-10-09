@@ -35,6 +35,26 @@
             "null"
           ]
         },
+        "nativeExecutionMode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "control-plane",
+                "sandbox"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warmWorkerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "status": {
           "type": "string",
           "enum": [
@@ -565,6 +585,8 @@
         "agentKind",
         "model",
         "codingProvider",
+        "nativeExecutionMode",
+        "warmWorkerName",
         "status",
         "trigger",
         "turns",

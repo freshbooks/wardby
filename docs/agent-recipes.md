@@ -24,9 +24,10 @@ These recipes go beyond the quickstart. Check each item.
 1. **Version.** The recipes require Wardby 0.4.0 or later. The knowledge note in
    coding runs, `wardby knowledge check`, and the `push` trigger are not in
    earlier releases.
-2. **Coding-agent setup.** The quickstart runs native agents only: it does not
-   install a GitHub App or build worker images. Both recipes use coding agents,
-   so complete [Coding-agent setup](coding-agent-setup.md) first: a GitHub App
+2. **Coding-agent setup.** The quickstart's optional coding step sets up coding
+   agents on a local git repository only; it does not install a GitHub App.
+   Both recipes use coding agents triggered by GitHub events, so complete
+   [Coding-agent setup](coding-agent-setup.md) first: a GitHub App
    installed on the repository, a worker image, the coding proxy, and a Docker or
    Kubernetes job launcher. Run `wardby coding preflight` to check it. For a
    hosted deployment, [Getting started on GKE](getting-started-gke.md) covers

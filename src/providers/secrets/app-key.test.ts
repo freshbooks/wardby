@@ -20,7 +20,12 @@ describe("AppKeySecretCipher", () => {
   it("tampered ciphertext fails auth tag", async () => {
     const c = new AppKeySecretCipher(key);
     const ct = await c.encrypt("x");
-    await expect(c.decrypt(ct.slice(0, -2) + "00")).rejects.toThrow();
+    // Flip a bit in the decoded ciphertext. Overwriting its text with "00" left it
+    // unchanged whenever it already decoded to that byte (1 run in 256).
+    const [iv, tag, body] = ct.split(":");
+    const bytes = Buffer.from(body, "base64url");
+    bytes[0] ^= 0x01;
+    await expect(c.decrypt(`${iv}:${tag}:${bytes.toString("base64url")}`)).rejects.toThrow();
   });
 
   it("rejects a key that isn't 32 bytes of hex", () => {

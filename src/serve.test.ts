@@ -1,10 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "./core/db.js";
 import type { Executor } from "./providers/executor/types.js";
 import type { McpProviders } from "./mcp/context.js";
+import { FakeChatProvider } from "./providers/chat/fake.js";
 import { startServe } from "./serve.js";
+
+// `startNotifications` is mocked (least-invasive seam) so this file can
+// assert serve.ts wires `providers.chat` through to it, and calls its
+// returned `stop()` during `close()`, without exercising the real
+// lease-gated dispatcher (already covered by notifications.test.ts).
+const notificationsMock = vi.hoisted(() => ({
+  startNotifications: vi.fn(async () => ({ stop: vi.fn() })),
+}));
+vi.mock("./core/notifications.js", () => notificationsMock);
 
 const ENV_KEYS = [
   "MCP_TRANSPORT",
@@ -33,6 +43,7 @@ afterEach(() => {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
+  notificationsMock.startNotifications.mockClear();
 });
 
 const fakeExecutor: Executor = { async start() {}, async stop() {} };
@@ -74,7 +85,7 @@ describe.skipIf(!process.env.DATABASE_URL)("startServe (database)", () => {
   const db = createPrismaClient();
   const scope = "serve-test-" + randomUUID();
   afterAll(async () => {
-    await db.schedulerLease.deleteMany({ where: { scope } });
+    await db.schedulerLease.deleteMany({ where: { scope: { in: [scope, scope + "-chat"] } } });
     await db.$disconnect();
   });
 
@@ -113,5 +124,36 @@ describe.skipIf(!process.env.DATABASE_URL)("startServe (database)", () => {
 
     // Shutdown: the port is released.
     await expect(fetch(origin + "/mcp", { method: "POST" })).rejects.toThrow();
+  });
+
+  it("passes providers.chat to startNotifications and stops it on close()", async () => {
+    const port = await freePort();
+    const origin = `http://127.0.0.1:${port}`;
+    Object.assign(process.env, {
+      MCP_TRANSPORT: "http",
+      MCP_HTTP_BIND: `127.0.0.1:${port}`,
+      MCP_CANONICAL_URI: origin,
+      AUTH_PROVIDER: "self-hosted",
+      AUTH_AUDIENCE: origin,
+      AUTH_SIGNING_KEY: "a1".repeat(32),
+      AUTH_CREDENTIAL_HASH_KEY: "b2".repeat(32),
+      SECRET_APP_KEY: "c3".repeat(32),
+    });
+
+    const chat = { slack: new FakeChatProvider() };
+    const providersWithChat = { ...providers, chat } as McpProviders;
+    const chatScope = scope + "-chat";
+
+    const handle = await startServe({ providers: providersWithChat, scope: chatScope });
+    try {
+      expect(notificationsMock.startNotifications).toHaveBeenCalledWith(
+        expect.objectContaining({ chat, db: expect.anything() }),
+      );
+    } finally {
+      await handle.close();
+    }
+
+    const notificationsHandle = await notificationsMock.startNotifications.mock.results[0].value;
+    expect(notificationsHandle.stop).toHaveBeenCalledTimes(1);
   });
 });

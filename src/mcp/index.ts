@@ -30,9 +30,11 @@ import { startModelCatalog } from "../providers/llm/catalog-store.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
 import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
+import { buildNativeSandboxExecutor } from "../native-worker/composition.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildIssueTrackers } from "../providers/issue-tracker/index.js";
 import { buildHostUserAuthorizers, buildReviewHosts } from "../providers/review-host/index.js";
+import { buildChatProviders } from "../providers/chat/index.js";
 import { createRepoAccessGate } from "../core/repo-access.js";
 import { userCallbackPath } from "../core/host-identity-links.js";
 import type { NativeRunProviders } from "../core/runner.js";
@@ -66,12 +68,14 @@ import { registerSubAgentTools } from "./tools/subagents.js";
 import { registerGrantTools } from "./tools/grants.js";
 import { registerRepositoryTools } from "./tools/repositories.js";
 import { registerIssueProjectTools } from "./tools/issue-projects.js";
+import { registerNotificationChannelTools } from "./tools/notification-channels.js";
 import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder } from "./tools/secrets.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { createStdioSecretElicitationHost } from "./tools/secret-elicitation-server.js";
 import { SECRET_ELICITATION_PATH } from "./tools/secret-elicitation-form.js";
+import { installWorkflowEventRecorder } from "../core/notifications.js";
 import { logger } from "../core/logger.js";
 
 const mcpLog = logger.child({ module: "mcp-index" });
@@ -143,6 +147,7 @@ export function registerAllTools(
   registerGrantTools(mcp);
   registerRepositoryTools(mcp);
   registerIssueProjectTools(mcp);
+  registerNotificationChannelTools(mcp);
   registerHostAccountTools(mcp);
   registerMemoryTools(mcp);
   registerSecretsTools(mcp, {
@@ -171,9 +176,14 @@ export function buildMcpProviders(): McpProviderComposition {
   const secrets = buildSecretCipher(providerConfig);
   const datastore = new PostgresDatastore(prisma, secrets);
   const memory = new PostgresAgentMemory(prisma);
-  const reviewHosts = buildReviewHosts();
+  const reviewHosts = buildReviewHosts(process.env, prisma);
   const issueTrackers = buildIssueTrackers();
   const hostUserAuthorizers = buildHostUserAuthorizers();
+  // Installed here (not just serve/scheduler) so `wardby mcp`, which handles
+  // webhooks, records events too; only serve and the scheduler command start
+  // the dispatcher.
+  const chat = buildChatProviders();
+  installWorkflowEventRecorder(prisma, chat);
   // One gate (and one cache) for the whole process: set-time checks in the
   // MCP tools, repo_* calls in native runs, coding runs, and host events.
   const repoAccess = createRepoAccessGate({ db: prisma, hosts: reviewHosts });
@@ -196,7 +206,14 @@ export function buildMcpProviders(): McpProviderComposition {
     repoAccess,
   };
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
-  const executor = buildConfiguredExecutor({ native: nativeExecutor, db: prisma, providerConfig, repoAccess });
+  const executor = buildConfiguredExecutor({
+    native: nativeExecutor,
+    db: prisma,
+    providerConfig,
+    repoAccess,
+    // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
+    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders }),
+  });
   nativeProviders.executor = executor;
 
   return {
@@ -211,6 +228,7 @@ export function buildMcpProviders(): McpProviderComposition {
       issueTrackers,
       hostUserAuthorizers,
       repoAccess,
+      chat,
     },
   };
 }
@@ -243,6 +261,24 @@ async function closeQuietly(promise: Promise<void> | undefined, what: string): P
   }
 }
 
+/**
+ * Fire-and-forget: starts the executor's start-up warm-up (e.g. KubernetesJobLauncher's memoized
+ * cluster preflight, via RoutingExecutor -> ContainerExecutor -> the job launcher's own `warmUp`)
+ * right when a long-running server process starts, so its first coding run doesn't pay for it.
+ * Never awaited by its caller and never throws: `warmUp()` on every implementation already swallows
+ * its own failure (logging it instead), but this still guards the call site against a surprise
+ * rejection, since nothing here may block or fail server start-up. Called from `startMcp` below —
+ * i.e. from `wardby mcp` (stdio and HTTP) and from `wardby serve`, which shares this same start-up
+ * path — and, separately, from `cli.ts`'s `scheduler()` (`wardby scheduler`), which dispatches
+ * scheduled coding runs through its own Kubernetes executor but never starts an MCP server. Never
+ * called from a one-shot CLI command (`wardby run`, `coding preflight`, migrations, imports).
+ */
+export function warmUpExecutor(executor: Pick<McpProviders["executor"], "warmUp">): void {
+  void executor.warmUp?.()?.catch((err: unknown) => {
+    mcpLog.warn({ err }, "executor warm-up failed unexpectedly");
+  });
+}
+
 /** The real CLI entry point: `wardby mcp`. Reads config from the environment, starts stdio or HTTP per MCP_TRANSPORT. */
 export async function startMcp(options: StartMcpOptions = {}): Promise<McpServerHandle> {
   const mcpConfig = loadMcpConfig();
@@ -258,6 +294,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const modelCatalog = await startModelCatalog(prisma);
   const providers = options.providers ?? buildMcpProviders().providers;
   await providers.executor.launch?.();
+  warmUpExecutor(providers.executor);
   if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
 
   if (mcpConfig.transport === "stdio") {

@@ -22,6 +22,8 @@ import {
 import { CONTINUATION_CLOSED_CATEGORY, CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { budgetSentence } from "../../core/budget-wording.js";
 import { fileSelfDefect } from "../../core/self-defects.js";
+import { isTransactionUnavailable } from "../../core/dispatch.js";
+import { CONTENDED_TX_MAX_WAIT_MS } from "../../core/timing.js";
 import type { IssueTrackerRegistry } from "../issue-tracker/types.js";
 import {
   classifyProviderFailure,
@@ -92,6 +94,14 @@ export async function normalizeCollectedLockfiles(provider: string, workspacePat
     workspace: workspacePath,
     proxyBaseUrl: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
   });
+}
+
+/** Columns on CodingRun recorded when a run completes, beyond its result JSON. */
+export interface CodingRunRecord {
+  /** The pushed branch of a run on a local repository. */
+  resultBranch?: string;
+  /** The commit the run started from. */
+  baseSha?: string;
 }
 
 export interface ContainerRunSnapshot {
@@ -173,7 +183,12 @@ export interface ContainerExecutionStore {
    * Related pull requests section. Optional: without it no section is written.
    */
   relatedPullRequests?(runId: string): Promise<RelatedPullRequestEntry[]>;
-  complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void>;
+  complete(
+    runId: string,
+    status: "succeeded" | "budget_exhausted",
+    result: CodingRunResult,
+    record?: CodingRunRecord,
+  ): Promise<void>;
   terminate(
     runId: string,
     status: "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
@@ -279,73 +294,83 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
 
   async claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim> {
     try {
-      return await this.db.$transaction(async (tx) => {
-        const { maxConcurrent } = this.options;
-        if (maxConcurrent !== undefined) {
-          // Slot usage is derived from run state, never a separate counter: a
-          // run that finishes, fails, is stopped, or is reconciled to lost stops
-          // counting, so a crashed replica cannot leak a slot.
-          await tx.$queryRawUnsafe(CODING_SLOT_LOCK_SQL);
-          const active = await tx.codingRun.count({
-            where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
-          });
-          // Oldest first (spec §6): a free slot belongs to the queued runs
-          // ahead of this one, not to whichever claim reaches the lock first.
-          // Without this a fresh dispatch could take a slot freed with no
-          // immediate drain (stopped from another replica, say) and starve
-          // older queued runs into coding_queue_timeout. A run not yet queued
-          // is behind every queued run; queued runs order by (queuedAt,
-          // runId), the same order drainCodingQueue starts them in.
-          const self = await tx.codingRun.findUnique({ where: { runId }, select: { queuedAt: true } });
-          const selfQueuedAt = self?.queuedAt ?? null;
-          const queuedAhead = await tx.codingRun.count({
-            where: {
-              runId: { not: runId },
-              queuedAt: { not: null },
-              jobBackend: null,
-              run: { status: "pending" },
-              ...(selfQueuedAt
-                ? { OR: [{ queuedAt: { lt: selfQueuedAt } }, { queuedAt: selfQueuedAt, runId: { lt: runId } }] }
-                : {}),
-            },
-          });
-          if (active + queuedAhead >= maxConcurrent) {
-            const queued = await tx.codingRun.updateMany({
-              where: { runId, jobBackend: null, queuedAt: null, run: { status: "pending" } },
-              data: { queuedAt: new Date() },
+      return await this.db.$transaction(
+        async (tx) => {
+          const { maxConcurrent } = this.options;
+          if (maxConcurrent !== undefined) {
+            // Slot usage is derived from run state, never a separate counter: a
+            // run that finishes, fails, is stopped, or is reconciled to lost stops
+            // counting, so a crashed replica cannot leak a slot.
+            await tx.$queryRawUnsafe(CODING_SLOT_LOCK_SQL);
+            const active = await tx.codingRun.count({
+              where: { jobBackend: { not: null }, run: { status: { in: ["pending", "running"] } } },
             });
-            if (queued.count === 1) return "queued";
-            const alreadyQueued = await tx.codingRun.count({
-              where: { runId, jobBackend: null, queuedAt: { not: null }, run: { status: "pending" } },
+            // Oldest first (spec §6): a free slot belongs to the queued runs
+            // ahead of this one, not to whichever claim reaches the lock first.
+            // Without this a fresh dispatch could take a slot freed with no
+            // immediate drain (stopped from another replica, say) and starve
+            // older queued runs into coding_queue_timeout. A run not yet queued
+            // is behind every queued run; queued runs order by (queuedAt,
+            // runId), the same order drainCodingQueue starts them in.
+            const self = await tx.codingRun.findUnique({ where: { runId }, select: { queuedAt: true } });
+            const selfQueuedAt = self?.queuedAt ?? null;
+            const queuedAhead = await tx.codingRun.count({
+              where: {
+                runId: { not: runId },
+                queuedAt: { not: null },
+                jobBackend: null,
+                run: { status: "pending" },
+                ...(selfQueuedAt
+                  ? { OR: [{ queuedAt: { lt: selfQueuedAt } }, { queuedAt: selfQueuedAt, runId: { lt: runId } }] }
+                  : {}),
+              },
             });
-            return alreadyQueued === 1 ? "queued" : "unavailable";
+            if (active + queuedAhead >= maxConcurrent) {
+              const queued = await tx.codingRun.updateMany({
+                where: { runId, jobBackend: null, queuedAt: null, run: { status: "pending" } },
+                data: { queuedAt: new Date() },
+              });
+              if (queued.count === 1) return "queued";
+              const alreadyQueued = await tx.codingRun.count({
+                where: { runId, jobBackend: null, queuedAt: { not: null }, run: { status: "pending" } },
+              });
+              return alreadyQueued === 1 ? "queued" : "unavailable";
+            }
           }
-        }
-        const claimed = await tx.codingRun.updateMany({
-          where: {
-            runId,
-            jobBackend: null,
-            jobHandle: null,
-            run: { status: { in: ["pending", "running"] } },
-          },
-          data: { jobBackend: PROVISIONING_BACKEND, jobHandle: claimId, queuedAt: null },
-        });
-        if (claimed.count === 0) return "unavailable";
-        const started = await tx.run.updateMany({
-          where: { id: runId, status: { in: ["pending", "running"] } },
-          data: { status: "running", heartbeatAt: new Date() },
-        });
-        if (started.count === 0) {
-          // The Run left pending/running between the CodingRun claim above and
-          // here (e.g. drainCodingQueue's coding_queue_timeout failure landed
-          // mid-claim). Abort the whole transaction so the CodingRun claim
-          // rolls back too, rather than reviving a run that just failed.
-          throw new RunNoLongerActiveError();
-        }
-        return "claimed";
-      });
+          const claimed = await tx.codingRun.updateMany({
+            where: {
+              runId,
+              jobBackend: null,
+              jobHandle: null,
+              run: { status: { in: ["pending", "running"] } },
+            },
+            data: { jobBackend: PROVISIONING_BACKEND, jobHandle: claimId, queuedAt: null },
+          });
+          if (claimed.count === 0) return "unavailable";
+          const started = await tx.run.updateMany({
+            where: { id: runId, status: { in: ["pending", "running"] } },
+            data: { status: "running", heartbeatAt: new Date() },
+          });
+          if (started.count === 0) {
+            // The Run left pending/running between the CodingRun claim above and
+            // here (e.g. drainCodingQueue's coding_queue_timeout failure landed
+            // mid-claim). Abort the whole transaction so the CodingRun claim
+            // rolls back too, rather than reviving a run that just failed.
+            throw new RunNoLongerActiveError();
+          }
+          return "claimed";
+        },
+        { maxWait: CONTENDED_TX_MAX_WAIT_MS },
+      );
     } catch (err) {
       if (err instanceof RunNoLongerActiveError) return "unavailable";
+      // A burst of claims queued on the slot lock left no connection in time.
+      // Nothing was claimed: wait in the coding queue (drainCodingQueue starts
+      // it, oldest first) instead of failing a run that only needed to wait.
+      if (isTransactionUnavailable(err)) {
+        await this.markQueued(runId);
+        return "queued";
+      }
       throw err;
     }
   }
@@ -389,7 +414,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     });
   }
 
-  async complete(runId: string, status: "succeeded" | "budget_exhausted", result: CodingRunResult): Promise<void> {
+  async complete(
+    runId: string,
+    status: "succeeded" | "budget_exhausted",
+    result: CodingRunResult,
+    record: CodingRunRecord = {},
+  ): Promise<void> {
     const finishedAt = new Date();
     const finished = await this.db.$transaction(async (tx) => {
       const run = await tx.run.findUnique({ where: { id: runId }, include: { codingRun: true } });
@@ -400,7 +430,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       }
       await tx.codingRun.update({
         where: { runId },
-        data: { result, resultSchema: CODING_PROTOCOL_VERSION },
+        data: {
+          result,
+          resultSchema: CODING_PROTOCOL_VERSION,
+          ...(record.resultBranch ? { resultBranch: record.resultBranch } : {}),
+          ...(record.baseSha ? { baseSha: record.baseSha } : {}),
+        },
       });
       await tx.run.update({
         where: { id: runId },
@@ -492,7 +527,12 @@ export interface ContainerExecutorOptions {
   sessions: CodingSessionController;
   capabilities: RunCapabilityVault;
   artifactRoot: string;
-  workerImage: string;
+  /**
+   * The Codex worker for the "node" toolchain (CODING_WORKER_IMAGE). Optional on a Claude-only
+   * deployment: a Codex run without an agent BYO image is then refused with
+   * coding_provider_not_configured:codex, as Claude Code is without its images.
+   */
+  workerImage?: string;
   /** Additional toolchains beyond the "node" baseline (workerImage). Keyed by toolchain, then version. */
   additionalWorkerImages?: Record<string, Record<string, string>>;
   credentialRef: string;
@@ -561,7 +601,7 @@ export class ContainerExecutor implements Executor {
   constructor(private readonly options: ContainerExecutorOptions) {
     this.artifactRoot = resolve(options.artifactRoot);
     if (this.artifactRoot === resolve("/")) throw new Error("coding_artifact_root_invalid");
-    if (!isImmutableDockerImage(options.workerImage)) {
+    if (options.workerImage !== undefined && !isImmutableDockerImage(options.workerImage)) {
       throw new Error("coding_worker_image_invalid");
     }
     for (const versions of Object.values(options.additionalWorkerImages ?? {})) {
@@ -1058,9 +1098,18 @@ export class ContainerExecutor implements Executor {
         ...this.issueFor(current),
         ...(await this.relatedFor(current)),
       });
+      // A pushed branch (local repository) is a successful run with no pull
+      // request; its branch is recorded on the run for the operator to merge.
       const result = this.resultFor(output, current, finalized.outcome, finalized);
-      await this.options.store.complete(run.runId, "succeeded", result);
-      if (finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated") {
+      await this.options.store.complete(run.runId, "succeeded", result, {
+        baseSha: finalized.baseCommit,
+        ...(finalized.outcome === "branch_pushed" ? { resultBranch: finalized.headRef } : {}),
+      });
+      if (
+        finalized.outcome === "pull_request_opened" ||
+        finalized.outcome === "pull_request_updated" ||
+        finalized.outcome === "branch_pushed"
+      ) {
         this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
       }
       this.terminal(current, "succeeded");
@@ -1122,7 +1171,7 @@ export class ContainerExecutor implements Executor {
   private resultFor(
     output: CodingAgentOutput,
     run: ContainerRunSnapshot,
-    forcedOutcome?: "pull_request_opened" | "pull_request_updated" | "no_changes" | "budget_exhausted",
+    forcedOutcome?: CodingRunResult["outcome"],
     finalized?: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>,
   ): CodingRunResult {
     const outcome = forcedOutcome ?? (output.outcome === "budget_exhausted" ? "budget_exhausted" : "no_changes");
@@ -1139,7 +1188,9 @@ export class ContainerExecutor implements Executor {
             pullRequestUrl: finalized.pullRequestUrl,
             pullRequestNumber: finalized.pullRequestNumber,
           }
-        : {}),
+        : outcome === "branch_pushed" && finalized?.outcome === "branch_pushed"
+          ? { headRef: finalized.headRef, commitSha: finalized.commitSha }
+          : {}),
       summary: output.summary,
       tests: output.tests,
       tag: output.tag,
@@ -1162,7 +1213,10 @@ export class ContainerExecutor implements Executor {
       if (!isImmutableDockerImage(selector.workerImageRef)) throw new Error("coding_worker_image_invalid");
       return selector.workerImageRef;
     }
-    if (selector.toolchain === "node") return this.options.workerImage;
+    if (selector.toolchain === "node") {
+      if (!this.options.workerImage) throw new Error("coding_provider_not_configured:codex");
+      return this.options.workerImage;
+    }
     const versions = this.options.additionalWorkerImages?.[selector.toolchain];
     const image = selector.toolchainVersion ? versions?.[selector.toolchainVersion] : undefined;
     if (!image) {
@@ -1224,6 +1278,11 @@ export class ContainerExecutor implements Executor {
     return this.options.jobs.supportsServicesFor?.(provider) === true;
   }
 
+  /** Delegates to the job launcher's own warm-up (Executor.warmUp); a no-op for a launcher without one. */
+  async warmUp(): Promise<void> {
+    await this.options.jobs.warmUp?.();
+  }
+
   private async requireCurrent(runId: string): Promise<ContainerRunSnapshot> {
     const current = await this.options.store.load(runId);
     if (!current) throw new Error("coding_run_not_found");
@@ -1250,6 +1309,9 @@ export class ContainerExecutor implements Executor {
     if (provider === "claude-code" && (!run.workerImage || !this.options.claudeToolRunnerImage)) {
       throw new Error("coding_provider_not_configured:claude-code");
     }
+    // Runs keep the image they were dispatched with; one without it needs the deployment default.
+    const image = run.workerImage ?? this.options.workerImage;
+    if (!image) throw new Error("coding_provider_not_configured:codex");
     if (run.workspaceDiskMb && run.workspaceDiskMb > this.options.maxDiskMb) {
       throw new Error("coding_workspace_disk_exceeds_limit");
     }
@@ -1262,7 +1324,7 @@ export class ContainerExecutor implements Executor {
       kind: "coding-agent",
       runId: run.runId,
       provider,
-      image: run.workerImage ?? this.options.workerImage,
+      image,
       // A run keeps the tool image it was dispatched with; rows from before CodingRun.toolImage use the default.
       ...(provider === "claude-code" ? { toolImage: run.toolImage ?? this.options.claudeToolRunnerImage } : {}),
       inputArtifact,
@@ -1572,7 +1634,13 @@ const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: stri
   ["vcs_protected_path:", PROTECTED_PATH_CATEGORY],
   // A continuation whose pull request was merged or closed: nothing pushed (coding/continuation-wording.ts).
   [CONTINUATION_CLOSED_ERROR, CONTINUATION_CLOSED_CATEGORY],
+  // A provider whose worker images this deployment doesn't configure (codex or claude-code): configuration.
+  ["coding_provider_not_configured", "preflight"],
+  // A GitHub repository on a server with no GitHub App: configuration, like an unsupported service.
+  ["vcs_github_not_configured", "preflight"],
   ["vcs_", "workspace"],
+  // Local repositories (LocalRepoError codes): the same family as the vcs_ errors.
+  ["local_", "workspace"],
   ["git_", "workspace"],
 ];
 

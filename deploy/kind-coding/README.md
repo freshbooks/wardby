@@ -99,14 +99,15 @@ KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
 
 The last one is `kind`-specific, not a copy-paste-everywhere default: a laptop
 `kind` node's default resources (250m CPU / 128Mi memory on the keeper
-container) can make even a healthy NetworkPolicy-enforcement probe exec take
-noticeably longer than the launcher's normal 10 s bound
+container) can make even a healthy NetworkPolicy-enforcement probe take
+noticeably longer than the launcher's normal 10 s per-probe budget
 (`src/providers/jobs/kubernetes.ts`'s `waitForPolicyEnforcement`), which
 otherwise fails every run with `kubernetes_exec_timeout` even though nothing
 is actually wrong. GKE Autopilot has more headroom and doesn't need it. The
-launcher derives its overall enforcement wall-clock bound from whichever exec
-timeout is configured (`enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK`,
-i.e. 180 s at this value), so raising only this one setting is enough.
+three probes of an enforcement streak run in one keeper exec, whose timeout the
+launcher derives from this per-probe value (three probes plus the two 500 ms
+gaps, i.e. 181 s at this value), and the overall enforcement wall-clock bound is
+never shorter than one such exec, so raising only this one setting is enough.
 
 Then run:
 
@@ -150,8 +151,8 @@ runs one. To actually see a coding agent do work against this cluster:
    KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS=60000
    ```
    `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` is only needed if the agent you
-   trigger uses the `node-python` toolchain; a plain `node` agent only needs
-   `CODING_WORKER_IMAGE`. `CODING_CLAUDE_WORKER_IMAGE` and
+   trigger uses the `node-python` toolchain; a plain `node` Codex agent only
+   needs `CODING_WORKER_IMAGE`, which a Claude-only setup can leave out. `CODING_CLAUDE_WORKER_IMAGE` and
    `CODING_CLAUDE_TOOL_RUNNER_IMAGE` are only needed to trigger an agent whose
    provider is `claude-code`, and `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`
    only for a `claude-code` agent on the `node-python` toolchain.
@@ -190,6 +191,90 @@ wardby-coding`) always has **two** containers: `keeper` (seeds the
    (runs the agent itself, gated until the keeper's seeded marker exists).
    If you only ever see one container, you're looking at a canary from a
    `preflight` run, not a triggered agent's run.
+
+## Native sandbox on the kind harness
+
+`up.sh` also sets up the [native sandbox](../../docs/native-sandbox.md) so
+sandbox-mode native agents run as pods in this cluster
+(`NATIVE_SANDBOX_LAUNCHER=kubernetes`). Beyond the coding-run steps above, it:
+
+- builds and pushes the native worker image
+  (`src/native-worker/Dockerfile`) and resolves its pulled-by-digest
+  reference;
+- creates or updates the gateway's `wardby-native-gateway-env` Secret from
+  `.env.local` the same way as the proxy's (`DATABASE_URL`, `OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY`, and `SECRET_APP_KEY`, which is **required** in
+  `.env.local`: the gateway will not start without it), plus `GITHUB_APP_ID`
+  and `GITHUB_APP_PRIVATE_KEY` when set, so sandboxed runs get the repository
+  built-ins;
+- applies the native gateway from `manifests/base/native-gateway.yaml`: a Deployment
+  running `wardby native-gateway` with no service-account token and no RBAC, a
+  ClusterIP Service exposing both the gateway port `8790` and the deny port
+  `8791`, and a NetworkPolicy that admits `native-run` pods on both ports
+  (`native-gateway-database-egress.yaml` in the kind overlay lets it reach the
+  local Postgres), then restarts it and waits for the rollout.
+
+The gateway is part of the shared base, so every overlay ships it. Each overlay
+supplies its own database egress and the `wardby-native-gateway-env` Secret; the
+`gke-autopilot` overlay also gives it its own Workload Identity and Cloud SQL
+login (see `deploy/gke/README.md`).
+
+Add the two extra lines `up.sh` prints to `.env.local`:
+
+```dotenv
+NATIVE_SANDBOX_LAUNCHER=kubernetes
+NATIVE_SANDBOX_WORKER_IMAGE=localhost:5001/wardby-native-worker@sha256:...
+```
+
+Run pods and the gateway live in `wardby-coding`, so the server's namespace and
+`KUBERNETES_CONTEXT=kind-wardby` settings above apply unchanged. Set an agent's
+`nativeExecutionMode` to `sandbox` and trigger it; watch the run's pod with
+`kubectl get pods -n wardby-coding -l wardby.io/component=native-run`. Before
+the worker is allowed to call the gateway, the server proves the pod's
+isolation from inside it (the gateway port answers, the deny port and an
+outside address do not). On a `kind` cluster whose network layer does not
+enforce `NetworkPolicy`, every sandbox run fails with
+`native_sandbox_network_unenforced`; see the Calico fallback below.
+
+To try the warm pool locally, also set `NATIVE_SANDBOX_WARM_POOL_SIZE=1` (the
+long-running server then keeps one idle isolated worker pod, labelled
+`wardby.io/pool=warm`, that the next run claims). See
+[Warm pool](../../docs/native-sandbox.md#warm-pool).
+
+An opt-in acceptance test exercises this end to end against the cluster. It is
+skipped unless the `test:native-kind` script sets its flag:
+
+```sh
+NATIVE_TEST_KIND_WORKER_IMAGE=localhost:5001/wardby-native-worker@sha256:... npm run test:native-kind
+```
+
+Use the digest `up.sh` printed for `NATIVE_SANDBOX_WORKER_IMAGE`.
+
+`npm run test:native-cluster` runs launcher-only isolation checks against any
+cluster's deployed gateway, with no database or model needed. It requires
+`NATIVE_TEST_WORKER_IMAGE` (a registry digest) and accepts
+`NATIVE_TEST_CONTEXT`, `NATIVE_TEST_NAMESPACE`, `NATIVE_TEST_PLATFORM`,
+`NATIVE_TEST_RUNTIME_CLASS`, `NATIVE_TEST_PRIORITY_CLASS`, and
+`NATIVE_TEST_FORBIDDEN` (a list of `host:port` addresses that must be
+unreachable from a worker).
+
+## Load testing (contributors)
+
+`manifests/overlays/kind-load` is the kind overlay plus a mock model upstream
+inside the coding proxy: every model request gets a canned answer that ends
+the run with no changes, after `WARDBY_LOAD_MOCK_LATENCY_MS` (default 5000).
+Nothing reaches a model provider and no credentials are sent. Metering, the
+ledger and audit still run; audit events carry `mockUpstream: true`.
+
+The proxy only enables it when both `WARDBY_LOAD_TEST=1` and
+`WARDBY_CODING_PROXY_MOCK_UPSTREAM=1` are set, and refuses to start with only
+one. Never set them on a real deployment. Codex agents only.
+
+Run the load test with `scripts/load/run-level-b.sh` (see its header).
+Re-run `deploy/kind-coding/up.sh` from the same checkout first, so the proxy
+image includes the mock upstream. While the test runs, the script replaces
+the proxy's model keys with a placeholder and aborts unless every proxy pod
+logs `proxy.mock_upstream_enabled`; it restores the original keys on exit.
 
 ## What the preflight proves — and what to do if it fails
 

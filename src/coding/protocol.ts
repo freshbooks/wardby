@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isAbsolute, resolve } from "node:path";
 
 export const CODING_PROTOCOL_VERSION = 1 as const;
 /** The code host every coding run's repository and pull request live on (see pullRequestUrlSchema); the one place to change when another is added. */
@@ -215,10 +216,55 @@ function isGitRef(value: string): boolean {
   }
 }
 
+/** Repository identity prefix for a git folder on the wardby host: `local:/abs/path`. */
+export const LOCAL_REPO_PREFIX = "local:";
+
+export function isLocalRepository(value: string): boolean {
+  return value.startsWith(LOCAL_REPO_PREFIX);
+}
+
+/** Upper bound on a whole `local:/abs/path` value, in UTF-8 bytes. */
+export const MAX_LOCAL_REPOSITORY_BYTES = 4096;
+
+/**
+ * Syntactic only: at most MAX_LOCAL_REPOSITORY_BYTES, no ASCII control
+ * characters (NUL included), absolute, normalized; returns "local:/abs/path"
+ * (no trailing slash).
+ */
+export function normalizeLocalRepository(value: string): string {
+  if (!isLocalRepository(value)) throw new Error("local repository must start with local:");
+  if (byteLength(value) > MAX_LOCAL_REPOSITORY_BYTES) {
+    throw new Error(`local repository must be at most ${MAX_LOCAL_REPOSITORY_BYTES} UTF-8 bytes`);
+  }
+  const path = value.slice(LOCAL_REPO_PREFIX.length);
+  if (INVALID_SINGLE_LINE_CONTROL.test(path)) {
+    throw new Error("local repository path must not contain control characters");
+  }
+  if (!isAbsolute(path)) throw new Error("local repository path must be absolute");
+  return `${LOCAL_REPO_PREFIX}${resolve(path)}`;
+}
+
+function isCodingRepository(value: string): boolean {
+  if (!isLocalRepository(value)) return isGitHubRepository(value);
+  try {
+    normalizeLocalRepository(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCodingRepository(value: string): string {
+  return isLocalRepository(value) ? normalizeLocalRepository(value) : normalizeGitHubRepository(value);
+}
+
 const repositorySchema = z
   .string()
-  .refine(isGitHubRepository, "must be a canonical name or uncredentialed github.com repository")
-  .transform(normalizeGitHubRepository);
+  .refine(
+    isCodingRepository,
+    "must be a canonical name, an uncredentialed github.com repository, or local:/absolute/path",
+  )
+  .transform(normalizeCodingRepository);
 
 export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe branch ref").transform(normalizeGitRef);
 
@@ -436,7 +482,7 @@ const pullRequestUrlSchema = z
 export const CodingRunResultSchema = z
   .object({
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
-    outcome: z.enum(["pull_request_opened", "pull_request_updated", "no_changes", "budget_exhausted"]),
+    outcome: z.enum(["pull_request_opened", "pull_request_updated", "branch_pushed", "no_changes", "budget_exhausted"]),
     repository: repositorySchema,
     baseRef: CodingBaseRefSchema,
     headRef: CodingBaseRefSchema.optional(),
@@ -459,7 +505,17 @@ export const CodingRunResultSchema = z
     if (isPrOutcome && prFields.some((field) => field === undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a PR outcome requires all PR fields" });
     }
-    if (!isPrOutcome && prFields.some((field) => field !== undefined)) {
+    if (value.outcome === "branch_pushed") {
+      if (value.headRef === undefined || value.commitSha === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "a pushed-branch outcome requires headRef and commitSha",
+        });
+      }
+      if (value.pullRequestUrl !== undefined || value.pullRequestNumber !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a pushed-branch outcome has no pull request" });
+      }
+    } else if (!isPrOutcome && prFields.some((field) => field !== undefined)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "non-PR outcomes must not include PR fields" });
     }
     if (value.pullRequestUrl && value.pullRequestNumber) {

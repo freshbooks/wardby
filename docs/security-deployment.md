@@ -543,6 +543,21 @@ bound connection pools and concurrent invocations, and review a cancellable
 database adapter or isolated worker if strict immediate termination is required.
 Do not claim these per-invocation caps establish a whole-process memory ceiling.
 
+## Slack workflow notifications
+
+Optional Slack workflow notifications add no inbound endpoint: wardby only
+ever calls out to Slack's `chat.postMessage`/`chat.update`/`conversations.info`,
+and the app manifest requests no event subscriptions or interactivity, so
+nothing posted in Slack can start or affect a run. What reaches Slack is
+limited to issue keys/titles and their links, pull request numbers and
+links, agent names, review verdicts, fix-round numbers, a failed run's
+reason (its first line, at most 200 characters), and (only when a link opts
+in) the run's spend line — never code, diffs, review bodies, or run output.
+Issue titles are posted regardless of Jira issue security, so link a project
+only to a channel whose members may see every issue in it. The bot token is a provider credential like any other and never
+reaches a sandboxed tool or coding-run worker. See
+[Send workflow updates to Slack](slack-notifications.md).
+
 ## Coding runs on Kubernetes
 
 `JOB_LAUNCHER=kubernetes` runs each coding agent in its own pod instead of a
@@ -612,6 +627,18 @@ guarantee; and the OSV vulnerability audit fails **closed**
 (`503 wardby_audit_unavailable`) when OSV can't be reached, unless the
 operator explicitly sets `REGISTRY_AUDIT_FAIL_OPEN=true` to allow installs
 through unaudited during an OSV outage.
+
+## Native sandbox
+
+A native agent set to `nativeExecutionMode=sandbox` runs its turn loop and user
+tools in a single-use container with no credentials, database access, Docker
+socket, or network except the native gateway. The gateway is a trusted
+component: it holds the LLM credentials and integration settings, so give it
+the database and provider settings it needs and nothing else, never the Docker
+socket, and do not publish its port outside the Docker host. Only the server,
+which launches workers, needs Docker access (or, on Kubernetes, permission to
+create pods in the run namespace). See
+[Native sandbox](native-sandbox.md).
 
 ## Images and dependencies
 

@@ -45,12 +45,13 @@ A coding agent's model is checked against the catalog only
 never look up a provider adapter at all, so a model can pass this check and
 still fail later for reasons `model_unavailable` never reports.
 
-One such failure has a specific name: dispatching a Claude Code run throws
-`coding_provider_not_configured:claude-code` when this deployment's
-`CODING_CLAUDE_WORKER_IMAGE` or `CODING_CLAUDE_TOOL_RUNNER_IMAGE` isn't set —
-it means the Claude Code worker or tool-runner image itself isn't configured,
-not a missing credential, and there is no equivalent error or string for
-Codex. See [Local coding-agent setup](../../docs/coding-agent-setup.md).
+One such failure has a specific name: dispatching a coding run throws
+`coding_provider_not_configured:codex` or
+`coding_provider_not_configured:claude-code` when this deployment has no
+worker images for that provider (`CODING_WORKER_IMAGE` for Codex;
+`CODING_CLAUDE_WORKER_IMAGE` and `CODING_CLAUDE_TOOL_RUNNER_IMAGE` for Claude
+Code). It means the images themselves aren't configured, not a missing
+credential. See [Coding provider not configured](coding-provider-not-configured.md).
 
 A missing or invalid API key behind a coding run's model-provider credential
 (`CODING_OPENAI_CREDENTIAL_REF` for Codex, `CODING_ANTHROPIC_CREDENTIAL_REF`

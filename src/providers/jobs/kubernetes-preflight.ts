@@ -34,6 +34,14 @@ export interface KubernetesPreflightOptions {
   cleanupTimeoutMs?: number; // default 15_000; bounds each canary delete
 }
 
+/**
+ * The image the preflight canary runs (it only needs node): the Codex worker when configured,
+ * else the Claude Code worker, so a Claude-only deployment is checked too.
+ */
+export function preflightCanaryImage(images: { workerImage?: string; claudeWorkerImage?: string }): string | undefined {
+  return images.workerImage || images.claudeWorkerImage || undefined;
+}
+
 export interface CanaryResult {
   dns: boolean;
   /** The proxy's deny port: reachable means the run policy is not being enforced. */

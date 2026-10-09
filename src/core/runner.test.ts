@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../providers/engine/types.js";
@@ -26,6 +27,7 @@ interface FakeAgent {
   budgetGroupId?: string | null;
   memoryEnabled?: boolean;
   effort?: string | null;
+  nativeExecutionMode?: "control_plane" | "sandbox";
   /** Defaults to FAKE_OWNER: the capability tests below are about scoping, not consent. */
   ownerId?: string | null;
 }
@@ -423,6 +425,71 @@ describe("runAgent", () => {
 
     expect(run.status).toBe("refused");
     expect(run.error).toBe("Estimated input cost exceeds budget before any LLM call.");
+  });
+
+  it("emits exactly one run_failed workflow event for a failed run", async () => {
+    const db = fakeDb([{ id: "a1", name: "lead", systemPrompt: "sys", model: "m", budgetUsd: 1, maxTurns: 10 }]);
+    (db as any).runHostCheck = { findUnique: async () => null };
+    const engine = fakeEngine({
+      status: "failed",
+      finalText: "",
+      turns: 1,
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+      error: "LLM call failed\nstack",
+    });
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const run = await runAgent(
+        "lead",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      );
+      expect(events).toEqual([
+        {
+          dedupeKey: `run_failed:${run.id}`,
+          runId: run.id,
+          agentId: "a1",
+          payload: { kind: "run_failed", agentName: "lead", status: "failed", reason: "LLM call failed" },
+        },
+      ]);
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
+
+  it("emits run_failed from the catch path when the engine throws", async () => {
+    const db = fakeDb([{ id: "a1", name: "lead", systemPrompt: "sys", model: "m", budgetUsd: 1, maxTurns: 10 }]);
+    (db as any).runHostCheck = { findUnique: async () => null };
+    const engine = {
+      run: async () => {
+        throw new Error("engine exploded\n    at frame");
+      },
+    };
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const run = await runAgent(
+        "lead",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      );
+      expect(run.status).toBe("failed");
+      expect(events).toEqual([
+        {
+          dedupeKey: `run_failed:${run.id}`,
+          runId: run.id,
+          agentId: "a1",
+          payload: { kind: "run_failed", agentName: "lead", status: "failed", reason: "engine exploded" },
+        },
+      ]);
+    } finally {
+      setWorkflowEventSink(null);
+    }
   });
 
   it("passes the agent's own budgetUsd unchanged to the engine when it has no budget group", async () => {
@@ -1380,6 +1447,82 @@ describe("coding agents on a deployment without a container executor", () => {
   });
 });
 
+describe("native sandbox mode on a deployment without a native sandbox executor", () => {
+  const agent = (nativeExecutionMode: "control_plane" | "sandbox"): FakeAgent => ({
+    id: "a1",
+    name: "boxed",
+    systemPrompt: "sys",
+    model: "m",
+    budgetUsd: 1,
+    maxTurns: 3,
+    nativeExecutionMode,
+  });
+  const engineCalls: string[] = [];
+  const providers = {
+    llm: noopLlm,
+    engine: {
+      async run() {
+        engineCalls.push("run");
+        return {
+          status: "succeeded" as const,
+          finalText: "ok",
+          turns: 1,
+          usage: { tokensIn: 1, tokensOut: 1, costUsd: 0.01 },
+        };
+      },
+    },
+    datastore: fakeDatastore(),
+    secrets: noopSecretCipher,
+    memory: fakeMemory(),
+  };
+  const expectedCause = /nativeExecutionMode=sandbox.*no native sandbox executor/;
+
+  it("runAgent (wardby run) refuses a sandbox-mode agent up front instead of running it inline", async () => {
+    const db = fakeDb([agent("sandbox")]);
+    const created = vi.spyOn(db.run, "create");
+    await expect(runAgent("boxed", providers, db)).rejects.toThrow(expectedCause);
+    expect(created).not.toHaveBeenCalled();
+  });
+
+  it("createRun snapshots the agent's mode onto the run", async () => {
+    const db = fakeDb([agent("control_plane")]);
+    engineCalls.length = 0;
+    const run = await runAgent("boxed", providers, db);
+    expect(run.nativeExecutionMode).toBe("control_plane");
+    expect(engineCalls).toEqual(["run"]);
+  });
+
+  it("executeRun fails a sandbox-snapshot run before any work, spending nothing", async () => {
+    const db = fakeDb([agent("sandbox")]);
+    const run = await db.run.create({ data: { agentId: "a1", nativeExecutionMode: "sandbox" } });
+    engineCalls.length = 0;
+    const result = await executeRun(run.id, providers, db);
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(expectedCause);
+    expect(Number(result.costUsd)).toBe(0);
+    expect(result.pricingVersion ?? null).toBeNull();
+    expect(engineCalls).toEqual([]);
+  });
+
+  it("follows the run's snapshot, not the agent's current setting", async () => {
+    // Created while the agent was control-plane; the agent was switched to sandbox afterwards.
+    const db = fakeDb([agent("sandbox")]);
+    const run = await db.run.create({ data: { agentId: "a1", nativeExecutionMode: "control_plane" } });
+    engineCalls.length = 0;
+    const result = await executeRun(run.id, providers, db);
+    expect(result.status).toBe("succeeded");
+    expect(engineCalls).toEqual(["run"]);
+  });
+
+  it("runs a legacy run with no snapshot in the control plane", async () => {
+    const db = fakeDb([agent("sandbox")]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    engineCalls.length = 0;
+    expect((await executeRun(run.id, providers, db)).status).toBe("succeeded");
+    expect(engineCalls).toEqual(["run"]);
+  });
+});
+
 describe("native runs record and keep their catalog entry", () => {
   const sonnet = SHIPPED_CATALOG.find((e) => e.modelId === "claude-sonnet-5")!;
   const agent = { id: "a1", name: "writer", systemPrompt: "s", model: "claude-sonnet-5", budgetUsd: 10, maxTurns: 10 };
@@ -1466,5 +1609,28 @@ describe("native runs record and keep their catalog entry", () => {
     expect(engine.run).not.toHaveBeenCalled();
     const row: any = await db.run.findUnique({ where: { id: run.id } });
     expect(row.pricingVersion ?? null).toBeNull();
+  });
+
+  it("emits run_failed when a run ends early on an unavailable model", async () => {
+    const db = fakeDb([agent]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const { llm } = routed(disabled);
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const finished = await executeRun(run.id, providers(llm, { run: vi.fn(async () => succeeded) }), db);
+      expect(finished.status).toBe("failed");
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        dedupeKey: `run_failed:${run.id}`,
+        runId: run.id,
+        agentId: "a1",
+        payload: { kind: "run_failed", status: "failed", reason: expect.stringMatching(/^model_unavailable: /) },
+      });
+    } finally {
+      setWorkflowEventSink(null);
+    }
   });
 });

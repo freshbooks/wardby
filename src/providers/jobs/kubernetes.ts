@@ -55,7 +55,7 @@ import {
   buildCapabilitySecret,
   buildRunNetworkPolicy,
   buildRunPod,
-  enforcementProbeScript,
+  enforcementStreakScript,
   kubernetesRunNames,
   kubernetesRunNamesForToken,
   runLabels,
@@ -104,14 +104,17 @@ const ENFORCEMENT_POLL_MS = 500;
 /** Consecutive proven probes required (8787 reachable, 8788 blocked): one dropped SYN must not open the gate. */
 const ENFORCEMENT_BLOCKED_STREAK = 3;
 /**
- * Default bound for one enforcement probe exec (the probe makes two sequential connects, so it
+ * Default time budget for ONE enforcement probe (the probe makes two sequential connects, so it
  * gives up after at most 6 s of its own connect timeouts). Overridable per KubernetesJobConfig's
  * `enforcementExecTimeoutMs` (KUBERNETES_ENFORCEMENT_EXEC_TIMEOUT_MS) — a resource-constrained
  * keeper (e.g. a laptop `kind` cluster's default 250m CPU / 128Mi limit) can take noticeably
- * longer than this to run even a healthy probe to completion. DEFAULT_ENFORCEMENT_TIMEOUT_MS
- * above is exactly this default times ENFORCEMENT_BLOCKED_STREAK, which is not a coincidence: see
- * the constructor, which derives the effective overall bound the same way from whichever exec
- * timeout is actually configured, so the two never drift apart.
+ * longer than this to run even a healthy probe to completion.
+ *
+ * The probes of one streak run inside a single exec (`enforcementStreakScript`), so the exec's own
+ * timeout is derived from this per-probe budget: ENFORCEMENT_BLOCKED_STREAK probes plus the
+ * ENFORCEMENT_POLL_MS gaps between them (`streakExecTimeoutMs`; 31_000 at this default). The
+ * constructor then floors the overall wall-clock bound at that one-streak-exec value, so a raised
+ * per-probe budget can never leave the bound shorter than a single streak.
  */
 const DEFAULT_ENFORCEMENT_EXEC_TIMEOUT_MS = 10_000;
 
@@ -126,12 +129,10 @@ const DEFAULT_ENFORCEMENT_EXEC_TIMEOUT_MS = 10_000;
  * and sending an operator to the CNI over a dead exec wastes the one clue they were given.
  */
 const ENFORCEMENT_VERDICTS: Readonly<Record<number, { code: string; detail: string }>> = {
-  [ENFORCEMENT_PROBE_PROVEN]: {
-    code: "kubernetes_policy_not_enforced",
-    // Reaching the bound on a proven probe means the streak kept being broken: enforcement was
-    // observed, but never ENFORCEMENT_BLOCKED_STREAK times running, so it is not stable evidence.
-    detail: `the last probe was proven, but never ${ENFORCEMENT_BLOCKED_STREAK} consecutive times within the bound — enforcement is flapping rather than absent`,
-  },
+  // No ENFORCEMENT_PROBE_PROVEN entry, deliberately: the whole streak runs in one exec
+  // (enforcementStreakScript), which exits PROVEN only after ENFORCEMENT_BLOCKED_STREAK consecutive
+  // proven probes — and that opens the gate before the bound is ever checked. A streak broken by
+  // flapping exits with the breaking probe's own code, so the verdict is always one of these.
   [ENFORCEMENT_PROBE_DENY_REACHABLE]: {
     code: "kubernetes_policy_not_enforced",
     detail: `the deny port ${CODING_PROXY_DENY_PORT} accepted a connection, so no policy is blocking it (or the policy is not port-scoped) — look at the CNI`,
@@ -171,13 +172,8 @@ type EnforcementStage = "initial" | "pre_marker";
 
 /** Same shape as ENFORCEMENT_VERDICTS/ENFORCEMENT_PROBE_DID_NOT_RUN, but for the `pre_marker` stage. */
 const ENFORCEMENT_VERDICTS_PRE_MARKER: Readonly<Record<number, { code: string; detail: string }>> = {
-  [ENFORCEMENT_PROBE_PROVEN]: {
-    code: "kubernetes_policy_enforcement_lost_before_marker",
-    detail:
-      `the policy was proven enforced earlier in this launch, but the re-probe run immediately before ` +
-      `opening the gate never reached ${ENFORCEMENT_BLOCKED_STREAK} consecutive proven probes within the ` +
-      "bound — enforcement held at the initial proof but is flapping now, immediately before release",
-  },
+  // No ENFORCEMENT_PROBE_PROVEN entry, for the same reason as ENFORCEMENT_VERDICTS: a proven streak
+  // exec opens the gate, so it never reaches enforcementVerdict.
   [ENFORCEMENT_PROBE_DENY_REACHABLE]: {
     code: "kubernetes_policy_enforcement_lost_before_marker",
     detail:
@@ -295,15 +291,19 @@ export interface KubernetesJobLauncherOptions {
   readyTimeoutMs?: number; // default 120_000
   /**
    * How long to wait for the run's NetworkPolicy to be enforced before seeding. Default 30_000,
-   * but never *less* than `enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK`: see the
-   * constructor. An explicit override here is a floor raise, not an escape hatch — the gate still
-   * needs room for a full streak of probes at whatever the effective exec timeout is.
+   * but never *less* than one full streak exec's timeout
+   * (`enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK + ENFORCEMENT_POLL_MS * (ENFORCEMENT_BLOCKED_STREAK - 1)`,
+   * 31_000 at the default exec timeout): see the constructor. An explicit override here is a floor
+   * raise, not an escape hatch — the gate still needs room for a full streak of probes at whatever
+   * the effective per-probe budget is.
    */
   enforcementTimeoutMs?: number;
   /**
-   * Bound for a single enforcement probe exec. Default 10_000 (DEFAULT_ENFORCEMENT_EXEC_TIMEOUT_MS).
-   * Raise this on a resource-constrained cluster (e.g. `kind` on a laptop) where a healthy probe
-   * can legitimately take longer than 10 s to run inside the keeper's CPU/memory limits.
+   * Time budget for a single enforcement probe. Default 10_000 (DEFAULT_ENFORCEMENT_EXEC_TIMEOUT_MS).
+   * A streak's probes share one exec, whose timeout is this times ENFORCEMENT_BLOCKED_STREAK plus
+   * the poll gaps between them. Raise this on a resource-constrained cluster (e.g. `kind` on a
+   * laptop) where a healthy probe can legitimately take longer than 10 s to run inside the
+   * keeper's CPU/memory limits.
    */
   enforcementExecTimeoutMs?: number;
   createArchive?: (directory: string) => { stream: Readable; done: Promise<number> }; // default: host `tar`
@@ -528,6 +528,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   private readonly warn: (message: string) => void;
   private readonly enforcementTimeoutMs: number;
   private readonly enforcementExecTimeoutMs: number;
+  /** Timeout of one streak exec: ENFORCEMENT_BLOCKED_STREAK probes plus the gaps between them. */
+  private readonly streakExecTimeoutMs: number;
   private preflightResult?: Promise<KubernetesClusterInfo>;
 
   constructor(private readonly options: KubernetesJobLauncherOptions) {
@@ -539,15 +541,20 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)));
     this.readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
     this.enforcementExecTimeoutMs = options.enforcementExecTimeoutMs ?? DEFAULT_ENFORCEMENT_EXEC_TIMEOUT_MS;
-    // Never less than a full blocked-streak's worth of worst-case probes: a longer configured exec
-    // timeout that left this unchanged could make the wall-clock bound expire before the loop ever
-    // has a chance to observe ENFORCEMENT_BLOCKED_STREAK consecutive probes, which would turn "the
-    // keeper is just slow" into an indistinguishable "the policy is not enforced" false negative.
-    // DEFAULT_ENFORCEMENT_TIMEOUT_MS (30_000) already equals the default exec timeout times the
-    // streak (10_000 * 3), so this is a no-op unless a longer exec timeout is actually configured.
+    // One exec runs a whole streak: ENFORCEMENT_BLOCKED_STREAK probes, each within its own
+    // per-probe budget, with ENFORCEMENT_POLL_MS between consecutive probes.
+    this.streakExecTimeoutMs =
+      this.enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK +
+      ENFORCEMENT_POLL_MS * (ENFORCEMENT_BLOCKED_STREAK - 1);
+    // Never less than one full streak exec's worst case: a longer configured per-probe budget that
+    // left this unchanged could make the wall-clock bound expire inside the first slow streak exec,
+    // leaving no room to retry a streak broken while the policy was still being programmed — which
+    // would turn "the keeper is just slow" into an indistinguishable "the policy is not enforced"
+    // false negative. At the defaults this raises DEFAULT_ENFORCEMENT_TIMEOUT_MS (30_000) to the
+    // default streak exec timeout (10_000 * 3 + 500 * 2 = 31_000).
     this.enforcementTimeoutMs = Math.max(
       options.enforcementTimeoutMs ?? DEFAULT_ENFORCEMENT_TIMEOUT_MS,
-      this.enforcementExecTimeoutMs * ENFORCEMENT_BLOCKED_STREAK,
+      this.streakExecTimeoutMs,
     );
     this.createArchive = options.createArchive ?? hostTarArchive;
     this.warn = options.onWarning ?? ((message) => kubernetesLog.warn(message));
@@ -756,7 +763,46 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Launch
 
-  /** Memoized: the preflight (or, without one, a single proxy-witness read) runs once per launcher. */
+  /**
+   * Starts the memoized cluster preflight (`runPreflight`) right away, instead of waiting for the
+   * first `launch()`, so a long-running server process's own start-up pays the preflight's cost (a
+   * canary pod on `kind`: ~20s) rather than that process's first coding run. Never throws: it only
+   * reports the outcome (an info line on success, a warning naming the failure code otherwise) so
+   * an operator sees a misconfigured cluster at boot. Any `launch()` already awaiting this same
+   * attempt (concurrent with this call) still fails exactly as it does today when the preflight
+   * failed — it shares the same rejected promise. But unlike a preflight `launch()` starts on its
+   * own, a start-up failure here is **not** left stuck memoized: a transient cluster problem at
+   * process start must not fail every coding run until restart, so the failed attempt is cleared
+   * (only if nothing has already started a newer one — compared by identity, never by state) and
+   * the *next* `launch()` runs the preflight fresh. A successful warm-up stays memoized as always.
+   */
+  async warmUp(): Promise<void> {
+    const attempt = this.runPreflight();
+    try {
+      await attempt;
+      kubernetesLog.info("kubernetes_preflight_warm_up_succeeded: cluster preflight passed at start-up");
+    } catch (error) {
+      // Only clear the memo if it still holds this exact attempt: a concurrent launch() or warmUp()
+      // may have already seen this same rejection and started a fresh one (which must survive), and
+      // nothing else could have replaced this attempt with anything but a newer one, since
+      // runPreflight() never overwrites an already-set, still-pending-or-resolved promise.
+      if (this.preflightResult === attempt) this.preflightResult = undefined;
+      // Same code-only convention as every other failure this launcher logs (e.g. launch()'s
+      // kubernetes_spec_rejected above): the error's own message is the fixed reason code set by
+      // runPreflight's errorWithCode (KUBERNETES_ISOLATION_ERROR) — never the raw cause, which could
+      // carry cluster detail.
+      const code = error instanceof Error ? error.message : String(error);
+      this.warn(`kubernetes_preflight_warm_up_failed: ${code}`);
+    }
+  }
+
+  /**
+   * Memoized: the preflight (or, without one, a single proxy-witness read) runs once per launcher —
+   * including its failure, which stays memoized and fails every subsequent `launch()` immediately,
+   * for a preflight `launch()` itself started (there was no `warmUp()`, or `warmUp()`'s own failed
+   * attempt was already cleared). `warmUp()` is the one caller that clears a failed attempt instead
+   * of leaving it stuck; see its own doc comment.
+   */
   private runPreflight(): Promise<KubernetesClusterInfo> {
     this.preflightResult ??= (async () => {
       try {
@@ -779,6 +825,14 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
    * as the worker) must, on ENFORCEMENT_BLOCKED_STREAK consecutive probes 500 ms apart, reach the
    * proxy on CODING_PROXY_PORT and fail to reach it on CODING_PROXY_DENY_PORT. Anything else resets
    * the streak; the wall-clock bound still applies.
+   *
+   * The whole streak runs in ONE keeper exec (`enforcementStreakScript`), so exec and interpreter
+   * start-up is paid once per streak rather than once per probe. That exec exits 0 only after the
+   * full streak was proven; otherwise it stops at the first non-proven probe and exits with that
+   * probe's code. Any non-zero exit is a broken streak: if the bound has been reached it is the
+   * verdict, else the launcher waits ENFORCEMENT_POLL_MS and starts a fresh streak from zero. The
+   * exec is bounded by `streakExecTimeoutMs` (the per-probe budget times the streak, plus the gaps);
+   * an exec that times out or fails throws, failing the launch exactly as a failed probe exec did.
    *
    * "Fail to reach" means the connect *timed out* — the packet was dropped. A refusal (RST) is not
    * a denial: it proves the SYN reached the destination host, so the deny port is merely unserved
@@ -804,17 +858,16 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     proxyIp: string,
     stage: EnforcementStage = "initial",
   ): Promise<void> {
-    const command = ["node", "-e", enforcementProbeScript(proxyIp)];
+    const command = ["node", "-e", enforcementStreakScript(proxyIp, ENFORCEMENT_BLOCKED_STREAK, ENFORCEMENT_POLL_MS)];
     const started = this.now();
-    let blocked = 0;
     for (;;) {
-      // `exitCode` is this iteration's probe, and the bound below is only ever reached from here —
-      // so the verdict is always the *last* probe's, never a remembered earlier one.
+      // `exitCode` is this attempt's streak, which stops at (and exits with) its first non-proven
+      // probe, and the bound below is only ever reached from here — so the verdict is always the
+      // *last* probe's, never a remembered earlier one.
       const exitCode = await this.api.exec(this.namespace, names.pod, KEEPER_CONTAINER, command, {
-        timeoutMs: this.enforcementExecTimeoutMs,
+        timeoutMs: this.streakExecTimeoutMs,
       });
-      blocked = exitCode === 0 ? blocked + 1 : 0;
-      if (blocked >= ENFORCEMENT_BLOCKED_STREAK) return;
+      if (exitCode === ENFORCEMENT_PROBE_PROVEN) return;
       if (this.now() - started >= this.enforcementTimeoutMs) {
         throw enforcementVerdict(exitCode, proxyIp, stage);
       }

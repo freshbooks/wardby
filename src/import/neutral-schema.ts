@@ -38,6 +38,8 @@ export const NeutralAgentSchema = z.object({
   ownerEmail: z.string().nullable().default(null),
   kind: z.enum(["native"]).default("native"),
   memoryEnabled: z.boolean().default(false),
+  /** Where the agent's runs execute; absent = control-plane. Native agents only (every imported agent is native). */
+  nativeExecutionMode: z.enum(["control-plane", "sandbox"]).optional(),
   unmodeled: z
     .object({
       description: z.string().nullable().default(null),

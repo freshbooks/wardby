@@ -6,7 +6,7 @@
  * the caller; an operator can list and unlink anyone's with
  * `wardby auth host-account`.
  */
-import { REVIEW_HOST_PROVIDERS, type ReviewHostProvider } from "../../providers/review-host/types.js";
+import { HOST_ACCOUNT_PROVIDERS, type ReviewHostProvider } from "../../providers/review-host/types.js";
 import {
   confirmHostIdentityLink,
   HostLinkError,
@@ -18,7 +18,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { canonicalUrl } from "../transport/http-limits.js";
 import { textResult } from "./text-result.js";
 
-const PROVIDER_PROP = { type: "string", enum: [...REVIEW_HOST_PROVIDERS] };
+const PROVIDER_PROP = { type: "string", enum: [...HOST_ACCOUNT_PROVIDERS] };
 
 function asMcpError(err: unknown): unknown {
   return err instanceof HostLinkError ? new McpError(err.status, err.message) : err;

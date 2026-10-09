@@ -70,6 +70,21 @@ when a run calls the model, with `unsupported_anthropic_feature`.
 For Claude Code coding runs, `efforts` is also the exact set of levels a run
 may send, so always include the model's default effort level.
 
+OpenAI models keep `thinkingMode` `none`; `efforts` alone drives
+`reasoning.effort` on native agents, which call OpenAI's Responses API
+(`store: false`). `gpt-5.6-sol`/`terra`/`luna` and `gpt-6-astra` list `low`
+through `max`; `gpt-4o`, `gpt-4o-mini` and the `gpt-4.1` family list none.
+Reasoning models reject sampling parameters such as `temperature`; wardby
+doesn't send them. Reasoning tokens bill as output tokens, charged when the
+call ends, so one call can take a run past its budget by its reasoning; higher
+effort raises that ceiling.
+
+After an upgrade, a `set_model` override of a shipped model keeps its stored
+`efforts` (it replaces the shipped entry wholesale). If those are empty,
+`create_agent`/`update_agent` reject an `effort` for the model: run
+`reset_model`, or `set_model` again with the new efforts, to pick up shipped
+changes.
+
 A newly released Claude model may also need a newer Claude Code than your
 Claude Code worker image has: coding runs on it then fail as
 `provider_rejected` (no cost) while native runs work. Upgrade wardby and
