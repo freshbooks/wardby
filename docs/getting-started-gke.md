@@ -274,6 +274,12 @@ name, so the script no longer reads it. It refuses a hostname with no dot, or a
 local name such as `*.lan`, `*.local`, or `*.internal`. If you deployed with an
 earlier version using `HOSTNAME=...`, pass the same value as `WARDBY_HOSTNAME`.
 
+If the cluster is already published on a different hostname, the script stops
+before building anything: moving the hostname breaks DNS, every client's
+configured endpoint, and every issued token. In a terminal it asks you to type
+the new hostname; elsewhere, set `WARDBY_HOSTNAME_CHANGE` to the new hostname to
+confirm the move.
+
 Point the hostname's public A record at the reserved address:
 
 ```sh

@@ -131,6 +131,28 @@ kubectl config use-context "$KUBE_CONTEXT" >/dev/null
 # out, both with 0.0.0.0/0 allowed and with an explicit Service-CIDR rule.
 API_HOST="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' | sed -e 's|https://||' -e 's|:.*||')"
 
+# hostname-change check: moving the public hostname breaks DNS, every client's configured
+# endpoint, and every issued token (their audience names the old host), so a run that would
+# change it stops for confirmation. Terraform (step 1) does not use the hostname.
+LIVE_HOSTNAME="$(kubectl -n "$NAMESPACE" get gateway wardby-control-plane -o jsonpath='{.spec.listeners[0].hostname}' 2>/dev/null || true)"
+if [[ -n "$LIVE_HOSTNAME" && "$LIVE_HOSTNAME" != "$WARDBY_HOSTNAME" ]]; then
+  echo "up.sh: the live deployment is published on ${LIVE_HOSTNAME}; this run would move it to ${WARDBY_HOSTNAME}." >&2
+  echo "       DNS, every client's endpoint, and every issued token are tied to ${LIVE_HOSTNAME}." >&2
+  if [[ "${WARDBY_HOSTNAME_CHANGE:-}" == "$WARDBY_HOSTNAME" ]]; then
+    echo "       Confirmed by WARDBY_HOSTNAME_CHANGE." >&2
+  elif [[ -t 0 ]]; then
+    read -r -p "       Type the new hostname to continue (anything else stops): " HOSTNAME_ANSWER
+    if [[ "$HOSTNAME_ANSWER" != "$WARDBY_HOSTNAME" ]]; then
+      echo "up.sh: hostname change not confirmed; nothing was rendered or applied." >&2
+      exit 1
+    fi
+  else
+    echo "up.sh: hostname change not confirmed. Re-run in a terminal, or set WARDBY_HOSTNAME_CHANGE=${WARDBY_HOSTNAME}." >&2
+    exit 1
+  fi
+fi
+# end hostname-change check
+
 echo "==> 3/${TOTAL_STEPS} build and push images (linux/amd64)"
 # Every image is built for linux/amd64 (deploy/gke/docker-bake.hcl): an arm64
 # image lands in the registry, the pod fails to start, and the failure surfaces

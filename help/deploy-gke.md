@@ -32,7 +32,9 @@ The deployment process is:
 4. Run `WARDBY_HOSTNAME=wardby.example.com deploy/gke/up.sh`, then verify DNS,
    certificate issuance, database IAM bootstrap, and service health.
    Use `WARDBY_HOSTNAME`, not `HOSTNAME` (shells set that to the machine name);
-   the script refuses local names such as `*.lan` or `*.local`.
+   the script refuses local names such as `*.lan` or `*.local`, and asks you
+   to confirm (or set `WARDBY_HOSTNAME_CHANGE=<new hostname>`) before moving
+   a deployment to a different hostname.
 
 When a release changes `deploy/gke/database-grants.sql`, re-run the database
 grants bootstrap **before** deploying that release, so the proxy role can
