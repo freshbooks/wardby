@@ -9,6 +9,7 @@ import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
 vi.mock("./host-events.js", () => ({ startDeferredReviews: vi.fn(async () => []) }));
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
+import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 
 interface FakeRun {
   id: string;
@@ -734,6 +735,40 @@ describe("reconcileOnce self-defects", () => {
     await reconcileOnce(fresh.db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
     expect(tracker.createIssue).not.toHaveBeenCalled();
     expect((fresh.db as any).agent.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("reconcileOnce workflow events", () => {
+  it("emits run_failed with status lost for a stale top-level run it marks lost", async () => {
+    const runs = [{ ...baseRun({ heartbeatAt: STALE }), agentId: "a1", parentRunId: null } as FakeRun];
+    const db = fakeDb(runs) as any;
+    db.agent = { findUnique: vi.fn(async () => ({ name: "nightly", defectProjectKey: null })) };
+    db.runHostCheck = { findUnique: vi.fn(async () => null) };
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      expect(await reconcileOnce(db as ReconcilerDb, NOW, HEARTBEAT_TIMEOUT_MS)).toBe(1);
+      expect(events).toEqual([
+        {
+          dedupeKey: "run_failed:r1",
+          runId: "r1",
+          agentId: "a1",
+          payload: {
+            kind: "run_failed",
+            agentName: "nightly",
+            status: "lost",
+            reason: expect.stringContaining("Orphaned"),
+          },
+        },
+      ]);
+      // A second pass finds nothing stale and emits nothing more.
+      await reconcileOnce(db as ReconcilerDb, NOW, HEARTBEAT_TIMEOUT_MS);
+      expect(events).toHaveLength(1);
+    } finally {
+      setWorkflowEventSink(null);
+    }
   });
 });
 
