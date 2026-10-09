@@ -21,9 +21,13 @@ import {
   NATIVE_GATEWAY_PORT,
   NATIVE_WORKER_TMP_MB,
   NATIVE_WORKER_UID,
+  nativeWarmWorkerName,
   type NativeWorkerLimits,
 } from "./docker-isolation.js";
+
+export { nativeWarmWorkerName };
 import type { WorkerInput } from "./protocol.js";
+import { WARM_INPUT_FILE } from "./warm-delivery.js";
 
 export const NATIVE_RUN_COMPONENT_LABEL = { "wardby.io/component": "native-run" } as const;
 export const NATIVE_GATEWAY_POD_LABEL = { "app.kubernetes.io/name": "wardby-native-gateway" } as const;
@@ -90,7 +94,58 @@ export interface NativeRunPodOptions {
 export const NATIVE_SANDBOX_PLATFORM_ERROR = "native_sandbox_platform_unsupported";
 
 export function buildNativeRunPod(options: NativeRunPodOptions): V1Pod {
-  const { runId, namespace, image, limits } = options;
+  const names = nativeKubernetesNames(options.runId);
+  return buildNativePod(options, {
+    name: names.pod,
+    labels: nativeRunLabels(options.runId),
+    env: [{ name: "NATIVE_WORKER_INPUT_FILE", value: NATIVE_INPUT_FILE }],
+    input: { secretName: names.secret },
+  });
+}
+
+/** The labels of every warm pool pod: still a native-run pod (the gateway admits it), never a run's. */
+export const NATIVE_WARM_POOL_LABEL = { "wardby.io/pool": "warm" } as const;
+export const NATIVE_WARM_TOKEN_LABEL = "wardby.io/warm-worker";
+/** The label selector listing every warm pool pod. */
+export const NATIVE_WARM_SELECTOR = "wardby.io/component=native-run,wardby.io/pool=warm";
+
+export function nativeWarmLabels(token: string): Record<string, string> {
+  return {
+    ...MANAGED_BY_LABEL,
+    ...NATIVE_RUN_COMPONENT_LABEL,
+    ...NATIVE_WARM_POOL_LABEL,
+    [NATIVE_WARM_TOKEN_LABEL]: token,
+  };
+}
+
+export interface NativeWarmPodOptions extends Omit<NativeRunPodOptions, "runId"> {
+  token: string;
+  /** NATIVE_WORKER_INPUT_WAIT_MS: how long the worker waits to be claimed before it exits. */
+  waitMs: number;
+}
+
+/** A warm pool pod (native sandbox phase 6): no input yet; it waits for one delivered by exec. */
+export function buildNativeWarmPod(options: NativeWarmPodOptions): V1Pod {
+  return buildNativePod(options, {
+    name: nativeWarmWorkerName(options.token),
+    labels: nativeWarmLabels(options.token),
+    env: [
+      { name: "NATIVE_WORKER_INPUT_FILE", value: WARM_INPUT_FILE },
+      { name: "NATIVE_WORKER_INPUT_WAIT_MS", value: String(Math.floor(options.waitMs)) },
+    ],
+  });
+}
+
+function buildNativePod(
+  options: Omit<NativeRunPodOptions, "runId">,
+  identity: {
+    name: string;
+    labels: Record<string, string>;
+    env: { name: string; value: string }[];
+    input?: { secretName: string };
+  },
+): V1Pod {
+  const { namespace, image, limits } = options;
   if (!isRepositoryDigest(image)) {
     throw new Error("native_sandbox_image_not_pinned: a cluster pulls by registry digest (repo@sha256:...).");
   }
@@ -100,7 +155,6 @@ export function buildNativeRunPod(options: NativeRunPodOptions): V1Pod {
       `${NATIVE_SANDBOX_PLATFORM_ERROR}: platform ${profile.name} runs native workers only under the ${GVISOR_RUNTIME_CLASS} RuntimeClass.`,
     );
   }
-  const names = nativeKubernetesNames(runId);
   // Already legal on the platform, so admission rewrites nothing (attestation compares resources).
   // Native pods always declare ephemeral storage, which a generic profile would otherwise drop.
   const conformed = conformResources(profile, {
@@ -112,7 +166,7 @@ export function buildNativeRunPod(options: NativeRunPodOptions): V1Pod {
   return {
     apiVersion: "v1",
     kind: "Pod",
-    metadata: { name: names.pod, namespace, labels: nativeRunLabels(runId) },
+    metadata: { name: identity.name, namespace, labels: identity.labels },
     spec: {
       restartPolicy: "Never",
       activeDeadlineSeconds: Math.max(1, Math.floor(options.activeDeadlineSeconds)),
@@ -137,7 +191,7 @@ export function buildNativeRunPod(options: NativeRunPodOptions): V1Pod {
           name: NATIVE_WORKER_CONTAINER,
           image,
           imagePullPolicy: "IfNotPresent",
-          env: [{ name: "NATIVE_WORKER_INPUT_FILE", value: NATIVE_INPUT_FILE }],
+          env: identity.env,
           resources: { requests: { ...resources }, limits: { ...resources } },
           securityContext: {
             allowPrivilegeEscalation: false,
@@ -147,13 +201,15 @@ export function buildNativeRunPod(options: NativeRunPodOptions): V1Pod {
             capabilities: { drop: ["ALL"] },
           },
           volumeMounts: [
-            { name: "input", mountPath: NATIVE_INPUT_MOUNT, readOnly: true },
+            ...(identity.input ? [{ name: "input", mountPath: NATIVE_INPUT_MOUNT, readOnly: true }] : []),
             { name: "tmp", mountPath: "/tmp" },
           ],
         },
       ],
       volumes: [
-        { name: "input", secret: { secretName: names.secret, defaultMode: 0o440 } },
+        ...(identity.input
+          ? [{ name: "input", secret: { secretName: identity.input.secretName, defaultMode: 0o440 } }]
+          : []),
         { name: "tmp", emptyDir: { sizeLimit: `${NATIVE_WORKER_TMP_MB}Mi` } },
       ],
     },
@@ -162,13 +218,21 @@ export function buildNativeRunPod(options: NativeRunPodOptions): V1Pod {
 
 /** Ingress: none. Egress: the native gateway's pods, on the gateway port only. */
 export function buildNativeRunNetworkPolicy(runId: string, namespace: string): V1NetworkPolicy {
-  const names = nativeKubernetesNames(runId);
+  return buildNativePolicy(nativeKubernetesNames(runId).policy, namespace, nativeRunLabels(runId));
+}
+
+/** A warm pool pod's policy: the same egress, selecting the pod by its token. */
+export function buildNativeWarmNetworkPolicy(token: string, namespace: string): V1NetworkPolicy {
+  return buildNativePolicy(nativeWarmWorkerName(token), namespace, nativeWarmLabels(token));
+}
+
+function buildNativePolicy(name: string, namespace: string, labels: Record<string, string>): V1NetworkPolicy {
   return {
     apiVersion: "networking.k8s.io/v1",
     kind: "NetworkPolicy",
-    metadata: { name: names.policy, namespace, labels: nativeRunLabels(runId) },
+    metadata: { name, namespace, labels },
     spec: {
-      podSelector: { matchLabels: nativeRunLabels(runId) },
+      podSelector: { matchLabels: labels },
       policyTypes: ["Ingress", "Egress"],
       ingress: [],
       egress: [
