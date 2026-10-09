@@ -222,3 +222,41 @@ describe("build worker image help", () => {
     }
   });
 });
+
+describe("Slack notification help", () => {
+  it("is found by the main article for broad queries and tool names in top 3", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const id = "slack-notifications";
+    for (const query of [
+      "slack",
+      "notification",
+      "channel",
+      "link_notification_channel",
+      "test_notification_channel",
+      "slack thread",
+    ]) {
+      const results = searchHelp(catalog, query);
+      expect(
+        results.slice(0, 3).map((r) => r.page.id),
+        query,
+      ).toContain(id);
+    }
+  });
+
+  it("finds each error code in its corresponding error article", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+
+    for (const [code, articleId] of [
+      ["not_in_channel", "errors/slack-channel-unreachable"],
+      ["invalid_auth", "errors/slack-auth-failed"],
+      ["slack not configured", "errors/slack-not-configured"],
+    ] as const) {
+      const results = searchHelp(catalog, code);
+      expect(results[0]?.page.id, code).toBe(articleId);
+    }
+  });
+});

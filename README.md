@@ -374,6 +374,9 @@ for the repository's own dependency-override policy.
 - QuickJS tool isolation with host allowlists and secret bindings.
 - Containerized Codex and Claude Code executors with trusted GitHub draft-PR
   finalization.
+- Optional, outbound-only [Slack workflow notifications](https://github.com/wardby/wardby/blob/main/docs/slack-notifications.md):
+  link a channel to a Jira project or an agent to follow a card from pickup
+  to merge.
 - Per-run PostgreSQL, Redis and MySQL services for coding runs, declared in the
   repository and allowed per agent, for Codex and Claude Code runs on the
   Kubernetes and Docker launchers.

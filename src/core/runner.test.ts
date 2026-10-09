@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../providers/engine/types.js";
@@ -424,6 +425,71 @@ describe("runAgent", () => {
 
     expect(run.status).toBe("refused");
     expect(run.error).toBe("Estimated input cost exceeds budget before any LLM call.");
+  });
+
+  it("emits exactly one run_failed workflow event for a failed run", async () => {
+    const db = fakeDb([{ id: "a1", name: "lead", systemPrompt: "sys", model: "m", budgetUsd: 1, maxTurns: 10 }]);
+    (db as any).runHostCheck = { findUnique: async () => null };
+    const engine = fakeEngine({
+      status: "failed",
+      finalText: "",
+      turns: 1,
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+      error: "LLM call failed\nstack",
+    });
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const run = await runAgent(
+        "lead",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      );
+      expect(events).toEqual([
+        {
+          dedupeKey: `run_failed:${run.id}`,
+          runId: run.id,
+          agentId: "a1",
+          payload: { kind: "run_failed", agentName: "lead", status: "failed", reason: "LLM call failed" },
+        },
+      ]);
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
+
+  it("emits run_failed from the catch path when the engine throws", async () => {
+    const db = fakeDb([{ id: "a1", name: "lead", systemPrompt: "sys", model: "m", budgetUsd: 1, maxTurns: 10 }]);
+    (db as any).runHostCheck = { findUnique: async () => null };
+    const engine = {
+      run: async () => {
+        throw new Error("engine exploded\n    at frame");
+      },
+    };
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const run = await runAgent(
+        "lead",
+        { llm: noopLlm, engine, datastore: fakeDatastore(), secrets: noopSecretCipher, memory: fakeMemory() },
+        db,
+      );
+      expect(run.status).toBe("failed");
+      expect(events).toEqual([
+        {
+          dedupeKey: `run_failed:${run.id}`,
+          runId: run.id,
+          agentId: "a1",
+          payload: { kind: "run_failed", agentName: "lead", status: "failed", reason: "engine exploded" },
+        },
+      ]);
+    } finally {
+      setWorkflowEventSink(null);
+    }
   });
 
   it("passes the agent's own budgetUsd unchanged to the engine when it has no budget group", async () => {
@@ -1543,5 +1609,28 @@ describe("native runs record and keep their catalog entry", () => {
     expect(engine.run).not.toHaveBeenCalled();
     const row: any = await db.run.findUnique({ where: { id: run.id } });
     expect(row.pricingVersion ?? null).toBeNull();
+  });
+
+  it("emits run_failed when a run ends early on an unavailable model", async () => {
+    const db = fakeDb([agent]);
+    const run = await db.run.create({ data: { agentId: "a1" } });
+    const { llm } = routed(disabled);
+    const events: WorkflowEventInput[] = [];
+    setWorkflowEventSink(async (e) => {
+      events.push(e);
+    });
+    try {
+      const finished = await executeRun(run.id, providers(llm, { run: vi.fn(async () => succeeded) }), db);
+      expect(finished.status).toBe("failed");
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        dedupeKey: `run_failed:${run.id}`,
+        runId: run.id,
+        agentId: "a1",
+        payload: { kind: "run_failed", status: "failed", reason: expect.stringMatching(/^model_unavailable: /) },
+      });
+    } finally {
+      setWorkflowEventSink(null);
+    }
   });
 });

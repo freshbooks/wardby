@@ -177,13 +177,15 @@ echo "==> 5/${TOTAL_STEPS} seed Secret Manager"
 # then .env.local, then -- for the two auth keys only -- a new random key. Values
 # go over stdin and are never printed. Stops before writing anything if a value
 # has no source.
-# Optional groups (Jira) are seeded all or none; the ones fully set are listed
-# in SEED_GROUPS_FILE for step 7.
+# Optional groups (Jira, Slack) are seeded all or none; the ones fully set are
+# listed in SEED_GROUPS_FILE for step 7.
 SEED_GROUPS_FILE="$(mktemp)"
 node deploy/gke/seed-secrets.mjs --project "$PROJECT_ID" --prefix "$SECRET_PREFIX" \
   --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" --groups-out "$SEED_GROUPS_FILE"
 JIRA_ENABLED=0
 grep -qx jira "$SEED_GROUPS_FILE" && JIRA_ENABLED=1
+SLACK_ENABLED=0
+grep -qx slack "$SEED_GROUPS_FILE" && SLACK_ENABLED=1
 rm -f "$SEED_GROUPS_FILE"
 
 echo "==> 6/${TOTAL_STEPS} External Secrets Operator ${ESO_CHART_VERSION}, scoped to ${NAMESPACE}"
@@ -236,6 +238,17 @@ if ((JIRA_ENABLED)); then
   SYNCED_SECRETS+=(wardby-jira-env)
 else
   kubectl -n "$NAMESPACE" delete externalsecret wardby-jira-env --ignore-not-found >/dev/null
+fi
+# Slack notifications are optional the same way (wardby-slack-env, optional: true).
+if ((SLACK_ENABLED)); then
+  echo "    Slack is configured; syncing wardby-slack-env"
+  if ! render_secrets external-secrets-slack.yaml | kubectl apply -f - >/dev/null; then
+    echo "up.sh: applying the Slack ExternalSecret failed; running pods are unaffected." >&2
+    exit 1
+  fi
+  SYNCED_SECRETS+=(wardby-slack-env)
+else
+  kubectl -n "$NAMESPACE" delete externalsecret wardby-slack-env --ignore-not-found >/dev/null
 fi
 if ! wait_external_secrets_synced 180s "${SYNCED_SECRETS[@]}"; then
   echo "up.sh: the Secrets did not sync from Secret Manager; nothing else was applied." >&2

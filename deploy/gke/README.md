@@ -90,7 +90,10 @@ that read fails it stops, and the existing Secrets are left as they were.
 The Jira secrets (`jira-*`) are optional and all or none. `seed-secrets.mjs`
 leaves them empty when `.env.local` has none of them, and `up.sh` then skips
 `secrets/external-secrets-jira.yaml`; the control plane reads its Secret,
-`wardby-jira-env`, with `optional: true`.
+`wardby-jira-env`, with `optional: true`. The Slack bot token
+(`slack-bot-token`) is optional the same way: without it `up.sh` skips
+`secrets/external-secrets-slack.yaml`, and the control plane reads
+`wardby-slack-env` with `optional: true`.
 
 `verify-eso-kind.sh` proves the manifests, the scoping and the handover on a
 throwaway kind cluster. Run it after changing any of them or the chart version.

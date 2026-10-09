@@ -16,6 +16,7 @@ import { issueStatusRow, postIssueWorkingStatus } from "./issue-status.js";
 import { logger } from "./logger.js";
 import { openSiblingsForIssue, SIBLING_GUIDANCE, type OpenSibling } from "./related-pull-requests.js";
 import { composeTaskOverride } from "./untrusted-content.js";
+import { dedupeKeys, emitWorkflowEvent } from "./workflow-events.js";
 
 const log = logger.child({ module: "issue-events" });
 const MAX_TASK_BODY = 8000;
@@ -35,7 +36,7 @@ export interface RouteResult {
 }
 
 type LinkRow = Awaited<ReturnType<IssueEventDb["agentIssueProject"]["findMany"]>>[number] & {
-  agent: { ownerId: string | null; kind: string };
+  agent: { ownerId: string | null; kind: string; name: string };
 };
 
 export type OpenIssuePr = OpenSibling;
@@ -144,7 +145,7 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
   if (!tracker) return result;
   const links = (await deps.db.agentIssueProject.findMany({
     where: { provider: event.provider, projectKey: event.projectKey },
-    include: { agent: { select: { ownerId: true, kind: true } } },
+    include: { agent: { select: { ownerId: true, kind: true, name: true } } },
   })) as LinkRow[];
   const bot = await tracker.botAccountId();
   // One snapshot per event, taken lazily on the first dispatch so an event no link matches costs nothing.
@@ -186,6 +187,18 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
       const runId = dispatched.run.id;
       result.runIds.push(runId);
       result.followUps.push(() => postIssueWorkingStatus(deps.db, deps.trackers, runId));
+      // describeKind shows only admin-configured values, so the trigger is safe to show in chat.
+      const trigger = matched.map((k) => describeKind(event, k, link)).join("; ");
+      const agentName = link.agent.name;
+      result.followUps.push(() =>
+        emitWorkflowEvent({
+          dedupeKey: dedupeKeys.issuePickedUp(runId),
+          runId,
+          agentId: link.agentId,
+          workItem: { provider: event.provider, key: event.issueKey },
+          payload: { kind: "issue_picked_up", agentName, trigger },
+        }),
+      );
       log.info({ issueKey: event.issueKey, agentId: link.agentId, runId, kinds: matched }, "issue run dispatched");
     } catch (err) {
       log.warn({ err, issueKey: event.issueKey, agentId: link.agentId }, "issue run could not be dispatched");
