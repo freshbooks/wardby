@@ -52,7 +52,7 @@ describe("native run Kubernetes objects", () => {
     });
     // Its only environment is where its input file is: no credentials, no URLs, no capability.
     expect(worker.env).toEqual([{ name: "NATIVE_WORKER_INPUT_FILE", value: NATIVE_INPUT_FILE }]);
-    expect(worker.resources?.limits).toEqual({ cpu: "1", memory: "512Mi", "ephemeral-storage": "128Mi" });
+    expect(worker.resources?.limits).toEqual({ cpu: "1000m", memory: "512Mi", "ephemeral-storage": "128Mi" });
     expect(worker.resources?.requests).toEqual(worker.resources?.limits);
     expect(worker.volumeMounts).toContainEqual({ name: "input", mountPath: "/run/wardby/input", readOnly: true });
     expect(spec.volumes).toContainEqual({ name: "tmp", emptyDir: { sizeLimit: "64Mi" } });
@@ -123,5 +123,34 @@ describe("native run Kubernetes objects", () => {
     expect(script).toContain('"10.96.0.42", 8790');
     expect(script).toContain('"10.96.0.42", 8791');
     expect(script).toContain('"1.1.1.1", 443');
+    expect(script).toContain('"169.254.169.254", 80');
+    const custom = nativeEnforcementProbe("10.96.0.42", [{ host: "10.1.2.3", port: 3307 }])[2];
+    expect(custom).toContain('"10.1.2.3", 3307');
+    expect(custom).not.toContain("1.1.1.1");
+  });
+
+  it("conforms resources to GKE Autopilot so admission rewrites nothing, and requires gVisor there", () => {
+    const autopilot = (cpus: number, memoryMb: number, runtimeClassName?: string) =>
+      buildNativeRunPod({
+        runId,
+        namespace: "n",
+        image,
+        limits: { cpus, memoryMb, pids: 128 },
+        activeDeadlineSeconds: 60,
+        platform: "gke-autopilot",
+        runtimeClassName,
+        priorityClassName: "wardby-coding-run",
+      }).spec!;
+    // 1 vCPU needs at least 1 GiB on Autopilot; 0.3 vCPU rounds up to the 250m increment.
+    expect(autopilot(1, 512, "gvisor").containers[0].resources?.limits).toEqual({
+      cpu: "1000m",
+      memory: "1024Mi",
+      "ephemeral-storage": "128Mi",
+    });
+    expect(autopilot(0.3, 512, "gvisor").containers[0].resources?.requests).toMatchObject({ cpu: "500m" });
+    expect(autopilot(0.5, 512, "gvisor").priorityClassName).toBe("wardby-coding-run");
+    expect(() => autopilot(0.5, 512)).toThrow(/native_sandbox_platform_unsupported/);
+    expect(() => autopilot(0.5, 512, "runc")).toThrow(/native_sandbox_platform_unsupported/);
+    expect(pod().spec?.priorityClassName).toBeUndefined();
   });
 });

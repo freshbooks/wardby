@@ -11,6 +11,12 @@ import { createHash } from "node:crypto";
 import type { V1NetworkPolicy, V1Pod, V1Secret } from "@kubernetes/client-node";
 import { isRepositoryDigest } from "../providers/jobs/docker-isolation.js";
 import {
+  conformResources,
+  GVISOR_RUNTIME_CLASS,
+  platformProfile,
+  type KubernetesPlatform,
+} from "../providers/jobs/kubernetes-platform.js";
+import {
   NATIVE_GATEWAY_DENY_PORT,
   NATIVE_GATEWAY_PORT,
   NATIVE_WORKER_TMP_MB,
@@ -75,17 +81,34 @@ export interface NativeRunPodOptions {
   /** The pod's hard lifetime: the run's session deadline. */
   activeDeadlineSeconds: number;
   runtimeClassName?: string;
+  /** The cluster's admission rules the pod must already satisfy (KUBERNETES_PLATFORM). Default: "generic". */
+  platform?: KubernetesPlatform;
+  /** KUBERNETES_RUN_PRIORITY_CLASS: the class must exist in the cluster, or every create is refused. */
+  priorityClassName?: string;
 }
+
+export const NATIVE_SANDBOX_PLATFORM_ERROR = "native_sandbox_platform_unsupported";
 
 export function buildNativeRunPod(options: NativeRunPodOptions): V1Pod {
   const { runId, namespace, image, limits } = options;
   if (!isRepositoryDigest(image)) {
     throw new Error("native_sandbox_image_not_pinned: a cluster pulls by registry digest (repo@sha256:...).");
   }
+  const profile = platformProfile(options.platform ?? "generic");
+  if (profile.requiresGvisor && options.runtimeClassName !== GVISOR_RUNTIME_CLASS) {
+    throw new Error(
+      `${NATIVE_SANDBOX_PLATFORM_ERROR}: platform ${profile.name} runs native workers only under the ${GVISOR_RUNTIME_CLASS} RuntimeClass.`,
+    );
+  }
   const names = nativeKubernetesNames(runId);
-  const cpu = String(limits.cpus);
-  const memory = `${limits.memoryMb}Mi`;
-  const ephemeral = `${EPHEMERAL_STORAGE_MI}Mi`;
+  // Already legal on the platform, so admission rewrites nothing (attestation compares resources).
+  // Native pods always declare ephemeral storage, which a generic profile would otherwise drop.
+  const conformed = conformResources(profile, {
+    cpuMillicores: Math.round(limits.cpus * 1000),
+    memoryMib: limits.memoryMb,
+    ephemeralStorageMib: EPHEMERAL_STORAGE_MI,
+  });
+  const resources = { ...conformed.requests, "ephemeral-storage": `${EPHEMERAL_STORAGE_MI}Mi` };
   return {
     apiVersion: "v1",
     kind: "Pod",
@@ -100,6 +123,7 @@ export function buildNativeRunPod(options: NativeRunPodOptions): V1Pod {
       hostIPC: false,
       terminationGracePeriodSeconds: 5,
       ...(options.runtimeClassName ? { runtimeClassName: options.runtimeClassName } : {}),
+      ...(options.priorityClassName ? { priorityClassName: options.priorityClassName } : {}),
       securityContext: {
         runAsNonRoot: true,
         runAsUser: NATIVE_WORKER_UID,
@@ -114,10 +138,7 @@ export function buildNativeRunPod(options: NativeRunPodOptions): V1Pod {
           image,
           imagePullPolicy: "IfNotPresent",
           env: [{ name: "NATIVE_WORKER_INPUT_FILE", value: NATIVE_INPUT_FILE }],
-          resources: {
-            requests: { cpu, memory, "ephemeral-storage": ephemeral },
-            limits: { cpu, memory, "ephemeral-storage": ephemeral },
-          },
+          resources: { requests: { ...resources }, limits: { ...resources } },
           securityContext: {
             allowPrivilegeEscalation: false,
             privileged: false,
@@ -163,12 +184,21 @@ export function buildNativeRunNetworkPolicy(runId: string, namespace: string): V
 /** Exit codes of the in-pod enforcement probe. */
 export const NATIVE_PROBE = { proven: 0, gatewayUnreachable: 3, denyReachable: 4, outsideReachable: 5 } as const;
 
+/** Addresses a worker must not reach: the internet, and the cloud metadata server (node and workload credentials). */
+export const NATIVE_PROBE_OUTSIDE: readonly { host: string; port: number }[] = [
+  { host: "1.1.1.1", port: 443 },
+  { host: "169.254.169.254", port: 80 },
+];
+
 /**
  * Run inside the worker container (exec): proves the pod's egress is the gateway port and nothing
- * else — the gateway answers, while its deny port (same address, another port) and an outside
+ * else — the gateway answers, while its deny port (same address, another port) and every outside
  * address do not. A connection that is refused or times out both count as unreachable.
  */
-export function nativeEnforcementProbe(gatewayHost: string, outside = { host: "1.1.1.1", port: 443 }): string[] {
+export function nativeEnforcementProbe(
+  gatewayHost: string,
+  outside: readonly { host: string; port: number }[] = NATIVE_PROBE_OUTSIDE,
+): string[] {
   const script = [
     'const net = require("node:net");',
     "const reach = (host, port) => new Promise((done) => {",
@@ -180,7 +210,9 @@ export function nativeEnforcementProbe(gatewayHost: string, outside = { host: "1
     "(async () => {",
     `  if (!(await reach(${JSON.stringify(gatewayHost)}, ${NATIVE_GATEWAY_PORT}))) process.exit(${NATIVE_PROBE.gatewayUnreachable});`,
     `  if (await reach(${JSON.stringify(gatewayHost)}, ${NATIVE_GATEWAY_DENY_PORT})) process.exit(${NATIVE_PROBE.denyReachable});`,
-    `  if (await reach(${JSON.stringify(outside.host)}, ${outside.port})) process.exit(${NATIVE_PROBE.outsideReachable});`,
+    ...outside.map(
+      (o) => `  if (await reach(${JSON.stringify(o.host)}, ${o.port})) process.exit(${NATIVE_PROBE.outsideReachable});`,
+    ),
     `  process.exit(${NATIVE_PROBE.proven});`,
     "})();",
   ].join("\n");

@@ -14,6 +14,8 @@
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
 import { logger } from "../core/logger.js";
 import { KubernetesAlreadyExistsError, type KubernetesApi } from "../providers/jobs/kubernetes-api.js";
+import { canonicalResources } from "../providers/jobs/kubernetes-isolation.js";
+import type { KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
 import { NATIVE_GATEWAY_PORT, type NativeWorkerLimits } from "./docker-isolation.js";
 import type { NativeWorkerState } from "./docker-launcher.js";
 import {
@@ -35,6 +37,15 @@ const k8sLog = logger.child({ module: "native-kubernetes-launcher" });
 
 export const NATIVE_SANDBOX_NETWORK_UNENFORCED = "native_sandbox_network_unenforced";
 export const NATIVE_SANDBOX_ISOLATION_MISMATCH = "native_sandbox_isolation_mismatch";
+export const NATIVE_SANDBOX_CAPACITY = "native_sandbox_capacity";
+
+/** The API server's refusal of a pod the namespace's ResourceQuota has no room for (403 "exceeded quota"). */
+export function isQuotaRejection(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const { code, body, message } = err as { code?: unknown; body?: unknown; message?: unknown };
+  const text = `${typeof body === "string" ? body : JSON.stringify(body ?? "")} ${typeof message === "string" ? message : ""}`;
+  return (code === 403 || code === undefined) && /exceeded quota/i.test(text);
+}
 
 export interface KubernetesNativeWorkerLauncherOptions {
   api: KubernetesApi;
@@ -44,6 +55,10 @@ export interface KubernetesNativeWorkerLauncherOptions {
   /** The native gateway's Service, in the same namespace (NetworkPolicy selects its pods there). */
   gatewayService: string;
   runtimeClassName?: string;
+  /** KUBERNETES_PLATFORM: the admission rules native pods are conformed to. */
+  platform?: KubernetesPlatform;
+  /** KUBERNETES_RUN_PRIORITY_CLASS. */
+  priorityClassName?: string;
   /** NATIVE_GATEWAY_URL: dial this instead of the Service's ClusterIP (its host is also what the probe checks). */
   gatewayUrl?: string;
   /** Called once a pod's isolation is proven; the executor marks the run's session ready. */
@@ -128,12 +143,23 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
         limits: this.options.limits,
         activeDeadlineSeconds: this.options.deadlineSeconds,
         runtimeClassName: this.options.runtimeClassName,
+        platform: this.options.platform,
+        priorityClassName: this.options.priorityClassName,
       });
       const policy = buildNativeRunNetworkPolicy(runId, this.ns);
       // Policy first, so the pod never exists without it; the Secret before the pod that mounts it.
       await this.createIfMissing(() => this.api.createNetworkPolicy(this.ns, policy));
       await this.createIfMissing(() => this.api.createSecret(this.ns, buildNativeInputSecret(input, this.ns)));
-      await this.createIfMissing(() => this.api.createPod(this.ns, pod));
+      try {
+        await this.createIfMissing(() => this.api.createPod(this.ns, pod));
+      } catch (err) {
+        if (!isQuotaRejection(err)) throw err;
+        await this.remove(runId).catch(() => {});
+        throw new Error(
+          `${NATIVE_SANDBOX_CAPACITY}: the namespace's ResourceQuota has no room for another native worker pod.`,
+          { cause: err },
+        );
+      }
       try {
         await this.attest(runId, pod, policy);
         await this.proveIsolation(runId);
@@ -165,10 +191,12 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher {
       stored.automountServiceAccountToken === false &&
       stored.hostNetwork !== true &&
       stored.runtimeClassName === want.runtimeClassName &&
+      stored.priorityClassName === want.priorityClassName &&
       stored.containers.length === 1 &&
       stored.containers[0].image === want.containers[0].image &&
       same(stored.containers[0].securityContext, want.containers[0].securityContext) &&
       same(stored.containers[0].env, want.containers[0].env) &&
+      same(canonicalResources(stored.containers[0].resources), canonicalResources(want.containers[0].resources)) &&
       (stored.initContainers ?? []).length === 0;
     if (!ok) {
       throw new Error(

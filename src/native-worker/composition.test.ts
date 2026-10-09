@@ -63,6 +63,7 @@ describe("native sandbox configuration", () => {
       workerImage: image,
       namespace: "wardby-coding",
       gatewayService: "wardby-native-gateway",
+      platform: "generic",
       cpus: 1,
       memoryMb: 512,
       pids: 128,
@@ -83,6 +84,41 @@ describe("native sandbox configuration", () => {
         NATIVE_GATEWAY_SERVICE: "gw",
       }),
     ).toMatchObject({ namespace: "native", gatewayService: "gw" });
+  });
+
+  it("reads GKE Autopilot's platform, run priority, timeouts, and the concurrency cap, and requires gVisor there", () => {
+    const k8s = { NATIVE_SANDBOX_LAUNCHER: "kubernetes", NATIVE_SANDBOX_WORKER_IMAGE: image };
+    const gke = {
+      ...k8s,
+      KUBERNETES_PLATFORM: "gke-autopilot",
+      KUBERNETES_RUNTIME_CLASS: "gvisor",
+      KUBERNETES_RUN_PRIORITY_CLASS: "wardby-coding-run",
+      NATIVE_SANDBOX_READY_TIMEOUT_MS: "600000",
+      NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS: "60000",
+      NATIVE_SANDBOX_MAX_CONCURRENT: "4",
+    };
+    expect(loadNativeSandboxConfig(gke)).toMatchObject({
+      platform: "gke-autopilot",
+      runtimeClassName: "gvisor",
+      priorityClassName: "wardby-coding-run",
+      readyTimeoutMs: 600_000,
+      enforcementTimeoutMs: 60_000,
+      maxConcurrent: 4,
+    });
+    expect(loadNativeSandboxConfig({ ...gke, NATIVE_SANDBOX_PRIORITY_CLASS: "native-runs" })).toMatchObject({
+      priorityClassName: "native-runs",
+    });
+    expect(() => loadNativeSandboxConfig({ ...gke, KUBERNETES_RUNTIME_CLASS: "" })).toThrow(/only under gVisor/);
+    expect(() => loadNativeSandboxConfig({ ...gke, NATIVE_SANDBOX_RUNTIME_CLASS: "runc" })).toThrow(
+      /only under gVisor/,
+    );
+    expect(() => loadNativeSandboxConfig({ ...gke, NATIVE_SANDBOX_PRIORITY_CLASS: "system-node-critical" })).toThrow(
+      /system- priority class/,
+    );
+    expect(() => loadNativeSandboxConfig({ ...gke, NATIVE_SANDBOX_READY_TIMEOUT_MS: "5" })).toThrow(
+      /NATIVE_SANDBOX_READY_TIMEOUT_MS/,
+    );
+    expect(() => loadNativeSandboxConfig({ ...k8s, KUBERNETES_PLATFORM: "eks" })).toThrow(/KUBERNETES_PLATFORM/);
   });
 
   it("requires a registry digest for Kubernetes: a cluster cannot pull a local image id", () => {

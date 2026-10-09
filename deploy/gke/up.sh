@@ -62,8 +62,11 @@ PROXY_SERVICE_ACCOUNT="$(terraform -chdir="$TF_DIR" output -raw proxy_service_ac
 APP_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw app_database_user)"
 MIGRATOR_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw migrator_database_user)"
 PROXY_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw proxy_database_user)"
+GATEWAY_SERVICE_ACCOUNT="$(terraform -chdir="$TF_DIR" output -raw gateway_service_account)"
+GATEWAY_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw gateway_database_user)"
 for var in CONNECTION DB_NAME APP_SERVICE_ACCOUNT MIGRATOR_SERVICE_ACCOUNT \
-           PROXY_SERVICE_ACCOUNT APP_DATABASE_USER MIGRATOR_DATABASE_USER PROXY_DATABASE_USER; do
+           PROXY_SERVICE_ACCOUNT APP_DATABASE_USER MIGRATOR_DATABASE_USER PROXY_DATABASE_USER \
+           GATEWAY_SERVICE_ACCOUNT GATEWAY_DATABASE_USER; do
   [[ -n "${!var}" ]] || { echo "up.sh: terraform output for ${var} came back empty; is ${TF_DIR} applied?" >&2; exit 1; }
 done
 # postgresql://<IAM user, @ as %40>@127.0.0.1:5432/<database>: the Auth Proxy
@@ -73,14 +76,17 @@ iam_url() { printf 'postgresql://%s@127.0.0.1:5432/%s' "$(printf '%s' "$1" | sed
 APP_DATABASE_URL="$(iam_url "$APP_DATABASE_USER")"
 MIGRATOR_DATABASE_URL="$(iam_url "$MIGRATOR_DATABASE_USER")"
 PROXY_DATABASE_URL="$(iam_url "$PROXY_DATABASE_USER")"
+GATEWAY_DATABASE_URL="$(iam_url "$GATEWAY_DATABASE_USER")"
 iam_substitutions() {
   sed -e "s|wardby-instance-connection-name|${CONNECTION}|g" \
       -e "s|wardby-app-gsa-email|${APP_SERVICE_ACCOUNT}|g" \
       -e "s|wardby-migrator-gsa-email|${MIGRATOR_SERVICE_ACCOUNT}|g" \
       -e "s|wardby-proxy-gsa-email|${PROXY_SERVICE_ACCOUNT}|g" \
+      -e "s|wardby-gateway-gsa-email|${GATEWAY_SERVICE_ACCOUNT}|g" \
       -e "s|value: wardby-app-database-url|value: ${APP_DATABASE_URL}|g" \
       -e "s|value: wardby-migrator-database-url|value: ${MIGRATOR_DATABASE_URL}|g" \
-      -e "s|value: wardby-proxy-database-url|value: ${PROXY_DATABASE_URL}|g"
+      -e "s|value: wardby-proxy-database-url|value: ${PROXY_DATABASE_URL}|g" \
+      -e "s|value: wardby-gateway-database-url|value: ${GATEWAY_DATABASE_URL}|g"
 }
 # Belt and suspenders against the substitution list above going stale: every
 # rendered manifest must be free of the wardby-*-gsa-email / *-database-url /
@@ -120,7 +126,7 @@ echo "==> 3/${TOTAL_STEPS} build and push images (linux/amd64)"
 # concurrently from one context, and the Dockerfiles compile JavaScript on the
 # builder's own platform, so an arm64 Mac only emulates what actually ships.
 REGISTRY="$REGISTRY" docker buildx bake -f deploy/gke/docker-bake.hcl --load >/dev/null
-IMAGES=(runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner claude-tool-runner-node-python)
+IMAGES=(runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner claude-tool-runner-node-python native-worker)
 PUSH_PIDS=()
 for img in "${IMAGES[@]}"; do
   docker push "${REGISTRY}/${img}:latest" >/dev/null &
@@ -143,6 +149,7 @@ WORKER_IMAGE_NODE_PYTHON="$(digest_of coding-worker-node-python)"
 CLAUDE_WORKER_IMAGE="$(digest_of claude-coding-worker)"
 CLAUDE_TOOL_RUNNER_IMAGE="$(digest_of claude-tool-runner)"
 CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON="$(digest_of claude-tool-runner-node-python)"
+NATIVE_WORKER_IMAGE="$(digest_of native-worker)"
 
 echo "==> 4/${TOTAL_STEPS} verify the worker images have tar, head and test"
 # Seeding and collection shell out to these. Without them every launch hangs
@@ -169,6 +176,14 @@ done
 # Claude's node-python tool runner runs a Python project's own checks, like the Codex one.
 if ! docker run --rm --platform linux/amd64 --entrypoint sh "$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON" -c 'python --version && python -m pytest --version && python -m ruff --version' >/dev/null; then
   echo "up.sh: the Claude node-python tool runner image is missing python, pytest or ruff." >&2
+  exit 1
+fi
+
+# The native sandbox worker: its in-pod isolation probe runs `node`, and it carries no network
+# tooling a tool escape could use (its Dockerfile asserts the same at build time).
+if ! docker run --rm --platform linux/amd64 --entrypoint sh "$NATIVE_WORKER_IMAGE" -c \
+  'command -v node && for t in curl wget nc ssh; do ! command -v "$t"; done' >/dev/null; then
+  echo "up.sh: the native worker image is missing node or carries network tooling." >&2
   exit 1
 fi
 
@@ -218,7 +233,7 @@ fi
 # rather than adopting the hand-made ones and their old annotations. Safe
 # because step 5 put every value in Secret Manager and the canary read every
 # key.
-release_unowned_secrets wardby-coding-proxy-env wardby-control-plane-env
+release_unowned_secrets wardby-coding-proxy-env wardby-control-plane-env wardby-native-gateway-env
 if ! render_secrets external-secrets.yaml | kubectl apply -f - >/dev/null; then
   echo "up.sh: applying the ExternalSecrets failed after the hand-made Secrets were released; running pods are unaffected. Re-run up.sh to finish." >&2
   exit 1
@@ -226,7 +241,7 @@ fi
 # Forces a sync and waits for a fresh one, so a secret version that step 5
 # just added (e.g. a newly generated auth key) is in the Secret before step 9
 # rolls the Deployments.
-SYNCED_SECRETS=(wardby-coding-proxy-env wardby-control-plane-env)
+SYNCED_SECRETS=(wardby-coding-proxy-env wardby-control-plane-env wardby-native-gateway-env)
 # Jira is optional: synced when every Jira secret is set, removed when none is
 # (the control plane reads wardby-jira-env with optional: true).
 if ((JIRA_ENABLED)); then
@@ -352,7 +367,7 @@ echo "    migrations applied"
 echo "==> 9/${TOTAL_STEPS} render and apply the overlay"
 # What is running now, recorded before it is replaced: rollback means going back
 # to exactly these digests (see the rollback note at the end).
-PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardby-coding-proxy \
+PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardby-coding-proxy wardby-native-gateway \
   -o jsonpath='{range .items[*]}{.metadata.name}={.spec.template.spec.containers[0].image}{"\n"}{end}' 2>/dev/null || true)"
 # Every value below is target identity: it is substituted here and never
 # committed. The placeholders are the contract between this script and the
@@ -371,6 +386,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
         -e "s|value: wardby-claude-tool-runner-image$|value: ${CLAUDE_TOOL_RUNNER_IMAGE}|" \
         -e "s|value: wardby-claude-coding-worker-image$|value: ${CLAUDE_WORKER_IMAGE}|" \
         -e "s|value: wardby-coding-worker-image$|value: ${WORKER_IMAGE}|" \
+        -e "s|value: wardby-native-worker-image$|value: ${NATIVE_WORKER_IMAGE}|" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
         -e "s|wardby-control-plane-hostname|${HOSTNAME}|g" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
@@ -380,6 +396,7 @@ echo "$OVERLAY_MANIFEST" | kubectl apply -f - >/dev/null
 
 echo "==> 10/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s
+kubectl -n "$NAMESPACE" rollout status deploy/wardby-native-gateway --timeout=300s
 if ! kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s; then
   # The previous pod keeps serving (maxUnavailable 0). The durable executor
   # launches before anything else, so a missing `dbos` schema grant shows here
@@ -434,6 +451,7 @@ import("/app/dist/core/db.js")
 DATABASE_OK=true
 database_roundtrip wardby-control-plane control-plane Agent "control plane" || DATABASE_OK=false
 database_roundtrip wardby-coding-proxy proxy CodingProxySession "coding proxy" || DATABASE_OK=false
+database_roundtrip wardby-native-gateway gateway NativeGatewaySession "native gateway" || DATABASE_OK=false
 # The proxy's grants only take effect when bootstrap-database-iam.sh runs, and
 # this script does not run it: a release that adds proxy tables deploys fine
 # and then fails every registry request with "permission denied" (an unlogged
@@ -467,12 +485,14 @@ if ! $DATABASE_OK; then
 up.sh: the new pods cannot use the database.
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
+  kubectl -n ${NAMESPACE} rollout undo deploy/wardby-native-gateway
 restores the previous images and pod templates (any revision since the IAM
 cutover), which also log in through IAM -- there is no password login to
 restore.
 "permission denied" means the grants are missing or incomplete. On a fresh
 install the coding proxy's are expected to be missing until the bootstrap runs
-again after the first migrations: run deploy/gke/bootstrap-database-iam.sh
+again after the first migrations, and the native gateway's until the bootstrap
+has run once since its identity was added: run deploy/gke/bootstrap-database-iam.sh
 (default mode), then up.sh again (docs/getting-started-gke.md, "Database
 login"). --password-from-stdin is only for a deployment still on password
 login.
@@ -544,6 +564,7 @@ Still manual, because neither belongs in a script:
 Roll back (images are pinned by digest, so this is exactly what ran before):
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
+  kubectl -n ${NAMESPACE} rollout undo deploy/wardby-native-gateway
 Images before this deploy:
 ${PREVIOUS_IMAGES:-  (none: first deploy)}
 Migrations only go forward, so a rollback is safe only while the schema change it

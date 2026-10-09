@@ -15,6 +15,8 @@ use `deploy/gke` and the `gke-autopilot` Kubernetes overlay described here.
 
 - The Wardby control plane and coding proxy run in GKE Autopilot.
 - Each Codex coding run uses an ephemeral gVisor-backed pod.
+- Native agents set to sandbox mode run in single-use gVisor pods behind the
+  native gateway (see "Native sandbox" below).
 - Cloud SQL PostgreSQL has no public IP and is reached through private services
   access on the cluster's VPC.
 - Runtime, migration, and worker images are stored in Artifact Registry and
@@ -290,11 +292,12 @@ through the Cloud SQL Auth Proxy, via Workload Identity from one Kubernetes
 service account. What each may do inside the database comes from a `NOLOGIN`
 group role in `deploy/gke/database-grants.sql`:
 
-| Workload      | Google service account   | Kubernetes service account | May do                                                                                                                                                                                          |
-| ------------- | ------------------------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table, including the durable executor's in schema `dbos`; never change a schema                                                                                  |
-| Coding proxy  | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: only its budget ledger — `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id` |
-| Migrations    | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` and `dbos schema` can alter and create tables                                                                                  |
+| Workload       | Google service account   | Kubernetes service account | May do                                                                                                                                                                                          |
+| -------------- | ------------------------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane  | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table, including the durable executor's in schema `dbos`; never change a schema                                                                                  |
+| Coding proxy   | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: only its budget ledger — `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id` |
+| Native gateway | `<name_prefix>-gateway`  | `wardby-native-gateway`    | Member of `wardby_app`: the same data access as the control plane, under its own login (see [Native sandbox](#native-sandbox))                                                                  |
+| Migrations     | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` and `dbos schema` can alter and create tables                                                                                  |
 
 `deploy/gke/bootstrap-database-iam.sh` applies the grants as the built-in
 owner, from a short-lived Job inside the cluster. Run it whenever
@@ -311,10 +314,16 @@ SQL Admin API, uses that password once to apply the grants, and resets it to
 a value nobody holds on every exit, including a failed grant. No password is
 ever stored, printed, or passed as a process argument.
 
+A deployment that already runs and then gains the native gateway identity from
+`terraform apply` runs `deploy/gke/bootstrap-database-iam.sh` once, so the
+gateway's user gets its `wardby_app` membership, and then `deploy/gke/up.sh`.
+`up.sh`'s database check also tests the native gateway and says so if the
+grant is missing.
+
 A brand-new project runs, in this order:
 
 1. `terraform -chdir=deploy/gke apply` — creates the cluster, the instance
-   and the three IAM database users. Run it yourself rather than through
+   and the four IAM database users. Run it yourself rather than through
    `up.sh`, which would go on to the migrations before the migrator has its
    grants.
 2. `deploy/gke/bootstrap-database-iam.sh` (default mode) — fetches the
@@ -583,6 +592,42 @@ it, set `replicas: 0` in
 A PriorityClass's value and preemption policy cannot be changed in place:
 delete the class and re-run `up.sh` to change them.
 
+### Native sandbox
+
+`up.sh` deploys everything the [native sandbox](native-sandbox.md) needs on
+this cluster. It builds and pushes the `native-worker` image, checks it (Node is
+present; `curl`, `wget`, `nc` and `ssh` are not), and pins it by digest as
+`NATIVE_SANDBOX_WORKER_IMAGE`. It syncs the gateway's ExternalSecret, rolls out
+`wardby-native-gateway`, waits for it, and checks its database round trip. The
+control plane is configured with `NATIVE_SANDBOX_LAUNCHER=kubernetes`,
+`NATIVE_SANDBOX_CPUS=0.5`, `NATIVE_SANDBOX_MEMORY_MB=512`,
+`NATIVE_SANDBOX_MAX_CONCURRENT=4`, `NATIVE_SANDBOX_READY_TIMEOUT_MS=600000`
+(a cold gVisor node takes about two minutes), and
+`NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS=60000`. Worker pods use the gVisor runtime
+class, `KUBERNETES_PLATFORM=gke-autopilot`, and the run priority class.
+
+- **One-time bootstrap.** The gateway has its own database login. After
+  `terraform apply` adds its identity to an existing deployment, run
+  `deploy/gke/bootstrap-database-iam.sh` once, then `deploy/gke/up.sh`; see
+  [Database login](#database-login).
+- **Enable per agent.** Nothing runs in the sandbox until you opt an agent in:
+  set its `nativeExecutionMode` to `sandbox` with the `update_agent` MCP tool
+  (native agents only).
+- **Capacity.** At most `NATIVE_SANDBOX_MAX_CONCURRENT` sandbox runs are active
+  at once; a start past that fails with `native_sandbox_capacity` rather than
+  queuing. The `wardby-coding` ResourceQuota (26 pods, 11 CPU, 20Gi memory)
+  already covers the gateway's two replicas and that many 500m / 512Mi worker
+  pods. Raise the quota together with `NATIVE_SANDBOX_MAX_CONCURRENT` or
+  `CODING_MAX_CONCURRENT`.
+- **Check isolation.** `npm run test:native-cluster` runs launcher-only
+  isolation checks against the deployed gateway; set `NATIVE_TEST_WORKER_IMAGE`
+  to the worker digest and `NATIVE_TEST_FORBIDDEN` to the database's private
+  `host:port` (for example `10.0.0.5:3307`).
+- **Roll back.** Set an agent back to `control-plane` with `update_agent`; this
+  affects only new runs, and runs already started in sandbox mode finish there.
+  To undo a bad gateway release, run
+  `kubectl -n wardby-coding rollout undo deploy/wardby-native-gateway`.
+
 ### Coding-run services
 
 A coding run whose agent allows [services](coding-services.md) waits for each
@@ -602,6 +647,7 @@ before. `up.sh` prints the previous digests at the end of every deploy.
 ```sh
 kubectl -n wardby-coding rollout undo deploy/wardby-control-plane
 kubectl -n wardby-coding rollout undo deploy/wardby-coding-proxy
+kubectl -n wardby-coding rollout undo deploy/wardby-native-gateway
 ```
 
 `rollout undo` restores only the Deployments' images and pod templates — there

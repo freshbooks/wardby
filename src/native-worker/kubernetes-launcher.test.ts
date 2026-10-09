@@ -141,4 +141,50 @@ describe("KubernetesNativeWorkerLauncher", () => {
       JSON.stringify(canonical(built)),
     );
   });
+
+  it("refuses a pod whose resources or priority class admission changed, but not a re-rendered quantity", async () => {
+    const mutate = (change: (pod: V1Pod) => void) => {
+      const ctx = setup();
+      const create = ctx.api.createPod.bind(ctx.api);
+      ctx.api.createPod = async (namespace, body) => {
+        const stored = structuredClone(body);
+        change(stored);
+        return create(namespace, stored);
+      };
+      return ctx;
+    };
+    const rewritten = mutate((pod) => {
+      pod.spec!.containers[0].resources = {
+        requests: { cpu: "2", memory: "2Gi", "ephemeral-storage": "128Mi" },
+        limits: { cpu: "2", memory: "2Gi", "ephemeral-storage": "128Mi" },
+      };
+    });
+    await expect(rewritten.launcher.launch(input)).rejects.toThrow(/native_sandbox_isolation_mismatch/);
+    const prioritized = mutate((pod) => {
+      pod.spec!.priorityClassName = "system-node-critical";
+    });
+    await expect(prioritized.launcher.launch(input)).rejects.toThrow(/native_sandbox_isolation_mismatch/);
+    // "1000m" read back as "1", "128Mi" as its byte count spelled differently: the same values.
+    const rerendered = mutate((pod) => {
+      pod.spec!.containers[0].resources = {
+        requests: { cpu: "1", memory: "512Mi", "ephemeral-storage": "134217728" },
+        limits: { cpu: "1", memory: "512Mi", "ephemeral-storage": "134217728" },
+      };
+    });
+    await expect(rerendered.launcher.launch(input)).resolves.toBeDefined();
+  });
+
+  it("reports a ResourceQuota refusal as capacity, leaving nothing behind", async () => {
+    const { api, launcher, proven } = setup();
+    api.createPod = async () => {
+      throw Object.assign(new Error("HTTP-Code: 403"), {
+        code: 403,
+        body: '{"message":"pods \\"x\\" is forbidden: exceeded quota: wardby-coding, requested: pods=1"}',
+      });
+    };
+    await expect(launcher.launch(input)).rejects.toThrow(/native_sandbox_capacity/);
+    expect(proven).not.toHaveBeenCalled();
+    expect(exists(api, "secret", names.secret)).toBe(false);
+    expect(exists(api, "networkpolicy", names.policy)).toBe(false);
+  });
 });

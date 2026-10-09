@@ -37,6 +37,10 @@ export function buildNativeSandboxExecutor(options: {
           limits,
           gatewayService: config.gatewayService,
           runtimeClassName: config.runtimeClassName,
+          platform: config.platform,
+          priorityClassName: config.priorityClassName,
+          readyTimeoutMs: config.readyTimeoutMs,
+          enforcementTimeoutMs: config.enforcementTimeoutMs,
           gatewayUrl: config.gatewayUrl,
           deadlineSeconds: SANDBOX_RUN_MAX_SEC,
           // Isolation proven inside the pod: the gateway may now serve the run.
@@ -53,5 +57,6 @@ export function buildNativeSandboxExecutor(options: {
     launcher,
     // Kubernetes resolves the gateway's ClusterIP per launch (resolveGatewayUrl) unless overridden.
     gatewayUrl: config.gatewayUrl ?? nativeGatewayUrl(),
+    maxConcurrent: config.maxConcurrent,
   });
 }

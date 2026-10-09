@@ -45,19 +45,28 @@ rule). On the server set `NATIVE_SANDBOX_WORKER_IMAGE` to a registry digest
 (`repo@sha256:...`; a local image id is not accepted), and optionally
 `NATIVE_SANDBOX_NAMESPACE` (default `KUBERNETES_NAMESPACE`, else
 `wardby-coding`), `KUBERNETES_CONTEXT`, `NATIVE_SANDBOX_RUNTIME_CLASS` (for
-example gVisor), and `NATIVE_GATEWAY_SERVICE` (default
-`wardby-native-gateway`). `NATIVE_SANDBOX_PIDS` applies to Docker only. The
+example gVisor), `NATIVE_GATEWAY_SERVICE` (default `wardby-native-gateway`),
+`NATIVE_SANDBOX_PRIORITY_CLASS` (not a `system-` class),
+`NATIVE_SANDBOX_MAX_CONCURRENT` (cap on simultaneous sandbox runs across all
+replicas; unset means no cap), `NATIVE_SANDBOX_READY_TIMEOUT_MS` (default 120000) and `NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS` (default 30000).
+`NATIVE_SANDBOX_PIDS` applies to Docker only. On GKE Autopilot also set
+`KUBERNETES_PLATFORM=gke-autopilot`: pod resources are conformed to Autopilot's
+rules and the gVisor runtime class is required. The shipped GKE deployment
+runs the gateway for you; see the GKE guide. The
 server needs permission in that namespace to create, get, and delete pods,
 Secrets, and NetworkPolicies, list pods, exec into pods, and get Services.
 
 Each run starts "not ready": the gateway refuses the worker until the server
 has verified the pod and its NetworkPolicy and proven from inside the pod that
-the gateway answers while the deny port and the outside world do not. Failures
+the gateway answers while the deny port, the outside world, and the cloud
+metadata server do not. Failures
 there are
 [native_sandbox_network_unenforced](errors/native-sandbox-network-unenforced.md),
 [native_sandbox_isolation_mismatch](errors/native-sandbox-isolation-mismatch.md),
 [native_sandbox_gateway_unavailable](errors/native-sandbox-gateway-unavailable.md),
 and [native_sandbox_worker_unready](errors/native-sandbox-worker-unready.md).
+A start past the concurrent cap or the namespace quota fails with
+[native_sandbox_capacity](errors/native-sandbox-capacity.md).
 
 The full procedure, topology, and local compose overlay are in
 [Native sandbox](../docs/native-sandbox.md).
@@ -77,8 +86,8 @@ The full procedure, topology, and local compose overlay are in
 
 ## Roll back
 
-Set the agent back to `control-plane`. Runs already started keep their mode
-until they finish.
+Set the agent back to `control-plane`. Only new runs are affected: runs
+already started in sandbox mode finish there.
 
 ## Troubleshooting
 
@@ -98,6 +107,7 @@ codes:
 - [native_sandbox_isolation_mismatch](errors/native-sandbox-isolation-mismatch.md)
 - [native_sandbox_gateway_unavailable](errors/native-sandbox-gateway-unavailable.md)
 - [native_sandbox_worker_unready](errors/native-sandbox-worker-unready.md)
+- [native_sandbox_capacity](errors/native-sandbox-capacity.md)
 
 See also [Use native agents, tools, and data](native-capabilities.md) and
 [Understand Wardby security boundaries](security.md).

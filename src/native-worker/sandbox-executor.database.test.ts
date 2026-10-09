@@ -99,6 +99,24 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     expect(fake.launched.filter((i) => i.runId === raced.id)).toHaveLength(1);
   });
 
+  it("refuses a start past NATIVE_SANDBOX_MAX_CONCURRENT active sessions, launching nothing", async () => {
+    const fake = fakeLauncher();
+    const first = await sandboxRun();
+    await executorWith(fake.launcher).start(first.id);
+    const active = await db.nativeGatewaySession.count({ where: { status: "active" } });
+    const full = new NativeSandboxExecutor({
+      db,
+      providers,
+      launcher: fake.launcher,
+      gatewayUrl,
+      maxConcurrent: active,
+    });
+    const second = await sandboxRun();
+    await expect(full.start(second.id)).rejects.toThrow(/native_sandbox_capacity/);
+    expect(fake.launched.map((i) => i.runId)).toEqual([first.id]);
+    expect(await db.nativeGatewaySession.findUnique({ where: { runId: second.id } })).toBeNull();
+  });
+
   it("fails a run whose worker exits without a result, and removes the worker", async () => {
     const fake = fakeLauncher();
     const run = await sandboxRun();
