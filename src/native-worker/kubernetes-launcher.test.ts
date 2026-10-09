@@ -246,7 +246,7 @@ describe("KubernetesNativeWorkerLauncher warm pool workers", () => {
     expect(await launcher.reattestWarm(token, 60_000)).toBe(false);
     api.put("networkpolicy", ns, policy);
     const pod = (await api.readPod(ns, warm))!;
-    api.put("pod", ns, { ...pod, status: { phase: "Succeeded" } } as V1Pod);
+    api.put("pod", ns, { ...pod, status: { phase: "Succeeded" } });
     expect(await launcher.reattestWarm(token, 60_000)).toBe(false);
     await launcher.removeWarm(token);
     expect(await launcher.reattestWarm(token, 60_000)).toBe(false);
