@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,5 +94,68 @@ describe("native gateway on GKE Autopilot", () => {
       Number(baseQuota.pods) + 2 + Number(env.NATIVE_SANDBOX_MAX_CONCURRENT),
     );
     expect(quota["limits.cpu"]).toBe(quota["requests.cpu"]);
+  });
+});
+
+describe("deploy/gke/up.sh and the native sandbox", () => {
+  const upSh = read("../../../../gke/up.sh");
+  const sedLine = (needle) =>
+    upSh
+      .split("\n")
+      .find((line) => line.includes(needle))
+      .trim()
+      .replace(/^(sed\s+)?-e\s+/, "")
+      .replace(/\s*\\$/, "");
+  const sed = (exprs, input, env) =>
+    execFileSync("bash", ["-c", `printf '%s' "$IN" | sed ${exprs.map((e) => `-e ${e}`).join(" ")}`], {
+      env: { PATH: process.env.PATH, IN: input, ...env },
+    }).toString();
+
+  it("substitutes the worker image digest, the gateway's identity and its database URL", () => {
+    const image = `registry.example/native-worker@sha256:${"b".repeat(64)}`;
+    const out = sed(
+      [
+        sedLine("s|value: wardby-native-worker-image$|"),
+        sedLine("s|wardby-gateway-gsa-email|"),
+        sedLine("s|value: wardby-gateway-database-url|"),
+      ],
+      [read("control-plane.yaml"), read("native-gateway-cloudsql.yaml")].join("\n---\n"),
+      {
+        NATIVE_WORKER_IMAGE: image,
+        GATEWAY_SERVICE_ACCOUNT: "wardby-gateway@project.iam.gserviceaccount.com",
+        GATEWAY_DATABASE_URL: "postgresql://wardby-gateway%40project.iam@127.0.0.1:5432/wardby",
+      },
+    );
+    expect(out).toContain(`value: ${image}`);
+    expect(out).toContain("iam.gke.io/gcp-service-account: wardby-gateway@project.iam.gserviceaccount.com");
+    expect(out).not.toMatch(/wardby-native-worker-image|wardby-gateway-gsa-email|wardby-gateway-database-url/);
+  });
+
+  it("refuses to apply a manifest that still carries a native placeholder", () => {
+    const fn = upSh.match(/^assert_no_placeholders\(\) \{[\s\S]*?^\}$/m)?.[0];
+    const run = (manifest) =>
+      execFileSync("bash", ["-c", `${fn}\nassert_no_placeholders "$M"`], {
+        env: { PATH: process.env.PATH, M: manifest },
+        stdio: "pipe",
+      });
+    expect(() => run("value: wardby-native-worker-image")).toThrow();
+    expect(() => run("iam.gke.io/gcp-service-account: wardby-gateway-gsa-email")).toThrow();
+    expect(() => run("value: wardby-gateway-database-url")).toThrow();
+  });
+
+  it("builds, pins, syncs and waits for everything the sandbox needs", () => {
+    expect(upSh).toMatch(/^IMAGES=\(.*\bnative-worker\b.*\)$/m);
+    expect(read("../../../../gke/docker-bake.hcl")).toMatch(/"native-worker",/);
+    expect(upSh).toMatch(/^SYNCED_SECRETS=\(.*\bwardby-native-gateway-env\b.*\)$/m);
+    expect(upSh).toContain("rollout status deploy/wardby-native-gateway");
+    expect(upSh).toMatch(/database_roundtrip wardby-native-gateway gateway NativeGatewaySession/);
+    const external = load("secrets/external-secrets.yaml").find((o) => o.metadata.name === "wardby-native-gateway-env");
+    expect(external.spec.data.map((d) => d.secretKey).sort()).toEqual([
+      "ANTHROPIC_API_KEY",
+      "GITHUB_APP_ID",
+      "GITHUB_APP_PRIVATE_KEY",
+      "OPENAI_API_KEY",
+      "SECRET_APP_KEY",
+    ]);
   });
 });
