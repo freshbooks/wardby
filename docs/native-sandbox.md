@@ -251,11 +251,13 @@ same Wardby image as the server. Requirements:
   wrongly proven.
 - Replicas are fine; the gateway is stateless.
 
-The Kubernetes harness in `deploy/kind-coding/manifests/overlays/kind/`
-contains a reference Deployment, Service, and NetworkPolicy
-(`native-gateway.yaml`) you can copy and adapt. The cloud overlays under
-`deploy/` do not ship the gateway yet, so on those you add the manifests
-yourself.
+The gateway ships in every target's manifests: the Deployment, Service, and
+NetworkPolicy are in `deploy/kind-coding/manifests/base/native-gateway.yaml`,
+and each overlay (`kind`, `gke-autopilot`) supplies its own database egress and
+the `wardby-native-gateway-env` Secret. On a cluster you manage yourself, copy
+that file and adapt it. On GKE Autopilot the gateway also gets its own Workload
+Identity and Cloud SQL database user; see
+[Getting started on GKE](getting-started-gke.md#native-sandbox).
 
 ### 3. Server permissions
 
@@ -285,8 +287,9 @@ NATIVE_SANDBOX_NAMESPACE=wardby
 
 Optional: `KUBERNETES_CONTEXT` (the kubeconfig context; unset uses the
 in-cluster identity or the current context), `NATIVE_SANDBOX_RUNTIME_CLASS`
-(for example a gVisor class), `NATIVE_GATEWAY_SERVICE`, and the CPU and memory
-limits. See [Configuration reference](#configuration-reference). Then set
+(for example a gVisor class), `NATIVE_GATEWAY_SERVICE`, the CPU and memory
+limits, `NATIVE_SANDBOX_MAX_CONCURRENT`, `NATIVE_SANDBOX_PRIORITY_CLASS`, and
+the two start-up time limits. See [Configuration reference](#configuration-reference). Then set
 agents to `sandbox` mode as described in
 [Set an agent's mode](#4-set-an-agents-mode).
 
@@ -302,7 +305,8 @@ For every run the server creates, then deletes when the run ends:
 - The **pod**, with no service-account token, non-root (uid and fsGroup
   10001), a read-only root filesystem with a 64 MiB `/tmp`, all capabilities
   dropped, no privilege escalation, the runtime-default seccomp profile, CPU
-  and memory requests equal to limits, and `activeDeadlineSeconds` set to the
+  and memory requests equal to limits, an optional priority class
+  (`NATIVE_SANDBOX_PRIORITY_CLASS`), and `activeDeadlineSeconds` set to the
   run's deadline. Kubernetes has no per-pod process limit, so
   `NATIVE_SANDBOX_PIDS` does not apply.
 
@@ -319,12 +323,14 @@ starts **not ready**: the gateway refuses every call from it with a
 1. Reads back the pod and NetworkPolicy it created and compares them with what
    it built. If an admission controller or mutating webhook changed the
    security-relevant parts (service-account token, host networking, runtime
-   class, image, container security context, extra containers, or the policy),
+   class, priority class, image, container resources and security context,
+   extra containers, or the policy),
    the run fails with
    [`native_sandbox_isolation_mismatch`](../help/errors/native-sandbox-isolation-mismatch.md).
 2. Waits for the pod to run, then executes a short probe inside it. The probe
    must reach the gateway on 8790, must fail to reach the gateway's deny port
-   8791 at the same address, and must fail to reach an outside address.
+   8791 at the same address, and must fail to reach an outside address or the
+   cloud metadata server (`169.254.169.254:80`).
 3. Only when the probe passes does it mark the run ready. The gateway then
    accepts the worker's calls.
 
@@ -335,21 +341,49 @@ stays in its starting state for a few seconds (longer on a cold image pull),
 and nothing in the model or tool logs until it is ready. A cluster whose CNI
 does not enforce NetworkPolicy fails every sandbox run this way, by design.
 
+### Managed Kubernetes platforms
+
+Set `KUBERNETES_PLATFORM=gke-autopilot` on GKE Autopilot. It applies to native
+worker pods as well as coding pods: pod resources are conformed to Autopilot's
+rules (CPU in 250m steps, 1 to 6.5 GiB of memory per vCPU) so admission changes
+nothing, and the attestation above then passes. Autopilot also requires a
+sandboxing runtime: with this platform the server refuses to start unless
+`NATIVE_SANDBOX_RUNTIME_CLASS` (or `KUBERNETES_RUNTIME_CLASS`) is `gvisor`
+("runs native workers only under gVisor"). A cold gVisor node can take about
+two minutes to come up, so raise `NATIVE_SANDBOX_READY_TIMEOUT_MS` (for example
+to `600000`).
+
+### Capacity
+
+`NATIVE_SANDBOX_MAX_CONCURRENT` caps how many sandbox runs may be active at
+once across all server replicas (it counts active gateway sessions). A start
+past the cap fails immediately with
+[`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md); it does
+not queue. The same code is returned when the namespace's ResourceQuota has no
+room for another worker pod. Raise the ResourceQuota together with
+`NATIVE_SANDBOX_MAX_CONCURRENT` (and `CODING_MAX_CONCURRENT`, which shares the
+namespace): each worker pod needs its CPU and memory limits from the quota.
+
 ## Configuration reference
 
-| Variable                       | Launcher   | Required | Default                                                                                                         | Purpose                                                                                                                   |
-| ------------------------------ | ---------- | -------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `NATIVE_SANDBOX_LAUNCHER`      | both       | Yes      | unset (sandbox off)                                                                                             | `docker` or `kubernetes`. Independent of `JOB_LAUNCHER`.                                                                  |
-| `NATIVE_SANDBOX_WORKER_IMAGE`  | both       | Yes      |                                                                                                                 | Pinned worker image. Docker: `repo@sha256:...` or a local image id. Kubernetes: a registry digest `repo@sha256:...` only. |
-| `NATIVE_GATEWAY_CONTAINER`     | Docker     | Yes      |                                                                                                                 | Name of the running gateway container the server connects to each run's network.                                          |
-| `NATIVE_SANDBOX_NAMESPACE`     | Kubernetes | No       | `KUBERNETES_NAMESPACE`, else `wardby-coding`                                                                    | Namespace for run pods and the gateway.                                                                                   |
-| `KUBERNETES_CONTEXT`           | Kubernetes | No       | in-cluster or current context                                                                                   | Kubeconfig context the server uses.                                                                                       |
-| `NATIVE_SANDBOX_RUNTIME_CLASS` | Kubernetes | No       | `KUBERNETES_RUNTIME_CLASS`, else none                                                                           | RuntimeClass for run pods (for example gVisor).                                                                           |
-| `NATIVE_GATEWAY_SERVICE`       | Kubernetes | No       | `wardby-native-gateway`                                                                                         | Name of the gateway Service in the run namespace.                                                                         |
-| `NATIVE_GATEWAY_URL`           | both       | No       | Docker: `http://wardby-native-gateway:8790/native-gateway/v1/call`; Kubernetes: the Service's ClusterIP on 8790 | What workers dial. Change only if the gateway is reachable another way. Must be an `http(s)` URL.                         |
-| `NATIVE_SANDBOX_CPUS`          | both       | No       | `1`                                                                                                             | CPU limit per worker (Kubernetes: request and limit).                                                                     |
-| `NATIVE_SANDBOX_MEMORY_MB`     | both       | No       | `512`                                                                                                           | Memory limit per worker (Docker: swap disabled; Kubernetes: request and limit).                                           |
-| `NATIVE_SANDBOX_PIDS`          | Docker     | No       | `128`                                                                                                           | Process limit per worker. Ignored on Kubernetes.                                                                          |
+| Variable                                | Launcher   | Required | Default                                                                                                         | Purpose                                                                                                                                            |
+| --------------------------------------- | ---------- | -------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NATIVE_SANDBOX_LAUNCHER`               | both       | Yes      | unset (sandbox off)                                                                                             | `docker` or `kubernetes`. Independent of `JOB_LAUNCHER`.                                                                                           |
+| `NATIVE_SANDBOX_WORKER_IMAGE`           | both       | Yes      |                                                                                                                 | Pinned worker image. Docker: `repo@sha256:...` or a local image id. Kubernetes: a registry digest `repo@sha256:...` only.                          |
+| `NATIVE_GATEWAY_CONTAINER`              | Docker     | Yes      |                                                                                                                 | Name of the running gateway container the server connects to each run's network.                                                                   |
+| `NATIVE_SANDBOX_NAMESPACE`              | Kubernetes | No       | `KUBERNETES_NAMESPACE`, else `wardby-coding`                                                                    | Namespace for run pods and the gateway.                                                                                                            |
+| `KUBERNETES_CONTEXT`                    | Kubernetes | No       | in-cluster or current context                                                                                   | Kubeconfig context the server uses.                                                                                                                |
+| `NATIVE_SANDBOX_RUNTIME_CLASS`          | Kubernetes | No       | `KUBERNETES_RUNTIME_CLASS`, else none                                                                           | RuntimeClass for run pods (for example gVisor).                                                                                                    |
+| `NATIVE_GATEWAY_SERVICE`                | Kubernetes | No       | `wardby-native-gateway`                                                                                         | Name of the gateway Service in the run namespace.                                                                                                  |
+| `NATIVE_GATEWAY_URL`                    | both       | No       | Docker: `http://wardby-native-gateway:8790/native-gateway/v1/call`; Kubernetes: the Service's ClusterIP on 8790 | What workers dial. Change only if the gateway is reachable another way. Must be an `http(s)` URL.                                                  |
+| `NATIVE_SANDBOX_CPUS`                   | both       | No       | `1`                                                                                                             | CPU limit per worker (Kubernetes: request and limit).                                                                                              |
+| `NATIVE_SANDBOX_MEMORY_MB`              | both       | No       | `512`                                                                                                           | Memory limit per worker (Docker: swap disabled; Kubernetes: request and limit).                                                                    |
+| `NATIVE_SANDBOX_PIDS`                   | Docker     | No       | `128`                                                                                                           | Process limit per worker. Docker only: Kubernetes has no per-pod process limit.                                                                    |
+| `NATIVE_SANDBOX_MAX_CONCURRENT`         | both       | No       | unset (no cap)                                                                                                  | At most this many sandbox runs at once across all replicas (counts active gateway sessions). A start past it fails with `native_sandbox_capacity`. |
+| `NATIVE_SANDBOX_READY_TIMEOUT_MS`       | Kubernetes | No       | `120000` (range 1000-1800000)                                                                                   | How long a worker pod may take to start running. Use about `600000` on GKE Autopilot, where a cold gVisor node takes about two minutes.            |
+| `NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS` | Kubernetes | No       | `30000` (range 1000-600000)                                                                                     | How long the in-pod isolation proof may take.                                                                                                      |
+| `NATIVE_SANDBOX_PRIORITY_CLASS`         | Kubernetes | No       | `KUBERNETES_RUN_PRIORITY_CLASS`, else none                                                                      | PriorityClass for worker pods. Must not be a `system-` class.                                                                                      |
+| `KUBERNETES_PLATFORM`                   | Kubernetes | No       | none                                                                                                            | `gke-autopilot` conforms worker pod resources to Autopilot's rules and requires the gVisor runtime class. Shared with coding runs.                 |
 
 Gateway-side variables (`NATIVE_GATEWAY_LISTEN`, `NATIVE_GATEWAY_DENY_PORT`) are
 set on the gateway, not the server.
@@ -387,28 +421,46 @@ never talks to the provider directly.
 
 ## Failure modes
 
-| Error code                                                                                   | Meaning                                                                                                   | What to do                                                                               |
-| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| [`native_sandbox_unavailable`](../help/errors/native-sandbox-unavailable.md)                 | Agent is in `sandbox` mode but the server has no native sandbox. Fails before any spend.                  | Configure the sandbox (steps above) or set the agent back to `control-plane`.            |
-| [`native_sandbox_worker_exited`](../help/errors/native-sandbox-worker-exited.md)             | The worker ended without producing a result.                                                              | Check the tool code and the worker's memory and PID limits; run again.                   |
-| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)     | The run passed its 60-minute maximum; the worker was stopped.                                             | Split the work into smaller runs or sub-agents.                                          |
-| [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)                 | The worker container or pod disappeared (for example its host or node restarted). It is never relaunched. | Trigger the run again; check the Docker host or node stability.                          |
-| [`native_sandbox_image_not_pinned`](../help/errors/native-sandbox-image-not-pinned.md)       | `NATIVE_SANDBOX_WORKER_IMAGE` is a mutable tag.                                                           | Use a `repo@sha256:...` digest or a local image id.                                      |
-| [`native_sandbox_docker_failed`](../help/errors/native-sandbox-docker-failed.md)             | A Docker command (pull, network create, connect, run) failed.                                             | Read the message, then check the Docker daemon, image availability, and gateway name.    |
-| [`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)   | Kubernetes: the pod's egress isolation could not be proven in time; the pod was removed.                  | Check that the CNI enforces NetworkPolicy and the gateway Service exposes 8790 and 8791. |
-| [`native_sandbox_isolation_mismatch`](../help/errors/native-sandbox-isolation-mismatch.md)   | Kubernetes: the stored pod or NetworkPolicy differs from what Wardby built (an admission change).         | Exempt the run namespace's native-run pods from mutating policies.                       |
-| [`native_sandbox_gateway_unavailable`](../help/errors/native-sandbox-gateway-unavailable.md) | Kubernetes: the gateway Service is missing or has no ClusterIP.                                           | Create the Service (ClusterIP, not headless) or fix `NATIVE_GATEWAY_SERVICE`.            |
-| [`native_sandbox_worker_unready`](../help/errors/native-sandbox-worker-unready.md)           | Kubernetes: the worker pod did not reach Running in time.                                                 | Check image pull, quotas, and scheduling with `kubectl describe pod`.                    |
+| Error code                                                                                   | Meaning                                                                                                      | What to do                                                                               |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| [`native_sandbox_unavailable`](../help/errors/native-sandbox-unavailable.md)                 | Agent is in `sandbox` mode but the server has no native sandbox. Fails before any spend.                     | Configure the sandbox (steps above) or set the agent back to `control-plane`.            |
+| [`native_sandbox_worker_exited`](../help/errors/native-sandbox-worker-exited.md)             | The worker ended without producing a result.                                                                 | Check the tool code and the worker's memory and PID limits; run again.                   |
+| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)     | The run passed its 60-minute maximum; the worker was stopped.                                                | Split the work into smaller runs or sub-agents.                                          |
+| [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)                 | The worker container or pod disappeared (for example its host or node restarted). It is never relaunched.    | Trigger the run again; check the Docker host or node stability.                          |
+| [`native_sandbox_image_not_pinned`](../help/errors/native-sandbox-image-not-pinned.md)       | `NATIVE_SANDBOX_WORKER_IMAGE` is a mutable tag.                                                              | Use a `repo@sha256:...` digest or a local image id.                                      |
+| [`native_sandbox_docker_failed`](../help/errors/native-sandbox-docker-failed.md)             | A Docker command (pull, network create, connect, run) failed.                                                | Read the message, then check the Docker daemon, image availability, and gateway name.    |
+| [`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)   | Kubernetes: the pod's egress isolation could not be proven in time; the pod was removed.                     | Check that the CNI enforces NetworkPolicy and the gateway Service exposes 8790 and 8791. |
+| [`native_sandbox_isolation_mismatch`](../help/errors/native-sandbox-isolation-mismatch.md)   | Kubernetes: the stored pod or NetworkPolicy differs from what Wardby built (an admission change).            | Exempt the run namespace's native-run pods from mutating policies.                       |
+| [`native_sandbox_gateway_unavailable`](../help/errors/native-sandbox-gateway-unavailable.md) | Kubernetes: the gateway Service is missing or has no ClusterIP.                                              | Create the Service (ClusterIP, not headless) or fix `NATIVE_GATEWAY_SERVICE`.            |
+| [`native_sandbox_worker_unready`](../help/errors/native-sandbox-worker-unready.md)           | Kubernetes: the worker pod did not reach Running in time.                                                    | Check image pull, quotas, and scheduling with `kubectl describe pod`.                    |
+| [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md)                       | `NATIVE_SANDBOX_MAX_CONCURRENT` runs are already active, or the namespace ResourceQuota is full. Not queued. | Wait and retry, or raise the cap together with the ResourceQuota.                        |
 
 A run's error appears in its `error` field in `get_run` and `list_runs`.
 
 ## Roll back
 
-Set the agent back to `control-plane` with `update_agent`. Runs already started
-keep their mode until they finish. To switch sandbox mode off for the whole
+Set the agent back to `control-plane` with `update_agent`. Only new runs are
+affected: runs already started in sandbox mode finish there. To switch sandbox mode off for the whole
 deployment, unset `NATIVE_SANDBOX_LAUNCHER`; sandbox-mode agents then fail
 closed with `native_sandbox_unavailable` rather than running unisolated, so move
 them back to `control-plane` first if they should keep running.
+
+## Acceptance tests
+
+Three opt-in checks exercise the real isolation against a real runtime. Each is
+skipped unless its script sets its flag:
+
+- `npm run test:native-docker`: the Docker launcher on the local Docker host.
+- `npm run test:native-kind`: the Kubernetes launcher on a kind cluster
+  (`NATIVE_TEST_KIND_WORKER_IMAGE`).
+- `npm run test:native-cluster`: launcher-only isolation checks against the
+  deployed gateway of any cluster. It needs no database or model. Set
+  `NATIVE_TEST_WORKER_IMAGE` (required, a registry digest) and, as needed,
+  `NATIVE_TEST_CONTEXT`, `NATIVE_TEST_NAMESPACE`, `NATIVE_TEST_PLATFORM`,
+  `NATIVE_TEST_RUNTIME_CLASS`, `NATIVE_TEST_PRIORITY_CLASS`, and
+  `NATIVE_TEST_FORBIDDEN`, a comma-separated list of `host:port` addresses that
+  must be unreachable from a worker (for example the database's private IP on
+  port 3307).
 
 ## Troubleshooting
 

@@ -94,5 +94,6 @@ and GKE Autopilot overlays.
 Native agents run in the server process by default. A native agent set to
 `nativeExecutionMode=sandbox` instead runs its turn loop and user tools in a
 single-use credential-free container whose only path out is a separate native
-gateway, enabled with `NATIVE_SANDBOX_LAUNCHER=docker` (independent of
+gateway, enabled with `NATIVE_SANDBOX_LAUNCHER=docker` or `kubernetes` (a pod
+per run, including on GKE Autopilot under gVisor; independent of
 `JOB_LAUNCHER`). See [native-sandbox.md](native-sandbox.md).
