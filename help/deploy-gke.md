@@ -29,8 +29,10 @@ The deployment process is:
 3. Put first-time values in an untracked `.env.local`; `deploy/gke/up.sh`
    seeds Secret Manager without overwriting existing production values.
    Jira settings are optional there, all or none; see [Jira](jira.md).
-4. Run `HOSTNAME=wardby.example.com deploy/gke/up.sh`, then verify DNS,
+4. Run `WARDBY_HOSTNAME=wardby.example.com deploy/gke/up.sh`, then verify DNS,
    certificate issuance, database IAM bootstrap, and service health.
+   Use `WARDBY_HOSTNAME`, not `HOSTNAME` (shells set that to the machine name);
+   the script refuses local names such as `*.lan` or `*.local`.
 
 When a release changes `deploy/gke/database-grants.sql`, re-run the database
 grants bootstrap **before** deploying that release, so the proxy role can

@@ -266,8 +266,13 @@ The deployment script is idempotent. It converges Terraform, builds and pushes
 renders the GKE overlay, and waits for the proxy and control plane:
 
 ```sh
-HOSTNAME=wardby.example.com deploy/gke/up.sh
+WARDBY_HOSTNAME=wardby.example.com deploy/gke/up.sh
 ```
+
+Set `WARDBY_HOSTNAME`, not `HOSTNAME`: shells set `HOSTNAME` to the machine's own
+name, so the script no longer reads it. It refuses a hostname with no dot, or a
+local name such as `*.lan`, `*.local`, or `*.internal`. If you deployed with an
+earlier version using `HOSTNAME=...`, pass the same value as `WARDBY_HOSTNAME`.
 
 Point the hostname's public A record at the reserved address:
 
