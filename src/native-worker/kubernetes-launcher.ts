@@ -40,7 +40,7 @@ import type { WorkerHandle } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import type { ManagedWorkerLauncher } from "./sandbox-executor.js";
 import { warmDeliveryCommand } from "./warm-delivery.js";
-import type { WarmWorkerLauncher } from "./warm-pool.js";
+import { NATIVE_SANDBOX_WARM_DELIVERY_FAILED, type WarmWorkerLauncher } from "./warm-pool.js";
 
 const k8sLog = logger.child({ module: "native-kubernetes-launcher" });
 
@@ -94,8 +94,6 @@ export function canonical(value: unknown): unknown {
   }
   return out;
 }
-
-export const NATIVE_SANDBOX_WARM_DELIVERY_FAILED = "native_sandbox_warm_delivery_failed";
 
 export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher, WarmWorkerLauncher {
   readonly networkReadyAtLaunch = false;

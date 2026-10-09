@@ -28,7 +28,7 @@ import {
 import type { DetachedWorkerLauncher, WorkerHandle } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import { warmDeliveryCommand } from "./warm-delivery.js";
-import type { WarmWorkerLauncher } from "./warm-pool.js";
+import { NATIVE_SANDBOX_WARM_DELIVERY_FAILED, type WarmWorkerLauncher } from "./warm-pool.js";
 
 const launcherLog = logger.child({ module: "native-docker-launcher" });
 
@@ -259,7 +259,9 @@ export class DockerNativeWorkerLauncher implements DetachedWorkerLauncher, WarmW
       { input: `${JSON.stringify(input)}\n`, timeoutMs: 20_000 },
     );
     if (result.code !== 0) {
-      throw new Error(`native_sandbox_warm_delivery_failed: delivering the run's input exited ${result.code ?? "?"}.`);
+      throw new Error(
+        `${NATIVE_SANDBOX_WARM_DELIVERY_FAILED}: delivering the run's input exited ${result.code ?? "?"}.`,
+      );
     }
   }
 

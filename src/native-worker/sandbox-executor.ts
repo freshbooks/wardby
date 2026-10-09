@@ -46,6 +46,8 @@ export interface ManagedWorkerLauncher extends DetachedWorkerLauncher {
   removeByWorkerName(name: string): Promise<void>;
   /** The URL workers dial, when only the launcher can know it (a Kubernetes Service's ClusterIP). */
   resolveGatewayUrl?(): Promise<string>;
+  /** Background upkeep the long-lived process runs from the executor's `launch()` (the warm pool's). */
+  start?(): Promise<void>;
 }
 
 export interface NativeSandboxExecutorOptions {
@@ -220,9 +222,12 @@ export class NativeSandboxExecutor implements Executor {
     };
   }
 
-  /** Startup janitor: removes worker containers whose runs have ended or passed their deadline. */
+  /** Startup janitor: removes worker containers whose runs have ended or passed their deadline. Starts the warm pool. */
   async launch(): Promise<void> {
     await this.sweep().catch((err: unknown) => executorLog.warn({ err }, "native sandbox janitor failed"));
+    await this.options.launcher
+      .start?.()
+      .catch((err: unknown) => executorLog.warn({ err }, "native warm pool failed to start"));
   }
 
   async sweep(): Promise<number> {
