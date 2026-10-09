@@ -31,9 +31,11 @@ gateway are trusted; the agent loop and user tool code are not.
    `NATIVE_SANDBOX_CPUS` (1), `NATIVE_SANDBOX_MEMORY_MB` (512),
    `NATIVE_SANDBOX_PIDS` (128).
 3. Set the mode with `create_agent` or `update_agent` (`nativeExecutionMode`:
-   `control-plane` or `sandbox`; native agents only). `sandbox` is refused when
-   the server has no native sandbox configured. Each run keeps the mode it
-   started with.
+   `control-plane` or `sandbox`; native agents only), or from the CLI with
+   `wardby agent create ... --native-execution-mode sandbox` or
+   `wardby agent mode <name> sandbox`. `sandbox` is refused when the server
+   (or, for the CLI, its environment) has no native sandbox configured. Each
+   run keeps the mode it started with; `get_run` shows it.
 
 ### Kubernetes
 
@@ -127,6 +129,7 @@ codes:
 - [native_sandbox_worker_unready](errors/native-sandbox-worker-unready.md)
 - [native_sandbox_capacity](errors/native-sandbox-capacity.md)
 - [native_sandbox_warm_delivery_failed](errors/native-sandbox-warm-delivery-failed.md)
+- [native_sandbox_requires_catalog](errors/native-sandbox-requires-catalog.md)
 
 See also [Use native agents, tools, and data](native-capabilities.md) and
 [Understand Wardby security boundaries](security.md).

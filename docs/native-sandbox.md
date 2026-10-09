@@ -192,6 +192,22 @@ Set it with the MCP tools `create_agent` or `update_agent` (field
 `nativeExecutionMode`, native agents only), or in an import bundle. Setting
 `sandbox` is refused while the server has no native sandbox configured.
 
+From the command line, with the same environment as the server:
+
+```bash
+wardby agent create --name <n> --model <m> --prompt <p> --budget <usd> --native-execution-mode sandbox
+```
+
+```bash
+wardby agent mode <name> sandbox
+```
+
+The CLI refuses `sandbox` with `native_sandbox_unavailable` when its own
+environment has no `NATIVE_SANDBOX_LAUNCHER`, so run it where the server's
+sandbox variables are set. `wardby agent list` marks sandbox-mode agents.
+`get_run` and `list_runs` report each run's mode as `nativeExecutionMode`
+(`control-plane`, `sandbox`, or `null` for a coding run).
+
 Each run keeps the mode it started with. Changing an agent affects only the
 runs that start afterwards.
 
@@ -530,26 +546,28 @@ never talks to the provider directly.
 
 ## Failure modes
 
-| Error code                                                                                     | Meaning                                                                                                       | What to do                                                                               |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| [`native_sandbox_unavailable`](../help/errors/native-sandbox-unavailable.md)                   | Agent is in `sandbox` mode but the server has no native sandbox. Fails before any spend.                      | Configure the sandbox (steps above) or set the agent back to `control-plane`.            |
-| [`native_sandbox_worker_exited`](../help/errors/native-sandbox-worker-exited.md)               | The worker ended without producing a result.                                                                  | Check the tool code and the worker's memory and PID limits; run again.                   |
-| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)       | The run passed its 60-minute maximum; the worker was stopped.                                                 | Split the work into smaller runs or sub-agents.                                          |
-| [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)                   | The worker container or pod disappeared (for example its host or node restarted). It is never relaunched.     | Trigger the run again; check the Docker host or node stability.                          |
-| [`native_sandbox_image_not_pinned`](../help/errors/native-sandbox-image-not-pinned.md)         | `NATIVE_SANDBOX_WORKER_IMAGE` is a mutable tag.                                                               | Use a `repo@sha256:...` digest or a local image id.                                      |
-| [`native_sandbox_docker_failed`](../help/errors/native-sandbox-docker-failed.md)               | A Docker command (pull, network create, connect, run) failed.                                                 | Read the message, then check the Docker daemon, image availability, and gateway name.    |
-| [`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)     | Kubernetes: the pod's egress isolation could not be proven in time; the pod was removed.                      | Check that the CNI enforces NetworkPolicy and the gateway Service exposes 8790 and 8791. |
-| [`native_sandbox_isolation_mismatch`](../help/errors/native-sandbox-isolation-mismatch.md)     | Kubernetes: the stored pod or NetworkPolicy differs from what Wardby built (an admission change).             | Exempt the run namespace's native-run pods from mutating policies.                       |
-| [`native_sandbox_gateway_unavailable`](../help/errors/native-sandbox-gateway-unavailable.md)   | Kubernetes: the gateway Service is missing or has no ClusterIP.                                               | Create the Service (ClusterIP, not headless) or fix `NATIVE_GATEWAY_SERVICE`.            |
-| [`native_sandbox_worker_unready`](../help/errors/native-sandbox-worker-unready.md)             | Kubernetes: the worker pod did not reach Running in time.                                                     | Check image pull, quotas, and scheduling with `kubectl describe pod`.                    |
-| [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md)                         | `NATIVE_SANDBOX_MAX_CONCURRENT` runs are already active, or the namespace ResourceQuota is full. Not queued.  | Wait and retry, or raise the cap together with the ResourceQuota.                        |
-| [`native_sandbox_warm_delivery_failed`](../help/errors/native-sandbox-warm-delivery-failed.md) | A claimed warm worker could not receive the run's input and could not be confirmed stopped within 30 seconds. | Trigger the run again; check the node or Docker host and pod exec access.                |
+| Error code                                                                                     | Meaning                                                                                                               | What to do                                                                                           |
+| ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| [`native_sandbox_unavailable`](../help/errors/native-sandbox-unavailable.md)                   | Agent is in `sandbox` mode but the server has no native sandbox. Fails before any spend.                              | Configure the sandbox (steps above) or set the agent back to `control-plane`.                        |
+| [`native_sandbox_worker_exited`](../help/errors/native-sandbox-worker-exited.md)               | The worker ended without producing a result.                                                                          | Check the tool code and the worker's memory and PID limits; run again.                               |
+| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)       | The run passed its 60-minute maximum; the worker was stopped.                                                         | Split the work into smaller runs or sub-agents.                                                      |
+| [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)                   | The worker container or pod disappeared (for example its host or node restarted). It is never relaunched.             | Trigger the run again; check the Docker host or node stability.                                      |
+| [`native_sandbox_image_not_pinned`](../help/errors/native-sandbox-image-not-pinned.md)         | `NATIVE_SANDBOX_WORKER_IMAGE` is a mutable tag.                                                                       | Use a `repo@sha256:...` digest or a local image id.                                                  |
+| [`native_sandbox_docker_failed`](../help/errors/native-sandbox-docker-failed.md)               | A Docker command (pull, network create, connect, run) failed.                                                         | Read the message, then check the Docker daemon, image availability, and gateway name.                |
+| [`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)     | Kubernetes: the pod's egress isolation could not be proven in time; the pod was removed.                              | Check that the CNI enforces NetworkPolicy and the gateway Service exposes 8790 and 8791.             |
+| [`native_sandbox_isolation_mismatch`](../help/errors/native-sandbox-isolation-mismatch.md)     | Kubernetes: the stored pod or NetworkPolicy differs from what Wardby built (an admission change).                     | Exempt the run namespace's native-run pods from mutating policies.                                   |
+| [`native_sandbox_gateway_unavailable`](../help/errors/native-sandbox-gateway-unavailable.md)   | Kubernetes: the gateway Service is missing or has no ClusterIP.                                                       | Create the Service (ClusterIP, not headless) or fix `NATIVE_GATEWAY_SERVICE`.                        |
+| [`native_sandbox_worker_unready`](../help/errors/native-sandbox-worker-unready.md)             | Kubernetes: the worker pod did not reach Running in time.                                                             | Check image pull, quotas, and scheduling with `kubectl describe pod`.                                |
+| [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md)                         | `NATIVE_SANDBOX_MAX_CONCURRENT` runs are already active, or the namespace ResourceQuota is full. Not queued.          | Wait and retry, or raise the cap together with the ResourceQuota.                                    |
+| [`native_sandbox_warm_delivery_failed`](../help/errors/native-sandbox-warm-delivery-failed.md) | A claimed warm worker could not receive the run's input and could not be confirmed stopped within 30 seconds.         | Trigger the run again; check the node or Docker host and pod exec access.                            |
+| [`native_sandbox_requires_catalog`](../help/errors/native-sandbox-requires-catalog.md)         | No model catalog entry was recorded for the run: the process running it does not use the catalog-backed model router. | Run it on a standard `wardby serve`/`scheduler`/`mcp` process, or keep the agent on `control-plane`. |
 
 A run's error appears in its `error` field in `get_run` and `list_runs`.
 
 ## Roll back
 
-Set the agent back to `control-plane` with `update_agent`. Only new runs are
+Set the agent back to `control-plane` with `update_agent` or
+`wardby agent mode <name> control-plane`. Only new runs are
 affected: runs already started in sandbox mode finish there. To switch sandbox mode off for the whole
 deployment, unset `NATIVE_SANDBOX_LAUNCHER`; sandbox-mode agents then fail
 closed with `native_sandbox_unavailable` rather than running unisolated, so move
