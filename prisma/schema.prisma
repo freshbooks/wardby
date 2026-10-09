@@ -658,6 +658,9 @@ model NativeGatewaySession {
   createdAt         DateTime                   @default(now())
   updatedAt         DateTime                   @updatedAt
   calls             NativeGatewayCall[]
+
+  /// NATIVE_SANDBOX_MAX_CONCURRENT counts the active sessions on every start.
+  @@index([status])
 }
 
 /// One worker call through the gateway, keyed by its callId: model calls are
