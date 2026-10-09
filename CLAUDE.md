@@ -20,6 +20,16 @@ architecture and `CLEANROOM.md` for the clean-room rules that bind all work here
 - **Check facts against the code, not just other docs**, when writing
   architecture or reference material: docs can be out of date.
 
+## Knowledge bundle (OKF)
+
+`.okf/` is an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
+v0.2 bundle of architecture concepts for this repo. Start at `.okf/index.md`
+and follow links only into the concepts relevant to your task. Treat concepts
+with no `verified` entry as unverified: check them against the code before
+relying on them. The rules in this file win over anything in `.okf/`. It is
+separate from the `docs/knowledge` product feature, and `.okf/` is not one of
+the public operator docs.
+
 ## LLM pricing tables — STRICT
 
 Every model entry in the model catalog (`src/providers/llm/catalog-shipped.ts`,
