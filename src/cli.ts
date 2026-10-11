@@ -75,6 +75,7 @@ import { startReconciler } from "./core/reconciler.js";
 import { startNotifications } from "./core/notifications.js";
 import { NativeEngine } from "./core/engine-native.js";
 import { logger } from "./core/logger.js";
+import { buildPower } from "./core/power-composition.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
 import { findSameNamedAttachedTool, reservedToolNameReason, resolveToolRef } from "./core/tool-names.js";
 import {
@@ -869,13 +870,23 @@ async function scheduler(args: string[]): Promise<void> {
     repoAccess,
   };
   const nativeExecutor = buildExecutor(config, nativeProviders, prisma);
+  const power = buildPower({ env: process.env, db: prisma });
+  if (power.enabled) {
+    void power.checkAccess().then(
+      (missing) => {
+        if (missing.length) cliLog.warn(`low_power_scale_forbidden: missing ${missing.join(", ")}`);
+      },
+      (err) => cliLog.warn({ err }, "low_power_access_check_failed"),
+    );
+  }
   const executor = buildConfiguredExecutor({
     native: nativeExecutor,
     db: prisma,
     providerConfig: config,
     repoAccess,
+    power,
     // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
-    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders }),
+    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power }),
   });
   nativeProviders.executor = executor;
   await executor.launch?.();
@@ -898,6 +909,7 @@ async function scheduler(args: string[]): Promise<void> {
       await drainCodingQueue({ db: prisma, executor, ...concurrency, selfDefects });
       // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.
       await drainDeferredRuns({ db: prisma, executor });
+      await power.sleepIfIdle().catch((err) => cliLog.warn({ err }, "power_sleep_failed"));
     },
   });
 

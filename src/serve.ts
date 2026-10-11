@@ -19,6 +19,8 @@
 import { loadCodingConcurrencyConfig, loadMcpConfig } from "./config/providers.js";
 import { drainCodingQueue } from "./core/coding-queue.js";
 import { prisma } from "./core/db.js";
+import { logger } from "./core/logger.js";
+import { DISABLED_POWER } from "./core/power.js";
 import { startNotifications } from "./core/notifications.js";
 import { startReconciler } from "./core/reconciler.js";
 import { createRepoAccessGate } from "./core/repo-access.js";
@@ -26,6 +28,8 @@ import { startScheduler } from "./core/scheduler.js";
 import { drainDeferredRuns } from "./providers/executor/deferred.js";
 import type { McpProviders } from "./mcp/context.js";
 import { buildMcpProviders, startMcp } from "./mcp/index.js";
+
+const serveLog = logger.child({ module: "serve" });
 
 export interface ServeOptions {
   /** Scheduler lease scope; defaults to "default" like `wardby scheduler --scope`. */
@@ -54,6 +58,15 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   // CODING_QUEUE_TIMEOUT_SEC fails fast instead of after HTTP is listening.
   const concurrency = loadCodingConcurrencyConfig();
   const providers = options.providers ?? buildMcpProviders().providers;
+  const power = providers.power ?? DISABLED_POWER;
+  if (power.enabled) {
+    void power.checkAccess().then(
+      (missing) => {
+        if (missing.length) serveLog.warn(`low_power_scale_forbidden: missing ${missing.join(", ")}`);
+      },
+      (err) => serveLog.warn({ err }, "low_power_access_check_failed"),
+    );
+  }
   const mcp = await startMcp({ providers, schedulerAttached: true });
   const reviewHosts = providers.reviewHosts;
   const reconciler = startReconciler({
@@ -82,6 +95,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       await drainCodingQueue({ db: prisma, executor: providers.executor, ...concurrency, selfDefects });
       // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.
       await drainDeferredRuns({ db: prisma, executor: providers.executor });
+      // Scale idle coding-proxy/native-gateway Deployments to zero (no-op unless WARDBY_LOW_POWER=1).
+      await power.sleepIfIdle().catch((err) => serveLog.warn({ err }, "power_sleep_failed"));
     },
   });
 
