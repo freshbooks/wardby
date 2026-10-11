@@ -11,7 +11,7 @@ import {
 import { MAX_COLLECT_EXCLUDE_PATHS, validateCollectExcludePath } from "./collect-exclude.js";
 import { CODING_PROVIDERS } from "./provider.js";
 import { WARDBY_PROTECTED_PATHS, isWellFormedProtectedPath, protectsSomePath } from "./protected-paths.js";
-import { parseAllowlist, resolvePolicy } from "./registry/allowlist.js";
+import { acceptedAdvisoriesSchema, parseAllowlist, resolvePolicy } from "./registry/allowlist.js";
 import { REGISTRY_ADAPTERS } from "./registry/adapters.js";
 import { AllowedServiceNamesSchema } from "./services/catalog.js";
 
@@ -118,7 +118,10 @@ const packageAllowlistSchema = z
     }
   });
 const packagePolicySchema = z
-  .object({ minReleaseAgeDays: z.number().int().min(0).max(30).optional() })
+  .object({
+    minReleaseAgeDays: z.number().int().min(0).max(30).optional(),
+    acceptedAdvisories: acceptedAdvisoriesSchema.optional(),
+  })
   .strict()
   .superRefine((value, ctx) => {
     try {
