@@ -540,9 +540,9 @@ linking stays disabled there.
 First link your GitHub account (`link_host_account`, above). Then use the
 `link_repository` tool (agents:write) on a native agent you own. Calling it
 again for an already-linked repository replaces that link's `access`,
-`triggers`, `checkName`, `reviewFixMaxRounds`, and `waitForCi` — omitted
-fields are cleared, not kept — and checks your access again, so always send
-the full desired state. Two common shapes:
+`triggers`, `checkName`, `reviewFixMaxRounds`, `waitForCi`, and
+`markReadyWhenPassing` — omitted fields are cleared, not kept — and checks
+your access again, so always send the full desired state. Two common shapes:
 
 **A reviewer**, which starts a check on every PR push:
 
@@ -757,6 +757,67 @@ Turning `waitForCi` off (re-linking without it, or with it set to `false`)
 only changes how future pushes are handled; it never retroactively starts or
 drops a review already being held.
 
+### Mark ready when passing (`markReadyWhenPassing`)
+
+With Wardby 0.7.0 or later, `markReadyWhenPassing` (boolean, default
+`false`, only on a write link — 400 on a read link) has wardby mark its own
+draft pull requests ready for review once they pass, instead of leaving
+that to a person. Set it with `link_repository` on the builder agent's
+write link — the link whose coding runs open the pull request. Re-linking
+that repository without it clears it, like every other link setting (see
+above); `list_repositories` shows its current value.
+
+Wardby marks a pull request ready for review once all of these hold, read
+fresh from GitHub on its current head:
+
+- the pull request is open and a draft;
+- Wardby's own GitHub App opened it, and its head is not in a fork;
+- the builder whose coding run opened it has `markReadyWhenPassing` set, on
+  an authorized write link to this repository;
+- at least one authorized reviewer link with the `pull_request` trigger
+  exists on the repository, and every one of those reviewers' own checks on
+  the head completed with conclusion `success`;
+- CI is green: every check run and commit status on the head that is not
+  one of Wardby's own checks has completed with `success`, `neutral`, or
+  `skipped` — or the repository reports no CI at all. CI that is truncated
+  (more checks exist than wardby could read), still pending, failing, or
+  unreadable leaves the pull request in draft; wardby tries again the next
+  time something changes.
+- the `wardby merge order` check (see [The wardby merge order
+  check](../help/merge-order-check.md)) is `success`, or is not posted on
+  this pull request at all.
+
+A commit status only counts toward CI being green if the App can read it:
+grant **Commit statuses: Read** (see [Registering the GitHub
+App](#registering-the-github-app) above) if your CI reports commit statuses
+rather than check runs; without it, wardby judges CI from check runs alone.
+
+Wardby marks a given pull request ready at most once. If a person moves it
+back to draft afterward, wardby leaves it there — it never re-marks a pull
+request once it has done so.
+
+Wardby re-checks whether a pull request is ready to mark:
+
+- after one of its reviewer runs finishes;
+- when a CI check suite completes on its head;
+- when its `wardby merge order` check turns `success` — for example, right
+  after an earlier step in its set merges;
+- and, as a fallback for any of the above missed, by wardby's own merge-order
+  reconciliation sweep, for a pull request that is part of a merge-ordered
+  set (see [The reconciliation sweep](../help/merge-order-check.md#the-reconciliation-sweep)).
+
+With a merge-ordered set of delegated pull requests (see [Fanning out to
+several builders](agent-recipes.md#fanning-out-to-several-builders)), a
+later step only becomes ready for review once the steps it depends on have
+merged — it stays a draft until the `wardby merge order` check on it reports
+`success`.
+
+`markReadyWhenPassing` never approves, merges, or converts a pull request
+back to draft — a person's own approval stays the gate wherever branch
+protection requires one. It needs the App's **Pull requests: Read and
+write** permission, which an App that opens pull requests already has (see
+[Registering the GitHub App](#registering-the-github-app) above).
+
 ## The `repo_*` tools
 
 A linked agent gets these built-in tools automatically — they are not
@@ -883,7 +944,11 @@ of any reviewer link, tracking whether the pull requests it depends on have
 merged yet. Require it the same way — add `wardby merge order` as a
 required status check, with its expected source set to the wardby GitHub
 App — to block a merge until they have. See
-[The wardby merge order check](../help/merge-order-check.md).
+[The wardby merge order check](../help/merge-order-check.md). With Wardby
+0.7.0 or later, a builder opted into [Mark ready when passing
+(`markReadyWhenPassing`)](#mark-ready-when-passing-markreadywhenpassing)
+relies on this same check: a later step in the set is only marked ready for
+review once it reports `success`.
 
 ## Accepted gap: a run that fails outside its normal finish path leaves its check open
 
