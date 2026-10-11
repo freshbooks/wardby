@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ObjectSerializer } from "@kubernetes/client-node/dist/serializer.js";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
+import { KubernetesForbiddenError } from "./kubernetes-api.js";
 import { PROXY_WITNESS_UNUSABLE, ProxyWitnessError, readProxyWitness } from "./kubernetes-witness.js";
 
 const NAMESPACE = "wardby-coding";
@@ -142,6 +143,14 @@ describe("readProxyWitness", () => {
     await expect(readProxyWitness(api({ withEndpoints: false }), NAMESPACE, SERVICE)).rejects.toThrow(
       "kubernetes_proxy_witness_unusable: Service wardby-coding/wardby-coding-proxy has no Endpoints",
     );
+  });
+
+  it("propagates a forbidden Endpoints read as the API error, not as a witness verdict", async () => {
+    const fake = api();
+    fake.forbiddenReads.add(`endpoints/${SERVICE}`);
+    const error = await readProxyWitness(fake, NAMESPACE, SERVICE).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KubernetesForbiddenError);
+    expect(error).not.toBeInstanceOf(ProxyWitnessError);
   });
 
   it("refuses a headless Service", async () => {

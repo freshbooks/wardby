@@ -31,7 +31,7 @@ describe("low-power manifest sources", () => {
   const power = role.find((o) => o.kind === "Role");
   const binding = role.find((o) => o.kind === "RoleBinding");
 
-  it("grants get and patch on exactly the proxy and gateway Deployments", () => {
+  it("grants get and patch on exactly the proxy and gateway Deployments, and get on their Endpoints", () => {
     expect(power.metadata.name).toBe("wardby-power");
     expect(power.rules).toEqual([
       {
@@ -39,6 +39,12 @@ describe("low-power manifest sources", () => {
         resources: ["deployments"],
         resourceNames: ["wardby-coding-proxy", "wardby-native-gateway"],
         verbs: ["get", "patch"],
+      },
+      {
+        apiGroups: [""],
+        resources: ["endpoints"],
+        resourceNames: ["wardby-coding-proxy", "wardby-native-gateway"],
+        verbs: ["get"],
       },
     ]);
   });
@@ -54,6 +60,7 @@ describe("low-power manifest sources", () => {
     const base = ["proxy.yaml", "native-gateway.yaml"].flatMap((f) => loadAt(`base/${f}`));
     const deployments = base.filter((o) => o.kind === "Deployment").map((o) => o.metadata.name);
     const services = base.filter((o) => o.kind === "Service").map((o) => o.metadata.name);
+    expect(power.rules[1].resourceNames).toEqual(power.rules[0].resourceNames);
     for (const name of power.rules[0].resourceNames) {
       expect(deployments).toContain(name);
       expect(services).toContain(name);
@@ -115,9 +122,10 @@ describe.skipIf(!hasKubectl)("low-power rendered overlays (kubectl)", () => {
 
   it("renders the GKE low-power overlay with every piece applied", () => {
     const docs = loadAllYaml(render("gke-autopilot-low-power"));
-    expect(find(docs, "Role", "wardby-power").rules[0].resourceNames).toEqual([
-      "wardby-coding-proxy",
-      "wardby-native-gateway",
+    const powerRole = find(docs, "Role", "wardby-power");
+    expect(powerRole.rules.map((r) => [r.resources, r.resourceNames, r.verbs])).toEqual([
+      [["deployments"], ["wardby-coding-proxy", "wardby-native-gateway"], ["get", "patch"]],
+      [["endpoints"], ["wardby-coding-proxy", "wardby-native-gateway"], ["get"]],
     ]);
     expect(find(docs, "RoleBinding", "wardby-power").subjects[0].name).toBe("wardby-control-plane");
     const hpa = find(docs, "HorizontalPodAutoscaler", "wardby-control-plane");

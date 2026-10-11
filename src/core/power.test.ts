@@ -117,6 +117,32 @@ describe("power (wake)", () => {
     api.accessDenied.add("patch/deployments/wardby-native-gateway");
     expect(await power.checkAccess()).toEqual(["patch deployments/wardby-native-gateway"]);
   });
+
+  it("checkAccess checks get on each target's Endpoints too", async () => {
+    const { api, power } = setup(1);
+    const canI = vi.spyOn(api, "canI");
+    api.accessDenied.add("get/endpoints/wardby-native-gateway");
+    expect(await power.checkAccess()).toEqual(["get endpoints/wardby-native-gateway"]);
+    expect(canI).toHaveBeenCalledWith(NS, "get", "", "endpoints", names.proxy);
+    expect(canI).toHaveBeenCalledWith(NS, "get", "", "endpoints", names.gateway);
+  });
+
+  it("maps a forbidden Deployment read to low_power_scale_forbidden", async () => {
+    const { api, power } = setup(0);
+    api.forbiddenReads.add(`deployment/${names.proxy}`);
+    await expect(power.ensureAwake("proxy", { timeoutMs: 5000, runId: "r" })).rejects.toThrow(
+      /^low_power_scale_forbidden: .*get Deployment "wardby-coding-proxy"/,
+    );
+    await expect(power.isAsleep("proxy")).rejects.toThrow(/^low_power_scale_forbidden: .*wardby-coding-proxy/);
+  });
+
+  it("maps a forbidden Endpoints read to low_power_scale_forbidden after waking", async () => {
+    const { api, power } = setup(0);
+    api.forbiddenReads.add(`endpoints/${names.proxy}`);
+    await expect(power.ensureAwake("proxy", { timeoutMs: 5000, runId: "r" })).rejects.toThrow(
+      /^low_power_scale_forbidden: .*get Endpoints "wardby-coding-proxy"/,
+    );
+  });
 });
 
 describe("power (sleep)", () => {
@@ -227,6 +253,18 @@ describe("power (sleep)", () => {
     expect(api.deploymentPatches).toEqual([{ name: names.gateway, replicas: 0 }]);
   });
 
+  it("swallows a forbidden read and still sleeps the other target", async () => {
+    const busy = vi.fn(async () => false);
+    const { api, power } = setup(1, { busy, wokeAt: SIXTY_MIN_AGO });
+    api.put("deployment", NS, {
+      metadata: { name: names.gateway, annotations: { [POWER_WOKE_AT]: SIXTY_MIN_AGO } },
+      spec: { replicas: 1, selector: {}, template: {} },
+    });
+    api.forbiddenReads.add(`deployment/${names.proxy}`);
+    await expect(power.sleepIfIdle()).resolves.toBeUndefined();
+    expect(api.deploymentPatches).toEqual([{ name: names.gateway, replicas: 0 }]);
+  });
+
   it("swallows a busy-check failure and leaves the target up", async () => {
     const busy = vi.fn(async () => {
       throw new Error("database unavailable");
@@ -306,6 +344,23 @@ describe("power (sleep now and status)", () => {
     const { api, power } = setup(1, { blockers: async () => [] });
     api.forbidden.add(names.proxy);
     await expect(power.sleepNow(["proxy"])).rejects.toThrow(/^low_power_scale_forbidden: .*wardby-coding-proxy/);
+  });
+
+  it("sleepNow maps a forbidden Deployment read to low_power_scale_forbidden", async () => {
+    const { api, power } = setup(1, { blockers: async () => [] });
+    api.forbiddenReads.add(`deployment/${names.proxy}`);
+    await expect(power.sleepNow(["proxy"])).rejects.toThrow(/^low_power_scale_forbidden: .*wardby-coding-proxy/);
+    expect(api.deploymentPatches).toEqual([]);
+  });
+
+  it("status maps a forbidden Deployment or Endpoints read to low_power_scale_forbidden", async () => {
+    const { api, power } = setup(1, { ready: true, blockers: async () => [] });
+    api.put("deployment", NS, { metadata: { name: names.gateway }, spec: { replicas: 1, selector: {}, template: {} } });
+    api.forbiddenReads.add(`endpoints/${names.gateway}`);
+    await expect(power.status()).rejects.toThrow(/^low_power_scale_forbidden: .*get Endpoints "wardby-native-gateway"/);
+    api.forbiddenReads.clear();
+    api.forbiddenReads.add(`deployment/${names.proxy}`);
+    await expect(power.status()).rejects.toThrow(/^low_power_scale_forbidden: .*get Deployment "wardby-coding-proxy"/);
   });
 
   it("sleepNow refuses to scale anything without a blockers check", async () => {

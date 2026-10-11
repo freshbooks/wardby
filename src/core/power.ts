@@ -90,11 +90,11 @@ export const DISABLED_POWER: Power = {
 
 const ready = (ep?: V1Endpoints) => (ep?.subsets ?? []).some((s) => (s.addresses ?? []).length > 0);
 
-/** Rethrows a Forbidden patch as low_power_scale_forbidden; anything else unchanged. */
-function scaleError(error: unknown, name: string): unknown {
+/** Rethrows a Forbidden read or patch as low_power_scale_forbidden; anything else unchanged. */
+function scaleError(error: unknown, name: string, access = "patch Deployment"): unknown {
   if (!(error instanceof KubernetesForbiddenError)) return error;
   return new Error(
-    `${LOW_POWER_SCALE_FORBIDDEN}: the control plane may not patch Deployment "${name}"; apply the wardby-power Role (up.sh with WARDBY_LOW_POWER=1).`,
+    `${LOW_POWER_SCALE_FORBIDDEN}: the control plane may not ${access} "${name}"; apply the wardby-power Role (up.sh with WARDBY_LOW_POWER=1).`,
     { cause: error },
   );
 }
@@ -113,10 +113,26 @@ export function createPower(options: PowerOptions): Power {
   const startedAt = now().getTime();
   let lastSweep: number | undefined;
 
+  const readDeployment = async (name: string) => {
+    try {
+      return await api.readDeployment(namespace, name);
+    } catch (error) {
+      throw scaleError(error, name, "get Deployment");
+    }
+  };
+
+  const readEndpoints = async (name: string) => {
+    try {
+      return await api.readEndpoints(namespace, name);
+    } catch (error) {
+      throw scaleError(error, name, "get Endpoints");
+    }
+  };
+
   async function sleepTarget(target: PowerTarget, at: number): Promise<void> {
     if (!api || !busy) return;
     const name = deployments[target];
-    const dep = await api.readDeployment(namespace, name);
+    const dep = await readDeployment(name);
     if (!dep || (dep.spec?.replicas ?? 1) === 0) return;
     const stamped = Date.parse(dep.metadata?.annotations?.[POWER_WOKE_AT] ?? "");
     const wokeAt = Number.isNaN(stamped) ? startedAt : stamped;
@@ -134,7 +150,7 @@ export function createPower(options: PowerOptions): Power {
 
     async ensureAwake(target, { timeoutMs, runId }) {
       const name = deployments[target];
-      const dep = await api.readDeployment(namespace, name);
+      const dep = await readDeployment(name);
       if (!dep) throw new Error(`${LOW_POWER_WAKE_TIMEOUT}: Deployment "${name}" not found in "${namespace}".`);
       if ((dep.spec?.replicas ?? 1) === 0) {
         try {
@@ -148,7 +164,7 @@ export function createPower(options: PowerOptions): Power {
         powerLog.info({ target, runId }, `power: ${target} woke`);
       }
       const deadline = now().getTime() + timeoutMs;
-      while (!ready(await api.readEndpoints(namespace, name))) {
+      while (!ready(await readEndpoints(name))) {
         if (now().getTime() >= deadline) {
           throw new Error(
             `${LOW_POWER_WAKE_TIMEOUT}: ${target} "${name}" had no ready endpoint within ${timeoutMs} ms.`,
@@ -159,7 +175,7 @@ export function createPower(options: PowerOptions): Power {
     },
 
     async isAsleep(target) {
-      return ((await api.readDeployment(namespace, deployments[target]))?.spec?.replicas ?? 1) === 0;
+      return ((await readDeployment(deployments[target]))?.spec?.replicas ?? 1) === 0;
     },
 
     async sleepIfIdle() {
@@ -179,12 +195,12 @@ export function createPower(options: PowerOptions): Power {
       const targets: PowerTargetStatus[] = [];
       for (const target of Object.keys(deployments) as PowerTarget[]) {
         const name = deployments[target];
-        const dep = await api.readDeployment(namespace, name);
+        const dep = await readDeployment(name);
         if (!dep) continue;
         targets.push({
           target,
           replicas: dep.spec?.replicas ?? 1,
-          ready: ready(await api.readEndpoints(namespace, name)),
+          ready: ready(await readEndpoints(name)),
           wokeAt: dep.metadata?.annotations?.[POWER_WOKE_AT] ?? null,
           blockers: blockers ? await blockers(target) : [],
         });
@@ -198,7 +214,7 @@ export function createPower(options: PowerOptions): Power {
       const result: SleepNowResult = { slept: [], blocked: [] };
       for (const target of targets) {
         const name = deployments[target];
-        const dep = await api.readDeployment(namespace, name);
+        const dep = await readDeployment(name);
         if (!dep) continue;
         if ((dep.spec?.replicas ?? 1) === 0) {
           result.slept.push(target);
@@ -229,6 +245,8 @@ export function createPower(options: PowerOptions): Power {
           if (!(await api.canI(namespace, verb, "apps", "deployments", name)))
             missing.push(`${verb} deployments/${name}`);
         }
+        // ensureAwake and status poll the Service's Endpoints (same name as the Deployment).
+        if (!(await api.canI(namespace, "get", "", "endpoints", name))) missing.push(`get endpoints/${name}`);
       }
       return missing;
     },

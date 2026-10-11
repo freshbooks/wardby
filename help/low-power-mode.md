@@ -104,7 +104,8 @@ full table.
 - [`low_power_disabled`](errors/low-power-disabled.md): `power_sleep` was
   called while the mode is off.
 - [`low_power_scale_forbidden`](errors/low-power-scale-forbidden.md): the
-  control plane may not scale the Deployment (Role `wardby-power` missing).
+  control plane may not read or scale a Deployment or read its Endpoints
+  (Role `wardby-power` missing or out of date).
 - Also: `power_sleep_failed`, `low_power_access_check_failed`,
   `low_power_ignored`.
 

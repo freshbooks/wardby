@@ -48,6 +48,8 @@ export class FakeKubernetesApi implements KubernetesApi {
   readonly deploymentPatches: Array<{ name: string; replicas?: number; annotations?: Record<string, string> }> = [];
   /** Deployment names whose patch throws KubernetesForbiddenError. */
   forbidden = new Set<string>();
+  /** "deployment/<name>" or "endpoints/<name>" keys whose read throws KubernetesForbiddenError. */
+  forbiddenReads = new Set<string>();
   /** "verb/resource/name" keys canI answers false for. */
   accessDenied = new Set<string>();
   logs = new Map<string, string>();
@@ -157,12 +159,16 @@ export class FakeKubernetesApi implements KubernetesApi {
     return this.read<V1Service>("service", namespace, name);
   }
   async readEndpoints(namespace: string, name: string) {
+    if (this.forbiddenReads.has(`endpoints/${name}`))
+      throw new KubernetesForbiddenError(this.key("endpoints", namespace, name));
     return this.read<V1Endpoints>("endpoints", namespace, name);
   }
   async readResourceQuota(namespace: string, name: string) {
     return this.read<V1ResourceQuota>("resourcequota", namespace, name);
   }
   async readDeployment(namespace: string, name: string) {
+    if (this.forbiddenReads.has(`deployment/${name}`))
+      throw new KubernetesForbiddenError(this.key("deployment", namespace, name));
     return this.read<V1Deployment>("deployment", namespace, name);
   }
   async patchDeployment(

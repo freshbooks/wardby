@@ -731,9 +731,12 @@ the autoscaler owns the replica count, so do not set it by hand.
 - `NATIVE_SANDBOX_WARM_POOL_SIZE` must be 0; the control plane refuses to start
   otherwise, because a warm pool needs the gateway running.
 - The gateway must be in the same namespace as `KUBERNETES_NAMESPACE`.
-- The control plane needs the `wardby-power` Role to scale the Deployments. If
-  it is missing, start-up warns `low_power_scale_forbidden: missing ...` and
-  waking fails with that error; re-run `up.sh` with the flag.
+- The control plane needs the `wardby-power` Role: `get` and `patch` on the
+  proxy and gateway Deployments, and `get` on their Endpoints (to tell when a
+  woken target is ready). If any of it is missing, start-up warns
+  `low_power_scale_forbidden: missing ...` naming each permission, and waking,
+  `power_status` and `power_sleep` fail with that error; re-run `up.sh` with
+  the flag.
 
 **Cost.** Autopilot bills Pod requests while a Pod exists. The table uses
 us-central1 list prices of $0.0445 per vCPU-hour and $0.0049225 per GiB-hour and

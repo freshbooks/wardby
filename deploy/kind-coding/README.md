@@ -261,7 +261,8 @@ unreachable from a worker).
 ## Low-power mode on the kind harness
 
 `WARDBY_LOW_POWER=1 bash deploy/kind-coding/up.sh` also applies the
-`wardby-power` Role that lets the control plane scale the coding proxy. The
+`wardby-power` Role that lets the control plane scale the coding proxy and
+native gateway and read their Endpoints. The
 kind control plane runs on your host, so set `WARDBY_LOW_POWER=1` (and
 optionally `LOW_POWER_IDLE_MINUTES`) in the environment of the locally run
 `wardby serve` as well. See the

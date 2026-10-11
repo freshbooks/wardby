@@ -53,6 +53,17 @@ async function readOrUndefined<T>(read: () => Promise<T>): Promise<T | undefined
   }
 }
 
+/** Undefined for a 404; a 403 becomes KubernetesForbiddenError (cause kept); rethrows anything else. */
+async function readOrForbidden<T>(what: string, read: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await read();
+  } catch (error) {
+    if (statusCode(error) === 404) return undefined;
+    if (statusCode(error) === 403) throw new KubernetesForbiddenError(`forbidden: get ${what}`, { cause: error });
+    throw error;
+  }
+}
+
 /** Swallows a 404 so deletes are idempotent. */
 async function deleteIgnoringMissing(remove: () => Promise<unknown>): Promise<void> {
   try {
@@ -188,7 +199,9 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
   }
 
   readEndpoints(namespace: string, name: string): Promise<V1Endpoints | undefined> {
-    return readOrUndefined(() => this.core.readNamespacedEndpoints({ namespace, name }));
+    return readOrForbidden(`endpoints/${namespace}/${name}`, () =>
+      this.core.readNamespacedEndpoints({ namespace, name }),
+    );
   }
 
   readResourceQuota(namespace: string, name: string): Promise<V1ResourceQuota | undefined> {
@@ -204,7 +217,9 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
   }
 
   readDeployment(namespace: string, name: string): Promise<V1Deployment | undefined> {
-    return readOrUndefined(() => this.apps.readNamespacedDeployment({ namespace, name }));
+    return readOrForbidden(`deployments/${namespace}/${name}`, () =>
+      this.apps.readNamespacedDeployment({ namespace, name }),
+    );
   }
 
   async patchDeployment(
@@ -222,7 +237,8 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
         setHeaderOptions("Content-Type", PatchStrategy.MergePatch),
       );
     } catch (error) {
-      if (statusCode(error) === 403) throw new KubernetesForbiddenError(`deployments/${namespace}/${name}`);
+      if (statusCode(error) === 403)
+        throw new KubernetesForbiddenError(`deployments/${namespace}/${name}`, { cause: error });
       if (statusCode(error) === 404) throw new KubernetesNotFoundError(`deployments/${namespace}/${name}`);
       throw error;
     }
