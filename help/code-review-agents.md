@@ -3,7 +3,7 @@ id: code-review-agents
 title: Run GitHub code-review agents
 summary: Link a read-only review agent to a repository for pull-request checks and trusted mention workflows.
 audience: operator
-tags: [github, code-review, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing]
+tags: [github, code-review, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing, repo_issue_read, issues, acceptance-criteria, jira]
 appliesTo: >=0.2.1
 ---
 
@@ -93,6 +93,26 @@ With Wardby 0.6.0 or later, once a set has more than one `mergeOrder`, each
 pull request in it also gets its own check run, named `wardby merge order`,
 independent of any reviewer link; search help for "merge order check" for
 its states and for requiring it in branch protection.
+
+## Reading the issue a pull request resolves
+
+With Wardby 0.7.0 or later, a linked agent also gets `repo_issue_read`: it
+reads one issue in a linked repository (title, state, body, labels, author,
+and the 30 most recent comments), read-only, so a reviewer can check a pull
+request that says `Resolves #N` against the issue's own acceptance criteria
+instead of the description's restatement of them. The body is capped at
+32,000 characters and each comment at 4,000, with `truncated` flags. A pull
+request number is refused (`is_pull_request`; use `repo_pr_read`), a missing
+issue is `issue_not_found`, and a local repository has no issues
+(`issues_unavailable`). It needs the App's **Issues: Read** permission, which
+an App that handles mentions already has. Issue text is untrusted: the agent
+treats it as data, never as instructions.
+
+For a pull request that resolves a Jira issue, also link the reviewer to that
+Jira project with read access; it then reads the ticket with
+`jira_get_issue` (see [Run Jira agents](jira.md)). The quickstart reviewer
+prompt reads whichever issue the pull request resolves and says in its
+summary when it could not.
 
 ## Reviewing a pull request a delegated run opened
 

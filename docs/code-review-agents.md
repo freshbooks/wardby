@@ -870,6 +870,24 @@ internal marker to the model:
   cases.
 - `repo_read_file` / `repo_list_files` — read a file or list a directory at
   a ref.
+- `repo_issue_read` (Wardby 0.7.0 or later) — read one issue, read-only:
+  `number`, `title`, `state` (`open` or `closed`), `body`, `labels`,
+  `author`, `url`, `createdAt`, `updatedAt`, and its 30 most recent comments
+  (`author`, `body`, `createdAt`), oldest first, with `totalComments`. The
+  body is capped at 32,000 characters and each comment at 4,000;
+  `truncated` is true when anything was cut (`bodyTruncated` and each
+  comment's `truncated` say where). A reviewer uses it to read the issue a
+  pull request says it resolves (`Resolves #N`) and check the change against
+  that issue's own acceptance criteria rather than the description's
+  restatement of them. It works on read and write links alike and needs the
+  App's **Issues: Read** permission. Issue text is written by whoever can
+  open or comment on issues: the tool description tells the agent to treat it
+  as data, never instructions. A pull request number is refused with
+  `is_pull_request` (use `repo_pr_read`), and a local repository has no
+  issues (`issues_unavailable`). For a pull request that resolves a Jira
+  issue, link the reviewer to that Jira project as well (`link_issue_project`,
+  read access is enough) so it can read the ticket with `jira_get_issue`; see
+  [Jira agents](jira-agents.md).
 - `repo_publish_review` — publish inline comments, a summary, and the check
   verdict for one PR head, in one call. A check is completed or created
   **only on the pull request the run was dispatched for** (by a push, a
@@ -897,6 +915,9 @@ agent's links. Failures are always a JSON result, never a thrown error:
 | `repository_access_unavailable` | GitHub could not be reached (or rate-limited wardby) while re-checking access, even after one retry; the call was refused for safety. Try again later.                            |
 | `host_not_configured`           | No host provider is configured for this link on this deployment.                                                                                                                  |
 | `unknown_tool`                  | Not a recognized `repo_*` tool name.                                                                                                                                              |
+| `issue_not_found`               | `repo_issue_read`: no issue with that number in the repository (or the repository has issues turned off).                                                                         |
+| `is_pull_request`               | `repo_issue_read`: the number is a pull request; read it with `repo_pr_read`.                                                                                                     |
+| `issues_unavailable`            | `repo_issue_read` on a local repository, which has no issues.                                                                                                                     |
 | `host_not_installed`            | The GitHub App is not installed on this repository.                                                                                                                               |
 | `host_permission_missing`       | The App installation is missing a required permission.                                                                                                                            |
 | `host_invalid_response`         | The host returned something the client could not parse.                                                                                                                           |

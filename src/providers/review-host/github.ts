@@ -30,6 +30,7 @@ import {
   type FileListView,
   type FileReadResult,
   type HostPermission,
+  type IssueReadResult,
   type HostUser,
   type OwnCheckView,
   type PublishReviewInput,
@@ -69,6 +70,11 @@ const PR_WRITE = { pull_requests: "write" } as const;
 /** CI reads, each on its own token: Checks is already granted; Commit statuses may not be. */
 const CHECKS_READ = { checks: "read" } as const;
 const STATUSES_READ = { statuses: "read" } as const;
+/** repo_issue_read: an issue and its comments, nothing else. */
+const ISSUES_READ = { issues: "read" } as const;
+const MAX_ISSUE_BODY_CHARS = 32_000;
+const MAX_ISSUE_COMMENT_CHARS = 4_000;
+const MAX_ISSUE_COMMENTS = 30;
 const MARK_READY_MUTATION = `mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }`;
 /** readOwnChecks's own name cap: a handful of fixed check names, never agent/user input. */
 const MAX_OWN_CHECK_NAMES = 10;
@@ -128,6 +134,21 @@ export function toReviewHostError(err: unknown): ReviewHostError {
     return new ReviewHostError("host_api_error", message);
   }
   return new ReviewHostError("host_api_error", "github_request_failed");
+}
+
+/** wardby's hidden markers (run, review, finding, status, related-section); never shown to agents. */
+const HIDDEN_MARKER = /<!--\s*(?:wardby|reevo-run)[\s\S]*?-->/g;
+
+/** Untrusted issue text for an agent: wardby markers removed, then cut at `limit` characters. */
+function capped(text: string, limit: number): { text: string; truncated: boolean } {
+  const clean = text.replace(HIDDEN_MARKER, "");
+  return clean.length > limit ? { text: clean.slice(0, limit), truncated: true } : { text: clean, truncated: false };
+}
+
+function loginOf(user: unknown): string | null {
+  return user && typeof user === "object" && typeof (user as Json).login === "string"
+    ? ((user as Json).login as string)
+    : null;
 }
 
 /** Ranks a collaborator-permission answer: user.permissions first, then the legacy permission field. */
@@ -579,6 +600,54 @@ export class GitHubReviewHost implements CodeReviewHost {
         truncated: window.startLine - 1 + slice.length < lines.length,
         content: slice.map((line, i) => `${window.startLine + i}: ${line}`).join("\n"),
         text: slice.join("\n"),
+      };
+    });
+  }
+
+  async readIssue(repository: string, number: number): Promise<IssueReadResult> {
+    const base = repoPath(repository);
+    return this.withToken(repository, ISSUES_READ, async (get) => {
+      const response = await get(`${base}/issues/${number}`, {}, [200, 404, 410]);
+      if (response.status !== 200) return { kind: "not_found", number };
+      const issue = record(await response.json());
+      // GitHub's issues API also answers for pull requests; those go through repo_pr_read.
+      if (issue.pull_request) return { kind: "pull_request", number };
+
+      const totalComments = typeof issue.comments === "number" ? issue.comments : 0;
+      let raw: Json[] = [];
+      // Comments come oldest first: read the last page, and the one before it when that is short, for the newest.
+      const lastPage = Math.ceil(totalComments / 100);
+      for (let page = lastPage; page >= 1 && page >= lastPage - 1 && raw.length < MAX_ISSUE_COMMENTS; page--) {
+        const batch = list(await (await get(`${base}/issues/${number}/comments?per_page=100&page=${page}`)).json());
+        raw = [...batch, ...raw];
+      }
+      const recent = raw.slice(-MAX_ISSUE_COMMENTS);
+      const comments = recent.map((c) => {
+        const { text, truncated } = capped(typeof c.body === "string" ? c.body : "", MAX_ISSUE_COMMENT_CHARS);
+        return { author: loginOf(c.user), body: text, createdAt: str(c.created_at), truncated };
+      });
+      const body = capped(typeof issue.body === "string" ? issue.body : "", MAX_ISSUE_BODY_CHARS);
+      const labels = Array.isArray(issue.labels)
+        ? issue.labels
+            .map((l) => (typeof l === "string" ? l : l && typeof l === "object" ? (l as Json).name : undefined))
+            .filter((name): name is string => typeof name === "string" && name !== "")
+        : [];
+      const commentsOmitted = Math.max(totalComments, raw.length) > comments.length;
+      return {
+        kind: "issue",
+        number: num(issue.number),
+        title: str(issue.title),
+        state: issue.state === "closed" ? "closed" : "open",
+        body: body.text,
+        bodyTruncated: body.truncated,
+        labels,
+        author: loginOf(issue.user),
+        url: str(issue.html_url),
+        createdAt: str(issue.created_at),
+        updatedAt: str(issue.updated_at),
+        comments,
+        totalComments: Math.max(totalComments, raw.length),
+        truncated: body.truncated || commentsOmitted || comments.some((c) => c.truncated),
       };
     });
   }
