@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Only the first three are required.
+
+region              = "us-east-1"
+hostname            = "wardby.your-company.example"
+public_access_cidrs = ["203.0.113.10/32"] # your own address
+
+# name_prefix = "wardby"
+# route53_zone_id = "Z0123456789ABCDEFGHIJ"
+# additional_admin_principal_arns = ["arn:aws:iam::111122223333:role/your-admin-role"]
+
+# Bring your own VPC (all four, at least two subnets each):
+# existing_vpc_id              = "vpc-0123456789abcdef0"
+# existing_public_subnet_ids   = ["subnet-...", "subnet-..."]
+# existing_private_subnet_ids  = ["subnet-...", "subnet-..."]
+# existing_database_subnet_ids = ["subnet-...", "subnet-..."]
