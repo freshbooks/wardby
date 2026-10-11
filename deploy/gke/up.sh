@@ -516,6 +516,14 @@ if ! kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeou
   echo "up.sh: the control plane did not roll out. If its log shows \"permission denied\" for the database or schema \"dbos\", the durable executor's grants are missing: run deploy/gke/bootstrap-database-iam.sh, then up.sh again (docs/getting-started-gke.md, \"Durable executor\")." >&2
   exit 1
 fi
+# failed always-on pods
+# A replica the node rejected at admission (Autopilot's OutOfcpu race during a
+# rollout) stays as a Failed pod next to its healthy replacement until
+# something deletes it. Remove those for the three always-on Deployments only:
+# failed coding-run and sandbox pods are the launchers' to collect.
+kubectl -n "$NAMESPACE" delete pods --field-selector=status.phase=Failed --ignore-not-found \
+  -l 'app.kubernetes.io/name in (wardby-control-plane,wardby-coding-proxy,wardby-native-gateway)' >/dev/null
+# end failed always-on pods
 
 echo "==> 11/${TOTAL_STEPS} prove the new pods can use the database"
 # A Ready pod has not necessarily touched the database: the control plane and

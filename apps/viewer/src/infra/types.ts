@@ -103,6 +103,8 @@ export interface InfraDeployment {
   ready: number;
   desired: number;
   labels: Record<string, string>;
+  /** Low-power mode's `wardby.io/power-woke-at`; absent where low-power never stamped it. */
+  wokeAt?: string | null;
 }
 export interface InfraJob {
   name: string;
