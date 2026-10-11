@@ -304,7 +304,11 @@ describe.skipIf(!process.env.DATABASE_URL)("request deferrals (database)", () =>
 
   it("ci_completed never starts a request row while its lead runs", async () => {
     ci = "passing";
-    await expect(routeHostEvent(ciDone(10), deps)).resolves.toEqual({ runIds: [], followUps: [] });
+    // One mark-ready follow-up per pull request (#287); no review starts.
+    await expect(routeHostEvent(ciDone(10), deps)).resolves.toEqual({
+      runIds: [],
+      followUps: [expect.any(Function)],
+    });
     expect(dispatchRun).not.toHaveBeenCalled();
     expect(await rowsFor(10)).toHaveLength(2);
   });
