@@ -780,10 +780,11 @@ fresh from GitHub on its current head:
 - CI is green: every check run and commit status on the head that is not
   one of Wardby's own checks has completed with `success`, `neutral`, or
   `skipped`, with at least one `success` — or the repository reports no CI
-  at all. All-neutral or all-skipped CI counts as inconclusive and waits. CI that is truncated
-  (more checks exist than wardby could read), still pending, failing, or
-  unreadable leaves the pull request in draft; wardby tries again the next
-  time something changes.
+  at all. All-neutral or all-skipped CI counts as inconclusive and waits. A
+  pull request with more checks and statuses than Wardby reads (about 50) is
+  truncated and never marked ready automatically. CI still pending, failing,
+  truncated, or unreadable leaves the pull request in draft; see the
+  re-evaluation triggers below for when Wardby checks again.
 - the `wardby merge order` check (see [The wardby merge order
   check](../help/merge-order-check.md)) is `success`, or is not posted on
   this pull request at all.
@@ -797,15 +798,21 @@ Wardby marks a given pull request ready at most once. If a person moves it
 back to draft afterward, wardby leaves it there — it never re-marks a pull
 request once it has done so.
 
-Wardby re-checks whether a pull request is ready to mark:
+Wardby re-checks whether a pull request is ready to mark on any of these
+events:
 
-- after one of its reviewer runs finishes;
-- when a CI check suite completes on its head;
-- when its `wardby merge order` check turns `success` — for example, right
+- a reviewer run finishing;
+- a CI check suite completing on its head;
+- its `wardby merge order` check turning `success` — for example, right
   after an earlier step in its set merges;
-- and, as a fallback for any of the above missed, by wardby's own merge-order
+- and, as a fallback for any of the above missed, wardby's own merge-order
   reconciliation sweep, for a pull request that is part of a merge-ordered
   set (see [The reconciliation sweep](../help/merge-order-check.md#the-reconciliation-sweep)).
+
+CI that reports only commit statuses (no check suite) is not re-checked when
+it finishes — GitHub does not raise a check-suite event for a status-only
+commit. Such a pull request is marked ready the next time one of the events
+above fires, or stays in draft until then.
 
 With a merge-ordered set of delegated pull requests (see [Fanning out to
 several builders](agent-recipes.md#fanning-out-to-several-builders)), a

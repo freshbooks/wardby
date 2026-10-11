@@ -191,16 +191,21 @@ isn't Wardby's own has completed with success, neutral, or skipped, at
 least one with success, or there is no CI at all), and the `wardby merge order` check is `success` or
 isn't posted on it. Commit statuses only count if the App can read them:
 grant **Commit statuses: Read** if your CI reports statuses rather than
-check runs. Wardby marks a given pull request ready at most once; moving it
-back to draft by hand is final — Wardby never re-marks it.
+check runs. A pull request with more checks and statuses than Wardby reads
+(about 50) is never marked ready automatically. Wardby marks a given pull
+request ready at most once; moving it back to draft by hand is final —
+Wardby never re-marks it.
 
-Wardby checks whether a pull request is ready after one of its reviewer
-runs finishes, when a CI check suite completes on its head, when its
-`wardby merge order` check turns `success`, and by Wardby's own
-reconciliation sweep for a pull request that is part of a merge-ordered
+Wardby checks whether a pull request is ready to mark on any of these
+events: a reviewer run finishing, a CI check suite completing on its head,
+its `wardby merge order` check turning `success`, or (as a fallback) Wardby's
+own reconciliation sweep for a pull request that is part of a merge-ordered
 set. With a `mergeOrder` set, a later step becomes ready this way only once
 the steps it depends on have merged — see [The wardby merge order
-check](merge-order-check.md).
+check](merge-order-check.md). CI that reports only commit statuses (no
+check suite) is not re-checked when it finishes; such a pull request is
+marked ready the next time one of those events fires, or stays in draft
+until then.
 
 It never approves, merges, or converts a pull request back to draft — a
 person's approval stays the gate wherever branch protection requires one.
