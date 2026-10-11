@@ -398,6 +398,8 @@ spec:
           value: wardby-app-database-url
         - name: NODE_ENV
           value: production
+        - name: WARDBY_GITHUB_ALLOWED_ACCOUNTS
+          value: wardby_github_allowed_accounts
         - name: MCP_TRANSPORT
           value: http
         - name: MCP_HTTP_BIND

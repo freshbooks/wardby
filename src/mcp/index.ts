@@ -40,6 +40,7 @@ import { userCallbackPath } from "../core/host-identity-links.js";
 import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import { GitHubAppClient } from "../providers/vcs/github.js";
+import { loadGitHubAllowedAccounts } from "../config/github-allowed-accounts.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
 import { buildPower } from "../core/power-composition.js";
@@ -291,6 +292,12 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const mcpConfig = loadMcpConfig();
   // Parsed up front so a malformed value fails at startup, not at shutdown.
   const drainSeconds = loadShutdownDrainSeconds();
+  // Parsed now so a malformed list stops startup instead of failing every event.
+  const allowedAccounts = loadGitHubAllowedAccounts();
+  mcpLog.info(
+    { additionalAccounts: [...allowedAccounts] },
+    "GitHub App serves its owner plus WARDBY_GITHUB_ALLOWED_ACCOUNTS",
+  );
   // Loads the model catalog before anything else: running on the shipped
   // catalog alone (the fallback currentModelCatalog() uses before a store
   // is installed) would quietly re-enable models an admin turned off.
@@ -360,8 +367,16 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const eventConfig = loadGitHubEventConfig();
   const githubConfig = loadGitHubVcsConfig();
   const reviewHosts = providers.reviewHosts;
+  const githubApp =
+    githubConfig.appId && githubConfig.privateKey
+      ? new GitHubAppClient({
+          appId: githubConfig.appId,
+          privateKey: githubConfig.privateKey,
+          apiVersion: githubConfig.apiVersion,
+        })
+      : undefined;
   const githubEvents =
-    eventConfig.webhookSecret && reviewHosts?.github && githubConfig.appId && githubConfig.privateKey
+    eventConfig.webhookSecret && reviewHosts?.github && githubApp
       ? {
           github: {
             db: prisma,
@@ -370,14 +385,9 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
             repoAccess: providers.repoAccess ?? createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
             ...(providers.issueTrackers ? { issueTrackers: providers.issueTrackers } : {}),
             webhookSecret: eventConfig.webhookSecret,
-            appIdentity: (() => {
-              const client = new GitHubAppClient({
-                appId: githubConfig.appId,
-                privateKey: githubConfig.privateKey,
-                apiVersion: githubConfig.apiVersion,
-              });
-              return () => client.appIdentity();
-            })(),
+            appIdentity: (opts?: { fresh?: boolean }) => githubApp.appIdentity(opts),
+            allowedAccounts: () => allowedAccounts,
+            uninstallInstallation: (id: number) => githubApp.deleteInstallation(id),
           },
         }
       : undefined;

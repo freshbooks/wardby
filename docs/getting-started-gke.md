@@ -197,6 +197,12 @@ control plane's `env` in the same `control-plane.yaml` if you need them. If you
 later remove the bot token, remove these two entries too: the control plane
 refuses to start with either one set and no token.
 
+`WARDBY_GITHUB_ALLOWED_ACCOUNTS` (optional, not a secret) adds GitHub accounts
+the App serves besides its owner. Pass it to `up.sh` on every run, for example
+`WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme-labs WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh`;
+a run without it serves only the App's owner. See
+[Which accounts the App serves](code-review-agents.md#which-accounts-the-app-serves-wardby_github_allowed_accounts).
+
 Generate `SECRET_APP_KEY` with:
 
 ```sh

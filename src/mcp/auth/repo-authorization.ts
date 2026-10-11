@@ -11,6 +11,7 @@ import {
   loadLocalRepoRoots,
   resolveLocalRepository,
 } from "../../coding/local-repo.js";
+import { GITHUB_ACCOUNT_NOT_ALLOWED } from "../../config/github-allowed-accounts.js";
 import { requiredLevel, type AuthorizedVia, type RepoAccessKind } from "../../core/repo-access.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
@@ -64,6 +65,15 @@ export async function authorizeRepositoryForSet(
     await canonicalLocalRepository(input.repository);
     return stamp("local_root");
   }
+  // A server-wide boundary: no admin approval reaches past it.
+  const accountDenied = await ctx.providers.repoAccess?.checkAccount?.(input.provider, input.repository);
+  if (accountDenied && !accountDenied.ok) {
+    if (accountDenied.reason === "github_account_not_allowed") throw accountNotAllowed(input.repository);
+    throw new McpError(
+      503,
+      `Could not check whether ${input.repository}'s GitHub account is served right now; try again later.`,
+    );
+  }
   if (input.adminOverride) {
     // Role-gated: the scope alone never suffices (resource-server.ts).
     requireScope(ctx, ctx.canonicalUri, "agents:admin");
@@ -99,10 +109,20 @@ export async function authorizeRepositoryForSet(
         `Your linked GitHub account has ${decision.level ?? "no"} access to ${input.repository}; ` +
           `this needs ${required}. Ask a repository admin for access, or a wardby admin to approve it (adminOverride).`,
       );
+    case "github_account_not_allowed":
+      throw accountNotAllowed(input.repository);
     default:
       throw new McpError(
         503,
         `Could not verify your GitHub access to ${input.repository} right now (is the GitHub App installed on it?). Try again.`,
       );
   }
+}
+
+function accountNotAllowed(repository: string): McpError {
+  return new McpError(
+    403,
+    `${GITHUB_ACCOUNT_NOT_ALLOWED}: ${repository} belongs to a GitHub account this server does not serve. ` +
+      "An operator can add the account to WARDBY_GITHUB_ALLOWED_ACCOUNTS.",
+  );
 }

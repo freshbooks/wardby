@@ -1,5 +1,6 @@
 import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
+import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
 import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 
 const DEFAULT_API_BASE_URL = "https://api.github.com";
@@ -702,22 +703,38 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     });
   }
 
-  private identity?: Promise<{ id: number; slug: string }>;
+  private identity?: Promise<{ id: number; slug: string; ownerLogin: string }>;
 
-  /** The App's id and slug (its @-mention handle), read once with the App JWT. */
-  appIdentity(): Promise<{ id: number; slug: string }> {
+  /**
+   * The App's id, slug (its @-mention handle), and owner account, read once
+   * with the App JWT and memoized. `fresh` re-reads GET /app and replaces the
+   * memo (used before a destructive action, since the owner can change).
+   * A rejection is never cached.
+   */
+  appIdentity(opts?: { fresh?: boolean }): Promise<{ id: number; slug: string; ownerLogin: string }> {
+    if (opts?.fresh) this.identity = undefined;
     this.identity ??= (async () => {
       const response = await this.requestJson("/app", await this.appJwt());
       const payload = record(await response.json());
       if (typeof payload.slug !== "string" || !/^[a-z0-9-]{1,64}$/.test(payload.slug)) {
         throw new Error("github_api_invalid_response");
       }
-      return { id: positiveInteger(payload.id), slug: payload.slug };
-    })().catch((err: unknown) => {
-      this.identity = undefined;
-      throw err;
+      const ownerLogin = record(payload.owner).login;
+      if (!isGitHubLogin(ownerLogin)) throw new Error("github_api_invalid_response");
+      return { id: positiveInteger(payload.id), slug: payload.slug, ownerLogin };
+    })();
+    const pending = this.identity;
+    void pending.catch(() => {
+      // Only clear our own attempt: a newer (fresh) read may have replaced it.
+      if (this.identity === pending) this.identity = undefined;
     });
-    return this.identity;
+    return pending;
+  }
+
+  /** Removes this App from an installation (an account outside the trusted set). */
+  async deleteInstallation(installationId: number): Promise<void> {
+    const id = positiveInteger(installationId);
+    await this.requestJson(`/app/installations/${id}`, await this.appJwt(), { method: "DELETE" }, [204]);
   }
 
   async upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void> {
