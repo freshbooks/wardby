@@ -608,7 +608,7 @@ production; the launcher warns loudly when it is unset.
 The `eks` platform profile (Amazon EKS with a gVisor node group) also requires
 the `gvisor` runtime class. The cluster supplies a RuntimeClass `gvisor`
 (handler `runsc`) whose scheduling block targets nodes labelled
-`wardby.dev/sandbox=gvisor` and tainted `sandbox=gvisor:NoSchedule`; the profile
+`wardby.dev/sandbox=gvisor` and tainted `sandbox=gvisor:NoSchedule`; coding-pod attestation
 forgives that node selector and toleration and nothing else. The startup canary
 and the native sandbox gate probe the cloud metadata endpoints
 `169.254.169.254`, `169.254.170.23` (EKS Pod Identity agent) and `fd00:ec2::254`

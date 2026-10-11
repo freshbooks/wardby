@@ -930,9 +930,9 @@ default 90,000ms):
 1. `platform` — pure configuration, checked before any cluster API call:
    `assertPlatformConfig` (`src/providers/jobs/kubernetes-platform.ts`) refuses
    a deployment that cannot work under `KUBERNETES_PLATFORM`. Under
-   `gke-autopilot` and `eks` this means `KUBERNETES_RUNTIME_CLASS` must be `gvisor`
-   (gVisor is mandatory there, and under `eks` — an unset or different runtime
-   class is refused, not warned about), and the effective `CODING_MAX_DISK_MB` must leave room
+   `gke-autopilot` and `eks`, `KUBERNETES_RUNTIME_CLASS` must be `gvisor` (an
+   unset or different runtime class is refused, not warned about). Under
+   `gke-autopilot` the effective `CODING_MAX_DISK_MB` must also leave room
    for the worker container's 1 GiB reservation inside Autopilot's 10 GiB pod
    ephemeral-storage ceiling. The same assertion runs again at process
    start-up in `buildConfiguredExecutor`
