@@ -24,6 +24,12 @@ import {
   type ReviewHostRegistry,
 } from "../providers/review-host/types.js";
 import { LocalRepoError, isLocalRepository, loadLocalRepoRoots, resolveLocalRepository } from "../coding/local-repo.js";
+import {
+  githubAccountOf,
+  isGitHubAccountAllowed,
+  loadGitHubAllowedAccounts,
+  trustedAccounts as trustedAccountSet,
+} from "../config/github-allowed-accounts.js";
 import { logger } from "./logger.js";
 
 const log = logger.child({ module: "repo-access" });
@@ -42,6 +48,8 @@ export type RepoAccessDenial =
   | "check_failed"
   /** A `local:` repository that is not inside the current trusted roots (LOCAL_REPO_ROOTS). */
   | "local_repo_not_allowed"
+  /** A GitHub repository whose owner is neither the App's owner nor in WARDBY_GITHUB_ALLOWED_ACCOUNTS. */
+  | "github_account_not_allowed"
   /** In-flight use only: the host was unreachable or rate-limited, even after one retry. */
   | "check_unavailable";
 
@@ -101,6 +109,8 @@ export interface RepoAccessGate {
     required: HostPermission;
     fresh?: boolean;
   }): Promise<RepoAccessDecision>;
+  /** Is this repository's account served by the GitHub App? undefined = yes (or not a GitHub repository). */
+  checkAccount?(provider: string, repository: string): Promise<RepoAccessDecision | undefined>;
 }
 
 export interface RepoAccessGateOptions {
@@ -116,6 +126,12 @@ export interface RepoAccessGateOptions {
   /** Delay before the one retry of a transient error (default 1s). */
   retryDelayMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * The served GitHub accounts (default: the App owner from hosts.github plus
+   * WARDBY_GITHUB_ALLOWED_ACCOUNTS). undefined = no GitHub App, nothing to guard.
+   * Throwing = fail closed.
+   */
+  trustedAccounts?: () => Promise<ReadonlySet<string> | undefined>;
 }
 
 /** 5xx, rate limits (403/429), and transport failures: worth one retry for a run already under way. */
@@ -142,6 +158,36 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
   const retryDelayMs = options.retryDelayMs ?? 1000;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const cache = new Map<string, CacheEntry>();
+  const readTrusted =
+    options.trustedAccounts ??
+    (async () => {
+      const host = options.hosts.github;
+      if (!host?.appOwnerLogin) return undefined;
+      let extra: ReadonlySet<string>;
+      try {
+        extra = loadGitHubAllowedAccounts();
+      } catch {
+        // A fixed code: the parse error quotes the raw value, which must not reach the log.
+        throw new Error("github_allowed_accounts_invalid");
+      }
+      return trustedAccountSet(await host.appOwnerLogin(), extra);
+    });
+
+  /** A server-wide boundary, checked before any stamp, owner, or host call. Local repositories are exempt. */
+  async function checkAccount(provider: string, repository: string): Promise<RepoAccessDecision | undefined> {
+    if (provider !== "github" || isLocalRepository(repository)) return undefined;
+    let trusted: ReadonlySet<string> | undefined;
+    try {
+      trusted = await readTrusted();
+    } catch (err) {
+      log.warn({ err }, "could not read the GitHub App's trusted accounts; denying");
+      return { ok: false, reason: "check_failed" };
+    }
+    if (trusted === undefined) return undefined;
+    return isGitHubAccountAllowed(trusted, githubAccountOf(repository))
+      ? undefined
+      : { ok: false, reason: "github_account_not_allowed" };
+  }
 
   /** The user's level, or why it could not be determined (host missing or failing). */
   async function levelOf(
@@ -197,6 +243,8 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
     fresh?: boolean;
     retryTransient?: boolean;
   }): Promise<RepoAccessDecision> {
+    const denied = await checkAccount(input.provider, input.repository);
+    if (denied) return denied;
     let identity;
     try {
       identity = await options.db.hostIdentity.findUnique({
@@ -238,6 +286,8 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
           return { ok: false, reason: "local_repo_not_allowed" };
         }
       }
+      const denied = await checkAccount(input.provider, input.repository);
+      if (denied) return denied;
       if (!input.ownerId) return { ok: false, reason: "owner_required" };
       if (input.authorizedVia === "admin" || input.authorizedVia === "grandfathered") return { ok: true };
       if (input.authorizedVia !== "host_permission") return { ok: false, reason: "not_authorized" };
@@ -251,10 +301,13 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
     },
     authorizePrincipal,
     async authorizeHostUser(input) {
+      const denied = await checkAccount(input.provider, input.repository);
+      if (denied) return denied;
       const answer = await levelOf(input.provider, input.repository, input.user, input.fresh === true, false);
       if (!answer.ok) return unavailable(answer);
       return decide(answer.level, input.required);
     },
+    checkAccount,
   };
 }
 
@@ -271,6 +324,8 @@ export function describeDenial(decision: Extract<RepoAccessDecision, { ok: false
       return `The agent owner's GitHub account has ${decision.level ?? "no"} access to ${repository}, which is not enough.`;
     case "local_repo_not_allowed":
       return `local_repo_not_allowed: ${repository} is not a git repository inside the configured local roots (LOCAL_REPO_ROOTS).`;
+    case "github_account_not_allowed":
+      return `github_account_not_allowed: ${repository} belongs to a GitHub account this server does not serve (the App's owner and WARDBY_GITHUB_ALLOWED_ACCOUNTS).`;
     case "check_failed":
       return `Could not verify access to ${repository} right now; try again later.`;
     case "check_unavailable":

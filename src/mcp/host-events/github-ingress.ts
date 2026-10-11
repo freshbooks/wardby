@@ -14,6 +14,7 @@ import { normalizeGitHubEvent, verifyGitHubSignature } from "../../providers/rev
 import type { IssueTrackerRegistry } from "../../providers/issue-tracker/types.js";
 import type { ReviewHostRegistry } from "../../providers/review-host/types.js";
 import type { RepoAccessGate } from "../../core/repo-access.js";
+import { isGitHubAccountAllowed, trustedAccounts } from "../../config/github-allowed-accounts.js";
 
 const log = logger.child({ module: "github-ingress" });
 const SAFE_DELIVERY = /^[A-Za-z0-9-]{1,100}$/;
@@ -27,7 +28,16 @@ export interface GitHubIngressDeps {
   /** For a merged/closed PR's linked issue; absent → closed PRs are ignored. */
   issueTrackers?: IssueTrackerRegistry;
   webhookSecret: string | undefined;
-  appIdentity: () => Promise<{ id: number; slug: string }>;
+  /**
+   * The App's id, slug, and owner (the owner is always served). Throwing fails
+   * the request closed. `fresh` bypasses any cache; it is used before an
+   * uninstall, since the owner can change while the server runs.
+   */
+  appIdentity: (opts?: { fresh?: boolean }) => Promise<{ id: number; slug: string; ownerLogin: string }>;
+  /** Accounts served in addition to the App's owner (WARDBY_GITHUB_ALLOWED_ACCOUNTS). */
+  allowedAccounts: () => ReadonlySet<string>;
+  /** Removes the App from an installation on an account that isn't served; absent = ignore only. */
+  uninstallInstallation?: (installationId: number) => Promise<void>;
   now?: () => Date;
 }
 
@@ -36,6 +46,41 @@ export interface GitHubIngressResult {
   body: Record<string, unknown>;
   /** Cosmetic follow-ups (reactions) to run after the response is sent. */
   afterResponse?: () => Promise<void>;
+}
+
+const INSTALLATION_EVENTS = new Set(["installation", "installation_repositories"]);
+
+function field(value: unknown, key: string): unknown {
+  return value !== null && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
+}
+
+/**
+ * Which GitHub account an event belongs to. Installation events name it on
+ * the installation; repository events carry only installation.id, so the
+ * repository's owner stands in.
+ */
+export function eventAccount(
+  eventName: string,
+  payload: unknown,
+): { login: string; installationId?: number; uninstall: boolean } | undefined {
+  if (INSTALLATION_EVENTS.has(eventName)) {
+    const installation = field(payload, "installation");
+    const login = field(field(installation, "account"), "login");
+    const id = field(installation, "id");
+    if (typeof login !== "string" || login === "") return undefined;
+    return {
+      login,
+      ...(typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? { installationId: id } : {}),
+      uninstall: field(payload, "action") !== "deleted",
+    };
+  }
+  const repository = field(payload, "repository");
+  const fullName = field(repository, "full_name");
+  const owner =
+    typeof fullName === "string" && fullName.includes("/")
+      ? fullName.split("/", 1)[0]
+      : field(field(repository, "owner"), "login");
+  return typeof owner === "string" && owner !== "" ? { login: owner, uninstall: false } : undefined;
 }
 
 export async function handleGitHubEventIngress(
@@ -61,6 +106,57 @@ export async function handleGitHubEventIngress(
     return { status: 400, body: { error: "invalid_json" } };
   }
   const app = await deps.appIdentity();
+  const account = eventAccount(eventName, payload);
+  if (account && !isGitHubAccountAllowed(trustedAccounts(app.ownerLogin, deps.allowedAccounts()), account.login)) {
+    // Never the body: only the account and what we do about it.
+    log.warn(
+      { event: eventName, account: account.login, installationId: account.installationId, deliveryId },
+      "GitHub event from an account this server does not serve ignored",
+    );
+    const uninstall = deps.uninstallInstallation;
+    const installationId = account.installationId;
+    return {
+      status: 202,
+      body: { ignored: "account_not_allowed" },
+      ...(account.uninstall && uninstall && installationId !== undefined
+        ? {
+            afterResponse: async () => {
+              // Destructive, so re-check against a fresh owner read: the cached
+              // owner may be stale after an ownership transfer or rename.
+              let fresh: { ownerLogin: string };
+              try {
+                fresh = await deps.appIdentity({ fresh: true });
+              } catch (err) {
+                log.warn(
+                  { err, account: account.login, installationId },
+                  "could not re-read the App owner; not removing the App from the installation",
+                );
+                return;
+              }
+              if (isGitHubAccountAllowed(trustedAccounts(fresh.ownerLogin, deps.allowedAccounts()), account.login)) {
+                log.info(
+                  { account: account.login, installationId },
+                  "account is served after re-reading the App owner; not removing the App from the installation",
+                );
+                return;
+              }
+              try {
+                await uninstall(installationId);
+                log.warn(
+                  { account: account.login, installationId },
+                  "removed the App from an installation on an account this server does not serve",
+                );
+              } catch (err) {
+                log.warn(
+                  { err, account: account.login, installationId },
+                  "could not remove the App from a foreign installation",
+                );
+              }
+            },
+          }
+        : {}),
+    };
+  }
   const event = normalizeGitHubEvent(eventName, payload, app);
   // An event we don't act on must never claim the delivery id: recording it
   // here would let a later, real delivery of the same id (GitHub does reuse

@@ -455,6 +455,50 @@ A GitHub App has exactly one webhook URL. Register a **separate App** for
 local development or a staging environment rather than pointing your
 production App's webhook at a dev host.
 
+### Which accounts the App serves (`WARDBY_GITHUB_ALLOWED_ACCOUNTS`)
+
+A GitHub App has one webhook URL, so every account that installs it sends its
+events to your server. wardby serves only trusted accounts:
+
+- **The App's owner** (the user or organization that owns the App), always.
+- **Accounts in `WARDBY_GITHUB_ALLOWED_ACCOUNTS`**, comma-separated logins:
+
+      WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme-labs
+
+Every other account is refused: its events are answered `202` and ignored before
+anything is recorded, and `link_repository` and coding profiles refuse its
+repositories with `github_account_not_allowed`, even with `adminOverride`.
+There is no setting that serves every account.
+
+wardby removes the App from another account's installation only when that
+account installs the App or changes the installation's repository selection.
+Installations that already exist on other accounts stay installed (their
+events are ignored); remove them by hand in the App's settings under
+**Install App**.
+
+**When you upgrade**, existing repository links and scheduled runs on
+repositories of accounts that are not served start failing with
+`github_account_not_allowed`. List those accounts in the variable first if they
+should keep working.
+
+A private App can only be installed on its owner, so it needs nothing here. Set
+the variable when the App must be installable by other accounts, for example
+when an organization owns the App and a user's repositories should be served
+too. Logins are matched case-insensitively; a malformed value stops the server
+at startup.
+
+wardby reads the App's owner login from GitHub (`GET /app`, with the App's own
+credentials) and remembers it until it restarts. If it cannot read the owner,
+it refuses rather than guesses. After you transfer the App to another owner or
+rename the owner account, list the new owner in
+`WARDBY_GITHUB_ALLOWED_ACCOUNTS` (or restart wardby) before relying on it:
+until then, events from the new owner are ignored. Before removing the App
+from an installation, wardby re-reads the owner, so it never removes the App
+from its current owner.
+
+Each wardby server should have its own GitHub App: never point other people at
+yours; give them the setup steps above instead.
+
 ### `GITHUB_APP_WEBHOOK_SECRET`
 
 Set alongside `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`

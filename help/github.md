@@ -3,7 +3,7 @@ id: github-integration
 title: Connect GitHub repositories
 summary: Authorize repository access and configure Wardby coding or review agents through a scoped GitHub App.
 audience: operator
-tags: [github, repositories, coding-agents, code-review]
+tags: [github, repositories, coding-agents, code-review, WARDBY_GITHUB_ALLOWED_ACCOUNTS]
 appliesTo: >=0.2.1
 ---
 
@@ -26,6 +26,17 @@ request. Wardby does not auto-merge coding-agent output.
 Set the App's credentials as `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` on
 the wardby server. Without them, a coding run on a GitHub repository fails with
 [`vcs_github_not_configured`](errors/vcs-github-not-configured.md).
+
+From Wardby 0.6.0, wardby serves only trusted GitHub accounts through the App:
+the App's owner, plus any accounts listed in `WARDBY_GITHUB_ALLOWED_ACCOUNTS`
+(comma-separated logins). Other accounts' events are ignored and their
+repositories are refused with `github_account_not_allowed` (help article
+`errors/github-account-not-allowed`), including existing links and scheduled
+runs after an upgrade. wardby removes the App when another account installs it
+or changes its repository selection; remove installations that already exist
+on other accounts by hand (App settings, **Install App**). After transferring
+the App or renaming its owner, list the new owner in the variable or restart
+wardby.
 
 No GitHub App is needed for a git repository on the wardby host. See
 [Use local git repositories](local-repositories.md).

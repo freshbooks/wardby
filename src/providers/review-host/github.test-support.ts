@@ -40,7 +40,7 @@ export function fakeGitHub(handler: Handler): { client: GitHubAppClient; calls: 
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
     const accept = new Headers(init?.headers).get("accept");
     const authorization = new Headers(init?.headers).get("authorization");
-    if (path === "/app" && method === "GET") return json({ id: APP_ID, slug: "wardby" });
+    if (path === "/app" && method === "GET") return json({ id: APP_ID, slug: "wardby", owner: { login: "acme" } });
     if (path.endsWith("/installation") && method === "GET") return json({ id: 42 });
     if (path === "/app/installations/42/access_tokens") {
       const requested = (body as { permissions: Record<string, string>; repositories: string[] }).permissions;
