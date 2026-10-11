@@ -13,6 +13,7 @@ import type { ProviderRegistry } from "../providers/index.js";
 import type { RepoAccessGate } from "../core/repo-access.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { HostUserAuthorizerRegistry, ReviewHostRegistry } from "../providers/review-host/types.js";
+import type { Power } from "../core/power.js";
 import type { ChatProviderRegistry } from "../providers/chat/types.js";
 
 export type McpProviders = Pick<
@@ -32,6 +33,8 @@ export type McpProviders = Pick<
    * only admin approvals still work.
    */
   repoAccess?: RepoAccessGate;
+  /** Low-power mode (scale idle proxy/gateway to zero); absent = DISABLED_POWER. */
+  power?: Power;
 };
 
 export interface McpRequestContext {

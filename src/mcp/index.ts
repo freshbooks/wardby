@@ -43,6 +43,7 @@ import { GitHubAppClient } from "../providers/vcs/github.js";
 import { loadGitHubAllowedAccounts } from "../config/github-allowed-accounts.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
+import { buildPower } from "../core/power-composition.js";
 import type { McpProviders, McpRequestContext } from "./context.js";
 import type { Principal, PrismaClient } from "#prisma";
 import { countUnattendedSchedules, unattendedSchedulesWarning } from "./unattended-schedules.js";
@@ -58,6 +59,7 @@ import { registerAgentTools } from "./tools/agents.js";
 import { registerServiceTools } from "./tools/services.js";
 import { registerBudgetGroupTools } from "./tools/budget-groups.js";
 import { registerModelCatalogTools } from "./tools/model-catalog.js";
+import { registerPowerTools } from "./tools/power.js";
 import { registerHelpTools } from "./tools/help.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
@@ -137,6 +139,7 @@ export function registerAllTools(
   registerServiceTools(mcp);
   registerBudgetGroupTools(mcp);
   registerModelCatalogTools(mcp, { refresh: opts.refreshModelCatalog });
+  registerPowerTools(mcp);
   registerHelpTools(mcp);
   registerTriggerTool(mcp);
   registerToolAuthoringTools(mcp);
@@ -207,13 +210,16 @@ export function buildMcpProviders(): McpProviderComposition {
     repoAccess,
   };
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
+  // One Power for the process, shared by both executors (wake) and the scheduler leader (sleep).
+  const power = buildPower({ env: process.env, db: prisma });
   const executor = buildConfiguredExecutor({
     native: nativeExecutor,
     db: prisma,
     providerConfig,
     repoAccess,
+    power,
     // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
-    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders }),
+    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power }),
   });
   nativeProviders.executor = executor;
 
@@ -230,6 +236,7 @@ export function buildMcpProviders(): McpProviderComposition {
       hostUserAuthorizers,
       repoAccess,
       chat,
+      power,
     },
   };
 }

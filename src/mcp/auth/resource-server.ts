@@ -37,6 +37,9 @@ export const SCOPES_SUPPORTED = [
   // Add, override, disable and reset model catalog entries (see docs/models.md).
   // Reading the catalog (list_models, get_model) is agents:read.
   "models:admin",
+  // Scale the coding proxy and native gateway to zero now (power_sleep) and
+  // read their state (power_status); low-power mode only (docs/getting-started-gke.md).
+  "power:manage",
 ];
 
 /**
@@ -47,7 +50,8 @@ export const SCOPES_SUPPORTED = [
  * services:manage changes the coding-run service catalog, which decides what
  * runs next to every coding run that names an entry; admin:view reads every
  * owner's runs (the admin viewer API); models:admin changes the model catalog,
- * which prices every principal's runs.
+ * which prices every principal's runs; power:manage scales the shared coding
+ * proxy and native gateway to zero (power_sleep) and reads their state.
  * A token scope only DELEGATES — it never authorizes on its own:
  * requireScope/requireAnyScope honour one only when one of the caller's
  * roles (McpRequestContext.roles, resolved live per request) grants it.
@@ -58,6 +62,7 @@ export const PRIVILEGED_SCOPES: readonly string[] = [
   "services:manage",
   "admin:view",
   "models:admin",
+  "power:manage",
 ];
 
 /**
@@ -65,7 +70,7 @@ export const PRIVILEGED_SCOPES: readonly string[] = [
  * grants. No roles = member: every non-privileged scope, nothing privileged.
  */
 export const ROLE_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
-  admin: ["agents:admin", "packages:approve", "services:manage", "admin:view", "models:admin"],
+  admin: ["agents:admin", "packages:approve", "services:manage", "admin:view", "models:admin", "power:manage"],
   "package-approver": ["packages:approve"],
   "service-manager": ["services:manage"],
   "model-manager": ["models:admin"],

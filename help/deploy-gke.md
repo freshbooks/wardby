@@ -46,6 +46,9 @@ The Kubernetes launcher runs Codex and Claude Code coding workers; a Claude
 Code pod adds a tool-runner sidecar with its own image. Configure an identity
 provider and GitHub App before allowing people to use the public endpoint.
 
+To lower the idle cost of a lightly used deployment, see
+[Low-power mode](../docs/getting-started-gke.md#low-power-mode) (Wardby 0.6.0 and later).
+
 ## Plan it with your assistant
 
 If you are an assistant connected to Wardby over MCP and the user asked to plan

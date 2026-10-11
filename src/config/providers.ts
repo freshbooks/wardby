@@ -368,6 +368,9 @@ export interface KubernetesNativeSandboxConfig extends NativeSandboxCommonConfig
   enforcementTimeoutMs?: number;
 }
 
+/** The native gateway Service (and Deployment) name when NATIVE_GATEWAY_SERVICE is unset. */
+export const DEFAULT_NATIVE_GATEWAY_SERVICE = "wardby-native-gateway";
+
 export type NativeSandboxConfig = DockerNativeSandboxConfig | KubernetesNativeSandboxConfig;
 
 /** Undefined when NATIVE_SANDBOX_LAUNCHER is unset (sandbox-mode runs then fail closed). Throws on a bad configuration. */
@@ -434,7 +437,7 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
       launcher,
       ...common,
       namespace,
-      gatewayService: env.NATIVE_GATEWAY_SERVICE?.trim() || "wardby-native-gateway",
+      gatewayService: env.NATIVE_GATEWAY_SERVICE?.trim() || DEFAULT_NATIVE_GATEWAY_SERVICE,
       platform: cluster.platform,
       ...(context ? { context } : {}),
       ...(runtimeClassName ? { runtimeClassName } : {}),

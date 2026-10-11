@@ -5,12 +5,17 @@
  */
 import {
   ApiException,
+  AppsV1Api,
+  AuthorizationV1Api,
   CoreV1Api,
   Exec,
   KubeConfig,
   NetworkingV1Api,
+  PatchStrategy,
+  setHeaderOptions,
   VersionApi,
   type V1ConfigMap,
+  type V1Deployment,
   type V1Endpoints,
   type V1ResourceQuota,
   type V1NetworkPolicy,
@@ -23,6 +28,7 @@ import { Writable } from "node:stream";
 import {
   KubernetesAlreadyExistsError,
   KubernetesConflictError,
+  KubernetesForbiddenError,
   KubernetesNotFoundError,
   type KubernetesApi,
   type KubernetesExecOptions,
@@ -43,6 +49,17 @@ async function readOrUndefined<T>(read: () => Promise<T>): Promise<T | undefined
     return await read();
   } catch (error) {
     if (statusCode(error) === 404) return undefined;
+    throw error;
+  }
+}
+
+/** Undefined for a 404; a 403 becomes KubernetesForbiddenError (cause kept); rethrows anything else. */
+async function readOrForbidden<T>(what: string, read: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await read();
+  } catch (error) {
+    if (statusCode(error) === 404) return undefined;
+    if (statusCode(error) === 403) throw new KubernetesForbiddenError(`forbidden: get ${what}`, { cause: error });
     throw error;
   }
 }
@@ -100,6 +117,8 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
   private readonly config: KubeConfig;
   private readonly core: CoreV1Api;
   private readonly networking: NetworkingV1Api;
+  private readonly apps: AppsV1Api;
+  private readonly authz: AuthorizationV1Api;
   private readonly version: VersionApi;
 
   constructor(options: ClientNodeKubernetesApiOptions = {}) {
@@ -108,6 +127,8 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
     if (options.context) this.config.setCurrentContext(options.context);
     this.core = this.config.makeApiClient(CoreV1Api);
     this.networking = this.config.makeApiClient(NetworkingV1Api);
+    this.apps = this.config.makeApiClient(AppsV1Api);
+    this.authz = this.config.makeApiClient(AuthorizationV1Api);
     this.version = this.config.makeApiClient(VersionApi);
   }
 
@@ -178,7 +199,9 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
   }
 
   readEndpoints(namespace: string, name: string): Promise<V1Endpoints | undefined> {
-    return readOrUndefined(() => this.core.readNamespacedEndpoints({ namespace, name }));
+    return readOrForbidden(`endpoints/${namespace}/${name}`, () =>
+      this.core.readNamespacedEndpoints({ namespace, name }),
+    );
   }
 
   readResourceQuota(namespace: string, name: string): Promise<V1ResourceQuota | undefined> {
@@ -191,6 +214,45 @@ export class ClientNodeKubernetesApi implements KubernetesApi {
 
   async readNamespace(name: string): Promise<boolean> {
     return (await readOrUndefined(() => this.core.readNamespace({ name }))) !== undefined;
+  }
+
+  readDeployment(namespace: string, name: string): Promise<V1Deployment | undefined> {
+    return readOrForbidden(`deployments/${namespace}/${name}`, () =>
+      this.apps.readNamespacedDeployment({ namespace, name }),
+    );
+  }
+
+  async patchDeployment(
+    namespace: string,
+    name: string,
+    patch: { replicas?: number; annotations?: Record<string, string> },
+  ): Promise<void> {
+    const body = {
+      ...(patch.annotations ? { metadata: { annotations: patch.annotations } } : {}),
+      ...(patch.replicas !== undefined ? { spec: { replicas: patch.replicas } } : {}),
+    };
+    try {
+      await this.apps.patchNamespacedDeployment(
+        { namespace, name, body },
+        setHeaderOptions("Content-Type", PatchStrategy.MergePatch),
+      );
+    } catch (error) {
+      if (statusCode(error) === 403)
+        throw new KubernetesForbiddenError(`deployments/${namespace}/${name}`, { cause: error });
+      if (statusCode(error) === 404) throw new KubernetesNotFoundError(`deployments/${namespace}/${name}`);
+      throw error;
+    }
+  }
+
+  async canI(namespace: string, verb: string, group: string, resource: string, name: string): Promise<boolean> {
+    const review = await this.authz.createSelfSubjectAccessReview({
+      body: {
+        apiVersion: "authorization.k8s.io/v1",
+        kind: "SelfSubjectAccessReview",
+        spec: { resourceAttributes: { namespace, verb, group, resource, name } },
+      },
+    });
+    return review.status?.allowed === true;
   }
 
   exec(

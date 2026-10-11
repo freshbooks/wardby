@@ -4,6 +4,8 @@
  */
 
 import { loadNativeSandboxConfig } from "../config/providers.js";
+import { DISABLED_POWER, type Power } from "../core/power.js";
+import { lowPowerActive } from "../core/power-composition.js";
 import type { NativeRunProviders, RunnerDb } from "../core/runner.js";
 import { nativeGatewayUrl } from "./docker-isolation.js";
 import { DockerNativeWorkerLauncher } from "./docker-launcher.js";
@@ -25,9 +27,18 @@ export function buildNativeSandboxExecutor(options: {
   launcher?: ManagedWorkerLauncher & Partial<WarmWorkerLauncher>;
   /** Tests only: replaces the kubeconfig-backed client for NATIVE_SANDBOX_LAUNCHER=kubernetes. */
   kubernetesApi?: KubernetesApi;
+  /** Low-power mode: the shared Power the Kubernetes launcher wakes the native gateway through. */
+  power?: Power;
 }): NativeSandboxExecutor | undefined {
-  const config = loadNativeSandboxConfig(options.env ?? process.env);
+  const env = options.env ?? process.env;
+  const config = loadNativeSandboxConfig(env);
   if (!config) return undefined;
+  // Only when low-power mode is actually on (as buildPower decides); otherwise it is ignored.
+  if (config.warmPoolSize > 0 && lowPowerActive(env)) {
+    throw new Error(
+      "WARDBY_LOW_POWER=1 requires NATIVE_SANDBOX_WARM_POOL_SIZE=0: an always-on warm pool defeats scale-to-zero.",
+    );
+  }
   const limits = { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids };
   const markReady = (runId: string) => new PrismaGatewayLedger(options.db).markNetworkReadyForRun(runId);
   const cold: ManagedWorkerLauncher & Partial<WarmWorkerLauncher> =
@@ -46,6 +57,7 @@ export function buildNativeSandboxExecutor(options: {
           enforcementTimeoutMs: config.enforcementTimeoutMs,
           gatewayUrl: config.gatewayUrl,
           deadlineSeconds: SANDBOX_RUN_MAX_SEC,
+          power: options.power ?? DISABLED_POWER,
           // Isolation proven inside the pod: the gateway may now serve the run.
           onNetworkProven: markReady,
         })

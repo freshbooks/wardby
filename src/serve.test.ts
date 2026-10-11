@@ -5,6 +5,7 @@ import { createPrismaClient } from "./core/db.js";
 import type { Executor } from "./providers/executor/types.js";
 import type { McpProviders } from "./mcp/context.js";
 import { FakeChatProvider } from "./providers/chat/fake.js";
+import type { Power } from "./core/power.js";
 import { startServe } from "./serve.js";
 
 // `startNotifications` is mocked (least-invasive seam) so this file can
@@ -15,6 +16,25 @@ const notificationsMock = vi.hoisted(() => ({
   startNotifications: vi.fn(async () => ({ stop: vi.fn() })),
 }));
 vi.mock("./core/notifications.js", () => notificationsMock);
+
+// Captures the serve module's warn calls without silencing the real logger.
+const serveWarn = vi.hoisted(() => vi.fn());
+vi.mock("./core/logger.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./core/logger.js")>();
+  const realChild = actual.logger.child.bind(actual.logger) as (bindings: object) => Record<string, unknown>;
+  (actual.logger as unknown as { child: unknown }).child = (bindings: { module?: string }) => {
+    const c = realChild(bindings);
+    if (bindings.module === "serve") {
+      const warn = (c.warn as (...a: unknown[]) => void).bind(c);
+      c.warn = (...args: unknown[]) => {
+        serveWarn(...args);
+        warn(...args);
+      };
+    }
+    return c;
+  };
+  return actual;
+});
 
 const ENV_KEYS = [
   "MCP_TRANSPORT",
@@ -44,6 +64,7 @@ afterEach(() => {
     else process.env[k] = saved[k];
   }
   notificationsMock.startNotifications.mockClear();
+  serveWarn.mockClear();
 });
 
 const fakeExecutor: Executor = { async start() {}, async stop() {} };
@@ -155,5 +176,76 @@ describe.skipIf(!process.env.DATABASE_URL)("startServe (database)", () => {
 
     const notificationsHandle = await notificationsMock.startNotifications.mock.results[0].value;
     expect(notificationsHandle.stop).toHaveBeenCalledTimes(1);
+  });
+
+  describe("low-power mode", () => {
+    function fakePower(over: Partial<Power> = {}): Power {
+      return {
+        enabled: true,
+        ensureAwake: vi.fn(async () => {}),
+        isAsleep: vi.fn(async () => false),
+        sleepIfIdle: vi.fn(async () => {}),
+        checkAccess: vi.fn(async () => []),
+        status: async () => ({ enabled: true, targets: [] }),
+        sleepNow: async () => ({ slept: [], blocked: [] }),
+        ...over,
+      };
+    }
+    async function serveWith(power: Power, tag: string) {
+      const port = await freePort();
+      const origin = `http://127.0.0.1:${port}`;
+      Object.assign(process.env, {
+        MCP_TRANSPORT: "http",
+        MCP_HTTP_BIND: `127.0.0.1:${port}`,
+        MCP_CANONICAL_URI: origin,
+        AUTH_PROVIDER: "self-hosted",
+        AUTH_AUDIENCE: origin,
+        AUTH_SIGNING_KEY: "a1".repeat(32),
+        AUTH_CREDENTIAL_HASH_KEY: "b2".repeat(32),
+        SECRET_APP_KEY: "c3".repeat(32),
+      });
+      return startServe({ providers: { ...providers, power }, scope: `${scope}-${tag}` });
+    }
+    afterAll(async () => {
+      await db.schedulerLease.deleteMany({ where: { scope: { startsWith: scope + "-power" } } });
+    });
+
+    it("sleeps idle targets from the leader tick, and a rejecting sleep does not break the tick", async () => {
+      const sleepIfIdle = vi.fn(async () => {
+        throw new Error("boom");
+      });
+      const handle = await serveWith(fakePower({ sleepIfIdle }), "power-tick");
+      try {
+        expect(await until(() => sleepIfIdle.mock.calls.length >= 1, 14000)).toBe(true);
+        expect(serveWarn).toHaveBeenCalledWith(
+          expect.objectContaining({ err: expect.any(Error) }),
+          "power_sleep_failed",
+        );
+      } finally {
+        await handle.close();
+      }
+    }, 20000);
+
+    it("warns at startup when the cluster role cannot scale the targets", async () => {
+      const checkAccess = vi.fn(async () => ["patch deployments/x"]);
+      const handle = await serveWith(fakePower({ checkAccess }), "power-access");
+      try {
+        expect(await until(() => serveWarn.mock.calls.length > 0)).toBe(true);
+        expect(serveWarn).toHaveBeenCalledWith("low_power_scale_forbidden: missing patch deployments/x");
+      } finally {
+        await handle.close();
+      }
+    });
+
+    it("does not check access when low-power mode is off", async () => {
+      const checkAccess = vi.fn(async () => ["patch deployments/x"]);
+      const handle = await serveWith(fakePower({ enabled: false, checkAccess }), "power-off");
+      try {
+        await new Promise((r) => setTimeout(r, 200));
+        expect(checkAccess).not.toHaveBeenCalled();
+      } finally {
+        await handle.close();
+      }
+    });
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { loadNativeSandboxConfig } from "../config/providers.js";
 import type { NativeRunProviders } from "../core/runner.js";
 import { buildNativeSandboxExecutor } from "./composition.js";
+import { FakeKubernetesApi } from "../providers/jobs/fake-kubernetes-api.js";
 import { NativeSandboxExecutor } from "./sandbox-executor.js";
 
 const image = `ghcr.io/wardby/wardby/wardby-native-worker@sha256:${"a".repeat(64)}`;
@@ -165,5 +166,43 @@ describe("native sandbox configuration", () => {
         NATIVE_SANDBOX_WORKER_IMAGE: `sha256:${"b".repeat(64)}`,
       }),
     ).toThrow(/must be a registry digest/);
+  });
+
+  it("refuses a warm pool in low-power mode, and builds with the pool off", () => {
+    const k8s = {
+      NATIVE_SANDBOX_LAUNCHER: "kubernetes",
+      NATIVE_SANDBOX_WORKER_IMAGE: image,
+      WARDBY_LOW_POWER: "1",
+      JOB_LAUNCHER: "kubernetes",
+    };
+    const build = (env: NodeJS.ProcessEnv) =>
+      buildNativeSandboxExecutor({
+        db: {} as never,
+        providers: {} as NativeRunProviders,
+        env,
+        kubernetesApi: new FakeKubernetesApi(),
+      });
+    expect(() => build({ ...k8s, NATIVE_SANDBOX_WARM_POOL_SIZE: "2" })).toThrow(
+      /WARDBY_LOW_POWER=1 requires NATIVE_SANDBOX_WARM_POOL_SIZE=0/,
+    );
+    expect(build({ ...k8s, NATIVE_SANDBOX_WARM_POOL_SIZE: "0" })).toBeInstanceOf(NativeSandboxExecutor);
+  });
+
+  it("allows a warm pool when low-power mode would be ignored (JOB_LAUNCHER is not kubernetes)", () => {
+    const env = {
+      NATIVE_SANDBOX_LAUNCHER: "kubernetes",
+      NATIVE_SANDBOX_WORKER_IMAGE: image,
+      WARDBY_LOW_POWER: "1",
+      NATIVE_SANDBOX_WARM_POOL_SIZE: "2",
+    };
+    const build = (extra: NodeJS.ProcessEnv) =>
+      buildNativeSandboxExecutor({
+        db: {} as never,
+        providers: {} as NativeRunProviders,
+        env: { ...env, ...extra },
+        kubernetesApi: new FakeKubernetesApi(),
+      });
+    expect(build({})).toBeInstanceOf(NativeSandboxExecutor);
+    expect(build({ JOB_LAUNCHER: "docker" })).toBeInstanceOf(NativeSandboxExecutor);
   });
 });

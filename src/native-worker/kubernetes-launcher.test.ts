@@ -4,6 +4,7 @@ import { FakeKubernetesApi } from "../providers/jobs/fake-kubernetes-api.js";
 import { nativeKubernetesNames, nativeWarmWorkerName } from "./kubernetes-isolation.js";
 import { KubernetesNativeWorkerLauncher } from "./kubernetes-launcher.js";
 import type { WorkerInput } from "./protocol.js";
+import type { Power } from "../core/power.js";
 
 const ns = "wardby-runs";
 const image = `registry.local:5001/wardby-native-worker@sha256:${"a".repeat(64)}`;
@@ -13,7 +14,7 @@ const input = {
 } as unknown as WorkerInput;
 const names = nativeKubernetesNames("run_k1");
 
-function setup(options: { probe?: number; serviceIp?: string | null } = {}) {
+function setup(options: { probe?: number; serviceIp?: string | null; power?: Power; readyTimeoutMs?: number } = {}) {
   const api = new FakeKubernetesApi();
   api.namespaces.add(ns);
   if (options.serviceIp !== null) {
@@ -41,9 +42,10 @@ function setup(options: { probe?: number; serviceIp?: string | null } = {}) {
     onNetworkProven: proven,
     deadlineSeconds: 3600,
     enforcementTimeoutMs: 0,
-    readyTimeoutMs: 5_000,
+    readyTimeoutMs: options.readyTimeoutMs ?? 5_000,
     pollMs: 1,
     sleep,
+    power: options.power,
   });
   return { api, launcher, proven };
 }
@@ -51,6 +53,38 @@ function setup(options: { probe?: number; serviceIp?: string | null } = {}) {
 const exists = (api: FakeKubernetesApi, kind: string, name: string) => api.objects.has(`${kind}/${ns}/${name}`);
 
 describe("KubernetesNativeWorkerLauncher", () => {
+  it("wakes the native gateway before creating any cluster object (low-power mode)", async () => {
+    let seenAtWake: number | undefined;
+    const holder: { api?: FakeKubernetesApi } = {};
+    const ensureAwake = vi.fn(async () => {
+      seenAtWake = [...(holder.api?.objects.keys() ?? [])].filter((k) =>
+        /^(secret|pod|networkpolicy)\//.test(k),
+      ).length;
+    });
+    const power = { enabled: true, ensureAwake } as unknown as Power;
+    const made = setup({ power });
+    holder.api = made.api;
+    await made.launcher.launch(input);
+    // The wake bound has a 5-minute floor (a cold node can take minutes), above the 5 s ready timeout.
+    expect(ensureAwake).toHaveBeenCalledWith("gateway", { timeoutMs: 300_000, runId: "run_k1" });
+    expect(seenAtWake).toBe(0);
+    expect(exists(made.api, "pod", names.pod)).toBe(true);
+  });
+
+  it("a ready timeout above the 5-minute floor raises the gateway wake bound too", async () => {
+    const ensureAwake = vi.fn(async () => {});
+    const { launcher } = setup({ power: { enabled: true, ensureAwake } as unknown as Power, readyTimeoutMs: 420_000 });
+    await launcher.launch(input);
+    expect(ensureAwake).toHaveBeenCalledWith("gateway", { timeoutMs: 420_000, runId: "run_k1" });
+  });
+
+  it("never calls power when it is disabled", async () => {
+    const ensureAwake = vi.fn(async () => {});
+    const { launcher } = setup({ power: { enabled: false, ensureAwake } as unknown as Power });
+    await launcher.launch(input);
+    expect(ensureAwake).not.toHaveBeenCalled();
+  });
+
   it("creates policy, input Secret and pod; proves isolation from inside the pod; then marks the run ready", async () => {
     const { api, launcher, proven } = setup();
     await launcher.launch(input);

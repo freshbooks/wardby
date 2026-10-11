@@ -8,7 +8,8 @@ import tar from "tar-stream";
 import { collectExclusions, tarExcludeArgs } from "../../coding/collect-exclude.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Power } from "../../core/power.js";
 import { jobLauncherContract } from "./contract-suite.js";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
 import { KubernetesConflictError } from "./kubernetes-api.js";
@@ -598,6 +599,116 @@ describe("KubernetesJobLauncher", () => {
     await warm;
     await launch;
     expect(calls).toBe(1);
+  });
+});
+
+describe("KubernetesJobLauncher low-power mode", () => {
+  function recordingPower(asleep: boolean) {
+    const calls: string[] = [];
+    const power: Power = {
+      enabled: true,
+      ensureAwake: async (target, opts) => {
+        calls.push(`wake:${target}:${opts.runId}:${opts.timeoutMs}`);
+      },
+      isAsleep: async () => asleep,
+      sleepIfIdle: async () => {},
+      checkAccess: async () => [],
+      status: async () => ({ enabled: true, targets: [] }),
+      sleepNow: async () => ({ slept: [], blocked: [] }),
+    };
+    return { power, calls };
+  }
+
+  it("wakes the proxy before the preflight on launch", async () => {
+    const order: string[] = [];
+    const { power, calls } = recordingPower(false);
+    const wake = power.ensureAwake;
+    power.ensureAwake = async (target, opts) => {
+      order.push("wake");
+      await wake(target, opts);
+    };
+    const h = await harness(
+      undefined,
+      {},
+      {
+        power,
+        preflight: async () => {
+          order.push("preflight");
+          return { proxyIp: "10.96.0.50" };
+        },
+      },
+    );
+    await h.launcher.launch(h.spec);
+    expect(order.slice(0, 2)).toEqual(["wake", "preflight"]);
+    // The wake bound has a 5-minute floor (a cold node can take minutes), above the 120 s ready timeout.
+    expect(calls).toEqual(["wake:proxy:run-k8s-test:300000"]);
+  });
+
+  it("a ready timeout above the 5-minute floor raises the wake bound too", async () => {
+    const { power, calls } = recordingPower(false);
+    const h = await harness(
+      undefined,
+      {},
+      { power, readyTimeoutMs: 600_000, preflight: async () => ({ proxyIp: "10.96.0.50" }) },
+    );
+    await h.launcher.launch(h.spec);
+    expect(calls).toEqual(["wake:proxy:run-k8s-test:600000"]);
+  });
+
+  it("a wake failure fails the launch before the preflight runs", async () => {
+    const { power } = recordingPower(false);
+    power.ensureAwake = async () => {
+      throw new Error("low_power_wake_timeout: proxy not ready");
+    };
+    const preflight = vi.fn(async () => ({ proxyIp: "10.96.0.50" }));
+    const h = await harness(undefined, {}, { power, preflight });
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow("low_power_wake_timeout");
+    expect(preflight).not.toHaveBeenCalled();
+  });
+
+  it("defers the start-up preflight while the proxy is asleep; the first launch still runs it", async () => {
+    const { power } = recordingPower(true);
+    const preflight = vi.fn(async () => ({ proxyIp: "10.96.0.50" }));
+    const h = await harness(undefined, {}, { power, preflight });
+    await h.launcher.warmUp();
+    expect(preflight).not.toHaveBeenCalled();
+    power.isAsleep = async () => false;
+    await h.launcher.launch(h.spec);
+    expect(preflight).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the start-up preflight when low-power mode is on but the proxy is awake", async () => {
+    const { power } = recordingPower(false);
+    const preflight = vi.fn(async () => ({ proxyIp: "10.96.0.50" }));
+    const h = await harness(undefined, {}, { power, preflight });
+    await h.launcher.warmUp();
+    expect(preflight).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      new Error('low_power_scale_forbidden: the control plane may not get Deployment "wardby-coding-proxy"'),
+      "low_power_scale_forbidden",
+    ],
+    [new TypeError("connect ECONNREFUSED 10.0.0.1:443"), "TypeError"],
+  ])("logs a failed asleep check by code only, then runs the start-up preflight", async (error, code) => {
+    const { power } = recordingPower(false);
+    power.isAsleep = async () => {
+      throw error;
+    };
+    const warnings: string[] = [];
+    const preflight = vi.fn(async () => ({ proxyIp: "10.96.0.50" }));
+    const h = await harness(undefined, {}, { power, preflight, onWarning: (m) => warnings.push(m) });
+    await h.launcher.warmUp();
+    expect(warnings).toEqual([`kubernetes_preflight_power_check_failed: ${code}`]);
+    expect(preflight).toHaveBeenCalledTimes(1);
+  });
+
+  it("with power disabled, warm-up runs the preflight as before", async () => {
+    const preflight = vi.fn(async () => ({ proxyIp: "10.96.0.50" }));
+    const h = await harness(undefined, {}, { preflight });
+    await h.launcher.warmUp();
+    expect(preflight).toHaveBeenCalledTimes(1);
   });
 });
 

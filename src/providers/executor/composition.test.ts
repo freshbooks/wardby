@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
+import type { Power } from "../../core/power.js";
 import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
 import { buildConfiguredExecutor, reReviewOnCodingRunTerminal } from "./composition.js";
 import { RoutingExecutor } from "./routing.js";
@@ -202,6 +203,32 @@ describe("buildConfiguredExecutor", () => {
       kubernetesApi: api,
     });
     expect(executor).toBeInstanceOf(RoutingExecutor);
+    expect(api.objects.size).toBe(0);
+    expect(api.execCalls).toEqual([]);
+  });
+
+  it("passes the given Power to the Kubernetes launcher: warm-up defers while the proxy is asleep", async () => {
+    const api = new FakeKubernetesApi();
+    const isAsleep = vi.fn(async () => true);
+    const power: Power = {
+      enabled: true,
+      ensureAwake: async () => {},
+      isAsleep,
+      sleepIfIdle: async () => {},
+      checkAccess: async () => [],
+      status: async () => ({ enabled: true, targets: [] }),
+      sleepNow: async () => ({ slept: [], blocked: [] }),
+    };
+    const executor = buildConfiguredExecutor({
+      native,
+      db,
+      env: { ...baseEnv, JOB_LAUNCHER: "kubernetes", CODING_WORKER_IMAGE: REGISTRY_IMAGE },
+      kubernetesApi: api,
+      power,
+    });
+    await executor.warmUp?.();
+    expect(isAsleep).toHaveBeenCalledWith("proxy");
+    // No preflight ran: no canary pod, no exec.
     expect(api.objects.size).toBe(0);
     expect(api.execCalls).toEqual([]);
   });

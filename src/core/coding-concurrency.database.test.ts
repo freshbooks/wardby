@@ -15,6 +15,8 @@ import type { Executor } from "../providers/executor/types.js";
 import { PrismaContainerExecutionStore } from "../providers/executor/container.js";
 import { CODING_QUEUE_TIMEOUT_ERROR, drainCodingQueue } from "./coding-queue.js";
 import { reconcileOnce } from "./reconciler.js";
+import { gatewayBusy, powerBlockers, proxyBusy } from "./power-idle.js";
+import type { Prisma, PrismaClient } from "#prisma";
 
 const db = createPrismaClient();
 /** Every row this file creates starts with this, so beforeAll can clear leftovers of an aborted earlier run. */
@@ -34,7 +36,8 @@ async function cleanupByPrefix(): Promise<void> {
 async function seed(
   runId: string,
   opts: {
-    status?: "pending" | "running";
+    status?: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+    finishedAt?: Date;
     queuedAt?: Date | null;
     jobBackend?: string;
     startedAt?: Date;
@@ -48,6 +51,7 @@ async function seed(
       executionManaged: true,
       status: opts.status ?? "pending",
       ...(opts.startedAt ? { startedAt: opts.startedAt } : {}),
+      ...(opts.finishedAt ? { finishedAt: opts.finishedAt } : {}),
     },
   });
   await db.codingRun.create({
@@ -318,5 +322,145 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
     expect((await db.run.findUniqueOrThrow({ where: { id: queuedRun } })).status).toBe("pending");
     expect((await db.run.findUniqueOrThrow({ where: { id: orphanRun } })).status).toBe("lost");
     await retire([queuedRun, orphanRun]);
+  });
+
+  // Low-power idle rules. busy=true assertions run against the whole
+  // database. A busy=false assertion cannot: many other database test files
+  // create coding runs that sit in the default "pending" status (this file
+  // owns only the slot/queue state, not every pending coding run), so the
+  // false cases go through onlyRuns(), which runs proxyBusy's own where
+  // clause in PostgreSQL restricted to the test's own rows.
+  describe("low-power idle rules", () => {
+    const since = () => new Date(Date.now() - 30 * 60_000);
+    const minutes = (n: number) => n * 60_000;
+    const ago = (n: number) => new Date(Date.now() - minutes(n));
+
+    /** A view of the database whose coding-run counts and lists see only `runIds`. */
+    function onlyRuns(runIds: string[]): PrismaClient {
+      const scoped = <W>(where: W | undefined) => ({ AND: [where ?? {}, { runId: { in: runIds } }] });
+      return {
+        codingRun: {
+          count: (args: Prisma.CodingRunCountArgs) => db.codingRun.count({ ...args, where: scoped(args.where) }),
+          findMany: (args: Prisma.CodingRunFindManyArgs) =>
+            db.codingRun.findMany({ ...args, where: scoped(args.where) }),
+        },
+      } as unknown as PrismaClient;
+    }
+
+    it("an active coding run keeps the proxy busy", async () => {
+      await seed(id("lp-active"), { status: "running" });
+      expect(await proxyBusy(db, since())).toBe(true);
+      await retire([id("lp-active")]);
+    });
+
+    it("a queued coding run keeps the proxy busy", async () => {
+      await seed(id("lp-queued"), { status: "pending", queuedAt: new Date() });
+      expect(await proxyBusy(db, since())).toBe(true);
+      await retire([id("lp-queued")]);
+    });
+
+    it("a coding run finished inside the window keeps the proxy busy; outside it does not", async () => {
+      const old = id("lp-old");
+      const recent = id("lp-recent");
+      await seed(old, { status: "succeeded", finishedAt: ago(40) });
+      expect(await proxyBusy(onlyRuns([old, recent]), since())).toBe(false);
+      await seed(recent, { status: "succeeded", finishedAt: ago(10) });
+      expect(await proxyBusy(onlyRuns([old, recent]), since())).toBe(true);
+      expect(await proxyBusy(db, since())).toBe(true);
+    });
+
+    it("an active sandbox native run or active gateway session keeps the gateway busy", async () => {
+      // Busy-only assertions: other database test files create sandbox runs and
+      // gateway sessions in parallel (the false cases live in power-idle.test.ts).
+      const sandboxRun = id("lp-sandbox");
+      await db.run.create({
+        data: { id: sandboxRun, agentId, status: "running", nativeExecutionMode: "sandbox" },
+      });
+      expect(await gatewayBusy(db, since())).toBe(true);
+      await db.run.update({
+        where: { id: sandboxRun },
+        data: { status: "succeeded", finishedAt: new Date(Date.now() - minutes(40)) },
+      });
+
+      const sessionRun = id("lp-session");
+      await db.run.create({
+        data: {
+          id: sessionRun,
+          agentId,
+          status: "succeeded",
+          finishedAt: new Date(Date.now() - minutes(40)),
+          nativeExecutionMode: "control_plane",
+        },
+      });
+      await db.nativeGatewaySession.create({
+        data: {
+          runId: sessionRun,
+          capabilityHash: `cap-${sessionRun}`,
+          status: "active",
+          deadlineAt: new Date(Date.now() + minutes(15)),
+          budgetUsd: 1,
+          snapshot: {},
+        },
+      });
+      expect(await gatewayBusy(db, since())).toBe(true);
+      await db.nativeGatewaySession.update({ where: { runId: sessionRun }, data: { status: "finished" } });
+    });
+
+    it("powerBlockers(proxy) lists running and queued coding runs, not a run finished a minute ago", async () => {
+      const running = id("lp-block-running");
+      const queued = id("lp-block-queued");
+      const finished = id("lp-block-finished");
+      await seed(running, { status: "running" });
+      await seed(queued, { status: "pending", queuedAt: new Date() });
+      await seed(finished, { status: "succeeded", finishedAt: ago(1) });
+      expect(await powerBlockers(db, "proxy")).toEqual(expect.arrayContaining([running, queued]));
+      expect(await powerBlockers(onlyRuns([running, queued, finished]), "proxy")).toEqual([running, queued].sort());
+      await retire([running, queued]);
+      expect(await powerBlockers(onlyRuns([running, queued, finished]), "proxy")).toEqual([]);
+    });
+
+    it("powerBlockers(gateway) lists a running sandbox run and the run of an active gateway session", async () => {
+      // Inclusion-only assertions: other database test files create sandbox runs and sessions in parallel.
+      const sandboxRun = id("lp-block-sandbox");
+      const sessionRun = id("lp-block-session");
+      await db.run.create({ data: { id: sandboxRun, agentId, status: "running", nativeExecutionMode: "sandbox" } });
+      await db.run.create({
+        data: {
+          id: sessionRun,
+          agentId,
+          status: "succeeded",
+          finishedAt: ago(1),
+          nativeExecutionMode: "control_plane",
+        },
+      });
+      await db.nativeGatewaySession.create({
+        data: {
+          runId: sessionRun,
+          capabilityHash: `cap-${sessionRun}`,
+          status: "active",
+          deadlineAt: new Date(Date.now() + minutes(15)),
+          budgetUsd: 1,
+          snapshot: {},
+        },
+      });
+      const blockers = await powerBlockers(db, "gateway");
+      expect(blockers).toEqual(expect.arrayContaining([sandboxRun, sessionRun]));
+      expect(new Set(blockers).size).toBe(blockers.length);
+      expect(blockers).toEqual([...blockers].sort());
+      await db.run.update({ where: { id: sandboxRun }, data: { status: "succeeded", finishedAt: new Date() } });
+      await db.nativeGatewaySession.update({ where: { runId: sessionRun }, data: { status: "finished" } });
+    });
+
+    it("the proxy is idle with no active coding run and nothing in the window", async () => {
+      const runIds = [id("lp-done-ok"), id("lp-done-failed"), id("lp-done-cancelled")];
+      await seed(runIds[0], { status: "succeeded", finishedAt: ago(40) });
+      await seed(runIds[1], { status: "failed", finishedAt: ago(45) });
+      await seed(runIds[2], { status: "cancelled", finishedAt: ago(90) });
+      expect(await proxyBusy(onlyRuns(runIds), since())).toBe(false);
+      // The same rows count as soon as one of them is active again.
+      await db.run.update({ where: { id: runIds[2] }, data: { status: "running", finishedAt: null } });
+      expect(await proxyBusy(onlyRuns(runIds), since())).toBe(true);
+      await retire(runIds);
+    });
   });
 });

@@ -13,6 +13,7 @@ import { summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { drainCodingQueue } from "../../core/coding-queue.js";
 import { prismaServiceStateReporter } from "../../core/coding-service-status.js";
 import { logger } from "../../core/logger.js";
+import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { reReviewAfterNoChangeFix, type ReReviewDeps } from "../../core/review-fix.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
 import { CodingProxy } from "../coding-proxy/proxy.js";
@@ -65,6 +66,11 @@ export interface ConfiguredExecutorOptions {
   kubernetesApi?: KubernetesApi;
   /** Repository authorization for coding runs; built from the configured review hosts when absent. */
   repoAccess?: RepoAccessGate;
+  /**
+   * Low-power mode, built once by the composition root and shared. Used only by the Kubernetes
+   * launcher (wakes the coding proxy before a run); absent: `DISABLED_POWER`.
+   */
+  power?: Power;
 }
 
 /**
@@ -142,6 +148,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       resolveCapability: (runId) => capabilities.get(runId),
       readyTimeoutMs: kubernetes.readyTimeoutMs,
       enforcementExecTimeoutMs: kubernetes.enforcementExecTimeoutMs,
+      power: options.power ?? DISABLED_POWER,
       preflight: async () => {
         const { proxyIp } = await runKubernetesPreflight({
           api,

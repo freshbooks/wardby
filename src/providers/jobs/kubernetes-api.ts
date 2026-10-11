@@ -5,6 +5,7 @@
  */
 import type {
   V1ConfigMap,
+  V1Deployment,
   V1Endpoints,
   V1NetworkPolicy,
   V1Pod,
@@ -18,6 +19,14 @@ export class KubernetesNotFoundError extends Error {
   constructor(message?: string) {
     super(message);
     this.name = "KubernetesNotFoundError";
+  }
+}
+
+/** The caller's identity lacks RBAC permission for the request (HTTP 403). */
+export class KubernetesForbiddenError extends Error {
+  constructor(message?: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "KubernetesForbiddenError";
   }
 }
 
@@ -68,11 +77,22 @@ export interface KubernetesApi {
   /**
    * Reads a Service's Endpoints by name. EndpointSlice is the durable successor to this core/v1
    * resource (migrating to it is a follow-up); Endpoints is read by name so RBAC stays one object wide.
+   * Undefined when missing; throws KubernetesForbiddenError on 403.
    */
   readEndpoints(namespace: string, name: string): Promise<V1Endpoints | undefined>;
   /** Reads one ResourceQuota by name (its status carries hard and used), for the launcher's capacity check. */
   readResourceQuota(namespace: string, name: string): Promise<V1ResourceQuota | undefined>;
   readNamespace(name: string): Promise<boolean>;
+  /** Undefined when missing; throws KubernetesForbiddenError on 403. */
+  readDeployment(namespace: string, name: string): Promise<V1Deployment | undefined>;
+  /** JSON merge patch of metadata.annotations and spec.replicas only. Throws KubernetesForbiddenError on 403. */
+  patchDeployment(
+    namespace: string,
+    name: string,
+    patch: { replicas?: number; annotations?: Record<string, string> },
+  ): Promise<void>;
+  /** SelfSubjectAccessReview: may the current identity perform `verb` on this one named resource? */
+  canI(namespace: string, verb: string, group: string, resource: string, name: string): Promise<boolean>;
   /** Runs a command in a container; resolves with its exit code. Never uses a shell. */
   exec(
     namespace: string,

@@ -1,0 +1,24 @@
+# GKE Autopilot in low-power mode: the gke-autopilot overlay plus the power
+# RBAC and control-plane env, an HPA for the control plane, no headroom pod,
+# one gateway replica, and a quota adjusted to match. Applied only when
+# WARDBY_LOW_POWER=1; the plain gke-autopilot overlay is unchanged.
+resources:
+  - ../gke-autopilot
+  - hpa.yaml
+components:
+  - ../../components/low-power
+patches:
+  - path: control-plane-env.yaml
+  - path: headroom-off.yaml
+  - path: gateway-one.yaml
+  - path: quota.yaml
+  # The HPA owns the control plane's replica count: without this, every
+  # re-apply would reset a scaled-out control plane to the overlay's 1.
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: wardby-control-plane
+    patch: |-
+      - op: remove
+        path: /spec/replicas

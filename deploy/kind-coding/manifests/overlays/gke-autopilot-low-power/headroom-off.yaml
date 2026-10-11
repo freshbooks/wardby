@@ -1,0 +1,6 @@
+# Low-power mode keeps no headroom pod warm.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: wardby-headroom, namespace: wardby-coding }
+spec:
+  replicas: 0
