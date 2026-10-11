@@ -4,7 +4,8 @@
   "metadata": {
     "name": "wardby",
     "namespace": "wardby",
-    "labels": { "app.kubernetes.io/name": "wardby", "team": "x" }
+    "labels": { "app.kubernetes.io/name": "wardby", "team": "x" },
+    "annotations": { "wardby.io/power-woke-at": "2026-10-11T21:17:57Z", "other": "ignored" }
   },
   "spec": {
     "replicas": 2,

@@ -47,6 +47,80 @@ const netpol = (over: Partial<InfraNetworkPolicy> = {}): InfraNetworkPolicy => (
   ...over,
 });
 
+suite("low-power mode", () => {
+  const cp = (name: string, over = {}) =>
+    pod(name, { owner: { kind: "ReplicaSet", name: name.split("-").slice(0, 4).join("-") }, ...over });
+  const dep = (name: string, desired: number, wokeAt: string | null = null) => ({
+    name,
+    ready: desired,
+    desired,
+    labels: {},
+    wokeAt,
+  });
+
+  it("shows a sleeping proxy and gateway as asleep, and headroom scaled to 0 as off", () => {
+    const m = describe(
+      clusterOf({
+        pod: [cp("wardby-control-plane-6d8f-abcde")],
+        deployment: [
+          dep("wardby-control-plane", 1),
+          dep("wardby-coding-proxy", 0, "2026-10-11T21:17:57Z"),
+          dep("wardby-native-gateway", 0, "2026-10-11T21:17:58Z"),
+          dep("wardby-headroom", 0),
+        ],
+      }),
+      gkeInfo,
+    );
+    expect(m.groups.alwaysOn.map((p) => p.title)).toEqual(["control-plane"]);
+    expect(m.groups.idle).toEqual([
+      { title: "coding-proxy", name: "wardby-coding-proxy", state: "asleep", wokeAt: "2026-10-11T21:17:57Z" },
+      { title: "native-gateway", name: "wardby-native-gateway", state: "asleep", wokeAt: "2026-10-11T21:17:58Z" },
+      { title: "headroom", name: "wardby-headroom", state: "off", wokeAt: null },
+    ]);
+  });
+
+  it("lists the native gateway as always on while it runs, and nothing as idle", () => {
+    const m = describe(
+      clusterOf({
+        pod: [cp("wardby-native-gateway-5b6c-klmno")],
+        deployment: [dep("wardby-native-gateway", 1, "2026-10-11T21:17:58Z")],
+      }),
+      gkeInfo,
+    );
+    expect(m.groups.alwaysOn.map((p) => p.title)).toEqual(["native-gateway"]);
+    expect(m.groups.idle).toEqual([]);
+  });
+
+  it("calls a Deployment scaled to 0 without a woke-at stamp off, not asleep", () => {
+    const m = describe(clusterOf({ deployment: [dep("wardby-coding-proxy", 0)] }), gkeInfo);
+    expect(m.groups.idle).toEqual([{ title: "coding-proxy", name: "wardby-coding-proxy", state: "off", wokeAt: null }]);
+  });
+
+  it("marks a failed replica next to a healthy one as stale and sorts it last", () => {
+    const m = describe(
+      clusterOf({
+        pod: [
+          cp("wardby-control-plane-867d-9qf9x", { phase: "Failed", ready: false, containers: [] }),
+          cp("wardby-control-plane-588d-fknw8"),
+        ],
+      }),
+      gkeInfo,
+    );
+    expect(m.groups.alwaysOn.map((p) => [p.name, p.stale])).toEqual([
+      ["wardby-control-plane-588d-fknw8", false],
+      ["wardby-control-plane-867d-9qf9x", true],
+    ]);
+  });
+
+  it("keeps a failed replica with no healthy sibling as a failure", () => {
+    const m = describe(
+      clusterOf({ pod: [cp("wardby-control-plane-867d-9qf9x", { phase: "Failed", ready: false, containers: [] })] }),
+      gkeInfo,
+    );
+    expect(m.groups.alwaysOn[0].stale).toBe(false);
+  });
+});
+
 suite("describe", () => {
   it("labels a GKE footprint", () => {
     const m = describe(gkeCluster, gkeInfo);

@@ -118,6 +118,15 @@ When `wardby serve` runs outside the cluster — for example against a local
 [kind](https://kind.sigs.k8s.io/) cluster — the map shows the control plane as
 outside the cluster, at the server's address.
 
+Always-on components are the control plane, the coding proxy, the native
+sandbox gateway and the headroom placeholder. In
+[low-power mode](../../docs/getting-started-gke.md#low-power-mode) the proxy and
+gateway are scaled to zero while idle: they show as **asleep**, with the time
+they last woke, rather than disappearing, and headroom shows as **off**. A
+replica that failed (for example one the node rejected with `OutOfcpu` during a
+rollout) is shown greyed as an **old replica** while a healthy replica of the
+same component runs; `deploy/gke/up.sh` deletes those after each deploy.
+
 On the Map, the left column follows a request's path: the public entry
 (Gateway, Ingress or load balancer, noting any HTTP → HTTPS redirect), any
 protection layer in front of the backends (on GKE, the Cloud Armor policy a

@@ -84,6 +84,9 @@ pub struct InfraDeployment {
     pub ready: i32,
     pub desired: i32,
     pub labels: BTreeMap<String, String>,
+    /// Low-power mode's `wardby.io/power-woke-at`: when the server (or up.sh)
+    /// last woke this Deployment. Absent on Deployments low-power never touched.
+    pub woke_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -407,6 +410,8 @@ pub fn pod_from(pod: &Pod) -> InfraPod {
 
 // ---- workloads ------------------------------------------------------------
 
+const POWER_WOKE_AT: &str = "wardby.io/power-woke-at";
+
 pub fn deployment_from(d: &Deployment) -> InfraDeployment {
     InfraDeployment {
         name: name_of(&d.metadata),
@@ -417,6 +422,12 @@ pub fn deployment_from(d: &Deployment) -> InfraDeployment {
             .unwrap_or(0),
         desired: d.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1),
         labels: wardby_labels(&d.metadata),
+        woke_at: d
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(POWER_WOKE_AT))
+            .cloned(),
     }
 }
 
@@ -1006,6 +1017,7 @@ mod tests {
         let d = deployment_from(&fixture("deployment"));
         assert_eq!((d.ready, d.desired), (1, 2));
         assert_eq!(d.labels.len(), 1);
+        assert_eq!(d.woke_at.as_deref(), Some("2026-10-11T21:17:57Z"));
         let j = job_from(&fixture("job"));
         assert_eq!((j.active, j.succeeded, j.failed), (0, 1, 0));
         assert!(j.finished_at.is_some());
