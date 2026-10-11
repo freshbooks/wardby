@@ -91,7 +91,12 @@ Set `existing_vpc_id` together with all three subnet lists, or none of them:
   `existing_database_subnet_ids`, at least two subnets each, in different
   availability zones.
 - The private subnets need outbound internet (a NAT gateway) or VPC endpoints for
-  ECR, EKS, STS and Secrets Manager, plus a path to the gVisor download.
+  the following, plus a path to the gVisor download host (or your mirror) and the
+  AL2023 package repositories (the bzip2 fallback): an S3 gateway endpoint (ECR
+  image layers and the AL2023 repositories), `ecr.api` and `ecr.dkr`, EC2 (the
+  VPC CNI), EKS, `eks-auth` (the Pod Identity agent, which every workload role
+  depends on), STS, Secrets Manager and Elastic Load Balancing (the load balancer
+  controller).
 - The database subnets must be reachable from the private subnets on port 5432.
   They may be the private subnets; isolated subnets are better.
 - The module creates no network resources and tags none of your subnets. The
@@ -155,15 +160,21 @@ take the latest release for `kubernetes_version`.
   `waf_rate_limit_window_seconds`, answered with 429) and the AWS IP reputation
   list block. The AWS common and known-bad-inputs rule groups follow
   `waf_managed_rules_action`, which starts at `count`: their body rules can match
-  code in MCP tool arguments and large webhook payloads. Read the WAF logs for
-  false positives before switching to `block`.
+  code in MCP tool arguments and large webhook payloads. Check the rule groups'
+  CloudWatch metrics and sampled requests (or configure WAF logging yourself; the
+  module creates no logging configuration) for false positives before switching
+  to `block`.
 - **Load balancer controller policy.** The controller's IAM policy is downloaded at
   the pinned `lbc_version` and refused unless its SHA-256 equals
   `lbc_iam_policy_sha256`. Change `lbc_version`, the checksum and the controller's
   Helm chart together. The policy URL is the commercial-partition one.
 - **Database engine upgrades.** `allow_major_version_upgrade` is on, so changing
-  `database_engine_version` performs a major upgrade, applied in the maintenance
-  window. Read RDS's major-version upgrade guidance and take a snapshot first.
+  `database_engine_version` performs a major upgrade. Take a snapshot and read
+  RDS's major-version upgrade guidance first, then set
+  `database_apply_immediately = true` for the upgrade apply (expect downtime
+  during the upgrade). If you leave it `false`, RDS defers the change to the
+  maintenance window and the apply reports a failure deleting the old parameter
+  group, which the instance still uses; apply again once the window has passed.
 
 ## Inputs
 
@@ -211,6 +222,7 @@ required while `endpoint_public_access` is true.
 | `database_backup_retention_days`    | `7`                                                      | Automated backup retention, 1-35 days.                                                                                          |
 | `database_name`                     | `wardby`                                                 | Database created inside the instance.                                                                                           |
 | `database_master_username`          | `wardby`                                                 | RDS master user; used only to bootstrap the IAM database users and grants.                                                      |
+| `database_apply_immediately`        | `false`                                                  | Apply database changes now instead of in the maintenance window; set `true` for a major engine upgrade (causes downtime).       |
 | `database_deletion_protection`      | `true`                                                   | Guard against deleting the database. Apply `false` first, then destroy.                                                         |
 | `ecr_force_delete`                  | `false`                                                  | Let destroy delete ECR repositories that still hold images.                                                                     |
 | `secrets_recovery_window_days`      | `30`                                                     | Days a deleted secret can be restored (0 deletes at once, else 7-30).                                                           |
@@ -286,9 +298,19 @@ Things that bite on teardown and rebuild:
   destroy fails.
 - Secrets enter a recovery window of `secrets_recovery_window_days`. Applying
   again with the same `name_prefix` inside the window fails with a "scheduled for
-  deletion" error: restore each secret with `aws secretsmanager restore-secret`,
-  or import it. This is deliberate: losing `secret-app-key` makes every stored
+  deletion" error: restore each of the module's secrets, then import it into state (restoring
+  alone leaves it outside state, and a secret scheduled for deletion cannot be
+  imported). This is deliberate: losing `secret-app-key` makes every stored
   credential unreadable.
+
+  ```bash
+  aws secretsmanager restore-secret --secret-id <name_prefix>/<id>
+  ```
+
+  ```bash
+  terraform import 'aws_secretsmanager_secret.deployment["<id>"]' <name_prefix>/<id>
+  ```
+
 - ECR repositories that still hold images need `ecr_force_delete = true`
   (applied before the destroy).
 - Replacing the certificate (see "The certificate and DNS") can fail to delete the

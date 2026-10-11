@@ -331,6 +331,12 @@ variable "database_master_username" {
   }
 }
 
+variable "database_apply_immediately" {
+  description = "Apply database changes now instead of in the next maintenance window. Set true for the apply that changes database_engine_version (a major upgrade, with downtime): otherwise RDS defers the change while Terraform tries to delete the old parameter group, and the apply fails until the window has passed."
+  type        = bool
+  default     = false
+}
+
 variable "database_deletion_protection" {
   description = "Guard against deleting the database. Apply false first, then destroy."
   type        = bool
@@ -409,7 +415,7 @@ variable "waf_rate_limit_window_seconds" {
 }
 
 variable "waf_managed_rules_action" {
-  description = "count: the AWS common and known-bad-inputs rule groups only log matches. block: they block. Their body rules match code in MCP tool arguments and large webhook payloads, so start with count and read the WAF logs before blocking."
+  description = "count: the AWS common and known-bad-inputs rule groups only log matches. block: they block. Their body rules match code in MCP tool arguments and large webhook payloads, so start with count and check the rule groups' CloudWatch metrics and sampled requests (or configure WAF logging yourself) before blocking."
   type        = string
   default     = "count"
 

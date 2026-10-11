@@ -69,9 +69,11 @@ resource "aws_db_instance" "main" {
   auto_minor_version_upgrade = true
 
   # Changing database_engine_version is the operator's explicit request for a
-  # major upgrade. It is applied in the maintenance window (apply_immediately
-  # is left unset).
+  # major upgrade. Without apply_immediately RDS defers it to the maintenance
+  # window while create_before_destroy deletes the old parameter group, which
+  # still is in use: set database_apply_immediately for the upgrade apply.
   allow_major_version_upgrade = true
+  apply_immediately           = var.database_apply_immediately
 
   # Read from state at destroy time: apply false first, then destroy. The final
   # snapshot name is fixed, so a second destroy of a recreated instance needs the

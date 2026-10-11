@@ -23,7 +23,7 @@ public_access_cidrs = ["203.0.113.10/32"] # your own address
 # RDS instance class.
 # database_instance_class = "db.t4g.small"
 
-# "count" only logs the WAF managed body rules; set "block" once the WAF logs look clean.
+# "count" only logs the WAF managed body rules; set "block" once the rule groups' CloudWatch metrics and sampled requests look clean.
 # waf_managed_rules_action = "count"
 
 # Your own HTTPS mirror of gVisor releases (<base>/<version>/x86_64/gvisor.tar.bz2).

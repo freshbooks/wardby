@@ -151,6 +151,15 @@ run "database" {
   }
 }
 
+run "apply_immediately_defaults_off" {
+  command = apply
+
+  assert {
+    condition     = !aws_db_instance.main.apply_immediately
+    error_message = "Database changes wait for the maintenance window by default."
+  }
+}
+
 run "multi_az_and_no_deletion_protection" {
   command = apply
   variables {
@@ -167,7 +176,13 @@ run "multi_az_and_no_deletion_protection" {
 run "major_version_change" {
   command = apply
   variables {
-    database_engine_version = "18"
+    database_engine_version    = "18"
+    database_apply_immediately = true
+  }
+
+  assert {
+    condition     = aws_db_instance.main.apply_immediately
+    error_message = "database_apply_immediately reaches the instance."
   }
 
   assert {
