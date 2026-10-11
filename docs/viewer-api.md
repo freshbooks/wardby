@@ -47,7 +47,7 @@ mode. See the help article `mobile-app`.
 
 ## Endpoints
 
-All three endpoints accept only `GET`.
+All four endpoints accept only `GET`.
 
 | Status | Meaning                                                           |
 | ------ | ----------------------------------------------------------------- |

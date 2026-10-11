@@ -3,7 +3,7 @@ openapi: 3.1.0
 info:
   title: wardby admin viewer API
   version: 0.5.3
-  description: "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info and a live event stream. See docs/viewer-api.md for the prose contract."
+  description: "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info and a live event stream. Response objects may gain new fields in later releases; clients should ignore unknown fields. See docs/viewer-api.md for the prose contract."
 servers:
   - url: https://{host}
     variables:
@@ -61,11 +61,33 @@ paths:
             - invalid_limit
         "401":
           description: No valid bearer token.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
           headers:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
         "403":
-          description: Token lacks the `admin:view` scope, or the caller is not an admin.
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
           headers:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
@@ -89,6 +111,12 @@ paths:
                 type: string
                 enum:
                   - GET
+        default:
+          description: Unexpected server error (HTTP 500). `id` identifies the failure in the server log.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewerInternalError"
   /admin/api/runs/{id}:
     get:
       operationId: getRun
@@ -115,11 +143,33 @@ paths:
                 $ref: "#/components/schemas/run-detail"
         "401":
           description: No valid bearer token.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
           headers:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
         "403":
-          description: Token lacks the `admin:view` scope, or the caller is not an admin.
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
           headers:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
@@ -156,6 +206,12 @@ paths:
                 type: string
                 enum:
                   - GET
+        default:
+          description: Unexpected server error (HTTP 500). `id` identifies the failure in the server log.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewerInternalError"
   /admin/api/infra:
     get:
       operationId: getInfra
@@ -175,11 +231,33 @@ paths:
                 $ref: "#/components/schemas/infra-info"
         "401":
           description: No valid bearer token.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
           headers:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
         "403":
-          description: Token lacks the `admin:view` scope, or the caller is not an admin.
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
           headers:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
@@ -203,6 +281,12 @@ paths:
                 type: string
                 enum:
                   - GET
+        default:
+          description: Unexpected server error (HTTP 500). `id` identifies the failure in the server log.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewerInternalError"
   /admin/api/events:
     get:
       operationId: getEvents
@@ -233,11 +317,33 @@ paths:
             $ref: "#/components/schemas/viewer-event"
         "401":
           description: No valid bearer token.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
           headers:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
         "403":
-          description: Token lacks the `admin:view` scope, or the caller is not an admin.
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ViewerError"
+                  - properties:
+                      error:
+                        enum:
+                          - invalid_token
+          x-error-codes:
+            - invalid_token
           headers:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
@@ -261,6 +367,12 @@ paths:
                 type: string
                 enum:
                   - GET
+        default:
+          description: Unexpected server error (HTTP 500). `id` identifies the failure in the server log.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewerInternalError"
 components:
   securitySchemes:
     bearer:
@@ -1275,5 +1387,18 @@ components:
         - error
       properties:
         error:
+          type: string
+      additionalProperties: false
+    ViewerInternalError:
+      type: object
+      required:
+        - error
+        - id
+      properties:
+        error:
+          type: string
+          enum:
+            - internal_error
+        id:
           type: string
       additionalProperties: false

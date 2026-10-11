@@ -198,10 +198,17 @@ async function start(): Promise<string> {
       })
       .catch((err: unknown) => {
         if (err instanceof McpError) {
-          res.writeHead(err.httpStatus, err.wwwAuthenticate ? { "www-authenticate": err.wwwAuthenticate } : {}).end();
+          res
+            .writeHead(err.httpStatus, {
+              "content-type": "application/json",
+              ...(err.wwwAuthenticate ? { "www-authenticate": err.wwwAuthenticate } : {}),
+            })
+            .end(JSON.stringify({ error: "invalid_token" }));
           return;
         }
-        res.writeHead(500).end();
+        res
+          .writeHead(500, { "content-type": "application/json" })
+          .end(JSON.stringify({ error: "internal_error", id: "x" }));
       });
   });
   await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
@@ -243,6 +250,9 @@ describe("viewer OpenAPI document conforms to the routes", () => {
     const doc = build();
     for (const [docPath, item] of Object.entries(doc.paths)) {
       for (const [status, response] of Object.entries(item.get.responses)) {
+        if (status === "default") continue; // the 500 body; asserted separately
+        if (status.startsWith("4"))
+          expect(documentedCodes(response), `${docPath} ${status} x-error-codes`).toBeDefined();
         const label = `${docPath} ${status}`;
         const path = concrete(docPath);
         let res: Response;
@@ -273,12 +283,14 @@ describe("viewer OpenAPI document conforms to the routes", () => {
         if (documentedCodes(response)) {
           const body = (await res.json()) as { error: string };
           expect(documentedCodes(response), label).toContain(body.error);
-        } else if (status === "401" || status === "403") {
-          expect(await res.text(), label).toBe("");
         }
         res.body?.cancel().catch(() => {});
       }
     }
+  });
+
+  it("documents the 500 on every operation", () => {
+    for (const item of Object.values(build().paths)) expect(item.get.responses.default).toBeDefined();
   });
 
   it("produces every documented error code", async () => {
@@ -294,9 +306,10 @@ describe("viewer OpenAPI document conforms to the routes", () => {
       ["GET", "/admin/api/runs/missing"],
       ["GET", "/admin/api/runs/%E0%A4%A"],
       ["POST", "/admin/api/infra"],
+      ["GET", "/admin/api/infra", "none"],
     ];
-    for (const [method, path] of probes) {
-      const res = await fetch(`${base}${path}`, { method, headers: ADMIN });
+    for (const [method, path, auth] of probes) {
+      const res = await fetch(`${base}${path}`, { method, headers: auth === "none" ? {} : ADMIN });
       seen.add(((await res.json()) as { error: string }).error);
     }
     const documented = new Set(

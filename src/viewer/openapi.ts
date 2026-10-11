@@ -128,6 +128,12 @@ function componentSchemas(): Json {
     properties: { error: { type: "string" } },
     additionalProperties: false,
   };
+  schemas.ViewerInternalError = {
+    type: "object",
+    required: ["error", "id"],
+    properties: { error: { type: "string", enum: ["internal_error"] }, id: { type: "string" } },
+    additionalProperties: false,
+  };
   return schemas;
 }
 
@@ -140,14 +146,21 @@ function operation(route: ViewerRoute): Json {
     ...(route.parameters ? { parameters: route.parameters } : {}),
     responses: {
       ...route.responses,
-      "401": { description: "No valid bearer token.", headers: wwwAuthenticate },
+      "401": { ...errorBody("invalid_token", "No valid bearer token."), headers: wwwAuthenticate },
       "403": {
-        description: "Token lacks the `admin:view` scope, or the caller is not an admin.",
+        ...errorBody(
+          "invalid_token",
+          "Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).",
+        ),
         headers: wwwAuthenticate,
       },
       "405": {
         ...errorBody("method_not_allowed", "Only GET is allowed."),
         headers: { Allow: { description: "Allowed methods: GET.", schema: { type: "string", enum: ["GET"] } } },
+      },
+      default: {
+        description: "Unexpected server error (HTTP 500). `id` identifies the failure in the server log.",
+        content: { "application/json": { schema: ref("ViewerInternalError") } },
       },
     },
   };
@@ -162,7 +175,7 @@ export function buildViewerOpenApi(version: string): Json {
       title: "wardby admin viewer API",
       version,
       description:
-        "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info and a live event stream. See docs/viewer-api.md for the prose contract.",
+        "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info and a live event stream. Response objects may gain new fields in later releases; clients should ignore unknown fields. See docs/viewer-api.md for the prose contract.",
     },
     servers: [{ url: "https://{host}", variables: { host: { default: "wardby.example.com" } } }],
     paths,
