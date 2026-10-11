@@ -16,6 +16,8 @@ function setup(
     /** Seeds the proxy Deployment's POWER_WOKE_AT annotation. */
     wokeAt?: string;
     enabled?: boolean;
+    /** When this process (createPower) started. Default: an hour before the clock's start. */
+    processStart?: string;
   } = {},
 ) {
   const api = new FakeKubernetesApi();
@@ -24,7 +26,8 @@ function setup(
     spec: { replicas, selector: {}, template: {} },
   });
   if (opts.ready) api.put("endpoints", NS, readyEndpoints);
-  let t = Date.parse("2026-10-11T12:00:00Z");
+  const clockStart = Date.parse("2026-10-11T12:00:00Z");
+  let t = opts.processStart ? Date.parse(opts.processStart) : clockStart - 60 * 60_000;
   let sleeps = 0;
   const power = createPower({
     config: { enabled: opts.enabled ?? true, idleMinutes: 30 },
@@ -40,6 +43,7 @@ function setup(
     },
     pollMs: 1000,
   });
+  t = clockStart;
   return { api, power, advance: (ms: number) => (t += ms) };
 }
 
@@ -169,10 +173,32 @@ describe("power (sleep)", () => {
 
   it("counts from process start when the Deployment has no woke-at annotation", async () => {
     const busy = vi.fn(async () => false);
-    const { api, power, advance } = setup(1, { busy });
+    const { api, power, advance } = setup(1, { busy, processStart: "2026-10-11T12:00:00Z" });
     await power.sleepIfIdle();
     expect(api.deploymentPatches).toEqual([]);
     advance(31 * 60_000);
+    await power.sleepIfIdle();
+    expect(api.deploymentPatches).toEqual([{ name: names.proxy, replicas: 0 }]);
+  });
+
+  it("counts from process start when it is later than a stale woke-at annotation", async () => {
+    const busy = vi.fn(async () => false);
+    const { api, power, advance } = setup(1, {
+      busy,
+      wokeAt: SIXTY_MIN_AGO,
+      processStart: "2026-10-11T11:50:00Z",
+    });
+    await power.sleepIfIdle();
+    expect(api.deploymentPatches).toEqual([]);
+    expect(busy).not.toHaveBeenCalled();
+    advance(21 * 60_000);
+    await power.sleepIfIdle();
+    expect(api.deploymentPatches).toEqual([{ name: names.proxy, replicas: 0 }]);
+  });
+
+  it("sleeps at once when both the woke-at annotation and process start are older than the window", async () => {
+    const busy = vi.fn(async () => false);
+    const { api, power } = setup(1, { busy, wokeAt: SIXTY_MIN_AGO, processStart: "2026-10-11T11:20:00Z" });
     await power.sleepIfIdle();
     expect(api.deploymentPatches).toEqual([{ name: names.proxy, replicas: 0 }]);
   });

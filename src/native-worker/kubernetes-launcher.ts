@@ -13,7 +13,7 @@
 
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
 import { logger } from "../core/logger.js";
-import { DISABLED_POWER, type Power } from "../core/power.js";
+import { DISABLED_POWER, wakeTimeoutMs, type Power } from "../core/power.js";
 import { KubernetesAlreadyExistsError, type KubernetesApi } from "../providers/jobs/kubernetes-api.js";
 import { canonicalResources } from "../providers/jobs/kubernetes-isolation.js";
 import type { KubernetesPlatform } from "../providers/jobs/kubernetes-platform.js";
@@ -153,7 +153,10 @@ export class KubernetesNativeWorkerLauncher implements ManagedWorkerLauncher, Wa
     // Low-power mode: the gateway may be scaled to zero; wake it before anything is created. Guarded
     // so mode off adds no await.
     if (this.power.enabled) {
-      await this.power.ensureAwake("gateway", { timeoutMs: this.options.readyTimeoutMs ?? 120_000, runId });
+      await this.power.ensureAwake("gateway", {
+        timeoutMs: wakeTimeoutMs(this.options.readyTimeoutMs ?? 120_000),
+        runId,
+      });
     }
     const names = nativeKubernetesNames(runId);
     if ((await this.inspect(runId)).state === "missing") {

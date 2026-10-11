@@ -15,7 +15,7 @@ vi.mock("../providers/jobs/kubernetes-client.js", () => ({
   },
 }));
 
-import { buildPower } from "./power-composition.js";
+import { buildPower, lowPowerActive } from "./power-composition.js";
 import { DISABLED_POWER } from "./power.js";
 
 const db = {} as PrismaClient;
@@ -45,5 +45,24 @@ describe("buildPower", () => {
     });
     expect(power.enabled).toBe(true);
     expect(apiCtor).toHaveBeenCalledWith({ context: "ctx" });
+  });
+});
+
+describe("lowPowerActive", () => {
+  it.each([
+    [{ WARDBY_LOW_POWER: "1", JOB_LAUNCHER: "kubernetes" }, true],
+    [{ WARDBY_LOW_POWER: "1", JOB_LAUNCHER: "docker" }, false],
+    [{ WARDBY_LOW_POWER: "1" }, false],
+    [{ WARDBY_LOW_POWER: "0", JOB_LAUNCHER: "kubernetes" }, false],
+    [{ JOB_LAUNCHER: "kubernetes" }, false],
+  ])("%j -> %s, as buildPower decides", (env, active) => {
+    expect(lowPowerActive(env)).toBe(active);
+    expect(buildPower({ env, db }).enabled).toBe(active);
+  });
+
+  it("still rejects an invalid WARDBY_LOW_POWER", () => {
+    expect(() => lowPowerActive({ WARDBY_LOW_POWER: "yes", JOB_LAUNCHER: "kubernetes" })).toThrow(
+      /WARDBY_LOW_POWER must be 0 or 1/,
+    );
   });
 });

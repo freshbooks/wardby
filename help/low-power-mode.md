@@ -30,25 +30,29 @@ and restores proxy 1, gateway 2, headroom 1, control plane 1.
 
 `WARDBY_LOW_POWER` accepts only unset, `0` or `1`; anything else fails `up.sh`
 and stops the control plane at start-up. `LOW_POWER_IDLE_MINUTES` is an integer
-from 5 to 1440 (default 30) set on the control-plane Deployment.
+from 5 to 1440 (default 30) set on the control-plane Deployment; it is read
+only when `WARDBY_LOW_POWER=1`.
 
 ## How it behaves
 
 - **Sleep.** Every minute the scheduler leader scales the coding proxy
   (`wardby-coding-proxy`) or native gateway (`wardby-native-gateway`) to 0 when
   nothing is pending or running for it and nothing finished within the idle
-  window. The gateway also needs no active session and must have been woken at
-  least one idle window ago (annotation `wardby.io/power-woke-at`). The check
-  repeats just before scaling. Log: `power: proxy slept (idle 30m)`.
-- **Wake.** A coding run scales the proxy to 1 and waits for a ready endpoint,
-  up to `KUBERNETES_READY_TIMEOUT_MS` (default 120000). A sandbox run does the
-  same for the gateway, up to `NATIVE_SANDBOX_READY_TIMEOUT_MS`. Expect about 1
-  to 2 minutes extra on a cold node. Log: `power: proxy woke`.
+  window. The gateway also needs no active session. Either target sleeps only
+  once at least one idle window has passed since it was last woken (annotation
+  `wardby.io/power-woke-at`) and since the control plane started, whichever is
+  later. The check repeats just before scaling. Log: `power: proxy slept (idle 30m)`.
+- **Wake.** A coding run scales the proxy to 1 and waits for a ready endpoint;
+  a sandbox run does the same for the gateway. The wait is at least 5 minutes.
+  A `KUBERNETES_READY_TIMEOUT_MS` (proxy) or `NATIVE_SANDBOX_READY_TIMEOUT_MS`
+  (gateway) above that, set on the control-plane Deployment, raises it. Expect
+  about 1 to 2 minutes extra on a cold node. Log: `power: proxy woke`.
 - **Preflight.** The first coding run after a control-plane restart also runs
   the cluster preflight canary, because start-up preflight is deferred while the
   proxy sleeps (`kubernetes_preflight_deferred`).
-- **Deploys.** A deploy leaves the proxy and gateway at 1 replica (its database
-  checks need them); they sleep after the idle window.
+- **Deploys.** A low-power `up.sh` run marks the proxy and gateway as just
+  woken before it brings them back to 1 replica, so they stay up through the
+  deploy (its database checks need them) and sleep one idle window later.
 - **Control plane.** It scales 1 to 2 on CPU (20% target, scale down
   after 10 minutes). A run executes on the copy that started it, so scheduled
   runs stay on the scheduler leader; webhook and MCP-started runs spread. The

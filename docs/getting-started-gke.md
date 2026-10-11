@@ -664,8 +664,8 @@ Low-power mode requires Wardby 0.6.0 or later.
 Low-power mode cuts the idle cost of a deployment that runs agents only now and
 then. The coding proxy and the native gateway scale to zero replicas when
 nothing needs them, and wake on demand; the headroom placeholder is turned off;
-and the control plane runs 1 copy, scaling to 2 under load. The control plane,
-database, and edge are unchanged.
+and the control plane runs 1 copy, scaling to 2 under load. The database and
+edge are unchanged.
 
 Turn it on by deploying with the flag:
 
@@ -681,26 +681,32 @@ control plane 1.
 | Variable                 | Where it is set                    | Values                          | Meaning                                                                                                                                                  |
 | ------------------------ | ---------------------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `WARDBY_LOW_POWER`       | `up.sh` environment; control plane | unset, `0` (off) or `1` (on)    | Anything else fails `up.sh` and stops the control plane at start-up. Needs `JOB_LAUNCHER=kubernetes`, else it logs `low_power_ignored` and does nothing. |
-| `LOW_POWER_IDLE_MINUTES` | Control-plane Deployment           | integer 5 to 1440, default `30` | How long a target must be unused before it sleeps.                                                                                                       |
+| `LOW_POWER_IDLE_MINUTES` | Control-plane Deployment           | integer 5 to 1440, default `30` | How long a target must be unused before it sleeps. Read only when `WARDBY_LOW_POWER=1`.                                                                  |
 
 **Sleeping.** Every minute the scheduler leader scales the coding proxy
 (`wardby-coding-proxy`) to 0 when no coding run is pending or running and none
 finished within the idle window. It scales the native gateway
 (`wardby-native-gateway`) to 0 when no sandbox native run is pending, running or
-recently finished, the gateway has no active session, and it was woken at least
-one idle window ago (recorded in the `wardby.io/power-woke-at` annotation).
-The condition is checked again immediately before scaling. The control plane
+recently finished and the gateway has no active session. Either target sleeps
+only once at least one idle window has passed since it was last woken (recorded
+in its `wardby.io/power-woke-at` annotation) and since the control plane
+started, whichever is later. The condition is checked again immediately before
+scaling. The control plane
 logs `power: proxy slept (idle 30m)`.
 
 **Waking.** Starting a coding run scales the proxy to 1 and waits for a ready
-endpoint, up to `KUBERNETES_READY_TIMEOUT_MS` (default 120000). Starting a
-sandbox run does the same for the gateway, up to
-`NATIVE_SANDBOX_READY_TIMEOUT_MS`. On a cold Autopilot node expect about 1 to 2
-minutes of extra start-up. The first coding run after a control-plane restart
-also runs the cluster preflight canary, because start-up preflight is deferred
-while the proxy sleeps (`kubernetes_preflight_deferred`). A deploy leaves the
-proxy and gateway at 1 replica, since the deploy's database checks need them;
-they sleep after the idle window.
+endpoint. Starting a sandbox run does the same for the gateway. The wait is at
+least 5 minutes, because a cold Autopilot node can add 1 to 2 minutes of
+start-up; a `KUBERNETES_READY_TIMEOUT_MS` (proxy) or
+`NATIVE_SANDBOX_READY_TIMEOUT_MS` (gateway) above 5 minutes, set on the
+control-plane Deployment, raises it to that value. The first coding run after a
+control-plane restart also runs the cluster preflight canary, because start-up
+preflight is deferred while the proxy sleeps (`kubernetes_preflight_deferred`).
+
+**Deploys.** A low-power `up.sh` run marks the proxy and gateway as just woken
+before it applies the manifests, which bring them back to 1 replica. They stay
+up through the deploy (its database checks need them) and sleep one idle window
+later if nothing uses them.
 
 **Sleeping now.** To skip the idle window (for example right after a test), an
 admin calls the MCP tool `power_sleep`, optionally with `target` set to `proxy`

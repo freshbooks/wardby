@@ -173,6 +173,7 @@ describe("native sandbox configuration", () => {
       NATIVE_SANDBOX_LAUNCHER: "kubernetes",
       NATIVE_SANDBOX_WORKER_IMAGE: image,
       WARDBY_LOW_POWER: "1",
+      JOB_LAUNCHER: "kubernetes",
     };
     const build = (env: NodeJS.ProcessEnv) =>
       buildNativeSandboxExecutor({
@@ -185,5 +186,23 @@ describe("native sandbox configuration", () => {
       /WARDBY_LOW_POWER=1 requires NATIVE_SANDBOX_WARM_POOL_SIZE=0/,
     );
     expect(build({ ...k8s, NATIVE_SANDBOX_WARM_POOL_SIZE: "0" })).toBeInstanceOf(NativeSandboxExecutor);
+  });
+
+  it("allows a warm pool when low-power mode would be ignored (JOB_LAUNCHER is not kubernetes)", () => {
+    const env = {
+      NATIVE_SANDBOX_LAUNCHER: "kubernetes",
+      NATIVE_SANDBOX_WORKER_IMAGE: image,
+      WARDBY_LOW_POWER: "1",
+      NATIVE_SANDBOX_WARM_POOL_SIZE: "2",
+    };
+    const build = (extra: NodeJS.ProcessEnv) =>
+      buildNativeSandboxExecutor({
+        db: {} as never,
+        providers: {} as NativeRunProviders,
+        env: { ...env, ...extra },
+        kubernetesApi: new FakeKubernetesApi(),
+      });
+    expect(build({})).toBeInstanceOf(NativeSandboxExecutor);
+    expect(build({ JOB_LAUNCHER: "docker" })).toBeInstanceOf(NativeSandboxExecutor);
   });
 });

@@ -10,15 +10,20 @@ export interface LowPowerConfig {
   idleMinutes: number;
 }
 
+const DEFAULT_IDLE_MINUTES = 30;
+
 export function loadLowPowerConfig(env: NodeJS.ProcessEnv = process.env): LowPowerConfig {
   const flag = env.WARDBY_LOW_POWER?.trim();
   if (flag !== undefined && flag !== "" && flag !== "0" && flag !== "1") {
     throw new Error("WARDBY_LOW_POWER must be 0 or 1.");
   }
+  // LOW_POWER_IDLE_MINUTES only matters with the mode on; off, it is ignored entirely.
+  if (flag !== "1") return { enabled: false, idleMinutes: DEFAULT_IDLE_MINUTES };
   const raw = env.LOW_POWER_IDLE_MINUTES?.trim();
-  const idleMinutes = raw ? Number(raw) : 30;
-  if (!Number.isSafeInteger(idleMinutes) || idleMinutes < 5 || idleMinutes > 1440) {
+  if (!raw) return { enabled: true, idleMinutes: DEFAULT_IDLE_MINUTES };
+  const idleMinutes = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!(idleMinutes >= 5 && idleMinutes <= 1440)) {
     throw new Error("LOW_POWER_IDLE_MINUTES must be an integer from 5 to 1440.");
   }
-  return { enabled: flag === "1", idleMinutes };
+  return { enabled: true, idleMinutes };
 }

@@ -3,9 +3,9 @@
  * or nothing when the native sandbox is not configured — sandbox-mode runs then fail closed.
  */
 
-import { loadLowPowerConfig } from "../config/low-power.js";
 import { loadNativeSandboxConfig } from "../config/providers.js";
 import { DISABLED_POWER, type Power } from "../core/power.js";
+import { lowPowerActive } from "../core/power-composition.js";
 import type { NativeRunProviders, RunnerDb } from "../core/runner.js";
 import { nativeGatewayUrl } from "./docker-isolation.js";
 import { DockerNativeWorkerLauncher } from "./docker-launcher.js";
@@ -33,7 +33,8 @@ export function buildNativeSandboxExecutor(options: {
   const env = options.env ?? process.env;
   const config = loadNativeSandboxConfig(env);
   if (!config) return undefined;
-  if (loadLowPowerConfig(env).enabled && config.warmPoolSize > 0) {
+  // Only when low-power mode is actually on (as buildPower decides); otherwise it is ignored.
+  if (config.warmPoolSize > 0 && lowPowerActive(env)) {
     throw new Error(
       "WARDBY_LOW_POWER=1 requires NATIVE_SANDBOX_WARM_POOL_SIZE=0: an always-on warm pool defeats scale-to-zero.",
     );

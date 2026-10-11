@@ -640,7 +640,19 @@ describe("KubernetesJobLauncher low-power mode", () => {
     );
     await h.launcher.launch(h.spec);
     expect(order.slice(0, 2)).toEqual(["wake", "preflight"]);
-    expect(calls).toEqual(["wake:proxy:run-k8s-test:120000"]);
+    // The wake bound has a 5-minute floor (a cold node can take minutes), above the 120 s ready timeout.
+    expect(calls).toEqual(["wake:proxy:run-k8s-test:300000"]);
+  });
+
+  it("a ready timeout above the 5-minute floor raises the wake bound too", async () => {
+    const { power, calls } = recordingPower(false);
+    const h = await harness(
+      undefined,
+      {},
+      { power, readyTimeoutMs: 600_000, preflight: async () => ({ proxyIp: "10.96.0.50" }) },
+    );
+    await h.launcher.launch(h.spec);
+    expect(calls).toEqual(["wake:proxy:run-k8s-test:600000"]);
   });
 
   it("a wake failure fails the launch before the preflight runs", async () => {
@@ -670,6 +682,25 @@ describe("KubernetesJobLauncher low-power mode", () => {
     const preflight = vi.fn(async () => ({ proxyIp: "10.96.0.50" }));
     const h = await harness(undefined, {}, { power, preflight });
     await h.launcher.warmUp();
+    expect(preflight).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      new Error('low_power_scale_forbidden: the control plane may not get Deployment "wardby-coding-proxy"'),
+      "low_power_scale_forbidden",
+    ],
+    [new TypeError("connect ECONNREFUSED 10.0.0.1:443"), "TypeError"],
+  ])("logs a failed asleep check by code only, then runs the start-up preflight", async (error, code) => {
+    const { power } = recordingPower(false);
+    power.isAsleep = async () => {
+      throw error;
+    };
+    const warnings: string[] = [];
+    const preflight = vi.fn(async () => ({ proxyIp: "10.96.0.50" }));
+    const h = await harness(undefined, {}, { power, preflight, onWarning: (m) => warnings.push(m) });
+    await h.launcher.warmUp();
+    expect(warnings).toEqual([`kubernetes_preflight_power_check_failed: ${code}`]);
     expect(preflight).toHaveBeenCalledTimes(1);
   });
 

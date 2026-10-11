@@ -16,6 +16,13 @@ export const LOW_POWER_SCALE_FORBIDDEN = "low_power_scale_forbidden";
 export const LOW_POWER_DISABLED = "low_power_disabled";
 /** ISO-8601 time the control plane last scaled the Deployment up from zero. */
 export const POWER_WOKE_AT = "wardby.io/power-woke-at";
+/**
+ * The least time a launcher waits for a woken target: a cold node can take a minute or two to
+ * come up. A launcher's own ready timeout above this raises the bound.
+ */
+export const LOW_POWER_WAKE_FLOOR_MS = 300_000;
+/** How long a launcher with this ready timeout lets ensureAwake wait. */
+export const wakeTimeoutMs = (readyTimeoutMs: number): number => Math.max(readyTimeoutMs, LOW_POWER_WAKE_FLOOR_MS);
 /** sleepIfIdle does real work at most this often. */
 const SLEEP_SWEEP_INTERVAL_MS = 60_000;
 
@@ -109,7 +116,8 @@ export function createPower(options: PowerOptions): Power {
   const { busy, blockers } = options;
   const idleMinutes = options.config.idleMinutes;
   const idleMs = idleMinutes * 60_000;
-  // A Deployment never stamped by a wake counts as woken when this process started.
+  // The idle window counts from the later of the Deployment's woke-at stamp and this process's
+  // start: a stamp left from before a restart (or none at all) never sleeps a target sooner.
   const startedAt = now().getTime();
   let lastSweep: number | undefined;
 
@@ -135,7 +143,7 @@ export function createPower(options: PowerOptions): Power {
     const dep = await readDeployment(name);
     if (!dep || (dep.spec?.replicas ?? 1) === 0) return;
     const stamped = Date.parse(dep.metadata?.annotations?.[POWER_WOKE_AT] ?? "");
-    const wokeAt = Number.isNaN(stamped) ? startedAt : stamped;
+    const wokeAt = Number.isNaN(stamped) ? startedAt : Math.max(stamped, startedAt);
     if (at - wokeAt < idleMs) return;
     const since = new Date(at - idleMs);
     if (await busy(target, since)) return;

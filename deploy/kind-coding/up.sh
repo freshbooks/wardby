@@ -254,6 +254,21 @@ unset DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY PROXY_DATABASE_URL \
   GITHUB_APP_LINES GITHUB_APP_ID_B64 GITHUB_APP_PRIVATE_KEY_B64
 
 echo "==> 8/${TOTAL_STEPS} render and apply the manifests (low-power mode: ${LOW_POWER_LABEL})"
+# low-power pre-apply
+if [ "$LOW_POWER" = 1 ]; then
+  # The apply and the restarts below bring a sleeping proxy and gateway back to 1
+  # replica while a control plane may already be running. Stamp both as just
+  # woken first, so it does not scale them straight back to 0 mid-deploy. A
+  # Deployment not created yet is skipped.
+  LOW_POWER_WOKE_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for low_power_target in wardby-coding-proxy wardby-native-gateway; do
+    low_power_found="$(kubectl --context "$KUBE_CONTEXT" -n wardby-coding get deploy "$low_power_target" --ignore-not-found -o name)"
+    if [ -n "$low_power_found" ]; then
+      kubectl --context "$KUBE_CONTEXT" -n wardby-coding annotate "deploy/$low_power_target" "wardby.io/power-woke-at=$LOW_POWER_WOKE_AT" --overwrite >/dev/null
+    fi
+  done
+fi
+# end low-power pre-apply
 kubectl kustomize "$OVERLAY" \
   | sed "s|image: wardby-runtime|image: ${RUNTIME_DIGEST}|" \
   | kubectl --context "$KUBE_CONTEXT" apply -f -

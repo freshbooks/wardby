@@ -1,5 +1,6 @@
-# kind in low-power mode: the power RBAC and control-plane env, no HPA (kind
-# has no metrics-server by default).
+# kind in low-power mode: the power RBAC only, no HPA (kind has no
+# metrics-server by default). The control plane runs on the host, so
+# WARDBY_LOW_POWER=1 is set in the environment of its own wardby serve.
 resources:
   - ../kind
 components:

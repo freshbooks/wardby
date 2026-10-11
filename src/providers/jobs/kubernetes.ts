@@ -31,7 +31,7 @@ import { isIP } from "node:net";
 import type { V1ConfigMap, V1ContainerStatus, V1Pod, V1ResourceQuota } from "@kubernetes/client-node";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
-import { DISABLED_POWER, type Power } from "../../core/power.js";
+import { DISABLED_POWER, wakeTimeoutMs, type Power } from "../../core/power.js";
 import {
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
@@ -653,7 +653,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     // Low-power mode: the proxy may be scaled to zero; wake it before the preflight reads it. Guarded
     // (not just a no-op await) so mode off keeps launch() joining an in-flight warm-up synchronously.
     if (this.power.enabled) {
-      await this.power.ensureAwake("proxy", { timeoutMs: this.readyTimeoutMs, runId: spec.runId });
+      await this.power.ensureAwake("proxy", { timeoutMs: wakeTimeoutMs(this.readyTimeoutMs), runId: spec.runId });
     }
     await this.runPreflight();
     const names = kubernetesRunNames(spec.runId);
@@ -778,6 +778,23 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   // Launch
 
   /**
+   * Low-power mode: whether the proxy is scaled to zero. A failed check is logged by code only (the
+   * leading reason code, else the error's class name -- never the raw message, which could carry
+   * cluster detail) and counts as awake, so warm-up runs the preflight as it would without the mode.
+   */
+  private async proxyAsleep(): Promise<boolean> {
+    try {
+      return await this.power.isAsleep("proxy");
+    } catch (error) {
+      const code =
+        (error instanceof Error && /^[a-z][a-z0-9_]*(?=:)/.exec(error.message)?.[0]) ||
+        (error instanceof Error ? error.name : "unknown");
+      this.warn(`kubernetes_preflight_power_check_failed: ${code}`);
+      return false;
+    }
+  }
+
+  /**
    * Starts the memoized cluster preflight (`runPreflight`) right away, instead of waiting for the
    * first `launch()`, so a long-running server process's own start-up pays the preflight's cost (a
    * canary pod on `kind`: ~20s) rather than that process's first coding run. Never throws: it only
@@ -793,7 +810,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
    * than waking the proxy only for the preflight; the first `launch()` wakes it and runs the preflight.
    */
   async warmUp(): Promise<void> {
-    if (this.power.enabled && (await this.power.isAsleep("proxy").catch(() => false))) {
+    if (this.power.enabled && (await this.proxyAsleep())) {
       kubernetesLog.info(
         "kubernetes_preflight_deferred: proxy asleep (low-power mode); the first coding run runs the preflight",
       );
