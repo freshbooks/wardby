@@ -400,6 +400,8 @@ spec:
           value: production
         - name: WARDBY_GITHUB_ALLOWED_ACCOUNTS
           value: wardby_github_allowed_accounts
+        - name: WARDBY_MOBILE_ENABLED
+          value: wardby_mobile_enabled
         - name: MCP_TRANSPORT
           value: http
         - name: MCP_HTTP_BIND

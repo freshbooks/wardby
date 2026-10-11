@@ -13,6 +13,7 @@ import type { Executor } from "../providers/executor/types.js";
 import type { Datastore, DatastoreValue } from "../providers/datastore/types.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import type { AgentMemoryStore } from "../providers/memory/types.js";
+import { DEFAULT_MOBILE_REDIRECT_URI } from "../config/mobile.js";
 
 // End-to-end per the spec's Definition of Done. Every individual tool
 // module already has its own focused test file (Tasks 9-14) — this file's
@@ -657,7 +658,12 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP integration: both AUTH_PROVIDER 
     expect(
       buildAuthProvider(
         "self-hosted",
-        { audience: CANONICAL_URI, signingKey: "a1".repeat(32), credentialHashKey: "b2".repeat(32) },
+        {
+          audience: CANONICAL_URI,
+          signingKey: "a1".repeat(32),
+          credentialHashKey: "b2".repeat(32),
+          mobile: { enabled: false, redirectUri: DEFAULT_MOBILE_REDIRECT_URI },
+        },
         db,
       ),
     ).toBeInstanceOf(SelfHostedAuthProvider);
@@ -680,7 +686,12 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP integration: both AUTH_PROVIDER 
     // than duplicating a real network fetch in a test.
     const provider = buildAuthProvider(
       "delegating",
-      { issuer: "https://idp.example.com", audience: CANONICAL_URI, jwksUri: "https://idp.example.com/jwks" },
+      {
+        issuer: "https://idp.example.com",
+        audience: CANONICAL_URI,
+        jwksUri: "https://idp.example.com/jwks",
+        mobile: { enabled: false, redirectUri: DEFAULT_MOBILE_REDIRECT_URI },
+      },
       db,
     );
     expect(provider).toBeInstanceOf(DelegatingAuthProvider);

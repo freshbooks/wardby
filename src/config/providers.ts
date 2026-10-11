@@ -12,6 +12,7 @@ import {
   platformProfile,
   type KubernetesPlatform,
 } from "../providers/jobs/kubernetes-platform.js";
+import { loadMobileConfig, type MobileConfig } from "./mobile.js";
 
 export type JobLauncherKind = "local" | "docker" | "kubernetes";
 export type EmailProviderKind = "smtp" | "ses";
@@ -636,6 +637,8 @@ export interface AuthConfig {
   signingKey?: string;
   credentialHashKey?: string;
   maxClients?: number;
+  /** Self-hosted mode: mobile sign-in (WARDBY_MOBILE_ENABLED, WARDBY_MOBILE_REDIRECT_URI). */
+  mobile: MobileConfig;
 }
 
 /** Read auth-adapter config (issuer/JWKS/audience/signing key) from the environment. */
@@ -649,6 +652,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
     signingKey: env.AUTH_SIGNING_KEY,
     credentialHashKey: env.AUTH_CREDENTIAL_HASH_KEY,
     maxClients: env.AUTH_MAX_CLIENTS ? Number(env.AUTH_MAX_CLIENTS) : undefined,
+    mobile: loadMobileConfig(env),
   };
 }
 

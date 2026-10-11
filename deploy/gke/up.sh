@@ -6,6 +6,7 @@
 #   WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh
 #   WARDBY_LOW_POWER=1 WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh   # low-power mode
 #   WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme,acme-labs   # optional: accounts the GitHub App serves besides its owner
+#   WARDBY_MOBILE_ENABLED=true   # optional: allow the wardby mobile app to sign in (default false)
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
 # re-pushed (digests change only if the source did), values already in Secret
@@ -79,6 +80,25 @@ fi
 echo "up.sh: the GitHub App will serve its owner${WARDBY_GITHUB_ALLOWED_ACCOUNTS:+ plus ${WARDBY_GITHUB_ALLOWED_ACCOUNTS}}."
 # --- end WARDBY_GITHUB_ALLOWED_ACCOUNTS check ---
 
+# --- WARDBY_MOBILE_ENABLED check ---
+# Optional: true lets the wardby mobile app sign in. Empty = false. Substituted
+# in step 9; the overlay placeholder is neither true nor false, so the server
+# refuses to start if it is ever left unsubstituted.
+WARDBY_MOBILE_ENABLED="${WARDBY_MOBILE_ENABLED:-false}"
+case "$WARDBY_MOBILE_ENABLED" in
+  true | false) ;;
+  *)
+    echo "up.sh: WARDBY_MOBILE_ENABLED must be true or false (got \"$WARDBY_MOBILE_ENABLED\")." >&2
+    exit 1
+    ;;
+esac
+if [[ "$WARDBY_MOBILE_ENABLED" = true ]]; then
+  echo "up.sh: mobile sign-in is on."
+else
+  echo "up.sh: mobile sign-in is off."
+fi
+# --- end WARDBY_MOBILE_ENABLED check ---
+
 echo "==> 1/${TOTAL_STEPS} terraform: cluster, image registry, database"
 terraform -chdir="$TF_DIR" init -input=false >/dev/null
 terraform -chdir="$TF_DIR" apply -input=false -auto-approve
@@ -137,7 +157,7 @@ iam_substitutions() {
 # match a real registry path (which never starts with "wardby-").
 assert_no_placeholders() {
   local leftover
-  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*|value: wardby_github_allowed_accounts' || true)"
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*|value: wardby_github_allowed_accounts|value: wardby_mobile_enabled' || true)"
   if [[ -n "$leftover" ]]; then
     echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
     echo "$leftover" | sort -u >&2
@@ -451,6 +471,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
         -e "s|wardby-control-plane-hostname|${WARDBY_HOSTNAME}|g" \
         -e "s|value: wardby_github_allowed_accounts$|value: \"${WARDBY_GITHUB_ALLOWED_ACCOUNTS}\"|" \
+        -e "s|value: wardby_mobile_enabled$|value: \"${WARDBY_MOBILE_ENABLED}\"|" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
   | iam_substitutions)"
 assert_no_placeholders "$OVERLAY_MANIFEST"

@@ -203,6 +203,13 @@ the App serves besides its owner. Pass it to `up.sh` on every run, for example
 a run without it serves only the App's owner. See
 [Which accounts the App serves](code-review-agents.md#which-accounts-the-app-serves-wardby_github_allowed_accounts).
 
+`WARDBY_MOBILE_ENABLED=true` (optional, not a secret) lets the Wardby mobile app
+sign in to the self-hosted OAuth server. Pass it to `up.sh` on every run, the
+same way as `WARDBY_GITHUB_ALLOWED_ACCOUNTS`; a run without it turns mobile
+sign-in off. It works for normal and low-power deploys. White-label builds that
+use their own redirect URI add `WARDBY_MOBILE_REDIRECT_URI` to the control
+plane's `env` themselves. See the help article `mobile-app`.
+
 Generate `SECRET_APP_KEY` with:
 
 ```sh
