@@ -11,12 +11,12 @@ import type { McpRequestContext } from "../mcp/context.js";
 import { requireScope } from "../mcp/auth/resource-server.js";
 import { sendJson } from "../mcp/transport/streamable-http.js";
 import type { InfraInfo } from "./api-schema.js";
-import { DEFAULT_GRAPH_LIMIT, MAX_GRAPH_LIMIT, loadGraph, parseSince, type IssueSites } from "./graph.js";
+import { loadGraph, parseSince, type IssueSites } from "./graph.js";
+import { DEFAULT_GRAPH_LIMIT, MAX_GRAPH_LIMIT, SSE_HEARTBEAT_MS } from "./limits.js";
 import { loadRunDetail } from "./run-detail.js";
 import type { ViewerEventBus } from "./event-bus.js";
 
 export const VIEWER_API_PREFIX = "/admin/api/";
-export const SSE_HEARTBEAT_MS = 15_000;
 /** A stream whose unsent backlog exceeds this is ended; the client reconnects and resyncs. */
 export const SSE_MAX_BUFFERED_BYTES = 1024 * 1024;
 

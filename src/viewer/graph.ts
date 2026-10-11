@@ -4,9 +4,6 @@ import { periodStart } from "../core/budget-groups.js";
 import { publicCodingRunResult } from "../coding/protocol.js";
 import type { GraphRun, GraphSnapshot, Outcome, RunTriggerInfo } from "./api-schema.js";
 
-export const DEFAULT_GRAPH_LIMIT = 500;
-export const MAX_GRAPH_LIMIT = 2000;
-
 const DEFAULT_SINCE_MS = 60 * 60 * 1000;
 const RELATIVE_SINCE_MS: Record<string, number> = {
   "15m": 15 * 60 * 1000,
