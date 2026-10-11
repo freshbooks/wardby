@@ -14,3 +14,31 @@ processClusterExternalSecret: false
 processClusterPushSecret: false
 processClusterGenerator: false
 processPushSecret: false
+
+# Explicit requests for the controller, webhook and cert-controller. The chart
+# sets none, and Autopilot bills a pod without requests at its default of 500m
+# CPU and 2 GiB of memory: about 1.5 vCPU and 6 GiB for three pods that idle at
+# a few millicores and tens of MiB. 256Mi leaves several times their working
+# set. The memory limit equals the request, so outgrowing it restarts one
+# container (the Secrets it already wrote stay) rather than risking eviction;
+# no CPU limit, so a reconcile or webhook call can burst instead of throttling.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 256Mi
+webhook:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 256Mi
+certController:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 256Mi

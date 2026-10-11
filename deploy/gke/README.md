@@ -106,7 +106,10 @@ Operator, installed by Helm at the version pinned in `eso.env` and scoped to
 `wardby-coding` by `eso-values.yaml`. One cluster-wide permission remains: ESO's
 cert-controller keeps a ClusterRole that reads Secrets and can write only its
 own webhook certificate (`external-secrets-webhook`). The controller that writes
-wardby's Secrets is confined to `wardby-coding`.
+wardby's Secrets is confined to `wardby-coding`. `eso-values.yaml` also gives
+ESO's three pods explicit requests (100m CPU and 256 MiB each, memory limited to
+the same): the chart sets none, and Autopilot would otherwise bill each pod at
+its 500m / 2 GiB default.
 
 Before it deletes any hand-made Secret, `up.sh` proves External Secrets can
 really read Secret Manager with a throwaway ExternalSecret that reads one key
