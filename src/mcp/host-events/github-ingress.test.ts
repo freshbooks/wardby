@@ -6,7 +6,7 @@ vi.mock("../../core/host-events.js", () => ({
   routeHostEvent: vi.fn(async () => ({ runIds: ["run1"], followUps: [vi.fn(async () => undefined)] })),
 }));
 import { routeHostEvent } from "../../core/host-events.js";
-import { handleGitHubEventIngress } from "./github-ingress.js";
+import { eventAccount, handleGitHubEventIngress } from "./github-ingress.js";
 
 const SECRET = "s3cret";
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -45,7 +45,8 @@ function deps(overrides: Record<string, unknown> = {}) {
       hosts: {},
       repoAccess: REPO_ACCESS,
       webhookSecret: SECRET,
-      appIdentity: async () => ({ id: 777, slug: "wardby" }),
+      appIdentity: async () => ({ id: 777, slug: "wardby", ownerLogin: "chfields" }),
+      allowedAccounts: () => new Set<string>(),
       ...overrides,
     },
   };
@@ -166,5 +167,119 @@ describe("handleGitHubEventIngress", () => {
     const retried = await handleGitHubEventIngress(req, d);
     expect(retried).toMatchObject({ status: 202, body: { runIds: ["run1"] } });
     expect(routeHostEvent).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("trusted GitHub accounts", () => {
+  beforeEach(() => {
+    vi.mocked(routeHostEvent).mockClear();
+  });
+  const strangerBody = JSON.stringify({
+    action: "opened",
+    repository: { full_name: "stranger/repo" },
+    pull_request: { number: 7, head: { sha: SHA, repo: { full_name: "stranger/repo" } } },
+  });
+  const installEvent = (action: string, login: string, delivery: string) => {
+    const raw = JSON.stringify({ action, installation: { id: 991, account: { login } } });
+    return {
+      headers: { "x-github-event": "installation", "x-github-delivery": delivery, "x-hub-signature-256": sign(raw) },
+      rawBody: raw,
+    };
+  };
+
+  it("ignores an event from an account that is neither the owner nor listed, without claiming the delivery", async () => {
+    const { deps: d, hostEventDelivery } = deps();
+    const result = await handleGitHubEventIngress(
+      { headers: headers({ "x-hub-signature-256": sign(strangerBody) }), rawBody: strangerBody },
+      d,
+    );
+    expect(result).toMatchObject({ status: 202, body: { ignored: "account_not_allowed" } });
+    expect(result.afterResponse).toBeUndefined();
+    expect(hostEventDelivery.create).not.toHaveBeenCalled();
+    expect(routeHostEvent).not.toHaveBeenCalled();
+  });
+
+  it("routes an event from a listed account (case-insensitive)", async () => {
+    const { deps: d } = deps({ allowedAccounts: () => new Set(["stranger"]) });
+    const raw = strangerBody.replaceAll("stranger/", "Stranger/");
+    const result = await handleGitHubEventIngress(
+      { headers: headers({ "x-hub-signature-256": sign(raw) }), rawBody: raw },
+      d,
+    );
+    expect(result).toMatchObject({ status: 202, body: { runIds: ["run1"] } });
+  });
+
+  it("uninstalls a new installation on an account that is not served", async () => {
+    const uninstallInstallation = vi.fn(async () => undefined);
+    const { deps: d, hostEventDelivery } = deps({ uninstallInstallation });
+    const result = await handleGitHubEventIngress(installEvent("created", "Stranger", "d9"), d);
+    expect(result).toMatchObject({ status: 202, body: { ignored: "account_not_allowed" } });
+    await result.afterResponse!();
+    expect(uninstallInstallation).toHaveBeenCalledWith(991);
+    expect(hostEventDelivery.create).not.toHaveBeenCalled();
+  });
+
+  it("never uninstalls the owner's or a listed account's installation, nor on a deleted event", async () => {
+    const uninstallInstallation = vi.fn(async () => undefined);
+    const { deps: d } = deps({ uninstallInstallation, allowedAccounts: () => new Set(["acme"]) });
+    expect(
+      (await handleGitHubEventIngress(installEvent("deleted", "stranger", "d10"), d)).afterResponse,
+    ).toBeUndefined();
+    await handleGitHubEventIngress(installEvent("created", "CHFIELDS", "d11"), d);
+    await handleGitHubEventIngress(installEvent("created", "acme", "d12"), d);
+    expect(uninstallInstallation).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the App identity can't be read", async () => {
+    const { deps: d, hostEventDelivery } = deps({
+      appIdentity: async () => {
+        throw new Error("github_api_unavailable");
+      },
+    });
+    await expect(
+      handleGitHubEventIngress(
+        { headers: headers({ "x-hub-signature-256": sign(strangerBody) }), rawBody: strangerBody },
+        d,
+      ),
+    ).rejects.toThrow("github_api_unavailable");
+    expect(hostEventDelivery.create).not.toHaveBeenCalled();
+    expect(routeHostEvent).not.toHaveBeenCalled();
+  });
+
+  it("still checks the signature first", async () => {
+    const { deps: d } = deps();
+    const result = await handleGitHubEventIngress(
+      { headers: headers({ "x-hub-signature-256": "sha256=00" }), rawBody: strangerBody },
+      d,
+    );
+    expect(result.status).toBe(401);
+  });
+});
+
+describe("eventAccount", () => {
+  it("reads the installation account for installation events and the repository owner otherwise", () => {
+    expect(
+      eventAccount("installation_repositories", { action: "added", installation: { id: 3, account: { login: "X" } } }),
+    ).toEqual({
+      login: "X",
+      installationId: 3,
+      uninstall: true,
+    });
+    expect(
+      eventAccount("installation", { action: "deleted", installation: { id: 3, account: { login: "X" } } }),
+    ).toEqual({
+      login: "X",
+      installationId: 3,
+      uninstall: false,
+    });
+    expect(eventAccount("issue_comment", { repository: { full_name: "Org/repo" } })).toEqual({
+      login: "Org",
+      uninstall: false,
+    });
+    expect(eventAccount("issue_comment", { repository: { owner: { login: "Org" } } })).toEqual({
+      login: "Org",
+      uninstall: false,
+    });
+    expect(eventAccount("github_app_authorization", { action: "revoked" })).toBeUndefined();
   });
 });
