@@ -1,0 +1,7 @@
+# The control-plane env patch is not here: the kind overlay has no
+# control-plane Deployment (the control plane runs outside the cluster), and a
+# patch with no target is an error. Overlays that run it in-cluster patch it.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - role.yaml

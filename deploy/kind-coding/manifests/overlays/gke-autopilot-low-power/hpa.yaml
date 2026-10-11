@@ -1,0 +1,24 @@
+# Low-power mode runs one control-plane replica and lets it grow to two under
+# CPU load. The utilization target is set from the kind load test.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: wardby-control-plane
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 40
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600

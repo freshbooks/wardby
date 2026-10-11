@@ -1,0 +1,1130 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/part-of: wardby
+  name: wardby-coding
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: wardby-coding
+  namespace: wardby-coding
+spec:
+  hard:
+    limits.cpu: "11"
+    limits.memory: 20Gi
+    pods: "26"
+    requests.cpu: "11"
+    requests.ephemeral-storage: 64Gi
+    requests.memory: 20Gi
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  annotations:
+    iam.gke.io/gcp-service-account: wardby-proxy-gsa-email
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: wardby-coding-worker
+  namespace: wardby-coding
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    iam.gke.io/gcp-service-account: wardby-app-gsa-email
+  name: wardby-control-plane
+  namespace: wardby-coding
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  annotations:
+    iam.gke.io/gcp-service-account: wardby-gateway-gsa-email
+  name: wardby-native-gateway
+  namespace: wardby-coding
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wardby-coding-launcher
+  namespace: wardby-coding
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - get
+  - delete
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - update
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - get
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resourceNames:
+  - wardby-coding-proxy
+  resources:
+  - endpoints
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resourceNames:
+  - wardby-coding
+  resources:
+  - resourcequotas
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wardby-coding-launcher-namespace
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - wardby-coding
+  resources:
+  - namespaces
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wardby-coding-namespace-reader
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - wardby-coding
+  resources:
+  - namespaces
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wardby-control-plane-launcher
+  namespace: wardby-coding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wardby-coding-launcher
+subjects:
+- kind: ServiceAccount
+  name: wardby-control-plane
+  namespace: wardby-coding
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wardby-control-plane-namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wardby-coding-launcher-namespace
+subjects:
+- kind: ServiceAccount
+  name: wardby-control-plane
+  namespace: wardby-coding
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  ports:
+  - name: proxy
+    port: 8787
+    targetPort: 8787
+  - name: deny
+    port: 8788
+    targetPort: 8788
+  selector:
+    app.kubernetes.io/name: wardby-coding-proxy
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  ports:
+  - name: mcp
+    port: 8080
+    targetPort: 8080
+  selector:
+    app.kubernetes.io/name: wardby-control-plane
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-native-gateway
+  namespace: wardby-coding
+spec:
+  ports:
+  - name: gateway
+    port: 8790
+    targetPort: 8790
+  - name: deny
+    port: 8791
+    targetPort: 8791
+  selector:
+    app.kubernetes.io/name: wardby-native-gateway
+  type: ClusterIP
+---
+apiVersion: scheduling.k8s.io/v1
+description: wardby coding-run pods; wait for capacity, never preempt.
+globalDefault: false
+kind: PriorityClass
+metadata:
+  name: wardby-coding-run
+preemptionPolicy: Never
+value: 1000
+---
+apiVersion: scheduling.k8s.io/v1
+description: wardby control plane and coding proxy.
+globalDefault: false
+kind: PriorityClass
+metadata:
+  name: wardby-control-plane
+value: 1000000
+---
+apiVersion: scheduling.k8s.io/v1
+description: wardby headroom placeholder; the first pod evicted when a node is short.
+globalDefault: false
+kind: PriorityClass
+metadata:
+  name: wardby-headroom
+preemptionPolicy: Never
+value: -10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: wardby-coding-proxy
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-coding-proxy
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - command:
+        - node
+        - dist/coding-proxy/main.js
+        env:
+        - name: DATABASE_URL
+          value: wardby-proxy-database-url
+        - name: NODE_ENV
+          value: production
+        envFrom:
+        - secretRef:
+            name: wardby-coding-proxy-env
+        image: wardby-runtime
+        name: proxy
+        ports:
+        - containerPort: 8787
+          name: proxy
+        - containerPort: 8788
+          name: deny
+        readinessProbe:
+          periodSeconds: 5
+          tcpSocket:
+            port: 8787
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 3Gi
+          requests:
+            cpu: 1000m
+            memory: 3Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+      initContainers:
+      - args:
+        - --auto-iam-authn
+        - --private-ip
+        - --address=127.0.0.1
+        - --port=5432
+        - --structured-logs
+        - --health-check
+        - --http-address=0.0.0.0
+        - --http-port=9090
+        - --exit-zero-on-sigterm
+        - wardby-instance-connection-name
+        image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.25.4@sha256:88501f0a695a586988add1b8a206fdf3f29f9a1a3deeb9b45ef2b1481ea6be83
+        name: cloud-sql-proxy
+        resources:
+          limits:
+            cpu: 100m
+            ephemeral-storage: 100Mi
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            ephemeral-storage: 100Mi
+            memory: 128Mi
+        restartPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+        startupProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /startup
+            port: 9090
+          periodSeconds: 2
+      priorityClassName: wardby-control-plane
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: wardby-coding-proxy
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 64Mi
+        name: tmp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: wardby-control-plane
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  minReadySeconds: 180
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-control-plane
+    spec:
+      automountServiceAccountToken: true
+      containers:
+      - command:
+        - node
+        - dist/cli.js
+        - serve
+        env:
+        - name: DATABASE_URL
+          value: wardby-app-database-url
+        - name: NODE_ENV
+          value: production
+        - name: MCP_TRANSPORT
+          value: http
+        - name: MCP_HTTP_BIND
+          value: 0.0.0.0:8080
+        - name: MCP_CANONICAL_URI
+          value: https://wardby-control-plane-hostname/mcp
+        - name: AUTH_AUDIENCE
+          value: https://wardby-control-plane-hostname/mcp
+        - name: KUBERNETES_SERVICE_HOST
+          value: wardby-apiserver-host
+        - name: KUBERNETES_SERVICE_PORT
+          value: "443"
+        - name: AUTH_MAX_CLIENTS
+          value: "20"
+        - name: EXECUTOR
+          value: dbos
+        - name: DBOS__APPVERSION
+          value: wardby-dbos-app-version
+        - name: JOB_LAUNCHER
+          value: kubernetes
+        - name: KUBERNETES_NAMESPACE
+          value: wardby-coding
+        - name: KUBERNETES_PROXY_SERVICE
+          value: wardby-coding-proxy
+        - name: KUBERNETES_PLATFORM
+          value: gke-autopilot
+        - name: KUBERNETES_RUNTIME_CLASS
+          value: gvisor
+        - name: KUBERNETES_RUN_PRIORITY_CLASS
+          value: wardby-coding-run
+        - name: KUBERNETES_RESOURCE_QUOTA
+          value: wardby-coding
+        - name: CODING_MAX_CONCURRENT
+          value: "3"
+        - name: KUBERNETES_PREFLIGHT_TIMEOUT_MS
+          value: "600000"
+        - name: KUBERNETES_READY_TIMEOUT_MS
+          value: "600000"
+        - name: CODING_WORKER_IMAGE
+          value: wardby-coding-worker-image
+        - name: CODING_WORKER_IMAGE_NODE_PYTHON_3_12
+          value: wardby-coding-worker-image-node-python-3-12
+        - name: CODING_CLAUDE_WORKER_IMAGE
+          value: wardby-claude-coding-worker-image
+        - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE
+          value: wardby-claude-tool-runner-image
+        - name: NATIVE_SANDBOX_LAUNCHER
+          value: kubernetes
+        - name: NATIVE_SANDBOX_WORKER_IMAGE
+          value: wardby-native-worker-image
+        - name: NATIVE_SANDBOX_CPUS
+          value: "0.5"
+        - name: NATIVE_SANDBOX_MEMORY_MB
+          value: "512"
+        - name: NATIVE_SANDBOX_MAX_CONCURRENT
+          value: "4"
+        - name: NATIVE_SANDBOX_WARM_POOL_SIZE
+          value: "0"
+        - name: NATIVE_SANDBOX_READY_TIMEOUT_MS
+          value: "600000"
+        - name: NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS
+          value: "60000"
+        - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12
+          value: wardby-claude-tool-runner-image-node-python-3-12
+        envFrom:
+        - secretRef:
+            name: wardby-control-plane-env
+        - secretRef:
+            name: wardby-jira-env
+            optional: true
+        - secretRef:
+            name: wardby-slack-env
+            optional: true
+        image: wardby-runtime
+        lifecycle:
+          preStop:
+            sleep:
+              seconds: 30
+        name: control-plane
+        ports:
+        - containerPort: 8080
+          name: mcp
+        readinessProbe:
+          httpGet:
+            httpHeaders:
+            - name: Host
+              value: wardby-control-plane-hostname
+            path: /.well-known/oauth-protected-resource
+            port: 8080
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 1000m
+            ephemeral-storage: 4Gi
+            memory: 2Gi
+          requests:
+            cpu: 1000m
+            ephemeral-storage: 4Gi
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+      initContainers:
+      - args:
+        - --auto-iam-authn
+        - --private-ip
+        - --address=127.0.0.1
+        - --port=5432
+        - --structured-logs
+        - --health-check
+        - --http-address=0.0.0.0
+        - --http-port=9090
+        - --exit-zero-on-sigterm
+        - wardby-instance-connection-name
+        image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.25.4@sha256:88501f0a695a586988add1b8a206fdf3f29f9a1a3deeb9b45ef2b1481ea6be83
+        name: cloud-sql-proxy
+        resources:
+          limits:
+            cpu: 100m
+            ephemeral-storage: 100Mi
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            ephemeral-storage: 100Mi
+            memory: 128Mi
+        restartPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+        startupProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /startup
+            port: 9090
+          periodSeconds: 2
+      priorityClassName: wardby-control-plane
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: wardby-control-plane
+      terminationGracePeriodSeconds: 720
+      volumes:
+      - emptyDir:
+          sizeLimit: 3Gi
+        name: tmp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: wardby-headroom
+  name: wardby-headroom
+  namespace: wardby-coding
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-headroom
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-headroom
+    spec:
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: wardby-control-plane
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      automountServiceAccountToken: false
+      containers:
+      - image: registry.k8s.io/pause:3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c
+        name: pause
+        resources:
+          limits:
+            cpu: 250m
+            ephemeral-storage: 100Mi
+            memory: 512Mi
+          requests:
+            cpu: 250m
+            ephemeral-storage: 100Mi
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      enableServiceLinks: false
+      priorityClassName: wardby-headroom
+      securityContext:
+        runAsGroup: 65535
+        runAsNonRoot: true
+        runAsUser: 65535
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: wardby-native-gateway
+  name: wardby-native-gateway
+  namespace: wardby-coding
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wardby-native-gateway
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - command:
+        - node
+        - dist/cli.js
+        - native-gateway
+        env:
+        - name: DATABASE_URL
+          value: wardby-gateway-database-url
+        - name: NODE_ENV
+          value: production
+        - name: NATIVE_GATEWAY_LISTEN
+          value: 0.0.0.0:8790
+        - name: NATIVE_GATEWAY_DENY_PORT
+          value: "8791"
+        envFrom:
+        - secretRef:
+            name: wardby-native-gateway-env
+        - secretRef:
+            name: wardby-jira-env
+            optional: true
+        image: wardby-runtime
+        name: gateway
+        ports:
+        - containerPort: 8790
+          name: gateway
+        - containerPort: 8791
+          name: deny
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8790
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 250m
+            memory: 512Mi
+          requests:
+            cpu: 250m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+      initContainers:
+      - args:
+        - --auto-iam-authn
+        - --private-ip
+        - --address=127.0.0.1
+        - --port=5432
+        - --structured-logs
+        - --health-check
+        - --http-address=0.0.0.0
+        - --http-port=9090
+        - --exit-zero-on-sigterm
+        - wardby-instance-connection-name
+        image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.25.4@sha256:88501f0a695a586988add1b8a206fdf3f29f9a1a3deeb9b45ef2b1481ea6be83
+        name: cloud-sql-proxy
+        resources:
+          limits:
+            cpu: 100m
+            ephemeral-storage: 100Mi
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            ephemeral-storage: 100Mi
+            memory: 128Mi
+        restartPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+        startupProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /startup
+            port: 9090
+          periodSeconds: 2
+      priorityClassName: wardby-control-plane
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: wardby-native-gateway
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 64Mi
+        name: tmp
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  annotations:
+    networking.gke.io/certmap: wardby-control-plane
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  addresses:
+  - type: NamedAddress
+    value: wardby-control-plane
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+  - allowedRoutes:
+      namespaces:
+        from: Same
+    hostname: wardby-control-plane-hostname
+    name: https
+    port: 443
+    protocol: HTTPS
+  - allowedRoutes:
+      namespaces:
+        from: Same
+    hostname: wardby-control-plane-hostname
+    name: http
+    port: 80
+    protocol: HTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  hostnames:
+  - wardby-control-plane-hostname
+  parentRefs:
+  - name: wardby-control-plane
+    sectionName: https
+  rules:
+  - backendRefs:
+    - name: wardby-control-plane
+      port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: wardby-control-plane-redirect
+  namespace: wardby-coding
+spec:
+  hostnames:
+  - wardby-control-plane-hostname
+  parentRefs:
+  - name: wardby-control-plane
+    sectionName: http
+  rules:
+  - filters:
+    - requestRedirect:
+        scheme: https
+        statusCode: 301
+      type: RequestRedirect
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  default:
+    securityPolicy: wardby-control-plane
+    timeoutSec: 3600
+  targetRef:
+    group: ""
+    kind: Service
+    name: wardby-control-plane
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  default:
+    config:
+      httpHealthCheck:
+        host: wardby-control-plane-hostname
+        port: 8080
+        requestPath: /.well-known/oauth-protected-resource
+      type: HTTP
+  targetRef:
+    group: ""
+    kind: Service
+    name: wardby-control-plane
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: wardby-coding
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  - ports:
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 100.64.0.0/10
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          wardby.io/component: coding-run
+    ports:
+    - port: 8787
+      protocol: TCP
+    - port: 8788
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-database
+  namespace: wardby-coding
+spec:
+  egress:
+  - ports:
+    - port: 3307
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: wardby-database-cidr
+  - ports:
+    - port: 80
+      protocol: TCP
+    - port: 988
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 169.254.169.254/32
+    - ipBlock:
+        cidr: 169.254.169.252/32
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-dns
+  namespace: wardby-coding
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 169.254.20.10/32
+    - ipBlock:
+        cidr: 169.254.169.254/32
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane
+  namespace: wardby-coding
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 169.254.20.10/32
+    - ipBlock:
+        cidr: 169.254.169.254/32
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  - ports:
+    - port: 3307
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: wardby-database-cidr
+  - ports:
+    - port: 80
+      protocol: TCP
+    - port: 988
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 169.254.169.254/32
+    - ipBlock:
+        cidr: 169.254.169.252/32
+  - ports:
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 100.64.0.0/10
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane-lb
+  namespace: wardby-coding
+spec:
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 130.211.0.0/22
+    - ipBlock:
+        cidr: 35.191.0.0/16
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-native-gateway
+  namespace: wardby-coding
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  - ports:
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 100.64.0.0/10
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          wardby.io/component: native-run
+    ports:
+    - port: 8790
+      protocol: TCP
+    - port: 8791
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-native-gateway-database
+  namespace: wardby-coding
+spec:
+  egress:
+  - ports:
+    - port: 3307
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: wardby-database-cidr
+  - ports:
+    - port: 80
+      protocol: TCP
+    - port: 988
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 169.254.169.254/32
+    - ipBlock:
+        cidr: 169.254.169.252/32
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  policyTypes:
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-native-gateway-dns
+  namespace: wardby-coding
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 169.254.20.10/32
+    - ipBlock:
+        cidr: 169.254.169.254/32
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  policyTypes:
+  - Egress

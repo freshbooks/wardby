@@ -1,0 +1,6 @@
+# kind in low-power mode: the power RBAC and control-plane env, no HPA (kind
+# has no metrics-server by default).
+resources:
+  - ../kind
+components:
+  - ../../components/low-power

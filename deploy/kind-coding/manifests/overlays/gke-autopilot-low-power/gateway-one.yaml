@@ -1,0 +1,7 @@
+# Low-power mode runs a single native gateway replica (the control plane scales
+# it to 0 when idle and back to 1 on demand).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: wardby-native-gateway, namespace: wardby-coding }
+spec:
+  replicas: 1
