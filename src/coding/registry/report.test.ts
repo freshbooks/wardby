@@ -59,10 +59,18 @@ describe("summarizeRegistryFetches", () => {
 
 describe("accepted advisories reason", () => {
   it("round-trips the ids, and is absent with none", () => {
-    expect(acceptedAdvisoriesReason(["GHSA-a", "CVE-1"])).toBe("accepted advisories: GHSA-a, CVE-1");
+    expect(acceptedAdvisoriesReason(["GHSA-aaaa-bbbb", "CVE-2026-1"])).toBe(
+      "accepted advisories: GHSA-aaaa-bbbb, CVE-2026-1",
+    );
     expect(acceptedAdvisoriesReason([])).toBeUndefined();
-    expect(parseAcceptedAdvisories("accepted advisories: GHSA-a, CVE-1")).toEqual(["GHSA-a", "CVE-1"]);
+    expect(parseAcceptedAdvisories("accepted advisories: GHSA-aaaa-bbbb, CVE-2026-1")).toEqual([
+      "GHSA-aaaa-bbbb",
+      "CVE-2026-1",
+    ]);
     expect(parseAcceptedAdvisories("wardby_version_filtered")).toEqual([]);
     expect(parseAcceptedAdvisories(null)).toEqual([]);
+    expect(parseAcceptedAdvisories("accepted advisories: GHSA-aaaa-bbbb, [x](https://e), @someone")).toEqual([
+      "GHSA-aaaa-bbbb",
+    ]);
   });
 });

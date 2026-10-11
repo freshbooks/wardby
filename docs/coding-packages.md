@@ -190,10 +190,21 @@ or `agents:admin`, like any other package-policy change):
 ```json
 {
   "codingProfile": {
-    "packagePolicy": { "acceptedAdvisories": ["GHSA-xxxx-xxxx-xxxx"] }
+    "packagePolicy": {
+      "minReleaseAgeDays": 3,
+      "acceptedAdvisories": ["GHSA-xxxx-xxxx-xxxx"]
+    }
   }
 }
 ```
+
+`update_agent` replaces `packagePolicy` as a whole, so always send the full
+object: leaving out `minReleaseAgeDays` resets it to the default of 3. To
+remove a waiver, send the whole object again without that id.
+
+Upgrade the coding proxy together with the control plane before setting
+`acceptedAdvisories`: an older proxy rejects the unknown policy key and fails
+package requests for that run (it fails closed).
 
 - Ids are matched exactly as OSV prints them (case-sensitive, for example
   `GHSA-…`, `CVE-…`, `PYSEC-…`) against an advisory's id and its aliases, so

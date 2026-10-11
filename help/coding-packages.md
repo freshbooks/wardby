@@ -76,8 +76,16 @@ with `create_agent` or `update_agent` (needs `packages:approve` or
 `agents:admin`):
 
 ```json
-{ "codingProfile": { "packagePolicy": { "acceptedAdvisories": ["GHSA-xxxx-xxxx-xxxx"] } } }
+{
+  "codingProfile": {
+    "packagePolicy": { "minReleaseAgeDays": 3, "acceptedAdvisories": ["GHSA-xxxx-xxxx-xxxx"] }
+  }
+}
 ```
+
+- `update_agent` replaces `packagePolicy` as a whole: send the full object
+  (omitting `minReleaseAgeDays` resets it to the default 3). To remove a
+  waiver, re-send the whole object without that id.
 
 - Up to 32 unique ids (`GHSA-…`, `CVE-…`, `PYSEC-…`), matched case-sensitively
   against an advisory's id and its aliases.

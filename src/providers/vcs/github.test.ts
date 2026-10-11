@@ -938,7 +938,7 @@ describe("pullRequestBody packages section", () => {
     const body = pullRequestBody({ ...base, packages });
     expect(body).toContain("<summary>Packages installed during this run (2)</summary>");
     expect(body).toContain("**Accepted advisories**");
-    expect(body).toContain("- `node-forge@1.4.0`: GHSA-86w9-cpqp-85rv");
+    expect(body).toContain("- `node-forge@1.4.0`: `GHSA-86w9-cpqp-85rv`");
     expect(body).not.toContain("`react@19.0.0`:");
 
     const without = pullRequestBody({ ...base, packages: [{ ecosystem: "npm", name: "react", version: "19.0.0" }] });
@@ -956,13 +956,31 @@ describe("pullRequestBody packages section", () => {
       ecosystem: "npm",
       name: `waived-${i}`,
       version: "1.0.0",
-      acceptedAdvisories: [`GHSA-${i}`, "bad`id"],
+      acceptedAdvisories: [`GHSA-${i}-xyz`, "bad`id"],
     }));
     const body = pullRequestBody({ ...base, packages });
-    expect(body).toContain("- `waived-99@1.0.0`: GHSA-99");
+    expect(body).toContain("- `waived-99@1.0.0`: `GHSA-99-xyz`");
     expect(body).not.toContain("`waived-100@1.0.0`:");
     expect(body).not.toContain("bad`id");
     expect(body.match(/…and 200 more — see get_run for the full list/g)).toHaveLength(2);
+  });
+
+  it("drops accepted advisory ids that are not policy-shaped ids", () => {
+    const body = pullRequestBody({
+      ...base,
+      packages: [
+        {
+          ecosystem: "npm",
+          name: "pkg",
+          version: "1.0.0",
+          acceptedAdvisories: ["GHSA-aaaa-bbbb", "[x](https://e)", "@someone", "</details>"],
+        },
+      ],
+    });
+    expect(body).toContain("- `pkg@1.0.0`: `GHSA-aaaa-bbbb`");
+    expect(body).not.toContain("https://e");
+    expect(body).not.toContain("@someone");
+    expect(body.match(/<\/details>/g)).toHaveLength(1);
   });
 
   it("omits the section, never throws, when the package report cannot be rendered", () => {

@@ -4,6 +4,7 @@
  * packages collapse on ecosystem + name + version (a retried download is one
  * package), refusals on ecosystem + name + reason.
  */
+import { ACCEPTED_ADVISORY_ID } from "./allowlist.js";
 export interface RegistryFetchRow {
   ecosystem: string;
   name: string;
@@ -48,7 +49,7 @@ export function parseAcceptedAdvisories(reason: string | null | undefined): stri
     .slice(ACCEPTED_ADVISORIES_PREFIX.length)
     .split(",")
     .map((id) => id.trim())
-    .filter((id) => id.length > 0);
+    .filter((id) => ACCEPTED_ADVISORY_ID.test(id));
 }
 
 export interface RegistryPackageSummary {

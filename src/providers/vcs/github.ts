@@ -1,6 +1,7 @@
 import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
+import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
 import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 
 const DEFAULT_API_BASE_URL = "https://api.github.com";
@@ -451,8 +452,10 @@ function packagesSection(input: PullRequestInput): string | undefined {
   // Only ids safe in a Markdown line; a package whose ids are all unsafe is
   // not listed here (it is still listed as installed).
   const waivers = packages.flatMap((pkg) => {
-    const ids = (pkg.acceptedAdvisories ?? []).filter((id) => isSafeMarkdownFragment(id) && id.length > 0);
-    return ids.length > 0 ? [`- \`${pkg.name}@${pkg.version}\`: ${ids.join(", ")}`] : [];
+    // Ids come from OSV (a waiver can match via alias), so keep only the
+    // policy id shape and render each in a code span.
+    const ids = (pkg.acceptedAdvisories ?? []).filter((id) => ACCEPTED_ADVISORY_ID.test(id));
+    return ids.length > 0 ? [`- \`${pkg.name}@${pkg.version}\`: ${ids.map((id) => `\`${id}\``).join(", ")}`] : [];
   });
   return [
     "<details>",
