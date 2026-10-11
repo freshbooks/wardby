@@ -73,6 +73,72 @@ describe("pgConnectionConfig", () => {
     ).toThrow(message);
   });
 
+  it.each(["mysql://wardby_app@db.example:3306/wardby", "http://wardby_app@db.example/wardby"])(
+    "refuses a non-postgres scheme: %s",
+    (base) => {
+      const url = `${base}?sslmode=verify-full&sslrootcert=/ca.pem`;
+      expect(() => pgConnectionConfig(url, "rds-iam", { env, readFile })).toThrow(
+        `${DATABASE_AUTH_ERROR}: DATABASE_AUTH=rds-iam needs a postgresql:// (or postgres://) DATABASE_URL`,
+      );
+    },
+  );
+
+  it("accepts the postgres:// scheme too", () => {
+    const url = RDS_URL.replace("postgresql://", "postgres://");
+    expect(pgConnectionConfig(url, "rds-iam", { env, readFile }).host).toBe("db.abc123.us-east-1.rds.amazonaws.com");
+  });
+
+  it("carries pg's session parameters over from the URL, as pg would read them from a connection string", () => {
+    const params =
+      "&application_name=wardby-mcp&fallback_application_name=wardby&options=-c%20search_path%3Dapp" +
+      "&client_encoding=UTF8&statement_timeout=5000&lock_timeout=1000" +
+      "&idle_in_transaction_session_timeout=60000&query_timeout=7000";
+    const config = pgConnectionConfig(RDS_URL + params, "rds-iam", { env, readFile });
+    expect(config).toMatchObject({
+      application_name: "wardby-mcp",
+      fallback_application_name: "wardby",
+      options: "-c search_path=app",
+      client_encoding: "UTF8",
+      statement_timeout: "5000",
+      lock_timeout: "1000",
+      idle_in_transaction_session_timeout: "60000",
+      query_timeout: "7000",
+    });
+  });
+
+  it("omits session parameters the URL does not set", () => {
+    const config = pgConnectionConfig(RDS_URL, "rds-iam", { env, readFile });
+    expect(Object.keys(config).sort()).toEqual(["database", "host", "password", "port", "ssl", "user"]);
+  });
+
+  it("accepts the pool, Prisma and timeout parameters other code reads from the URL", () => {
+    const url = `${RDS_URL}&connection_limit=5&pool_timeout=20&connect_timeout=3&schema=public`;
+    expect(() => pgConnectionConfig(url, "rds-iam", { env, readFile })).not.toThrow();
+  });
+
+  it.each([
+    "sslcert",
+    "sslkey",
+    "sslpassword",
+    "ssl",
+    "sslnegotiation",
+    "uselibpqcompat",
+    "host",
+    "replication",
+    "pgbouncer",
+    "made_up",
+  ])("refuses the URL parameter %s, naming it", (param) => {
+    expect(() => pgConnectionConfig(`${RDS_URL}&${param}=x`, "rds-iam", { env, readFile })).toThrow(
+      `${DATABASE_AUTH_ERROR}: DATABASE_AUTH=rds-iam does not support the DATABASE_URL parameter "${param}"`,
+    );
+  });
+
+  it("never echoes a refused parameter's value", () => {
+    expect(() => pgConnectionConfig(`${RDS_URL}&sslkey=%2Fsecret%2Fkey.pem`, "rds-iam", { env, readFile })).toThrow(
+      expect.objectContaining({ message: expect.not.stringContaining("secret") }),
+    );
+  });
+
   it("never echoes the URL's password in a refusal", () => {
     const url = RDS_URL.replace("wardby_app@", "wardby_app:s3cr3t-value@");
     expect(() => pgConnectionConfig(url, "rds-iam", { env, readFile })).toThrow(

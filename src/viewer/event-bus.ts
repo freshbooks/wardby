@@ -16,6 +16,7 @@
 import pg from "pg";
 import { poolSettings } from "../core/db.js";
 import { logger } from "../core/logger.js";
+import { type DatabaseAuth, type PgAuthOptions, databaseAuthFromEnv, pgConnectionConfig } from "../core/pg-auth.js";
 import { ViewerEventSchema, type ViewerEvent } from "./api-schema.js";
 
 export const VIEWER_CHANNEL = "wardby_viewer";
@@ -41,8 +42,25 @@ export interface ViewerEventBus {
   close(): Promise<void>;
 }
 
+/** The LISTEN client's config: auth (pg-auth.ts) plus keepAlive and the pool's connect timeout. */
+export function eventBusClientConfig(
+  connectionString: string,
+  auth: DatabaseAuth,
+  pgAuth?: PgAuthOptions,
+): pg.ClientConfig {
+  return {
+    ...pgConnectionConfig(connectionString, auth, pgAuth),
+    keepAlive: true,
+    keepAliveInitialDelayMillis: KEEPALIVE_INITIAL_DELAY_MS,
+    connectionTimeoutMillis: poolSettings(connectionString).connectionTimeoutMillis,
+  };
+}
+
 export function createViewerEventBus(options: {
   connectionString: string;
+  /** Defaults to DATABASE_AUTH. */
+  auth?: DatabaseAuth;
+  pgAuth?: PgAuthOptions; // tests
   connect?: (connectionString: string) => pg.Client;
   reconnectDelaysMs?: readonly number[];
   healthCheckIntervalMs?: number; // tests
@@ -51,15 +69,12 @@ export function createViewerEventBus(options: {
   const healthIntervalMs = options.healthCheckIntervalMs ?? DEFAULT_HEALTH_CHECK_INTERVAL_MS;
   const healthTimeoutMs = options.healthCheckTimeoutMs ?? DEFAULT_HEALTH_CHECK_TIMEOUT_MS;
   const delays = options.reconnectDelaysMs?.length ? options.reconnectDelaysMs : DEFAULT_RECONNECT_DELAYS_MS;
-  const makeClient =
-    options.connect ??
-    ((connectionString: string) =>
-      new pg.Client({
-        connectionString,
-        keepAlive: true,
-        keepAliveInitialDelayMillis: KEEPALIVE_INITIAL_DELAY_MS,
-        connectionTimeoutMillis: poolSettings(connectionString).connectionTimeoutMillis,
-      }));
+  // Built once, up front: a misconfigured DATABASE_AUTH fails here rather than on every reconnect,
+  // and under rds-iam every reconnect shares one token cache.
+  const clientConfig = options.connect
+    ? undefined
+    : eventBusClientConfig(options.connectionString, options.auth ?? databaseAuthFromEnv(), options.pgAuth);
+  const makeClient = options.connect ?? (() => new pg.Client({ ...clientConfig }));
 
   const listeners = new Set<(event: ViewerEvent) => void>();
   const stateListeners = new Set<(live: boolean) => void>();

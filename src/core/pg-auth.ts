@@ -13,7 +13,10 @@
  *
  * Under rds-iam the URL is parsed here into explicit fields rather than passed as connectionString:
  * pg merges a parsed connection string over explicit config, and a password-less URL would replace
- * the token function with an empty password.
+ * the token function with an empty password. Nothing in the URL is dropped silently: each query
+ * parameter is consumed here (sslmode, sslrootcert), carried over as the same field pg would have
+ * read from the connection string (SESSION_PARAMS), read from the URL by other code
+ * (OTHER_READERS_PARAMS), or refused by name.
  *
  * Refusals never include the URL, its credentials, or a token.
  */
@@ -41,6 +44,33 @@ export function databaseAuthFromEnv(env: NodeJS.ProcessEnv = process.env): Datab
   if (value === "password" || value === "rds-iam") return value;
   throw new Error(`${DATABASE_AUTH_ERROR}: DATABASE_AUTH must be "password" or "rds-iam" (found "${value}")`);
 }
+
+/** pg reads these from a connection string as same-named config fields (strings); carried over as-is. */
+const SESSION_PARAMS = [
+  "application_name",
+  "fallback_application_name",
+  "options",
+  "client_encoding",
+  "statement_timeout",
+  "lock_timeout",
+  "idle_in_transaction_session_timeout",
+  "query_timeout",
+] as const;
+
+/**
+ * Read from the URL elsewhere, so allowed through: connection_limit and pool_timeout (poolSettings
+ * in db.ts), connect_timeout (the DBOS system pool, as DBOS reads it for its own; pg's JavaScript
+ * client never reads it), schema (Prisma's CLI; the pg adapter ignores it, so it has no effect at
+ * run time under either auth mode).
+ */
+const OTHER_READERS_PARAMS = ["connection_limit", "pool_timeout", "connect_timeout", "schema"] as const;
+
+const ACCEPTED_PARAMS: ReadonlySet<string> = new Set([
+  "sslmode",
+  "sslrootcert",
+  ...SESSION_PARAMS,
+  ...OTHER_READERS_PARAMS,
+]);
 
 function refuse(detail: string): never {
   throw new Error(`${DATABASE_AUTH_ERROR}: DATABASE_AUTH=rds-iam ${detail}`);
@@ -91,6 +121,13 @@ export function pgConnectionConfig(url: string, auth: DatabaseAuth, options: PgA
   } catch {
     refuse("needs a valid postgresql:// DATABASE_URL");
   }
+  if (parsed.protocol !== "postgresql:" && parsed.protocol !== "postgres:") {
+    refuse("needs a postgresql:// (or postgres://) DATABASE_URL");
+  }
+  for (const name of parsed.searchParams.keys()) {
+    // The name only: a refused parameter's value can be a key path or a secret.
+    if (!ACCEPTED_PARAMS.has(name)) refuse(`does not support the DATABASE_URL parameter "${name}"`);
+  }
   if (parsed.password) refuse("takes no password in DATABASE_URL (the IAM token is the password)");
   const user = decode(parsed.username, "user name");
   if (!user) refuse("needs a user name in DATABASE_URL (the database user mapped to the IAM role)");
@@ -105,7 +142,13 @@ export function pgConnectionConfig(url: string, auth: DatabaseAuth, options: PgA
   const database = decode(parsed.pathname.replace(/^\//, ""), "database name") || undefined;
   const makeSigner = options.makeSigner ?? ((params) => new Signer(params));
   const readFile = options.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+  const session: Record<string, string> = {};
+  for (const name of SESSION_PARAMS) {
+    const value = parsed.searchParams.get(name);
+    if (value !== null) session[name] = value;
+  }
   return {
+    ...session,
     host,
     port,
     user,

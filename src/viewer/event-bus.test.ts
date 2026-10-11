@@ -1,8 +1,8 @@
 import { EventEmitter } from "node:events";
-import type pg from "pg";
+import pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../core/logger.js";
-import { createViewerEventBus, type ViewerEventBus } from "./event-bus.js";
+import { createViewerEventBus, eventBusClientConfig, type ViewerEventBus } from "./event-bus.js";
 
 /** A stand-in pg.Client: LISTEN succeeds; `SELECT 1` follows `health`. */
 function fakeClient(health: "ok" | "hang" | "reject") {
@@ -111,5 +111,62 @@ describe("viewer event bus state and health checks", () => {
     const count = clients[0].queries.length;
     await new Promise((r) => setTimeout(r, 50));
     expect(clients[0].queries.length).toBe(count);
+  });
+});
+
+describe("viewer event bus connection config", () => {
+  const RDS_URL = "postgresql://app@db.example:5432/w?sslmode=verify-full&sslrootcert=/ca.pem";
+  const pgAuth = {
+    env: { AWS_REGION: "us-east-1" },
+    readFile: () => "CA",
+    makeSigner: () => ({ getAuthToken: async () => "t" }),
+  };
+
+  it("is today's client config under password auth", () => {
+    expect(eventBusClientConfig("postgresql://u:p@h/db?pool_timeout=3", "password")).toEqual({
+      connectionString: "postgresql://u:p@h/db?pool_timeout=3",
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 30_000,
+      connectionTimeoutMillis: 3_000,
+    });
+  });
+
+  it("uses explicit fields and a token password under rds-iam", () => {
+    const config = eventBusClientConfig(RDS_URL, "rds-iam", pgAuth);
+    expect(config.connectionString).toBeUndefined();
+    expect(typeof config.password).toBe("function");
+    expect(config).toMatchObject({ host: "db.example", user: "app", keepAlive: true, connectionTimeoutMillis: 10_000 });
+  });
+
+  it("builds its default client from that config", async () => {
+    const configs: pg.ClientConfig[] = [];
+    vi.spyOn(pg, "Client").mockImplementation(function (config) {
+      configs.push(config as pg.ClientConfig);
+      return fakeClient("ok") as unknown as pg.Client;
+    });
+    const saved = process.env.DATABASE_AUTH;
+    delete process.env.DATABASE_AUTH;
+    try {
+      bus = createViewerEventBus({ connectionString: "postgresql://u:p@h/db" });
+    } finally {
+      if (saved !== undefined) process.env.DATABASE_AUTH = saved;
+    }
+    bus.subscribe(() => {});
+    await vi.waitFor(() => expect(bus!.connected()).toBe(true));
+    expect(configs).toEqual([eventBusClientConfig("postgresql://u:p@h/db", "password")]);
+
+    await bus.close();
+    configs.length = 0;
+    bus = createViewerEventBus({ connectionString: RDS_URL, auth: "rds-iam", pgAuth });
+    bus.subscribe(() => {});
+    await vi.waitFor(() => expect(bus!.connected()).toBe(true));
+    expect(typeof configs[0]?.password).toBe("function");
+    expect(configs[0]?.connectionString).toBeUndefined();
+  });
+
+  it("refuses a bad rds-iam URL when the bus is created, not on every reconnect", () => {
+    expect(() =>
+      createViewerEventBus({ connectionString: "postgresql://app@db.example/w", auth: "rds-iam", pgAuth }),
+    ).toThrow("database_auth_invalid");
   });
 });
