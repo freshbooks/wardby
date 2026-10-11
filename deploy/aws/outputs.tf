@@ -59,3 +59,39 @@ output "sandbox_toleration" {
   description = "Taint on sandbox nodes (key=value:effect) the gvisor RuntimeClass must tolerate."
   value       = "${local.sandbox_taint_key}=${local.sandbox_value}:NoSchedule"
 }
+
+output "database_endpoint" {
+  description = "RDS host name (TLS server name for sslmode=verify-full)."
+  value       = aws_db_instance.main.address
+}
+
+output "database_port" {
+  value = aws_db_instance.main.port
+}
+
+output "database_name" {
+  value = aws_db_instance.main.db_name
+}
+
+output "database_resource_id" {
+  description = "The instance's resource id (the dbuser ARNs' instance part)."
+  value       = aws_db_instance.main.resource_id
+}
+
+output "database_master_username" {
+  value = aws_db_instance.main.username
+}
+
+output "database_master_user_secret_arn" {
+  description = "Secrets Manager secret holding the RDS-managed master password, for the one-off grants bootstrap."
+  value       = try(aws_db_instance.main.master_user_secret[0].secret_arn, null)
+}
+
+output "database_users" {
+  description = "Postgres user per workload; the grants bootstrap creates them with GRANT rds_iam."
+  value       = local.database_users
+}
+
+output "database_role_arns" {
+  value = { for k, r in aws_iam_role.database : k => r.arn }
+}

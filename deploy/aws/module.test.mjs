@@ -81,3 +81,22 @@ describe("deploy/aws sandbox node group", () => {
     expect(local("sandbox_value")).toBe(GVISOR_RUNTIME_CLASS);
   });
 });
+
+describe("deploy/aws database identities", () => {
+  it("binds each database role to a service account the manifests define", () => {
+    const manifests = walk(join(repoRoot, "deploy", "kind-coding", "manifests")).filter((f) => f.endsWith(".yaml"));
+    const accounts = new Set(
+      manifests.flatMap((f) =>
+        [
+          ...readFileSync(f, "utf8").matchAll(
+            /kind: ServiceAccount\s*\nmetadata:\s*\n(?:\s+\S.*\n)*?\s+name: ([\w-]+)/g,
+          ),
+        ].map((m) => m[1]),
+      ),
+    );
+    const block = read("database-iam.tf").match(/database_identities = \{([\s\S]*?)\}/)[1];
+    const bound = [...block.matchAll(/=\s*"([\w-]+)"/g)].map((m) => m[1]);
+    expect(bound).toEqual(["wardby-control-plane", "wardby-migrator", "wardby-coding-proxy", "wardby-native-gateway"]);
+    for (const account of bound) expect(accounts, account).toContain(account);
+  });
+});
