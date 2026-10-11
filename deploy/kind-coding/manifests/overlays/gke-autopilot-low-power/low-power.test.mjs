@@ -135,6 +135,13 @@ describe.skipIf(!hasKubectl)("low-power rendered overlays (kubectl)", () => {
     expect(hard.pods).toBe("26");
   });
 
+  it("leaves the control-plane replica count to the HPA, so a re-apply never resets it", () => {
+    const low = find(loadAllYaml(render("gke-autopilot-low-power")), "Deployment", "wardby-control-plane");
+    expect(low.spec).not.toHaveProperty("replicas");
+    const plain = find(loadAllYaml(render("gke-autopilot")), "Deployment", "wardby-control-plane");
+    expect(plain.spec.replicas).toBe(1);
+  });
+
   it("renders the kind low-power overlay with the Role but no HPA", () => {
     const docs = loadAllYaml(render("kind-low-power"));
     expect(find(docs, "Role", "wardby-power")).toBeDefined();

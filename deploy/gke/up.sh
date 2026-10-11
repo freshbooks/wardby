@@ -4,6 +4,7 @@
 # serving MCP endpoint.
 #
 #   WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh
+#   WARDBY_LOW_POWER=1 WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh   # low-power mode
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
 # re-pushed (digests change only if the source did), values already in Secret
@@ -34,7 +35,20 @@ for tool in terraform gcloud kubectl docker helm node; do
 done
 
 TF_DIR="deploy/gke"
-OVERLAY="deploy/kind-coding/manifests/overlays/gke-autopilot"
+# low-power mode selection
+# WARDBY_LOW_POWER=1 applies the gke-autopilot-low-power overlay (the control plane
+# scales the coding proxy and native gateway to zero when idle); unset or 0 applies
+# the plain gke-autopilot overlay and removes anything an earlier low-power run left.
+LOW_POWER="${WARDBY_LOW_POWER:-0}"
+case "$LOW_POWER" in 0|1) ;; *) echo "up.sh: WARDBY_LOW_POWER must be 0 or 1" >&2; exit 1 ;; esac
+OVERLAY_DIR_NAME=gke-autopilot
+LOW_POWER_LABEL=off
+if [ "$LOW_POWER" = 1 ]; then
+  OVERLAY_DIR_NAME=gke-autopilot-low-power
+  LOW_POWER_LABEL=on
+fi
+OVERLAY="deploy/kind-coding/manifests/overlays/${OVERLAY_DIR_NAME}"
+# end low-power mode selection
 NAMESPACE="wardby-coding"
 TOTAL_STEPS=12
 
@@ -398,7 +412,7 @@ for i in $(seq 1 "$MIGRATE_POLL_ITERATIONS"); do
 done
 echo "    migrations applied"
 
-echo "==> 9/${TOTAL_STEPS} render and apply the overlay"
+echo "==> 9/${TOTAL_STEPS} render and apply the overlay (low-power mode: ${LOW_POWER_LABEL})"
 # What is running now, recorded before it is replaced: rollback means going back
 # to exactly these digests (see the rollback note at the end).
 PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardby-coding-proxy wardby-native-gateway \
@@ -427,6 +441,14 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | iam_substitutions)"
 assert_no_placeholders "$OVERLAY_MANIFEST"
 echo "$OVERLAY_MANIFEST" | kubectl apply -f - >/dev/null
+# low-power undo
+if [ "$LOW_POWER" = 0 ]; then
+  # Leaving low-power mode: remove what only it applies. The plain overlay has
+  # already restored proxy 1 / gateway 2 / headroom 1 replicas, and the control
+  # plane's own replicas: 1. A no-op when low-power mode was never on.
+  kubectl -n "$NAMESPACE" delete hpa/wardby-control-plane role/wardby-power rolebinding/wardby-power --ignore-not-found >/dev/null
+fi
+# end low-power undo
 
 echo "==> 10/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s

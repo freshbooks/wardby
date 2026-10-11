@@ -25,6 +25,22 @@ REGISTRY_NAME="kind-registry"
 REGISTRY_PORT="5001"
 TOTAL_STEPS=10
 
+# low-power mode selection
+# WARDBY_LOW_POWER=1 applies the kind-low-power overlay (the power Role the control
+# plane needs to scale the coding proxy and native gateway); unset or 0 applies the
+# plain kind overlay and removes that Role. The control plane itself runs on the
+# host, so it needs WARDBY_LOW_POWER=1 in its own environment too.
+LOW_POWER="${WARDBY_LOW_POWER:-0}"
+case "$LOW_POWER" in 0|1) ;; *) echo "up.sh: WARDBY_LOW_POWER must be 0 or 1" >&2; exit 1 ;; esac
+OVERLAY_DIR_NAME=kind
+LOW_POWER_LABEL=off
+if [ "$LOW_POWER" = 1 ]; then
+  OVERLAY_DIR_NAME=kind-low-power
+  LOW_POWER_LABEL=on
+fi
+OVERLAY="${MANIFEST_DIR}/manifests/overlays/${OVERLAY_DIR_NAME}"
+# end low-power mode selection
+
 for bin in kind kubectl docker; do
   if ! command -v "$bin" >/dev/null 2>&1; then
     echo "up.sh: '$bin' is required but not found on PATH." >&2
@@ -237,10 +253,17 @@ unset DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY PROXY_DATABASE_URL \
   DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 SECRET_APP_KEY_VALUE SECRET_APP_KEY_B64 \
   GITHUB_APP_LINES GITHUB_APP_ID_B64 GITHUB_APP_PRIVATE_KEY_B64
 
-echo "==> 8/${TOTAL_STEPS} render and apply the manifests"
-kubectl kustomize "${MANIFEST_DIR}/manifests/overlays/kind" \
+echo "==> 8/${TOTAL_STEPS} render and apply the manifests (low-power mode: ${LOW_POWER_LABEL})"
+kubectl kustomize "$OVERLAY" \
   | sed "s|image: wardby-runtime|image: ${RUNTIME_DIGEST}|" \
   | kubectl --context "$KUBE_CONTEXT" apply -f -
+# low-power undo
+if [ "$LOW_POWER" = 0 ]; then
+  # Leaving low-power mode: remove the power Role and RoleBinding only it applies.
+  # The plain overlay has already restored the proxy and gateway replicas.
+  kubectl --context "$KUBE_CONTEXT" -n wardby-coding delete role/wardby-power rolebinding/wardby-power --ignore-not-found
+fi
+# end low-power undo
 
 echo "==> 9/${TOTAL_STEPS} restart the proxy so it picks up the current Secret, then wait for the rollout"
 kubectl --context "$KUBE_CONTEXT" -n wardby-coding rollout restart deploy/wardby-coding-proxy
@@ -274,3 +297,7 @@ Then run:
 
   npm run cli -- coding preflight
 EOF
+if [ "$LOW_POWER" = 1 ]; then
+  echo
+  echo "Low-power mode: set WARDBY_LOW_POWER=1 (and optionally LOW_POWER_IDLE_MINUTES, default 30) in the environment of the locally run wardby serve too."
+fi
