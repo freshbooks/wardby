@@ -4,6 +4,7 @@
 # serving MCP endpoint.
 #
 #   WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh
+#   WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme,acme-labs   # optional: accounts the GitHub App serves besides its owner
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
 # re-pushed (digests change only if the source did), values already in Secret
@@ -51,6 +52,18 @@ case "$WARDBY_HOSTNAME" in
     exit 1
     ;;
 esac
+
+# --- WARDBY_GITHUB_ALLOWED_ACCOUNTS check ---
+# Optional: GitHub accounts the App serves in addition to its owner
+# (comma-separated logins). Empty = the App's owner only. Substituted in step 9.
+WARDBY_GITHUB_ALLOWED_ACCOUNTS="${WARDBY_GITHUB_ALLOWED_ACCOUNTS:-}"
+if [[ -n "$WARDBY_GITHUB_ALLOWED_ACCOUNTS" ]] &&
+  ! [[ "$WARDBY_GITHUB_ALLOWED_ACCOUNTS" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}(,[A-Za-z0-9][A-Za-z0-9-]{0,38})*$ ]]; then
+  echo "up.sh: WARDBY_GITHUB_ALLOWED_ACCOUNTS must be comma-separated GitHub logins with no spaces (got \"$WARDBY_GITHUB_ALLOWED_ACCOUNTS\")." >&2
+  exit 1
+fi
+echo "up.sh: the GitHub App will serve its owner${WARDBY_GITHUB_ALLOWED_ACCOUNTS:+ plus ${WARDBY_GITHUB_ALLOWED_ACCOUNTS}}."
+# --- end WARDBY_GITHUB_ALLOWED_ACCOUNTS check ---
 
 echo "==> 1/${TOTAL_STEPS} terraform: cluster, image registry, database"
 terraform -chdir="$TF_DIR" init -input=false >/dev/null
@@ -110,7 +123,7 @@ iam_substitutions() {
 # match a real registry path (which never starts with "wardby-").
 assert_no_placeholders() {
   local leftover
-  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*' || true)"
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*|value: wardby-github-allowed-accounts' || true)"
   if [[ -n "$leftover" ]]; then
     echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
     echo "$leftover" | sort -u >&2
@@ -423,6 +436,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
         -e "s|value: wardby-native-worker-image$|value: ${NATIVE_WORKER_IMAGE}|" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
         -e "s|wardby-control-plane-hostname|${WARDBY_HOSTNAME}|g" \
+        -e "s|value: wardby-github-allowed-accounts$|value: \"${WARDBY_GITHUB_ALLOWED_ACCOUNTS}\"|" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
   | iam_substitutions)"
 assert_no_placeholders "$OVERLAY_MANIFEST"

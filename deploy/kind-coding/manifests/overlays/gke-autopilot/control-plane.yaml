@@ -179,6 +179,9 @@ spec:
               value: wardby-app-database-url
             - name: NODE_ENV
               value: production
+            # Set by up.sh from WARDBY_GITHUB_ALLOWED_ACCOUNTS (empty = the App's owner only).
+            - name: WARDBY_GITHUB_ALLOWED_ACCOUNTS
+              value: wardby-github-allowed-accounts
             # `serve` refuses any transport but http (src/serve.ts): in stdio
             # mode stdout is the JSON-RPC wire. The endpoint is ClusterIP-only —
             # nothing outside the cluster can reach it. An operator's MCP client
