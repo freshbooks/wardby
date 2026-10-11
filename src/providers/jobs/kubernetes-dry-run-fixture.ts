@@ -52,10 +52,13 @@ export interface DryRunFixture {
   mutations: PodMutation[];
 }
 
-const FIXTURE_URL = new URL("./fixtures/gke-autopilot-dry-run.json", import.meta.url);
+const FIXTURE_URLS = {
+  "gke-autopilot": new URL("./fixtures/gke-autopilot-dry-run.json", import.meta.url),
+  eks: new URL("./fixtures/eks-dry-run.json", import.meta.url),
+} as const;
 
-export function loadDryRunFixture(): DryRunFixture {
-  return JSON.parse(readFileSync(FIXTURE_URL, "utf8")) as DryRunFixture;
+export function loadDryRunFixture(platform: keyof typeof FIXTURE_URLS = "gke-autopilot"): DryRunFixture {
+  return JSON.parse(readFileSync(FIXTURE_URLS[platform], "utf8")) as DryRunFixture;
 }
 
 function segments(path: string): string[] {

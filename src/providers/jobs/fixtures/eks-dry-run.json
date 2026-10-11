@@ -1,0 +1,18 @@
+{
+  "capturedAt": "2026-10-10",
+  "platform": "eks",
+  "provisional": true,
+  "source": "PROVISIONAL: derived from the RuntimeClass scheduling block in overlays/eks, not a server-side dry run",
+  "notes": [
+    "Replace with `npx tsx --conditions=wardby-source src/tools/capture-fixture.ts` output from a real EKS cluster (PR 3).",
+    "Every entry must have a matching allowance in kubernetes-platform.ts, or the attestation test fails."
+  ],
+  "mutations": [
+    { "op": "add", "path": "/spec/nodeSelector", "value": { "wardby.dev/sandbox": "gvisor" } },
+    {
+      "op": "add",
+      "path": "/spec/tolerations",
+      "value": [{ "effect": "NoSchedule", "key": "sandbox", "operator": "Equal", "value": "gvisor" }]
+    }
+  ]
+}

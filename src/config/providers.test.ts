@@ -299,13 +299,17 @@ describe("loadKubernetesJobConfig", () => {
     expect(config.readyTimeoutMs).toBeUndefined();
   });
 
+  it("accepts eks", () => {
+    expect(loadKubernetesJobConfig({ KUBERNETES_PLATFORM: "eks" }).platform).toBe("eks");
+  });
+
   it("accepts gke-autopilot", () => {
     expect(loadKubernetesJobConfig({ KUBERNETES_PLATFORM: "gke-autopilot" }).platform).toBe("gke-autopilot");
   });
 
   it("rejects an unknown platform", () => {
-    expect(() => loadKubernetesJobConfig({ KUBERNETES_PLATFORM: "eks" })).toThrow(
-      "KUBERNETES_PLATFORM must be one of: generic, gke-autopilot.",
+    expect(() => loadKubernetesJobConfig({ KUBERNETES_PLATFORM: "aks" })).toThrow(
+      "KUBERNETES_PLATFORM must be one of: generic, gke-autopilot, eks.",
     );
   });
 
