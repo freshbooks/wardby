@@ -33,6 +33,7 @@ type LinkArgs = {
   checkName?: string;
   reviewFixMaxRounds?: number;
   waitForCi?: boolean;
+  markReadyWhenPassing?: boolean;
   adminOverride?: boolean;
 };
 
@@ -92,9 +93,9 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       "pull_request trigger, and is unique per repository. waitForCi (only with the pull_request trigger) holds this agent's " +
       "review on a pushed head until that head's own CI finishes, instead of racing it; APPROVE is refused while CI on the " +
       "head is failing or still running. Re-linking an already-linked repository replaces its access, triggers, checkName, " +
-      "reviewFixMaxRounds, and waitForCi (an omitted field is cleared, not kept) and re-checks access — always send the full " +
-      "desired state. A local repository (local:/abs/path, inside the server's trusted roots) takes no triggers or checkName: " +
-      "it supports manual reviews only (trigger_agent with review).",
+      "reviewFixMaxRounds, waitForCi, and markReadyWhenPassing (an omitted field is cleared, not kept) and re-checks access " +
+      "— always send the full desired state. A local repository (local:/abs/path, inside the server's trusted roots) takes " +
+      "no triggers or checkName: it supports manual reviews only (trigger_agent with review).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -117,6 +118,13 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
           description:
             "Only with the pull_request trigger: hold this agent's review on a pushed head until that head's own CI " +
             "finishes, instead of racing it (default false).",
+        },
+        markReadyWhenPassing: {
+          type: "boolean",
+          description:
+            "Only on a write link: mark the draft pull requests this agent opens here ready for review, once, " +
+            "after every Wardby review check passed, CI is green and the wardby merge order check (if any) " +
+            "is success (default false).",
         },
         adminOverride: {
           type: "boolean",
@@ -185,6 +193,10 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       if (waitForCi && !triggers.includes("pull_request")) {
         throw new McpError(400, "waitForCi needs the pull_request trigger.");
       }
+      const markReadyWhenPassing = args.markReadyWhenPassing ?? false;
+      if (markReadyWhenPassing && args.access !== "write") {
+        throw new McpError(400, "markReadyWhenPassing needs write access.");
+      }
 
       // The host call happens before, and outside, the serializable transaction.
       const authorization = await authorizeRepositoryForSet(ctx, {
@@ -205,6 +217,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
               checkName,
               reviewFixMaxRounds,
               waitForCi,
+              markReadyWhenPassing,
               ...authorization,
             };
             return tx.agentRepository.upsert({
