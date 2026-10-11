@@ -16,6 +16,7 @@ import { PrismaContainerExecutionStore } from "../providers/executor/container.j
 import { CODING_QUEUE_TIMEOUT_ERROR, drainCodingQueue } from "./coding-queue.js";
 import { reconcileOnce } from "./reconciler.js";
 import { gatewayBusy, proxyBusy } from "./power-idle.js";
+import type { Prisma, PrismaClient } from "#prisma";
 
 const db = createPrismaClient();
 /** Every row this file creates starts with this, so beforeAll can clear leftovers of an aborted earlier run. */
@@ -35,7 +36,7 @@ async function cleanupByPrefix(): Promise<void> {
 async function seed(
   runId: string,
   opts: {
-    status?: "pending" | "running" | "succeeded";
+    status?: "pending" | "running" | "succeeded" | "failed" | "cancelled";
     finishedAt?: Date;
     queuedAt?: Date | null;
     jobBackend?: string;
@@ -323,13 +324,26 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
     await retire([queuedRun, orphanRun]);
   });
 
-  // Low-power idle rules. retire() stamps finishedAt = now, and other files'
-  // terminal coding runs land at "now" too, so window cases anchor a day
-  // ahead: nothing else in the database can fall inside that window. Rows
-  // with only a busy=true assertion use the real window.
+  // Low-power idle rules. busy=true assertions run against the whole
+  // database. A busy=false assertion cannot: many other database test files
+  // create coding runs that sit in the default "pending" status (this file
+  // owns only the slot/queue state, not every pending coding run), so the
+  // false cases go through onlyRuns(), which runs proxyBusy's own where
+  // clause in PostgreSQL restricted to the test's own rows.
   describe("low-power idle rules", () => {
     const since = () => new Date(Date.now() - 30 * 60_000);
     const minutes = (n: number) => n * 60_000;
+    const ago = (n: number) => new Date(Date.now() - minutes(n));
+
+    /** A view of the database whose coding-run counts see only `runIds`. */
+    function onlyRuns(runIds: string[]): PrismaClient {
+      return {
+        codingRun: {
+          count: (args: Prisma.CodingRunCountArgs) =>
+            db.codingRun.count({ ...args, where: { AND: [args.where ?? {}, { runId: { in: runIds } }] } }),
+        },
+      } as unknown as PrismaClient;
+    }
 
     it("an active coding run keeps the proxy busy", async () => {
       await seed(id("lp-active"), { status: "running" });
@@ -344,17 +358,13 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
     });
 
     it("a coding run finished inside the window keeps the proxy busy; outside it does not", async () => {
-      const anchor = Date.now() + minutes(24 * 60);
-      const windowStart = new Date(anchor - minutes(30));
-      await seed(id("lp-old"), { status: "succeeded", finishedAt: new Date(anchor - minutes(40)) });
-      expect(await proxyBusy(db, windowStart)).toBe(false);
-      await seed(id("lp-recent"), { status: "succeeded", finishedAt: new Date(anchor - minutes(10)) });
-      expect(await proxyBusy(db, windowStart)).toBe(true);
-      // Leave nothing dated in the future for a later test.
-      await db.run.updateMany({
-        where: { id: { in: [id("lp-old"), id("lp-recent")] } },
-        data: { finishedAt: new Date() },
-      });
+      const old = id("lp-old");
+      const recent = id("lp-recent");
+      await seed(old, { status: "succeeded", finishedAt: ago(40) });
+      expect(await proxyBusy(onlyRuns([old, recent]), since())).toBe(false);
+      await seed(recent, { status: "succeeded", finishedAt: ago(10) });
+      expect(await proxyBusy(onlyRuns([old, recent]), since())).toBe(true);
+      expect(await proxyBusy(db, since())).toBe(true);
     });
 
     it("an active sandbox native run or active gateway session keeps the gateway busy", async () => {
@@ -395,9 +405,15 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
     });
 
     it("the proxy is idle with no active coding run and nothing in the window", async () => {
-      // A window starting after every finishedAt in the database leaves only the
-      // active-run rule, which this file's baseline keeps empty.
-      expect(await proxyBusy(db, new Date(Date.now() + minutes(60)))).toBe(false);
+      const runIds = [id("lp-done-ok"), id("lp-done-failed"), id("lp-done-cancelled")];
+      await seed(runIds[0], { status: "succeeded", finishedAt: ago(40) });
+      await seed(runIds[1], { status: "failed", finishedAt: ago(45) });
+      await seed(runIds[2], { status: "cancelled", finishedAt: ago(90) });
+      expect(await proxyBusy(onlyRuns(runIds), since())).toBe(false);
+      // The same rows count as soon as one of them is active again.
+      await db.run.update({ where: { id: runIds[2] }, data: { status: "running", finishedAt: null } });
+      expect(await proxyBusy(onlyRuns(runIds), since())).toBe(true);
+      await retire(runIds);
     });
   });
 });
