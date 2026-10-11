@@ -92,6 +92,10 @@ run "database" {
     error_message = "Deletion protection, 7-day backups (PITR) and a final snapshot by default."
   }
   assert {
+    condition     = aws_db_instance.main.allow_major_version_upgrade
+    error_message = "Changing database_engine_version performs the major upgrade instead of being refused."
+  }
+  assert {
     condition     = aws_db_parameter_group.main.family == "postgres17" && one([for p in aws_db_parameter_group.main.parameter : p.value if p.name == "rds.force_ssl"]) == "1"
     error_message = "The parameter group forces TLS."
   }
@@ -154,5 +158,17 @@ run "multi_az_and_no_deletion_protection" {
   assert {
     condition     = aws_db_instance.main.multi_az && !aws_db_instance.main.deletion_protection
     error_message = "Variables reach the instance."
+  }
+}
+
+run "major_version_change" {
+  command = apply
+  variables {
+    database_engine_version = "18"
+  }
+
+  assert {
+    condition     = aws_db_parameter_group.main.family == "postgres18" && endswith(aws_db_parameter_group.main.name, "postgres18") && aws_db_instance.main.engine_version == "18"
+    error_message = "The engine version reaches the instance and a version-named parameter group."
   }
 }

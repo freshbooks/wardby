@@ -32,6 +32,12 @@ resource "aws_db_parameter_group" "main" {
     name  = "rds.force_ssl"
     value = "1"
   }
+
+  # The name carries the major version, so a version change creates the new
+  # group before the instance moves off the old one, which is deleted last.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_db_instance" "main" {
@@ -61,6 +67,11 @@ resource "aws_db_instance" "main" {
   backup_retention_period    = var.database_backup_retention_days
   copy_tags_to_snapshot      = true
   auto_minor_version_upgrade = true
+
+  # Changing database_engine_version is the operator's explicit request for a
+  # major upgrade. It is applied in the maintenance window (apply_immediately
+  # is left unset).
+  allow_major_version_upgrade = true
 
   # Read from state at destroy time: apply false first, then destroy. The final
   # snapshot name is fixed, so a second destroy of a recreated instance needs the
