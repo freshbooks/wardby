@@ -123,3 +123,16 @@ describe("deploy/aws parity with the GKE deployment", () => {
     expect(tosetList(read("ecr.tf"), "image_names").sort()).toEqual(targets.sort());
   });
 });
+
+describe("deploy/aws README", () => {
+  const readme = read("README.md");
+
+  it("documents every input variable", () => {
+    for (const name of Object.keys(variableBlocks())) expect(readme, name).toContain(`\`${name}\``);
+  });
+
+  it("documents every output", () => {
+    const outputs = [...read("outputs.tf").matchAll(/^output "([\w]+)"/gm)].map((m) => m[1]);
+    for (const name of outputs) expect(readme, name).toContain(`\`${name}\``);
+  });
+});

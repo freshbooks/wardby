@@ -13,3 +13,18 @@ public_access_cidrs = ["203.0.113.10/32"] # your own address
 # existing_public_subnet_ids   = ["subnet-...", "subnet-..."]
 # existing_private_subnet_ids  = ["subnet-...", "subnet-..."]
 # existing_database_subnet_ids = ["subnet-...", "subnet-..."]
+
+# EKS Kubernetes minor version.
+# kubernetes_version = "1.36"
+
+# Instance types of the gVisor sandbox node group (x86_64 only).
+# sandbox_instance_types = ["m6i.xlarge"]
+
+# RDS instance class.
+# database_instance_class = "db.t4g.small"
+
+# "count" only logs the WAF managed body rules; set "block" once the WAF logs look clean.
+# waf_managed_rules_action = "count"
+
+# Your own HTTPS mirror of gVisor releases (<base>/<version>/x86_64/gvisor.tar.bz2).
+# gvisor_download_base_url = "https://your-mirror.example.com/gvisor/release"
