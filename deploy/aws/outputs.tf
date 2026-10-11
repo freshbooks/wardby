@@ -26,3 +26,26 @@ output "database_subnet_cidrs" {
   description = "CIDRs of the database subnets, for the workloads' database egress NetworkPolicies."
   value       = local.database_subnet_cidrs
 }
+
+output "cluster_name" {
+  value = aws_eks_cluster.main.name
+}
+
+output "cluster_arn" {
+  value = aws_eks_cluster.main.arn
+}
+
+output "cluster_endpoint" {
+  description = "Kubernetes API endpoint."
+  value       = aws_eks_cluster.main.endpoint
+}
+
+output "cluster_security_group_id" {
+  description = "The EKS-managed cluster security group (on every node)."
+  value       = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+}
+
+output "kubeconfig_command" {
+  description = "Creates the kubectl context for this cluster."
+  value       = "aws eks update-kubeconfig --region ${var.region} --name ${aws_eks_cluster.main.name}"
+}

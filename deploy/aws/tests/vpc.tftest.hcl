@@ -18,6 +18,12 @@ mock_provider "aws" {
       master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:us-test-1:111122223333:secret:rds!db-test", kms_key_id = "", secret_status = "active" }]
     }
   }
+  mock_resource "aws_iam_role" {
+    defaults = { arn = "arn:aws:iam::111122223333:role/mock-role" }
+  }
+  mock_resource "aws_eks_cluster" {
+    defaults = { arn = "arn:aws:eks:us-test-1:111122223333:cluster/wardby" }
+  }
   mock_resource "aws_acm_certificate" {
     defaults = {
       domain_validation_options = [{
