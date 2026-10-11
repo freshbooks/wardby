@@ -32,6 +32,7 @@ interface FakeRepositoryRow {
   checkName: string | null;
   reviewFixMaxRounds?: number | null;
   waitForCi?: boolean;
+  markReadyWhenPassing?: boolean;
   createdAt: Date;
   authorizedVia?: string | null;
   authorizedById?: string | null;
@@ -523,6 +524,71 @@ describe("repository tools", () => {
     });
     expect((parseText(relinked as never) as { link: Record<string, unknown> }).link).toMatchObject({
       waitForCi: false,
+    });
+    await client.close();
+  });
+
+  it("stores markReadyWhenPassing on a write link", async () => {
+    const { mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const res = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "acme/web",
+        access: "write",
+        markReadyWhenPassing: true,
+      },
+    });
+    expect(res.isError).toBeFalsy();
+    const parsed = parseText(res as never) as { link: Record<string, unknown> };
+    expect(parsed.link).toMatchObject({ markReadyWhenPassing: true });
+    await client.close();
+  });
+
+  it("refuses markReadyWhenPassing on a read link", async () => {
+    const { mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const res = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "acme/web",
+        access: "read",
+        markReadyWhenPassing: true,
+      },
+    });
+    expect(res.isError).toBeTruthy();
+    expect(errorText(res as never)).toContain("markReadyWhenPassing needs write access.");
+    await client.close();
+  });
+
+  it("defaults markReadyWhenPassing to false and clears it when re-linking without it", async () => {
+    const { mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const first = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "acme/web",
+        access: "write",
+        markReadyWhenPassing: true,
+      },
+    });
+    expect((parseText(first as never) as { link: Record<string, unknown> }).link).toMatchObject({
+      markReadyWhenPassing: true,
+    });
+
+    const relinked = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "acme/web",
+        access: "write",
+      },
+    });
+    expect((parseText(relinked as never) as { link: Record<string, unknown> }).link).toMatchObject({
+      markReadyWhenPassing: false,
     });
     await client.close();
   });

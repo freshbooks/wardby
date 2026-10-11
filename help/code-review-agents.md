@@ -3,7 +3,7 @@ id: code-review-agents
 title: Run GitHub code-review agents
 summary: Link a read-only review agent to a repository for pull-request checks and trusted mention workflows.
 audience: operator
-tags: [github, code-review, pull-requests, webhooks, ci, checks, waitForCi]
+tags: [github, code-review, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing]
 appliesTo: >=0.2.1
 ---
 
@@ -174,6 +174,43 @@ On a release before 0.6.0, `repo_pr_read` has no `relatedPullRequests`:
 use the description's **Related pull requests** section in its place in that
 step. Wardby also writes that section: see
 [Related pull requests across repositories](related-pull-requests.md).
+
+## Mark ready when passing
+
+With Wardby 0.7.0 or later, set `markReadyWhenPassing: true` on a builder's
+own write link (`link_repository`) to have Wardby mark the draft pull
+requests it opens here ready for review on its own, once they pass, instead
+of leaving that to a person. Re-linking the repository without it clears
+it, like every other link setting.
+
+Wardby marks a pull request ready once it is open and a draft, Wardby's own
+App opened it (and its head isn't in a fork), every authorized reviewer
+linked with the `pull_request` trigger has approved the head with its own
+check, CI on the head is green (every check run and commit status that
+isn't Wardby's own has completed with success, neutral, or skipped, at
+least one with success, or there is no CI at all), and the `wardby merge order` check is `success` or
+isn't posted on it. Commit statuses only count if the App can read them:
+grant **Commit statuses: Read** if your CI reports statuses rather than
+check runs. A pull request with more checks and statuses than Wardby reads
+(about 50) is never marked ready automatically. Wardby marks a given pull
+request ready at most once; moving it back to draft by hand is final —
+Wardby never re-marks it.
+
+Wardby checks whether a pull request is ready to mark on any of these
+events: a reviewer run finishing, a CI check suite completing on its head,
+its `wardby merge order` check turning `success`, or (as a fallback) Wardby's
+own reconciliation sweep for a pull request that is part of a merge-ordered
+set. With a `mergeOrder` set, a later step becomes ready this way only once
+the steps it depends on have merged — see [The wardby merge order
+check](merge-order-check.md). CI that reports only commit statuses (no
+check suite) is not re-checked when it finishes; such a pull request is
+marked ready the next time one of those events fires, or stays in draft
+until then.
+
+It never approves, merges, or converts a pull request back to draft — a
+person's approval stays the gate wherever branch protection requires one.
+It needs no App permission beyond **Pull requests: Read and write**, which
+an App that opens pull requests already has.
 
 For App permissions, webhook setup, trigger configuration, and security
 details, follow [`docs/code-review-agents.md`](../docs/code-review-agents.md).

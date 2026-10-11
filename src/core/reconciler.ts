@@ -72,6 +72,7 @@ export type ReconcilerDb = Pick<
   | "issuePullRequest"
   | "codingRun"
   | "agent"
+  | "agentRepository"
   | "$transaction"
   | "$queryRaw"
 >;

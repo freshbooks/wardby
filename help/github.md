@@ -79,4 +79,10 @@ opening coding run was delegated by a lead agent. See [Reviewing a pull
 request a delegated run
 opened](code-review-agents.md#reviewing-a-pull-request-a-delegated-run-opened).
 
+With Wardby 0.7.0 or later, `markReadyWhenPassing` on a builder's own write
+link has Wardby mark the draft pull requests it opens here ready for review
+on its own, once every Wardby reviewer check and CI on the head are green
+and, for a merge-ordered set, the steps it depends on have merged. See [Mark
+ready when passing](code-review-agents.md#mark-ready-when-passing).
+
 For Jira Cloud instead of GitHub, see [Run Jira agents](jira.md).

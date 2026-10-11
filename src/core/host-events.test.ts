@@ -21,6 +21,8 @@ vi.mock("./related-pull-requests.js", async (orig) => ({
   openSiblings: vi.fn(async () => []),
 }));
 import { openSiblings } from "./related-pull-requests.js";
+vi.mock("./mark-ready.js", () => ({ maybeMarkReady: vi.fn(async () => "off") }));
+import { maybeMarkReady } from "./mark-ready.js";
 import { mentionTaskText, siblingContinuationHints } from "./host-events.js";
 
 // vi.mock factories are hoisted above every declaration, so shared state goes through vi.hoisted.
@@ -1427,7 +1429,7 @@ describe("routeHostEvent: CI finished", () => {
 
   it("re-runs a review that only commented while CI was pending, claiming the row first", async () => {
     const { d, updateMany } = setup([row()]);
-    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [expect.any(Function)] });
     expect(updateMany).toHaveBeenCalledWith({
       where: { runId: "r1", ciRereviewAt: null },
       data: { ciRereviewAt: expect.any(Date) },
@@ -1449,7 +1451,7 @@ describe("routeHostEvent: CI finished", () => {
       [[row({ ciPendingAtReview: false })], "passing", SHA],
     ] as const) {
       const { d } = setup([...rows], state, head);
-      await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: [], followUps: [expect.any(Function)] });
       expect(dispatchRun).not.toHaveBeenCalled();
     }
   });
@@ -1461,13 +1463,13 @@ describe("routeHostEvent: CI finished", () => {
       row({ runId: "r0", verdict: "CHANGES_REQUESTED", ciPendingAtReview: false, noChangeRereviewAt: new Date() }),
       row(),
     ]);
-    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [expect.any(Function)] });
   });
 
   it("starts nothing when another delivery already claimed the row", async () => {
     const { d, updateMany } = setup([row()]);
     updateMany.mockResolvedValueOnce({ count: 0 });
-    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: [], followUps: [] });
+    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: [], followUps: [expect.any(Function)] });
     expect(dispatchRun).not.toHaveBeenCalled();
   });
 
@@ -1489,7 +1491,31 @@ describe("routeHostEvent: CI finished", () => {
       findMany: vi.fn(async () => [row({ ciRereviewAt: new Date() }), row({ runId: "r2", run: { agentId: "a2" } })]),
       updateMany: vi.fn(async () => ({ count: 1 })),
     });
-    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a2"], followUps: [] });
+    await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a2"], followUps: [expect.any(Function)] });
+  });
+
+  it("returns a mark-ready follow-up per pull request on the event, run after the webhook response (#287)", async () => {
+    vi.mocked(maybeMarkReady).mockClear();
+    const multi: HostEvent = { ...ci, prNumbers: [7, 8] };
+    const d = deps(reviewer);
+    const result = await routeHostEvent(multi, d);
+    expect(result.runIds).toEqual([]);
+    expect(result.followUps).toHaveLength(2);
+    expect(maybeMarkReady).not.toHaveBeenCalled();
+    for (const followUp of result.followUps) await followUp();
+    expect(maybeMarkReady).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(maybeMarkReady).mock.calls[0]).toEqual([
+      { db: d.db, hosts: d.hosts, log: expect.anything() },
+      REPO,
+      7,
+      "github",
+    ]);
+    expect(vi.mocked(maybeMarkReady).mock.calls[1]).toEqual([
+      { db: d.db, hosts: d.hosts, log: expect.anything() },
+      REPO,
+      8,
+      "github",
+    ]);
   });
 });
 
@@ -1661,7 +1687,10 @@ describe("review after CI (waitForCi)", () => {
   describe("when CI finishes", () => {
     it("claims each deferred row and starts its review once, skipping already-reviewed commits", async () => {
       const { d, store } = setup({ ci: "passing", rows: [deferred()] });
-      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: ["run-a1"], followUps: [] });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({
+        runIds: ["run-a1"],
+        followUps: [expect.any(Function)],
+      });
       expect(store.findMany).toHaveBeenCalledWith({
         where: { provider: "github", repository: REPO, prNumber: 7, headSha: SHA, reason: "ci" },
         select: { id: true, agentId: true, checkName: true },
@@ -1678,14 +1707,14 @@ describe("review after CI (waitForCi)", () => {
 
     it("keeps waiting while CI on the head is still pending", async () => {
       const { d, store } = setup({ ci: "pending", rows: [deferred()] });
-      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [expect.any(Function)] });
       expect(store.deleteMany).not.toHaveBeenCalled();
       expect(dispatchRun).not.toHaveBeenCalled();
     });
 
     it("does nothing (and reads no CI) when nothing was deferred on the head", async () => {
       const { d, h } = setup({ ci: "passing" });
-      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [expect.any(Function)] });
       expect(h.readCi).not.toHaveBeenCalled();
     });
 
@@ -1695,7 +1724,7 @@ describe("review after CI (waitForCi)", () => {
       ["a fork", { headSha: SHA, isFork: true, state: "open" }],
     ])("drops the rows and starts nothing for %s", async (_label, head) => {
       const { d, store } = setup({ ci: "passing", rows: [deferred(), deferred({ id: "d2", agentId: "a2" })], head });
-      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [expect.any(Function)] });
       expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ["d1", "d2"] } } });
       expect(dispatchRun).not.toHaveBeenCalled();
     });
@@ -1703,7 +1732,7 @@ describe("review after CI (waitForCi)", () => {
     it("starts nothing when a concurrent delivery already claimed the row", async () => {
       const { d, store } = setup({ ci: "passing", rows: [deferred()] });
       store.deleteMany.mockResolvedValueOnce({ count: 0 });
-      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [expect.any(Function)] });
       expect(dispatchRun).not.toHaveBeenCalled();
     });
 
@@ -1713,7 +1742,7 @@ describe("review after CI (waitForCi)", () => {
         rows: [deferred()],
         repoAccess: gate({ use: () => ({ ok: false, reason: "not_authorized" }) }),
       });
-      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [expect.any(Function)] });
       expect(store.deleteMany).not.toHaveBeenCalled();
     });
 
@@ -1722,7 +1751,7 @@ describe("review after CI (waitForCi)", () => {
       h.pullRequestHead = vi.fn(async () => {
         throw new Error("boom");
       });
-      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [expect.any(Function)] });
     });
   });
 

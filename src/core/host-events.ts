@@ -19,6 +19,7 @@ import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
+import { maybeMarkReady } from "./mark-ready.js";
 import { syncMergeOrderChecksForPullRequest } from "./merge-order-check.js";
 import {
   MAX_SIBLING_HINTS,
@@ -1376,11 +1377,16 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
     case "ci_completed": {
       if (reviewerLinks.length === 0) return none;
       const runIds: string[] = [];
+      // CI going green may be the last thing a pull request waited for (#287); evaluated
+      // after the response (a host read per PR could otherwise exceed the webhook timeout).
+      const followUps: RouteResult["followUps"] = event.prNumbers.map((prNumber) => async () => {
+        await maybeMarkReady({ db: deps.db, hosts: deps.hosts, log }, event.repository, prNumber, event.provider);
+      });
       for (const prNumber of event.prNumbers) {
         runIds.push(...(await rereviewAfterCi(deps, host, event, prNumber, reviewerLinks)));
         runIds.push(...(await startDeferredAfterCi(deps, host, event, prNumber, reviewerLinks)));
       }
-      return { runIds, followUps: [] };
+      return { runIds, followUps };
     }
     case "check_rerun": {
       const owners = reviewerLinks.filter((l) => l.checkName === event.checkName);

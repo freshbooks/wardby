@@ -1035,3 +1035,77 @@ describe("GitHubReviewHost.replaceRelatedSection", () => {
     expect(calls.some((c) => c.method === "PATCH")).toBe(false);
   });
 });
+
+describe("GitHubReviewHost.readOwnChecks", () => {
+  it("returns this App's newest run per name and ignores other apps", async () => {
+    const { client, grants } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path.startsWith(`${BASE}/commits/${SHA}/check-runs?check_name=wardby%20review`))
+        return json({
+          check_runs: [
+            { id: 1, app: { id: APP_ID }, status: "completed", conclusion: "failure" },
+            { id: 2, app: { id: APP_ID }, status: "completed", conclusion: "success" },
+            { id: 3, app: { id: 999 }, status: "completed", conclusion: "failure" },
+          ],
+        });
+      if (method === "GET" && path.startsWith(`${BASE}/commits/${SHA}/check-runs?check_name=wardby%20merge%20order`))
+        return json({ check_runs: [] });
+      return undefined;
+    });
+    const got = await new GitHubReviewHost(client).readOwnChecks(REPO, SHA, ["wardby review", "wardby merge order"]);
+    expect(got.get("wardby review")).toEqual({ status: "completed", conclusion: "success" });
+    expect(got.has("wardby merge order")).toBe(false);
+    expect(grants).toEqual([{ checks: "read" }]);
+  });
+
+  it("rejects an unsafe sha", async () => {
+    const { client } = fakeGitHub(() => undefined);
+    await expect(new GitHubReviewHost(client).readOwnChecks(REPO, "../x", ["a"])).rejects.toMatchObject({
+      code: "host_api_error",
+    });
+  });
+});
+
+describe("GitHubReviewHost.markReadyForReview", () => {
+  const APP_PR = { ...PR, user: { type: "Bot", login: "wardby[bot]" }, body: "<!-- wardby:run_1 -->" };
+  const draftPr = (over: Record<string, unknown> = {}) => ({
+    ...APP_PR,
+    draft: true,
+    state: "open",
+    node_id: "PR_1",
+    ...over,
+  });
+
+  it("marks an open draft App PR at the expected head", async () => {
+    const calls: unknown[] = [];
+    const { client, grants } = fakeGitHub(({ method, path, body }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(draftPr());
+      if (method === "POST" && path === "/graphql") {
+        calls.push(body);
+        return json({ data: { markPullRequestReadyForReview: { pullRequest: { isDraft: false } } } });
+      }
+      return undefined;
+    });
+    expect(await new GitHubReviewHost(client).markReadyForReview(REPO, 7, SHA, "run_1")).toBe("marked");
+    expect(JSON.stringify(calls[0])).toContain("markPullRequestReadyForReview");
+    expect(grants).toEqual([{ pull_requests: "write" }]);
+  });
+
+  it.each([
+    ["not a draft", { draft: false }],
+    ["closed", { state: "closed" }],
+    ["head moved", { head: { ...PR.head, sha: "b".repeat(40) } }],
+    ["not the App's", { body: "no marker" }],
+  ])("skips when %s", async (_why, over) => {
+    const { client } = fakeGitHub(({ method, path }) =>
+      method === "GET" && path === `${BASE}/pulls/7` ? json(draftPr(over)) : undefined,
+    );
+    expect(await new GitHubReviewHost(client).markReadyForReview(REPO, 7, SHA, "run_1")).toBe("skipped");
+  });
+
+  it("skips when the PR carries a different run's marker", async () => {
+    const { client } = fakeGitHub(({ method, path }) =>
+      method === "GET" && path === `${BASE}/pulls/7` ? json(draftPr()) : undefined,
+    );
+    expect(await new GitHubReviewHost(client).markReadyForReview(REPO, 7, SHA, "run_2")).toBe("skipped");
+  });
+});

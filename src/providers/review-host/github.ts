@@ -31,6 +31,7 @@ import {
   type FileReadResult,
   type HostPermission,
   type HostUser,
+  type OwnCheckView,
   type PublishReviewInput,
   type PublishReviewResult,
   type PullRequestFileView,
@@ -68,6 +69,9 @@ const PR_WRITE = { pull_requests: "write" } as const;
 /** CI reads, each on its own token: Checks is already granted; Commit statuses may not be. */
 const CHECKS_READ = { checks: "read" } as const;
 const STATUSES_READ = { statuses: "read" } as const;
+const MARK_READY_MUTATION = `mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }`;
+/** readOwnChecks's own name cap: a handful of fixed check names, never agent/user input. */
+const MAX_OWN_CHECK_NAMES = 10;
 const CI_NAME_CHARS = 100;
 const APP_SLUG = /^[a-z0-9-]{1,64}$/;
 const GITHUB_USER_ID = /^[1-9]\d{0,19}$/;
@@ -924,6 +928,58 @@ export class GitHubReviewHost implements CodeReviewHost {
         { method: "POST", body: JSON.stringify({ name: input.name, head_sha: input.headSha, ...body }) },
         [201],
       );
+    });
+  }
+
+  /** This App's newest check run per name on `headSha`, one request per name (at most MAX_OWN_CHECK_NAMES). */
+  async readOwnChecks(repository: string, headSha: string, names: string[]): Promise<Map<string, OwnCheckView>> {
+    if (!SAFE_SHA.test(headSha)) throw new ReviewHostError("host_api_error", "head_sha_invalid");
+    const base = repoPath(repository);
+    const unique = [...new Set(names)].slice(0, MAX_OWN_CHECK_NAMES);
+    return this.withToken(repository, CHECKS_READ, async (get) => {
+      const { id: appId } = await this.client.appIdentity();
+      const out = new Map<string, OwnCheckView>();
+      for (const name of unique) {
+        const payload = record(
+          await (await get(`${base}/commits/${headSha}/check-runs?check_name=${encodeURIComponent(name)}`)).json(),
+        );
+        const newest = list(payload.check_runs ?? [])
+          .filter((r) => fromApp(r, appId))
+          .sort((a, b) => num(b.id) - num(a.id))[0];
+        if (newest) {
+          out.set(name, {
+            status: typeof newest.status === "string" ? newest.status : "unknown",
+            conclusion: typeof newest.conclusion === "string" ? newest.conclusion : null,
+          });
+        }
+      }
+      return out;
+    });
+  }
+
+  /**
+   * Marks a draft pull request ready for review, only when it is still open,
+   * a draft, at `expectedHeadSha`, and carries `expectedMarkerRunId` in its
+   * description's run marker (this App's own PR for that run). "skipped"
+   * covers every refusal, including a head that moved since the caller last
+   * checked it.
+   */
+  async markReadyForReview(
+    repository: string,
+    prNumber: number,
+    expectedHeadSha: string,
+    expectedMarkerRunId: string,
+  ): Promise<"marked" | "skipped"> {
+    if (!SAFE_SHA.test(expectedHeadSha)) throw new ReviewHostError("host_api_error", "head_sha_invalid");
+    const { slug } = await this.client.appIdentity();
+    return this.withToken(repository, PR_WRITE, async (get, graphql) => {
+      const pr = record(await (await get(`${repoPath(repository)}/pulls/${prNumber}`)).json());
+      const head = record(pr.head ?? {});
+      if (pr.state !== "open" || pr.draft !== true || head.sha !== expectedHeadSha) return "skipped";
+      if (appMarkerRunId(pr, slug) !== expectedMarkerRunId) return "skipped";
+      if (typeof pr.node_id !== "string") return "skipped";
+      await graphql(MARK_READY_MUTATION, { id: pr.node_id });
+      return "marked";
     });
   }
 }

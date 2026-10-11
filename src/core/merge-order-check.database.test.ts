@@ -24,6 +24,8 @@ vi.mock("./dispatch.js", () => ({
   dispatchRun: vi.fn(async (opts: { agentId: string }) => ({ run: { id: `run-${opts.agentId}-${randomUUID()}` } })),
   checkContinuation: vi.fn(),
 }));
+vi.mock("./mark-ready.js", () => ({ maybeMarkReady: vi.fn(async () => "off") }));
+import { maybeMarkReady } from "./mark-ready.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)", () => {
   const db = createPrismaClient();
@@ -188,6 +190,7 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     failRead.clear();
     failUpsert = false;
     vi.mocked(host.pullRequestOrigin!).mockClear();
+    vi.mocked(maybeMarkReady).mockClear();
   });
 
   afterAll(async () => {
@@ -220,6 +223,9 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     expect(summaryFor(repoC)).toContain(`[${repoB}#2](https://github.com/${repoB}/pull/2)`);
     const reads = vi.mocked(host.pullRequestOrigin!).mock.calls.map((c) => `${c[0]}#${c[1]}`);
     expect(reads).not.toContain(`${repoD}#30`);
+    // Only the member whose posted check is completed/success (#287); not the in_progress ones.
+    expect(maybeMarkReady).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(maybeMarkReady).mock.calls[0]).toEqual([{ db, hosts: deps.hosts, log: undefined }, repoA, 1]);
   });
 
   it("a delegated (non-root) run's end posts nothing", async () => {
@@ -248,6 +254,8 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby merge order check (database)"
     expect(verdicts()).toEqual([`${repoB} completed/failure`, `${repoC} completed/failure`]);
     expect(summaryFor(repoB)).toContain(`[${repoA}#1](https://github.com/${repoA}/pull/1)`);
     expect(summaryFor(repoC)).toContain(`[${repoA}#1](https://github.com/${repoA}/pull/1)`);
+    // completed/failure members never evaluate mark-ready (#287).
+    expect(maybeMarkReady).not.toHaveBeenCalled();
   });
 
   it("a reopened dependency (pr_updated) takes its dependents from failure back to in_progress", async () => {
