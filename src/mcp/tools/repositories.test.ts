@@ -702,6 +702,50 @@ describe("link_repository authorization (H5-1)", () => {
     expect(errorText(result as never)).toMatch(/adminOverride/);
     await c2.close();
   });
+
+  describe("trusted GitHub accounts", () => {
+    const refusing = (reason: "github_account_not_allowed" | "check_failed") => {
+      const { gate, authorizePrincipal } = gateAt("admin");
+      gate.checkAccount = vi.fn(async () => ({ ok: false, reason }));
+      return { gate, authorizePrincipal };
+    };
+
+    it("refuses a repository outside the trusted set, even with adminOverride, without asking the host", async () => {
+      const { gate, authorizePrincipal } = refusing("github_account_not_allowed");
+      const { mcp } = setup([OWNED], "p1", [], {
+        gate,
+        roles: ["admin"],
+        scopes: ["agents:read", "agents:write", "agents:admin"],
+      });
+      const client = await connectClient(mcp);
+      for (const extra of [{}, { adminOverride: true }]) {
+        const result = await client.callTool(link(extra));
+        expect(result.isError).toBeTruthy();
+        expect(errorText(result as never)).toContain("github_account_not_allowed: ");
+      }
+      expect(authorizePrincipal).not.toHaveBeenCalled();
+      await client.close();
+    });
+
+    it("refuses when the trusted set can't be checked", async () => {
+      const { gate } = refusing("check_failed");
+      const { mcp } = setup([OWNED], "p1", [], { gate });
+      const client = await connectClient(mcp);
+      const result = await client.callTool(link());
+      expect(result.isError).toBeTruthy();
+      expect(errorText(result as never)).toMatch(/could not check/i);
+      await client.close();
+    });
+
+    it("links when the account is served", async () => {
+      const { gate } = gateAt("write");
+      gate.checkAccount = vi.fn(async () => undefined);
+      const { mcp } = setup([OWNED], "p1", [], { gate });
+      const client = await connectClient(mcp);
+      expect((await client.callTool(link())).isError).toBeFalsy();
+      await client.close();
+    });
+  });
 });
 
 describe("link_repository check names (H5-2)", () => {

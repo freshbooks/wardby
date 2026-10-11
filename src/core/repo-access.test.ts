@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CodeReviewHost, HostPermission } from "../providers/review-host/types.js";
 import { ReviewHostError } from "../providers/review-host/types.js";
-import { atLeast, createRepoAccessGate, requiredLevel } from "./repo-access.js";
+import { atLeast, createRepoAccessGate, describeDenial, requiredLevel } from "./repo-access.js";
 
 const REPO = "chfields/knock-knock-jokes";
 
@@ -22,6 +22,7 @@ function setup(
     level?: HostPermission | (() => HostPermission);
     ttlMs?: number;
     maxEntries?: number;
+    trustedAccounts?: () => Promise<ReadonlySet<string> | undefined>;
   } = {},
 ) {
   const identities = [
@@ -53,6 +54,7 @@ function setup(
     hosts: { github: host },
     ttlMs: opts.ttlMs,
     maxEntries: opts.maxEntries,
+    trustedAccounts: opts.trustedAccounts,
     now: () => clock,
     sleep: async () => undefined,
   });
@@ -336,5 +338,89 @@ describe("RepoAccessGate.authorizeUse on local repositories", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("RepoAccessGate trusted GitHub accounts", () => {
+  const trusted =
+    (...logins: string[]) =>
+    async () =>
+      new Set(logins) as ReadonlySet<string>;
+
+  it("refuses a repository outside the trusted set before any stamp, owner check, or host call", async () => {
+    const { gate, repositoryPermission } = setup({ trustedAccounts: trusted("acme") });
+    for (const authorizedVia of ["admin", "grandfathered", "host_permission"]) {
+      expect(await gate.authorizeUse(use({ authorizedVia }))).toEqual({
+        ok: false,
+        reason: "github_account_not_allowed",
+      });
+    }
+    expect(await gate.authorizeUse(use({ ownerId: null }))).toEqual({
+      ok: false,
+      reason: "github_account_not_allowed",
+    });
+    expect(
+      await gate.authorizePrincipal({ principalId: "p1", provider: "github", repository: REPO, required: "write" }),
+    ).toEqual({ ok: false, reason: "github_account_not_allowed" });
+    expect(
+      await gate.authorizeHostUser({
+        provider: "github",
+        repository: REPO,
+        user: { id: "42", login: "octo" },
+        required: "write",
+      }),
+    ).toEqual({ ok: false, reason: "github_account_not_allowed" });
+    expect(await gate.checkAccount!("github", REPO)).toEqual({ ok: false, reason: "github_account_not_allowed" });
+    expect(repositoryPermission).not.toHaveBeenCalled();
+  });
+
+  it("passes a repository whose owner is trusted (case-insensitive)", async () => {
+    const { gate } = setup({ trustedAccounts: trusted("chfields") });
+    expect(await gate.authorizeUse(use({ repository: "ChFields/knock-knock-jokes", authorizedVia: "admin" }))).toEqual({
+      ok: true,
+    });
+    expect(await gate.checkAccount!("github", REPO)).toBeUndefined();
+  });
+
+  it("fails closed when the trusted set can't be read", async () => {
+    const { gate } = setup({
+      trustedAccounts: async () => {
+        throw new Error("github_api_unavailable");
+      },
+    });
+    expect(await gate.authorizeUse(use({ authorizedVia: "admin" }))).toEqual({ ok: false, reason: "check_failed" });
+  });
+
+  it("skips the check when no GitHub App is configured", async () => {
+    const { gate } = setup({ trustedAccounts: async () => undefined });
+    expect(await gate.authorizeUse(use({ authorizedVia: "admin" }))).toEqual({ ok: true });
+  });
+
+  it("defaults to the App owner plus WARDBY_GITHUB_ALLOWED_ACCOUNTS", async () => {
+    const saved = process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS;
+    process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS = "acme";
+    try {
+      const host = {
+        provider: "github",
+        repositoryPermission: vi.fn(),
+        appOwnerLogin: async () => "owner-org",
+      } as unknown as CodeReviewHost;
+      const gate = createRepoAccessGate({ db: {} as never, hosts: { github: host } });
+      expect(await gate.checkAccount!("github", "owner-org/x")).toBeUndefined();
+      expect(await gate.checkAccount!("github", "ACME/x")).toBeUndefined();
+      expect(await gate.checkAccount!("github", "stranger/x")).toEqual({
+        ok: false,
+        reason: "github_account_not_allowed",
+      });
+    } finally {
+      if (saved === undefined) delete process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS;
+      else process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS = saved;
+    }
+  });
+
+  it("describes the denial with its code", () => {
+    expect(describeDenial({ ok: false, reason: "github_account_not_allowed" }, REPO)).toMatch(
+      /^github_account_not_allowed: .*WARDBY_GITHUB_ALLOWED_ACCOUNTS/,
+    );
   });
 });
