@@ -111,47 +111,48 @@ describe.each(scripts)("$name WARDBY_LOW_POWER", (s) => {
       expect(preApply.start).toBeLessThan(applyAt);
     });
 
-    it("in low-power mode, stamps both Deployments as just woken (a Date.parse-able UTC time)", () => {
-      const before = Date.now() - 1000;
-      const result = run(1);
-      expect(result.status).toBe(0);
-      const calls = result.calls.trim().split("\n");
-      expect(calls).toHaveLength(4);
-      deployments.forEach((name, i) => {
-        expect(calls[2 * i]).toBe(`${s.kubectlPrefix} get deploy ${name} --ignore-not-found -o name`);
-        const match = calls[2 * i + 1].match(
-          new RegExp(`^${s.kubectlPrefix} annotate deploy/${name} wardby\\.io/power-woke-at=(\\S+) --overwrite$`),
-        );
-        expect(match).not.toBeNull();
-        expect(match[1]).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
-        const stamped = Date.parse(match[1]);
-        expect(stamped).toBeGreaterThanOrEqual(before);
-        expect(stamped).toBeLessThanOrEqual(Date.now() + 1000);
+    // Both modes stamp: when switching low-power OFF, the control plane still
+    // running is in low-power mode and would otherwise sleep the targets the
+    // apply has just restored.
+    describe.each([
+      ["low-power mode", 1],
+      ["off mode", 0],
+    ])("in %s", (_label, mode) => {
+      it("stamps both Deployments as just woken (a Date.parse-able UTC time)", () => {
+        const before = Date.now() - 1000;
+        const result = run(mode);
+        expect(result.status).toBe(0);
+        const calls = result.calls.trim().split("\n");
+        expect(calls.slice(4)).toEqual(mode === 0 ? s.offPreApplyCalls : []);
+        deployments.forEach((name, i) => {
+          expect(calls[2 * i]).toBe(`${s.kubectlPrefix} get deploy ${name} --ignore-not-found -o name`);
+          const match = calls[2 * i + 1].match(
+            new RegExp(`^${s.kubectlPrefix} annotate deploy/${name} wardby\\.io/power-woke-at=(\\S+) --overwrite$`),
+          );
+          expect(match).not.toBeNull();
+          expect(match[1]).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+          const stamped = Date.parse(match[1]);
+          expect(stamped).toBeGreaterThanOrEqual(before);
+          expect(stamped).toBeLessThanOrEqual(Date.now() + 1000);
+        });
       });
-    });
 
-    it("in low-power mode, skips a Deployment that does not exist yet (first install)", () => {
-      const result = run(1, "");
-      expect(result.status).toBe(0);
-      expect(result.calls).not.toContain("annotate");
-    });
+      it("skips a Deployment that does not exist yet (first install)", () => {
+        const result = run(mode, "");
+        expect(result.status).toBe(0);
+        expect(result.calls).not.toContain("annotate");
+      });
 
-    it("in low-power mode, fails on any other error reading a Deployment", () => {
-      const result = run(1, 'case "$*" in *" get "*) echo "Error from server (Forbidden)" >&2; exit 1 ;; esac');
-      expect(result.status).not.toBe(0);
-      expect(result.calls).not.toContain("annotate");
-    });
+      it("fails on any other error reading a Deployment", () => {
+        const result = run(mode, 'case "$*" in *" get "*) echo "Error from server (Forbidden)" >&2; exit 1 ;; esac');
+        expect(result.status).not.toBe(0);
+        expect(result.calls).not.toContain("annotate");
+      });
 
-    it("in low-power mode, fails when the annotate fails", () => {
-      const result = run(1, `${existing}\ncase "$*" in *" annotate "*) exit 1 ;; esac`);
-      expect(result.status).not.toBe(0);
-    });
-
-    it("in off mode, stamps nothing", () => {
-      const result = run(0);
-      expect(result.status).toBe(0);
-      expect(result.calls).not.toContain("annotate");
-      expect(result.calls.trim().split("\n").filter(Boolean)).toEqual(s.offPreApplyCalls);
+      it("fails when the annotate fails", () => {
+        const result = run(mode, `${existing}\ncase "$*" in *" annotate "*) exit 1 ;; esac`);
+        expect(result.status).not.toBe(0);
+      });
     });
   });
 

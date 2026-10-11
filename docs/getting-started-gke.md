@@ -716,10 +716,12 @@ control-plane Deployment, raises it to that value. The first coding run after a
 control-plane restart also runs the cluster preflight canary, because start-up
 preflight is deferred while the proxy sleeps (`kubernetes_preflight_deferred`).
 
-**Deploys.** A low-power `up.sh` run marks the proxy and gateway as just woken
-before it applies the manifests, which bring them back to 1 replica. They stay
-up through the deploy (its database checks need them) and sleep one idle window
-later if nothing uses them.
+**Deploys.** Every `up.sh` run marks the proxy and gateway as just woken before
+it applies the manifests, which bring them back up. That includes a run that
+turns low-power mode off: the control plane being replaced still runs in
+low-power mode until its rollout ends, and the mark stops it scaling them back
+down. With the mode on they stay up through the deploy (its database checks
+need them) and sleep one idle window later if nothing uses them.
 
 **Sleeping now.** To skip the idle window (for example right after a test), an
 admin calls the MCP tool `power_sleep`, optionally with `target` set to `proxy`

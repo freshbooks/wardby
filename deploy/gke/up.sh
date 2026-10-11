@@ -476,19 +476,20 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | iam_substitutions)"
 assert_no_placeholders "$OVERLAY_MANIFEST"
 # low-power pre-apply
-if [ "$LOW_POWER" = 1 ]; then
-  # The apply brings a sleeping proxy and gateway back to 1 replica, while the
-  # control plane still running serves until its rollout ends. Stamp both as just
-  # woken first, so it does not scale them straight back to 0 mid-deploy (and
-  # steps 10-11 find their pods). A Deployment not created yet is skipped.
-  LOW_POWER_WOKE_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  for low_power_target in wardby-coding-proxy wardby-native-gateway; do
-    low_power_found="$(kubectl -n "$NAMESPACE" get deploy "$low_power_target" --ignore-not-found -o name)"
-    if [ -n "$low_power_found" ]; then
-      kubectl -n "$NAMESPACE" annotate "deploy/$low_power_target" "wardby.io/power-woke-at=$LOW_POWER_WOKE_AT" --overwrite >/dev/null
-    fi
-  done
-else
+# The apply brings a sleeping proxy and gateway back to 1+ replicas, while the
+# control plane still running serves until its rollout ends -- and that one may
+# be in low-power mode even when this deploy turns the mode off. Stamp both as
+# just woken first, in either mode, so it does not scale them straight back to
+# 0 mid-deploy (and steps 10-11 find their pods). With the mode off the stamp is
+# never read again. A Deployment not created yet is skipped.
+LOW_POWER_WOKE_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+for low_power_target in wardby-coding-proxy wardby-native-gateway; do
+  low_power_found="$(kubectl -n "$NAMESPACE" get deploy "$low_power_target" --ignore-not-found -o name)"
+  if [ -n "$low_power_found" ]; then
+    kubectl -n "$NAMESPACE" annotate "deploy/$low_power_target" "wardby.io/power-woke-at=$LOW_POWER_WOKE_AT" --overwrite >/dev/null
+  fi
+done
+if [ "$LOW_POWER" = 0 ]; then
   # Leaving low-power mode: drop the control plane's HPA before the apply sets
   # its replicas: 1, so the HPA cannot rescale it in between. A no-op when
   # low-power mode was never on.

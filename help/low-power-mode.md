@@ -50,9 +50,11 @@ only when `WARDBY_LOW_POWER=1`.
 - **Preflight.** The first coding run after a control-plane restart also runs
   the cluster preflight canary, because start-up preflight is deferred while the
   proxy sleeps (`kubernetes_preflight_deferred`).
-- **Deploys.** A low-power `up.sh` run marks the proxy and gateway as just
-  woken before it brings them back to 1 replica, so they stay up through the
-  deploy (its database checks need them) and sleep one idle window later.
+- **Deploys.** Every `up.sh` run, including one that turns the mode off, marks
+  the proxy and gateway as just woken before it brings them back up, so the
+  control plane being replaced cannot scale them down mid-deploy. With the mode
+  on they stay up through the deploy (its database checks need them) and sleep
+  one idle window later.
 - **Control plane.** It scales 1 to 2 on CPU (20% target, scale down
   after 10 minutes). A run executes on the copy that started it, so scheduled
   runs stay on the scheduler leader; webhook and MCP-started runs spread. The
