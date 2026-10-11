@@ -182,6 +182,10 @@ spec:
             # Set by up.sh from WARDBY_GITHUB_ALLOWED_ACCOUNTS (empty = the App's owner only).
             - name: WARDBY_GITHUB_ALLOWED_ACCOUNTS
               value: wardby_github_allowed_accounts
+            # Set by up.sh from WARDBY_MOBILE_ENABLED (true or false; empty = false).
+            # The placeholder is neither, so an unsubstituted render fails to boot.
+            - name: WARDBY_MOBILE_ENABLED
+              value: wardby_mobile_enabled
             # `serve` refuses any transport but http (src/serve.ts): in stdio
             # mode stdout is the JSON-RPC wire. The endpoint is ClusterIP-only —
             # nothing outside the cluster can reach it. An operator's MCP client
