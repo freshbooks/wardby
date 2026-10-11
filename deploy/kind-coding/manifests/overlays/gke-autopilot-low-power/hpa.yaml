@@ -1,5 +1,11 @@
 # Low-power mode runs one control-plane replica and lets it grow to two under
-# CPU load. The utilization target is set from the kind load test.
+# CPU load. The utilization target comes from the kind load test
+# (scripts/load/run-level-b.sh with the control plane in low-power mode):
+# raise the number of concurrent runs until p95 trigger-to-start latency
+# degrades, take the control plane's sustained CPU at that load (90th
+# percentile of 10 s averages) as a share of its 1 vCPU request, and use about
+# 70% of it, kept between 20% and 70%. The measured share was below the floor,
+# so the target is the 20% floor.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -18,7 +24,7 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 40
+          averageUtilization: 20
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 600

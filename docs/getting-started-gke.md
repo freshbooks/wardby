@@ -716,7 +716,7 @@ Each `power_sleep` is logged as `event: "power.sleep"` with the caller's
 principal.
 
 **Control-plane autoscaling.** The control plane scales between 1 and 2 copies
-on CPU (placeholder 40% target, scale-down after 10 minutes). A run executes on
+on CPU (20% target, scale-down after 10 minutes). A run executes on
 the copy that started it, so scheduled runs stay on the scheduler leader, while
 runs started by a webhook or over MCP spread across copies. While the mode is on
 the autoscaler owns the replica count, so do not set it by hand.

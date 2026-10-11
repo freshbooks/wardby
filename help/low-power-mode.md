@@ -49,7 +49,7 @@ from 5 to 1440 (default 30) set on the control-plane Deployment.
   proxy sleeps (`kubernetes_preflight_deferred`).
 - **Deploys.** A deploy leaves the proxy and gateway at 1 replica (its database
   checks need them); they sleep after the idle window.
-- **Control plane.** It scales 1 to 2 on CPU (placeholder 40% target, scale down
+- **Control plane.** It scales 1 to 2 on CPU (20% target, scale down
   after 10 minutes). A run executes on the copy that started it, so scheduled
   runs stay on the scheduler leader; webhook and MCP-started runs spread. The
   autoscaler owns the replica count while the mode is on.

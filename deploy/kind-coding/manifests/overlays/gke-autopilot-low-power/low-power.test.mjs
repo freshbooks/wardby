@@ -80,7 +80,7 @@ describe("low-power manifest sources", () => {
     expect(hpa.spec.minReplicas).toBe(1);
     expect(hpa.spec.maxReplicas).toBe(2);
     expect(hpa.spec.metrics[0].resource.name).toBe("cpu");
-    expect(hpa.spec.metrics[0].resource.target.averageUtilization).toBe(40);
+    expect(hpa.spec.metrics[0].resource.target.averageUtilization).toBe(20);
     expect(hpa.spec.behavior.scaleDown.stabilizationWindowSeconds).toBe(600);
   });
 
