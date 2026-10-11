@@ -10,6 +10,7 @@ import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
 import { DEFAULT_CLAUDE_MAX_TURNS, MAX_CODING_TURNS, isLocalRepository } from "../../coding/protocol.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
+import { ACCEPTED_ADVISORY_ID, MAX_ACCEPTED_ADVISORIES } from "../../coding/registry/allowlist.js";
 import { assertAgentModelAvailable } from "../../core/run-pricing.js";
 import { ModelUnavailableError } from "../../providers/llm/catalog-types.js";
 import { currentModelCatalog } from "../../providers/llm/catalog-store.js";
@@ -312,7 +313,17 @@ const profileJsonSchema = {
     },
     packagePolicy: {
       type: "object",
-      properties: { minReleaseAgeDays: { type: "integer", minimum: 0, maximum: 30 } },
+      description:
+        "minReleaseAgeDays: days a release must have been public before it can be installed (0-30, default 3). acceptedAdvisories: advisory ids (GHSA-…, CVE-…) this agent's runs may install despite; malware never; every waiver is reported in the PR. Needs packages:approve or agents:admin.",
+      properties: {
+        minReleaseAgeDays: { type: "integer", minimum: 0, maximum: 30 },
+        acceptedAdvisories: {
+          type: "array",
+          maxItems: MAX_ACCEPTED_ADVISORIES,
+          uniqueItems: true,
+          items: { type: "string", pattern: ACCEPTED_ADVISORY_ID.source },
+        },
+      },
       additionalProperties: false,
     },
     services: {

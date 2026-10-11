@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { npmAdapter } from "../../../coding/registry/npm.js";
 import { RegistryError, type UpstreamFetch } from "../../../coding/registry/types.js";
 import { capabilityHash } from "../proxy.js";
-import type { AuditedVersion, WithheldVersions } from "./audit.js";
+import type { AuditedVersion, WithheldAdvisory, WithheldVersions } from "./audit.js";
 import { RegistryService, type RegistryResponse } from "./service.js";
 import { MemoryRegistryStore } from "./store.js";
 
@@ -105,6 +105,9 @@ function setup(
     now?: () => Date;
     planConcurrency?: number;
     planMaxPerRun?: number;
+    /** Blocking advisories per name@version, with malware flags and aliases. */
+    advisories?: Record<string, WithheldAdvisory[]>;
+    policy?: unknown;
   } = {},
 ) {
   const npm = fakeNpm(registry);
@@ -113,18 +116,24 @@ function setup(
     runId: "run-1",
     deadlineAt: new Date(NOW.getTime() + 10 * DAY),
     allowlist: { npm: options.allowlist ?? ["a"] },
-    policy: {},
+    policy: options.policy ?? {},
   });
   const audited: AuditedVersion[][] = [];
   const service = new RegistryService({
     adapters: new Map([["npm", npmAdapter]]),
     store,
     audit: {
-      audit: async () => ({ withheld: () => [], reported: () => [] }),
+      audit: async () => ({ withheld: () => [], waived: () => [], reported: () => [] }),
       auditVersions: async (_adapter, versions) => {
         audited.push([...versions]);
         if (options.audit) return options.audit(versions);
-        return new Map(Object.entries(options.withheld ?? {}));
+        return new Map([
+          ...Object.entries(options.withheld ?? {}).map(([key, ids]): [string, WithheldAdvisory[]] => [
+            key,
+            ids.map((id) => ({ id, malware: false, aliases: [] })),
+          ]),
+          ...Object.entries(options.advisories ?? {}),
+        ]);
       },
     },
     upstream: options.upstream ?? npm.upstream,
@@ -660,5 +669,92 @@ describe("downloads of approved versions", () => {
         tarballUrl("c", "3.0.0"),
       ]),
     );
+  });
+});
+
+describe("lockfile plans and accepted advisories (packagePolicy.acceptedAdvisories)", () => {
+  const download = (name: string, version: string) => ({
+    method: "GET",
+    ecosystem: "npm",
+    subpath: `${name}/-/${name}-${version}.tgz`,
+    token: "rrg_token",
+    signal: new AbortController().signal,
+  });
+  const high = (id: string, aliases: string[] = []): WithheldAdvisory => ({ id, malware: false, aliases });
+  const accepting = (...ids: string[]) => ({ acceptedAdvisories: ids });
+
+  it("refuses a HIGH-only version without the policy: the plan refusal answers its download", async () => {
+    const { plan, service, store } = setup(chain, { advisories: { "c@2.0.3": [high("GHSA-high")] } });
+    const { json } = await plan(chainLock);
+    expect(refusedOf(json)).toEqual({ "c@2.0.3": "wardby_version_filtered" });
+    expect(approvedOf(store)).toEqual(["a@1.0.0", "b@1.1.0"]);
+    const response = await service.handle(download("c", "2.0.3"));
+    expect([response.status, await drain(response)]).toEqual([403, expect.stringContaining("GHSA-high")]);
+    expect(store.fetches.some((fetch) => fetch.outcome === "served")).toBe(false);
+  });
+
+  it("approves it with the policy, keeps the waiver on the approval, and records it on the served row", async () => {
+    const { plan, service, store } = setup(chain, {
+      advisories: { "c@2.0.3": [high("GHSA-high", ["CVE-2026-1"])] },
+      policy: accepting("CVE-2026-1"),
+    });
+    const { json } = await plan(chainLock);
+    expect(json).toEqual({ approved: 3, refused: [] });
+    expect(store.planRefusals.size).toBe(0);
+    expect([...store.approvals.values()].find((approval) => approval.name === "c")).toMatchObject({
+      acceptedAdvisories: ["GHSA-high"],
+    });
+    // A version that needed no waiver carries none.
+    expect([...store.approvals.values()].find((approval) => approval.name === "b")).not.toHaveProperty(
+      "acceptedAdvisories",
+    );
+    const response = await service.handle(download("c", "2.0.3"));
+    expect([response.status, await drain(response)]).toEqual([200, "tarball c@2.0.3"]);
+    expect(store.fetches.at(-1)).toMatchObject({
+      name: "c",
+      version: "2.0.3",
+      outcome: "served",
+      reason: "accepted advisories: GHSA-high",
+    });
+    const plain = await service.handle(download("b", "1.1.0"));
+    expect(plain.status).toBe(200);
+    await drain(plain);
+    expect(store.fetches.at(-1)).toMatchObject({ name: "b", outcome: "served" });
+    expect(store.fetches.at(-1)).not.toHaveProperty("reason");
+  });
+
+  it("never approves malware, even when the policy lists its id or alias", async () => {
+    const { plan, service, store } = setup(chain, {
+      advisories: { "c@2.0.3": [{ id: "GHSA-mal", malware: true, aliases: ["MAL-2026-1"] }] },
+      policy: accepting("GHSA-mal"),
+    });
+    const { json } = await plan(chainLock);
+    expect(refusedOf(json)).toEqual({ "c@2.0.3": "wardby_version_filtered" });
+    expect(approvedOf(store)).toEqual(["a@1.0.0", "b@1.1.0"]);
+    const response = await service.handle(download("c", "2.0.3"));
+    expect([response.status, await drain(response)]).toEqual([403, expect.stringContaining("GHSA-mal")]);
+  });
+
+  it("still refuses a version with two advisories when only one is accepted, naming the one left", async () => {
+    const { plan, store } = setup(chain, {
+      advisories: { "c@2.0.3": [high("GHSA-one"), high("GHSA-two")] },
+      policy: accepting("GHSA-one"),
+    });
+    const { json } = await plan(chainLock);
+    expect(refusedOf(json)).toEqual({ "c@2.0.3": "wardby_version_filtered" });
+    const reason = json.refused[0].reason as string;
+    expect(reason).toContain("GHSA-two");
+    expect(reason).not.toContain("GHSA-one");
+    expect(approvedOf(store)).toEqual(["a@1.0.0", "b@1.1.0"]);
+  });
+
+  it("a waived parent keeps what is reachable only through it", async () => {
+    const { plan, store } = setup(chain, {
+      advisories: { "b@1.1.0": [high("GHSA-high")] },
+      policy: accepting("GHSA-high"),
+    });
+    const { json } = await plan(chainLock);
+    expect(json).toEqual({ approved: 3, refused: [] });
+    expect(approvedOf(store)).toEqual(["a@1.0.0", "b@1.1.0", "c@2.0.3"]);
   });
 });

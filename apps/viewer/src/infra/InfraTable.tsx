@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { InfraModel, PodView } from "./adapter";
 import { visibleJobs } from "./jobs";
-import { containerDot, formatAge, podUsage, statusKind } from "./format";
+import { containerDot, formatAge, idleLabel, podUsage, statusKind } from "./format";
 
 interface Props {
   model: InfraModel;
@@ -79,6 +79,7 @@ export function InfraTable({ model, selected, onSelect, onOpenRun, jobFinishedAt
   const [filter, setFilter] = useState("");
   const q = filter.trim().toLowerCase();
   const keep = (p: PodView) => !q || `${p.name} ${p.title} ${p.status}`.toLowerCase().includes(q);
+  const idle = model.groups.idle.filter((i) => !q || `${i.name} ${i.title} ${i.state}`.toLowerCase().includes(q));
   const sections: [string, PodView[]][] = [
     ["ALWAYS ON", model.groups.alwaysOn],
     ["CODING RUNS", model.groups.codingRuns],
@@ -126,7 +127,9 @@ export function InfraTable({ model, selected, onSelect, onOpenRun, jobFinishedAt
           return (
             <div key={title} role="rowgroup">
               <h3 className="infra-group">{title}</h3>
-              {rows.length === 0 && <p className="muted infra-empty">None</p>}
+              {rows.length === 0 && (title !== "ALWAYS ON" || idle.length === 0) && (
+                <p className="muted infra-empty">None</p>
+              )}
               {rows.map((p) => (
                 <Row
                   key={p.name}
@@ -137,6 +140,23 @@ export function InfraTable({ model, selected, onSelect, onOpenRun, jobFinishedAt
                   now={now}
                 />
               ))}
+              {title === "ALWAYS ON" &&
+                idle.map((i) => {
+                  const l = idleLabel(i);
+                  return (
+                    <div key={i.name} className="infra-row-wrap" role="row">
+                      <div className="infra-row infra-row-span infra-row-idle" title={i.name}>
+                        <span className="infra-cell pod-name" role="cell">
+                          {i.title}
+                          <span className="muted">
+                            {" "}
+                            · {l.state} · {l.detail}
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
             </div>
           );
         })}

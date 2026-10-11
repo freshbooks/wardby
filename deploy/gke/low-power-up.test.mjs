@@ -174,3 +174,27 @@ describe("deploy/kind-coding/up.sh control plane reminder", () => {
     expect(read("../kind-coding/up.sh")).toMatch(/WARDBY_LOW_POWER=1.*wardby serve/);
   });
 });
+
+describe("deploy/gke/up.sh failed always-on pods", () => {
+  const script = read("./up.sh");
+  const cleanup = block(script, "failed always-on pods");
+
+  it("runs after the rollout waits and before the database checks", () => {
+    expect(cleanup.start).toBeGreaterThan(script.indexOf("rollout status deploy/wardby-control-plane"));
+    expect(cleanup.start).toBeLessThan(script.indexOf('echo "==> 11/'));
+  });
+
+  it("deletes only Failed pods of the three always-on Deployments, never run pods", () => {
+    const result = runBlock(cleanup.text, {}, "NAMESPACE=wardby-coding\nOVERLAY=unused");
+    expect(result.status).toBe(0);
+    expect(result.calls.trim()).toBe(
+      "-n wardby-coding delete pods --field-selector=status.phase=Failed --ignore-not-found " +
+        "-l app.kubernetes.io/name in (wardby-control-plane,wardby-coding-proxy,wardby-native-gateway)",
+    );
+  });
+
+  it("fails the deploy when the delete fails", () => {
+    const result = runBlock(cleanup.text, {}, "NAMESPACE=wardby-coding\nOVERLAY=unused", "exit 1");
+    expect(result.status).not.toBe(0);
+  });
+});

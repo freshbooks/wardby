@@ -45,6 +45,8 @@ export interface PodView {
   title: string;
   /** What to show for the pod: Terminating, Completed, a container problem, or its phase. */
   status: string;
+  /** A failed always-on replica while a healthy replica of the same component runs: leftover, not an outage. */
+  stale?: boolean;
   phase: string;
   terminating: boolean;
   ready: boolean;
@@ -84,12 +86,22 @@ export interface DataStoreView {
   label: string;
   detail: string[];
 }
+/** An always-on component with no pod because its Deployment is scaled to 0. */
+export interface IdleView {
+  title: string;
+  name: string;
+  /** asleep: low-power mode scaled it to 0 (it carries a woke-at stamp); off: scaled to 0 otherwise. */
+  state: "asleep" | "off";
+  wokeAt: string | null;
+}
 export interface InfraModel {
   platform: Platform;
   controlPlane: { inCluster: true } | { inCluster: false; location: string | null };
   edge: EdgeView[];
   groups: {
     alwaysOn: PodView[];
+    /** Always-on components scaled to 0 (low-power mode's sleeping proxy and gateway, headroom off). */
+    idle: IdleView[];
     codingRuns: PodView[];
     /** Sandbox-mode native agent runs, including warm pool pods a run has claimed. */
     agentSandboxes: PodView[];
@@ -363,6 +375,7 @@ function hostPort(url: string | undefined): string | null {
 const ALWAYS_ON: [prefix: string, title: string][] = [
   ["wardby-control-plane", "control-plane"],
   ["wardby-coding-proxy", "coding-proxy"],
+  ["wardby-native-gateway", "native-gateway"],
   ["wardby-headroom", "headroom"],
 ];
 
@@ -675,8 +688,23 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
     if (hit) alwaysOn.push(view(p, "always_on", hit[1]));
     else if (p.owner?.kind === "Job") jobs.push(view(p, "job", p.owner.name));
   }
+  // A failed replica (e.g. rejected at admission with OutOfcpu) stays until something deletes
+  // it; next to a healthy replica of the same component it is debris, not an outage.
+  for (const p of alwaysOn) {
+    p.stale = p.phase === "Failed" && alwaysOn.some((o) => o.title === p.title && o.ready && !o.terminating);
+  }
   const order = (p: PodView) => ALWAYS_ON.findIndex(([, t]) => t === p.title);
-  alwaysOn.sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
+  alwaysOn.sort(
+    (a, b) =>
+      order(a) - order(b) || Number(a.stale ?? false) - Number(b.stale ?? false) || a.name.localeCompare(b.name),
+  );
+  const deployments = values(cluster, "deployment");
+  const idle: IdleView[] = ALWAYS_ON.flatMap(([prefix, title]) => {
+    const d = deployments.find((x) => x.name === prefix);
+    if (!d || d.desired !== 0 || alwaysOn.some((p) => p.title === title && !p.stale && p.phase !== "Failed")) return [];
+    const wokeAt = d.wokeAt ?? null;
+    return [{ title, name: d.name, state: wokeAt && title !== "headroom" ? "asleep" : "off", wokeAt } as IdleView];
+  });
   codingRuns.sort((a, b) => a.name.localeCompare(b.name));
   agentSandboxes.sort((a, b) => a.name.localeCompare(b.name));
   warmPool.sort((a, b) => a.name.localeCompare(b.name));
@@ -709,7 +737,7 @@ export function describe(cluster: ClusterState, info: InfraInfo, opts: DescribeO
         ? { inCluster: true }
         : { inCluster: false, location: hostPort(opts.serverUrl) },
     edge: edgePath(edges.map((e) => rules.edge(e, { backendPolicies: values(cluster, "backend_policy") }))),
-    groups: { alwaysOn, codingRuns, agentSandboxes, warmPool, jobs },
+    groups: { alwaysOn, idle, codingRuns, agentSandboxes, warmPool, jobs },
     // Older servers don't describe sandboxes; their pods still show when present.
     agentSandbox:
       nativeK8s || agentSandboxes.length > 0 || warmPool.length > 0

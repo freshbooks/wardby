@@ -11,7 +11,8 @@
  *   the declared package at a version inside the declared range;
  * - reachability starts at the projects' dependencies that are allowlist
  *   roots (at a version inside the root's range) and follows only verified
- *   edges, through versions old enough and without a HIGH/CRITICAL advisory.
+ *   edges, through versions old enough and without a HIGH/CRITICAL advisory
+ *   (one the run's accepted set waives does not count; malware always does).
  *
  * A refused entry refuses itself and whatever is reachable only through it;
  * everything else is approved, as exact name@version pairs. The work is
@@ -30,7 +31,7 @@ import {
   type UpstreamFetch,
   type VersionFact,
 } from "../../../coding/registry/types.js";
-import { versionKey, type AuditedVersion, type WithheldVersions } from "./audit.js";
+import { splitWaived, versionKey, type AuditedVersion, type WithheldVersions } from "./audit.js";
 import type { ApprovedVersion, StoredVersionFact } from "./store.js";
 
 export const DEFAULT_PLAN_MAX_ENTRIES = 5000;
@@ -82,6 +83,10 @@ export interface PlanInput {
   /** Unbuffered fetch for streamed package documents. */
   streamUpstream: UpstreamFetch;
   audit(versions: readonly AuditedVersion[], signal: AbortSignal): Promise<WithheldVersions>;
+  /** The run's accepted advisory ids (packagePolicy.acceptedAdvisories):
+   *  blocking advisories they waive do not refuse a version (see
+   *  `isWaived`; malware is never waived). Absent or empty waives nothing. */
+  accepted?: ReadonlySet<string>;
   hostAllowed(url: string): boolean;
   signal: AbortSignal;
   factConcurrency?: number;
@@ -193,15 +198,23 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
     ),
     signal,
   );
+  // Advisories the run's accepted set waived, per approved name@version.
+  const waivers = new Map<string, string[]>();
   for (const entry of candidates) {
-    const ids = withheld.get(versionKey(entry.name, entry.version));
-    if (ids && ids.length > 0) {
+    const key = versionKey(entry.name, entry.version);
+    const split = splitWaived(withheld.get(key) ?? [], input.accepted);
+    if (split.withheld.length > 0) {
       candidates.delete(entry);
       refusals.set(entry, {
         code: "wardby_version_filtered",
-        reason: `withheld by advisory ${ids.join(", ")} (high severity or malware)`,
+        reason: `withheld by advisory ${split.withheld.map(({ id }) => id).join(", ")} (high severity or malware)`,
         intrinsic: true,
       });
+    } else if (split.waived.length > 0) {
+      waivers.set(
+        key,
+        split.waived.map(({ id }) => id),
+      );
     }
   }
 
@@ -221,12 +234,15 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
 
   const approved = new Map<string, ApprovedVersion>();
   for (const entry of approvedEntries) {
-    const outcome = outcomes.get(versionKey(entry.name, entry.version));
+    const key = versionKey(entry.name, entry.version);
+    const outcome = outcomes.get(key);
+    const acceptedAdvisories = waivers.get(key);
     if (outcome && "fact" in outcome)
-      approved.set(versionKey(entry.name, entry.version), {
+      approved.set(key, {
         name: entry.name,
         version: entry.version,
         integrity: outcome.fact.integrity,
+        ...(acceptedAdvisories ? { acceptedAdvisories } : {}),
       });
   }
   const refused = new Map<string, PlanRefusal>();

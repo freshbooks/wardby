@@ -67,5 +67,38 @@ run. See [Local repositories](local-repositories.md).
 Review agents see the pull request's CI results in `repo_pr_read` and are
 told to trust CI over the sandbox's **Tests**.
 
+## Accepting advisories
+
+From Wardby 0.6.1, a version withheld only by a high or critical advisory
+(refused with `wardby_version_filtered`) can be served for one agent once an
+approver accepts the advisory. Set `codingProfile.packagePolicy.acceptedAdvisories`
+with `create_agent` or `update_agent` (needs `packages:approve` or
+`agents:admin`):
+
+```json
+{
+  "codingProfile": {
+    "packagePolicy": { "minReleaseAgeDays": 3, "acceptedAdvisories": ["GHSA-xxxx-xxxx-xxxx"] }
+  }
+}
+```
+
+- `update_agent` replaces `packagePolicy` as a whole: send the full object
+  (omitting `minReleaseAgeDays` resets it to the default 3). To remove a
+  waiver, re-send the whole object without that id.
+
+- Up to 32 unique ids (`GHSA-…`, `CVE-…`, `PYSEC-…`), matched case-sensitively
+  against an advisory's id and its aliases.
+- A version is served only when every blocking advisory is accepted; the
+  refusal names the ones still blocking.
+- Malware is never waivable: `MAL-…` ids are rejected, and malware advisories
+  stay blocked even if listed.
+- Waivers show as `acceptedAdvisories` per package in `get_run` and in an
+  **Accepted advisories** section of the pull request. The policy is fixed
+  when a run starts.
+- Find the id from the package named in the refusal: `https://osv.dev/list?q=<package>`
+  or `npm audit`. Accept only after judging the exposure (for example, a
+  build-time-only dependency), and remove the entry once a fixed version ships.
+
 Read [`docs/coding-packages.md`](../docs/coding-packages.md) for allowlist
 syntax (including [PyPI extras](../docs/coding-packages.md#pypi-extras)), package-policy controls, lockfile behavior, and refusal errors.

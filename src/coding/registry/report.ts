@@ -4,6 +4,7 @@
  * packages collapse on ecosystem + name + version (a retried download is one
  * package), refusals on ecosystem + name + reason.
  */
+import { ACCEPTED_ADVISORY_ID } from "./allowlist.js";
 export interface RegistryFetchRow {
   ecosystem: string;
   name: string;
@@ -29,12 +30,37 @@ export function countPlanRefusals(rows: readonly RegistryFetchRow[]): number {
   return keys.size;
 }
 
+/** A served row's `reason` when serving it waived blocking advisories the
+ *  run's packagePolicy.acceptedAdvisories lists: this prefix, then the
+ *  waived advisory ids joined by ", ". */
+export const ACCEPTED_ADVISORIES_PREFIX = "accepted advisories: ";
+
+/** The served-row reason recording these waived advisory ids, or undefined
+ *  when none were waived (the row then has no reason, as before). */
+export function acceptedAdvisoriesReason(ids: readonly string[]): string | undefined {
+  return ids.length > 0 ? `${ACCEPTED_ADVISORIES_PREFIX}${ids.join(", ")}` : undefined;
+}
+
+/** The waived advisory ids a served row's reason records (empty for any
+ *  other reason, or none). */
+export function parseAcceptedAdvisories(reason: string | null | undefined): string[] {
+  if (!reason?.startsWith(ACCEPTED_ADVISORIES_PREFIX)) return [];
+  return reason
+    .slice(ACCEPTED_ADVISORIES_PREFIX.length)
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => ACCEPTED_ADVISORY_ID.test(id));
+}
+
 export interface RegistryPackageSummary {
   ecosystem: string;
   name: string;
   version: string;
   /** Bytes served (RegistryFetch.sizeBytes); null when not recorded. */
   size: number | null;
+  /** Blocking advisories waived to serve it (the run's accepted set);
+   *  absent when none were. */
+  acceptedAdvisories?: string[];
 }
 
 export interface RegistryRefusalSummary {
@@ -52,8 +78,16 @@ export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
   for (const row of rows) {
     if (row.outcome === "served" && row.version) {
       const key = `${row.ecosystem}\0${row.name}\0${row.version}`;
-      if (!packages.has(key))
-        packages.set(key, { ecosystem: row.ecosystem, name: row.name, version: row.version, size: row.sizeBytes });
+      let summary = packages.get(key);
+      if (!summary) {
+        summary = { ecosystem: row.ecosystem, name: row.name, version: row.version, size: row.sizeBytes };
+        packages.set(key, summary);
+      }
+      // Every file of the version (a retry, a wheel and its metadata) may
+      // record the waiver; the package lists each advisory once.
+      const accepted = parseAcceptedAdvisories(row.reason);
+      if (accepted.length > 0)
+        summary.acceptedAdvisories = [...new Set([...(summary.acceptedAdvisories ?? []), ...accepted])];
     } else if (row.outcome === "refused") {
       const reason = row.reason ?? "refused";
       const key = `${row.ecosystem}\0${row.name}\0${reason}`;

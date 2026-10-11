@@ -11,6 +11,7 @@ import {
 import { npmAdapter } from "../../../coding/registry/npm.js";
 import { pypiAdapter } from "../../../coding/registry/pypi.js";
 import { capabilityHash } from "../proxy.js";
+import { splitWaived, type WithheldAdvisory } from "./audit.js";
 import { MemoryRegistryStore, type RegistryFetchRecord, type RegistryStore } from "./store.js";
 import { RegistryService } from "./service.js";
 
@@ -83,10 +84,11 @@ const fakeAdapter: RegistryAdapter = {
 };
 
 type AdvisoryIndex = {
-  withheld: (version: string) => readonly string[];
+  withheld: (version: string, accepted?: ReadonlySet<string>) => readonly string[];
+  waived: (version: string, accepted: ReadonlySet<string>) => readonly string[];
   reported: (version: string) => readonly string[];
 };
-const NO_ADVISORIES: AdvisoryIndex = { withheld: () => [], reported: () => [] };
+const NO_ADVISORIES: AdvisoryIndex = { withheld: () => [], waived: () => [], reported: () => [] };
 
 function service(
   overrides: {
@@ -102,7 +104,8 @@ function service(
     store?: MemoryRegistryStore;
     upstream?: (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
     allowlist?: Record<string, string[]>;
-    audit?: () => Promise<AdvisoryIndex>;
+    audit?: (adapter: unknown, name: string) => Promise<AdvisoryIndex>;
+    policy?: unknown;
   } = {},
 ) {
   const store = overrides.store ?? new MemoryRegistryStore();
@@ -110,7 +113,7 @@ function service(
     runId: "run-1",
     deadlineAt: new Date(NOW.getTime() + DAY),
     allowlist: overrides.allowlist ?? { fake: ["app"] },
-    policy: {},
+    policy: overrides.policy ?? {},
   });
   const registry = new RegistryService({
     adapters: new Map([["fake", fakeAdapter]]),
@@ -120,6 +123,7 @@ function service(
         overrides.audit ??
         (async () => ({
           withheld: (version: string) => ((overrides.withheld ?? []).includes(version) ? ["GHSA-x"] : []),
+          waived: () => [],
           reported: () => [],
         })),
     },
@@ -393,6 +397,114 @@ describe("RegistryService", () => {
 
     releaseRecord();
     expect(new Uint8Array(await bodyAPromise)).toEqual(tarball);
+  });
+});
+
+describe("RegistryService accepted advisories (packagePolicy.acceptedAdvisories)", () => {
+  /** An advisory index over fixed blocking advisories per `name@version`,
+   *  waiving through audit.ts's own splitWaived (malware never waived). */
+  const advisoryIndex =
+    (byVersion: Record<string, WithheldAdvisory[]>) =>
+    async (_adapter: unknown, name: string): Promise<AdvisoryIndex> => {
+      const of = (version: string) => byVersion[`${name}@${version}`] ?? [];
+      return {
+        withheld: (version, accepted) => splitWaived(of(version), accepted).withheld.map(({ id }) => id),
+        waived: (version, accepted) => splitWaived(of(version), accepted).waived.map(({ id }) => id),
+        reported: () => [],
+      };
+    };
+  const high = (id: string, aliases: string[] = []): WithheldAdvisory => ({ id, malware: false, aliases });
+  const accepting = (...ids: string[]) => ({ acceptedAdvisories: ids });
+  const drain = async (response: Awaited<ReturnType<RegistryService["handle"]>>) => {
+    if (!("stream" in response)) throw new Error(`expected a stream, got ${response.status}`);
+    return new Uint8Array(await new Response(response.stream).arrayBuffer());
+  };
+
+  it("refuses a HIGH-only version without the policy, and records no waiver", async () => {
+    const { registry, store } = service({ audit: advisoryIndex({ "app@1.0.0": [high("GHSA-high")] }) });
+    await expect(registry.handle(request("app"))).resolves.toMatchObject({ status: 404 });
+    await expect(registry.handle(request("dl/app/1.0.0"))).resolves.toMatchObject({ status: 404 });
+    expect(store.fetches.at(-1)).toMatchObject({ outcome: "refused", reason: "wardby_version_filtered" });
+    expect(store.fetches.some((fetch) => fetch.outcome === "served")).toBe(false);
+  });
+
+  it("serves it when the policy accepts the advisory (by id or alias), recording the waiver on the served row", async () => {
+    for (const accepted of ["GHSA-high", "CVE-2026-1"]) {
+      const { registry, store } = service({
+        audit: advisoryIndex({ "app@1.0.0": [high("GHSA-high", ["CVE-2026-1"])] }),
+        policy: accepting(accepted),
+      });
+      await expect(registry.handle(request("app"))).resolves.toMatchObject({
+        status: 200,
+        body: JSON.stringify(["1.0.0"]),
+      });
+      expect(await drain(await registry.handle(request("dl/app/1.0.0")))).toEqual(tarball);
+      expect(store.fetches.at(-1)).toEqual({
+        runId: "run-1",
+        ecosystem: "fake",
+        name: "app",
+        version: "1.0.0",
+        filename: "1.0.0.tgz",
+        integrity: `sha512:${sha512}`,
+        sizeBytes: tarball.byteLength,
+        outcome: "served",
+        reason: "accepted advisories: GHSA-high",
+        createdAt: expect.any(Date),
+      });
+    }
+  });
+
+  it("records no reason for a served version that needed no waiver, whatever the policy accepts", async () => {
+    const { registry, store } = service({ audit: advisoryIndex({}), policy: accepting("GHSA-high") });
+    await drain(await registry.handle(request("dl/app/1.0.0")));
+    expect(store.fetches.at(-1)).toMatchObject({ outcome: "served" });
+    expect(store.fetches.at(-1)).not.toHaveProperty("reason");
+  });
+
+  it("never serves malware, even when the policy lists its id or alias", async () => {
+    const malware: WithheldAdvisory = { id: "GHSA-mal", malware: true, aliases: ["MAL-2026-1"] };
+    const { registry, store } = service({
+      audit: advisoryIndex({ "app@1.0.0": [malware] }),
+      policy: accepting("GHSA-mal"),
+    });
+    await expect(registry.handle(request("app"))).resolves.toMatchObject({ status: 404 });
+    const download = await registry.handle(request("dl/app/1.0.0"));
+    expect(download).toMatchObject({ status: 404 });
+    expect("body" in download && download.body).toContain("wardby_version_filtered");
+    expect(store.fetches.some((fetch) => fetch.outcome === "served")).toBe(false);
+  });
+
+  it("still refuses a version with two advisories when only one is accepted", async () => {
+    const { registry, store } = service({
+      audit: advisoryIndex({ "app@1.0.0": [high("GHSA-one"), high("GHSA-two")] }),
+      policy: accepting("GHSA-one"),
+    });
+    const download = await registry.handle(request("dl/app/1.0.0"));
+    expect(download).toMatchObject({ status: 404 });
+    expect("body" in download && download.body).toContain("wardby_version_filtered");
+    expect(store.fetches.at(-1)).toMatchObject({ outcome: "refused", reason: "wardby_version_filtered" });
+  });
+
+  it("without the policy, the graph walk does not follow a withheld version's dependencies", async () => {
+    const { registry, store } = service({ audit: advisoryIndex({ "app@1.0.0": [high("GHSA-high")] }) });
+    await expect(registry.handle(request("dl/dep/1.0.0"))).resolves.toMatchObject({ status: 403 });
+    expect(await store.isAllowedDependency("run-1", "fake", "dep")).toBe(false);
+  });
+
+  it("waives in the graph walk too: a dependency kept only by a waiver is in the approved graph", async () => {
+    // dep is reachable only through app@1.0.0, which carries an accepted
+    // advisory; without the policy the walk never reaches it.
+    const { registry, store } = service({
+      audit: advisoryIndex({ "app@1.0.0": [high("GHSA-high")] }),
+      policy: accepting("GHSA-high"),
+    });
+    // Straight to dep's download (a lockfile install): the walk must find it via app@1.0.0.
+    const response = await registry.handle(request("dl/dep/1.0.0"));
+    expect(await drain(response)).toEqual(tarball);
+    expect(await store.isAllowedDependency("run-1", "fake", "dep")).toBe(true);
+    // dep itself needed no waiver: its served row carries no reason.
+    expect(store.fetches.at(-1)).toMatchObject({ name: "dep", outcome: "served" });
+    expect(store.fetches.at(-1)).not.toHaveProperty("reason");
   });
 });
 
@@ -1174,7 +1286,11 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
             throw new RegistryError(503, "wardby_audit_unavailable", `the audit for "${name}" is unreachable`);
           }
           const withheld = overrides.withheld?.[name] ?? [];
-          return { withheld: (v: string) => (withheld.includes(v) ? ["GHSA-x"] : []), reported: () => [] };
+          return {
+            withheld: (v: string) => (withheld.includes(v) ? ["GHSA-x"] : []),
+            waived: () => [],
+            reported: () => [],
+          };
         },
       },
       upstream: async (url, init) => {

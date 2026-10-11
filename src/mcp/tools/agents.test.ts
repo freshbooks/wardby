@@ -1292,6 +1292,48 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  it("acceptedAdvisories needs packages:approve on create_agent and update_agent, and round-trips via get_agent", async () => {
+    const db = fakeDb([codingAgentSeed()]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const policy = { acceptedAdvisories: ["GHSA-86w9-cpqp-85rv"] };
+    const created = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "coder2",
+        systemPrompt: "Make the requested change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 0.25,
+        kind: "coding",
+        codingProfile: { repository: "openai/example", packagePolicy: policy },
+      },
+    });
+    expect(created.isError).toBe(true);
+    expect((created.content as { text: string }[])[0].text).toContain("packages:approve");
+    const updated = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { packagePolicy: policy } },
+    });
+    expect(updated.isError).toBe(true);
+    expect((updated.content as { text: string }[])[0].text).toContain("packages:approve");
+    await client.close();
+
+    const adminMcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    adminMcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read", "packages:approve"], ["admin"]));
+    registerAgentTools(adminMcp);
+    const adminClient = await connectClient(adminMcp);
+    const ok = await adminClient.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { packagePolicy: policy } },
+    });
+    expect(ok.isError).toBeFalsy();
+    const fetched = await adminClient.callTool({ name: "get_agent", arguments: { id: "a1" } });
+    expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.packagePolicy).toEqual(policy);
+    await adminClient.close();
+  });
+
   it("update_agent patching workerImageRef requires agents:admin, not just agents:write", async () => {
     const db = fakeDb([
       {

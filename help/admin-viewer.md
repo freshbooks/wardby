@@ -44,7 +44,10 @@ requires a minimal read-only Kubernetes role. See the Infrastructure view
 section of the [viewer README](../apps/viewer/README.md#infrastructure-view) for
 setup. Its Map shows the request path (entry, protection layer such as Cloud
 Armor, routes), each NetworkPolicy with a plain-English summary, and on GKE a
-link from each pod to the Google Cloud console. The run graph's zoom controls
+link from each pod to the Google Cloud console. In low-power mode the sleeping
+coding proxy and native gateway show as asleep (with when they last woke), and
+a failed old replica next to a healthy one is greyed out rather than shown as a
+failure. The run graph's zoom controls
 include **Fit width**, which fills the canvas with the graph's width.
 
 From Wardby 0.6.0 the API is also published as OpenAPI 3.1 (`docs/viewer-api.openapi.yml` in the package), an API contract you can feed to client generators such as `openapi-typescript`.

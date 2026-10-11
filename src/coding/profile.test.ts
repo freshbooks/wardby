@@ -41,6 +41,14 @@ describe("CodingProfileSchema", () => {
     expect(() => CodingProfileSchema.parse({ ...base, packageAllowlist: { cargo: ["serde"] } })).toThrow();
     expect(() => CodingProfileSchema.parse({ ...base, packageAllowlist: { npm: ["react@nope"] } })).toThrow();
     expect(() => CodingProfileSchema.parse({ ...base, packagePolicy: { minReleaseAgeDays: 31 } })).toThrow();
+    expect(
+      CodingProfileSchema.parse({ ...base, packagePolicy: { acceptedAdvisories: ["GHSA-86w9-cpqp-85rv"] } })
+        .packagePolicy,
+    ).toEqual({ acceptedAdvisories: ["GHSA-86w9-cpqp-85rv"] });
+    expect(() => CodingProfileSchema.parse({ ...base, packagePolicy: { acceptedAdvisories: ["MAL-2026-1"] } })).toThrow(
+      /malware advisories/,
+    );
+    expect(() => CodingProfileSchema.parse({ ...base, packagePolicy: { acceptedAdvisories: ["nope"] } })).toThrow();
   });
 
   it.each([

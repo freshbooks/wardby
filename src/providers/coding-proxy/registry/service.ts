@@ -11,7 +11,7 @@
 import { createHash } from "node:crypto";
 import { logger } from "../../../core/logger.js";
 import { matchRoot, parseAllowlist, resolvePolicy } from "../../../coding/registry/allowlist.js";
-import { PLAN_REFUSAL_FILENAME } from "../../../coding/registry/report.js";
+import { acceptedAdvisoriesReason, PLAN_REFUSAL_FILENAME } from "../../../coding/registry/report.js";
 import {
   RegistryError,
   type AllowlistEntry,
@@ -481,7 +481,7 @@ export class RegistryService {
     context: RegistryRunContext,
   ): Promise<RegistryResponse> {
     const entries = parseAllowlist(context.allowlist, this.options.adapters).get(adapter.id) ?? [];
-    const { minReleaseAgeDays } = resolvePolicy(context.policy);
+    const { minReleaseAgeDays, acceptedAdvisories } = resolvePolicy(context.policy);
     const timeoutMs = this.options.planTimeoutMs ?? DEFAULT_PLAN_TIMEOUT_MS;
     const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), request.signal]);
     const store = this.options.store;
@@ -500,6 +500,7 @@ export class RegistryService {
         upstream: this.versionUpstream,
         streamUpstream: this.options.upstream,
         audit: (versions, auditSignal) => auditVersions(adapter, versions, auditSignal),
+        accepted: new Set(acceptedAdvisories),
         hostAllowed: (url) => this.hostAllowed(adapter, url),
         signal,
       });
@@ -611,7 +612,16 @@ export class RegistryService {
           );
         }
         if (request.method === "HEAD") return { status: 200, contentType: contentTypeOf(route), body: "" };
-        return this.download(adapter, context, name, route, file, request.signal);
+        // The plan's waiver (if any) is recorded on the served row.
+        return this.download(
+          adapter,
+          context,
+          name,
+          route,
+          file,
+          request.signal,
+          acceptedAdvisoriesReason(approved.acceptedAdvisories),
+        );
       }
       // A version the plan definitively refused is answered from the plan,
       // with its code and reason: no metadata, no graph walk.
@@ -652,8 +662,9 @@ export class RegistryService {
     }
     let keep: Set<string>;
     let keptFiles: Set<string>;
+    let waivers: Map<string, readonly string[]>;
     try {
-      ({ keep, keptFiles } = await this.keptVersions(adapter, context, meta, root));
+      ({ keep, keptFiles, waivers } = await this.keptVersions(adapter, context, meta, root));
     } catch (error) {
       // Every refusal gets a row, including one the run never chose: the
       // audit being unreachable (fail-closed) still stops this request.
@@ -712,7 +723,17 @@ export class RegistryService {
     // HEAD answers from metadata alone: no upstream download, no
     // reservation, nothing recorded as served.
     if (request.method === "HEAD") return { status: 200, contentType: contentTypeOf(route), body: "" };
-    return this.download(adapter, context, name, route, file, request.signal);
+    // A version kept only by waiving accepted advisories records them on
+    // its served row.
+    return this.download(
+      adapter,
+      context,
+      name,
+      route,
+      file,
+      request.signal,
+      acceptedAdvisoriesReason(waivers.get(file.version) ?? []),
+    );
   }
 
   private hostAllowed(adapter: RegistryAdapter, url: string): boolean {
@@ -1082,12 +1103,17 @@ export class RegistryService {
     context: RegistryRunContext,
     meta: PackageMetadata,
     root: AllowlistEntry | undefined,
-  ): Promise<{ keep: Set<string>; keptFiles: Set<string> }> {
-    const { minReleaseAgeDays } = resolvePolicy(context.policy);
+  ): Promise<{ keep: Set<string>; keptFiles: Set<string>; waivers: Map<string, readonly string[]> }> {
+    const { minReleaseAgeDays, acceptedAdvisories } = resolvePolicy(context.policy);
     const cutoff = this.now().getTime() - minReleaseAgeDays * DAY_MS;
+    // The run's accepted advisories waive the blocking ones they name
+    // (never malware); fixed for the run (snapshotted at dispatch).
+    const accepted = new Set(acceptedAdvisories);
     const advisories = await this.options.audit.audit(adapter, meta.name);
     const keep = new Set<string>();
     const keptFiles = new Set<string>();
+    /** Kept version -> the advisories waived to keep it (only non-empty). */
+    const waivers = new Map<string, readonly string[]>();
     for (const info of meta.versions.values()) {
       if (root?.range && !adapter.satisfies(info.version, root.range)) continue;
       // Per-file release age: a file with an unknown or too-recent publish
@@ -1095,11 +1121,15 @@ export class RegistryService {
       // files does.
       const oldEnough = info.files.filter((file) => file.publishedAt && file.publishedAt.getTime() <= cutoff);
       if (oldEnough.length === 0) continue;
-      if (advisories.withheld(info.version).length > 0) continue;
+      if (advisories.withheld(info.version, accepted).length > 0) continue;
       keep.add(info.version);
       for (const file of oldEnough) keptFiles.add(file.filename);
+      if (accepted.size > 0) {
+        const waived = advisories.waived(info.version, accepted);
+        if (waived.length > 0) waivers.set(info.version, waived);
+      }
     }
-    return { keep, keptFiles };
+    return { keep, keptFiles, waivers };
   }
 
   private tally(context: RegistryRunContext): RunTally {
@@ -1226,6 +1256,9 @@ export class RegistryService {
     route: DownloadRoute | FileMetadataRoute,
     file: FileRef,
     signal: AbortSignal,
+    /** The served row's reason: set only when serving it waived accepted
+     *  advisories (`accepted advisories: <ids>`). */
+    servedReason?: string,
   ): Promise<RegistryResponse> {
     const { limits, store } = this.options;
     const runId = context.runId;
@@ -1355,6 +1388,7 @@ export class RegistryService {
               integrity: file.integrity ? `${file.integrity.algorithm}:${file.integrity.hex}` : undefined,
               sizeBytes: bytes,
               outcome: "served",
+              ...(servedReason ? { reason: servedReason } : {}),
             });
             // Counted before release() drops the reservation, so no window
             // exists where neither the tally nor inFlight holds this file.

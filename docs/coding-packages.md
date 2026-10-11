@@ -179,6 +179,54 @@ entries first.
 Every safeguard below (release age, advisories, wheels only, the record of
 what was fetched) applies to packages reached through an extra.
 
+### Accepting advisories
+
+A version withheld only because of a **high** or **critical** advisory can be
+served for one agent once an approver accepts that advisory. List the advisory
+ids in the coding profile's `packagePolicy.acceptedAdvisories` with
+`create_agent` or `update_agent` (up to 32 unique ids; needs `packages:approve`
+or `agents:admin`, like any other package-policy change):
+
+```json
+{
+  "codingProfile": {
+    "packagePolicy": {
+      "minReleaseAgeDays": 3,
+      "acceptedAdvisories": ["GHSA-xxxx-xxxx-xxxx"]
+    }
+  }
+}
+```
+
+`update_agent` replaces `packagePolicy` as a whole, so always send the full
+object: leaving out `minReleaseAgeDays` resets it to the default of 3. To
+remove a waiver, send the whole object again without that id.
+
+Upgrade the coding proxy together with the control plane before setting
+`acceptedAdvisories`: an older proxy rejects the unknown policy key and fails
+package requests for that run (it fails closed).
+
+- Ids are matched exactly as OSV prints them (case-sensitive, for example
+  `GHSA-…`, `CVE-…`, `PYSEC-…`) against an advisory's id and its aliases, so
+  accepting a `CVE-…` id also waives the `GHSA-…` advisory that aliases it.
+- The registry serves a version only when **every** advisory blocking it is
+  accepted. Otherwise it is still refused with `wardby_version_filtered`, and
+  the refusal names only the advisories still blocking.
+- **Malware is never waivable.** `MAL-…` ids are rejected when you set the
+  policy, and an advisory that is malware (a `MAL-…` id or alias, or CWE-506)
+  is still withheld even if its id is listed.
+- Each served version that needed a waiver is recorded with the reason
+  `accepted advisories: <ids>`. `get_run` shows `acceptedAdvisories` per
+  package, and the pull request body gets an **Accepted advisories** section
+  listing `name@version: ids` (only when a waiver was used).
+- The policy is fixed when a run starts; a change applies to the next run.
+
+To find the id, take the package named in the refusal and look it up at
+`https://osv.dev/list?q=<package>`, or run `npm audit`. Accept an advisory only
+after reading it and judging whether the vulnerable code is actually exposed
+(for example, a dependency used only at build time). Remove the entry once a
+fixed version ships, so the waiver does not outlive its reason.
+
 ### The quickstart offers a repository's declared packages
 
 The quickstart's coding step (see
@@ -416,6 +464,10 @@ collected either.
   parse counts as affected. If OSV can't be reached, installs in that request fail closed
   (`503 wardby_audit_unavailable`) rather than skipping the check — an
   operator can opt out of fail-closed with `REGISTRY_AUDIT_FAIL_OPEN=true`.
+  An approver can accept specific advisories for one agent with
+  `packagePolicy.acceptedAdvisories` (see
+  [Accepting advisories](#accepting-advisories)); malware is never waivable,
+  and every waiver is reported in the run's packages and in the pull request.
 - **Wheels only for Python.** PyPI source distributions (sdists), which can
   run arbitrary code at install/build time, are never served — only wheels.
 - **npm install scripts are off, but only by configuration.** The proxy sets

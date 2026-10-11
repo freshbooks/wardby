@@ -35,6 +35,17 @@ export interface ApprovedVersion {
   name: string;
   version: string;
   integrity: string;
+  /** Blocking advisories the run's accepted set waived for this version,
+   *  when the plan kept it only by that waiver; absent or empty otherwise. */
+  acceptedAdvisories?: readonly string[];
+}
+
+/** What a download of a plan-approved version needs. */
+export interface ApprovedDownload {
+  integrity: string;
+  downloadUrl: string;
+  /** Advisories the approval waived (empty when none). */
+  acceptedAdvisories: string[];
 }
 
 /** One exact version a lockfile plan definitively refused for a run. */
@@ -93,13 +104,14 @@ export interface RegistryStore {
   /** Approves exact versions for the run (an existing approval is kept). */
   approveVersions(runId: string, ecosystem: string, versions: readonly ApprovedVersion[]): Promise<void>;
   /** The run's approval of this exact version, with its download URL (from
-   *  the version's fact), or null. */
+   *  the version's fact) and any advisories it was approved by waiving, or
+   *  null. */
   findApprovedVersion(
     runId: string,
     ecosystem: string,
     name: string,
     version: string,
-  ): Promise<{ integrity: string; downloadUrl: string } | null>;
+  ): Promise<ApprovedDownload | null>;
   /** Stores the run's plan refusals (an existing one is kept). */
   refusePlanVersions(runId: string, ecosystem: string, versions: readonly PlanRefusedVersion[]): Promise<void>;
   /** The run's plan refusal of this exact version, or null. */
@@ -201,10 +213,16 @@ export class MemoryRegistryStore implements RegistryStore {
     ecosystem: string,
     name: string,
     version: string,
-  ): Promise<{ integrity: string; downloadUrl: string } | null> {
+  ): Promise<ApprovedDownload | null> {
     const approval = this.approvals.get(`${runId}\0${ecosystem}\0${name}\0${version}`);
     const fact = this.facts.get(`${ecosystem}\0${name}\0${version}`);
-    return approval && fact ? { integrity: approval.integrity, downloadUrl: fact.downloadUrl } : null;
+    return approval && fact
+      ? {
+          integrity: approval.integrity,
+          downloadUrl: fact.downloadUrl,
+          acceptedAdvisories: [...(approval.acceptedAdvisories ?? [])],
+        }
+      : null;
   }
 
   async refusePlanVersions(runId: string, ecosystem: string, versions: readonly PlanRefusedVersion[]): Promise<void> {

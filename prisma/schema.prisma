@@ -866,13 +866,17 @@ model RegistryVersionFact {
 /// /registry/<ecosystem>/-/plan) verified and approved: a download of it is
 /// served directly, integrity-checked against this value.
 model RegistryApprovedVersion {
-  runId     String
-  ecosystem String
-  name      String
-  version   String
-  integrity String
-  createdAt DateTime  @default(now())
-  run       CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  runId              String
+  ecosystem          String
+  name               String
+  version            String
+  integrity          String
+  /// Blocking advisories this run's packagePolicy.acceptedAdvisories waived
+  /// for this version: empty unless the plan kept it only by that waiver. A
+  /// download of it records them on its served RegistryFetch row.
+  acceptedAdvisories String[]  @default([])
+  createdAt          DateTime  @default(now())
+  run                CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
 
   @@id([runId, ecosystem, name, version])
 }
