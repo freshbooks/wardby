@@ -15,6 +15,7 @@ import type { Executor } from "../providers/executor/types.js";
 import { PrismaContainerExecutionStore } from "../providers/executor/container.js";
 import { CODING_QUEUE_TIMEOUT_ERROR, drainCodingQueue } from "./coding-queue.js";
 import { reconcileOnce } from "./reconciler.js";
+import { gatewayBusy, proxyBusy } from "./power-idle.js";
 
 const db = createPrismaClient();
 /** Every row this file creates starts with this, so beforeAll can clear leftovers of an aborted earlier run. */
@@ -34,7 +35,8 @@ async function cleanupByPrefix(): Promise<void> {
 async function seed(
   runId: string,
   opts: {
-    status?: "pending" | "running";
+    status?: "pending" | "running" | "succeeded";
+    finishedAt?: Date;
     queuedAt?: Date | null;
     jobBackend?: string;
     startedAt?: Date;
@@ -48,6 +50,7 @@ async function seed(
       executionManaged: true,
       status: opts.status ?? "pending",
       ...(opts.startedAt ? { startedAt: opts.startedAt } : {}),
+      ...(opts.finishedAt ? { finishedAt: opts.finishedAt } : {}),
     },
   });
   await db.codingRun.create({
@@ -318,5 +321,83 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
     expect((await db.run.findUniqueOrThrow({ where: { id: queuedRun } })).status).toBe("pending");
     expect((await db.run.findUniqueOrThrow({ where: { id: orphanRun } })).status).toBe("lost");
     await retire([queuedRun, orphanRun]);
+  });
+
+  // Low-power idle rules. retire() stamps finishedAt = now, and other files'
+  // terminal coding runs land at "now" too, so window cases anchor a day
+  // ahead: nothing else in the database can fall inside that window. Rows
+  // with only a busy=true assertion use the real window.
+  describe("low-power idle rules", () => {
+    const since = () => new Date(Date.now() - 30 * 60_000);
+    const minutes = (n: number) => n * 60_000;
+
+    it("an active coding run keeps the proxy busy", async () => {
+      await seed(id("lp-active"), { status: "running" });
+      expect(await proxyBusy(db, since())).toBe(true);
+      await retire([id("lp-active")]);
+    });
+
+    it("a queued coding run keeps the proxy busy", async () => {
+      await seed(id("lp-queued"), { status: "pending", queuedAt: new Date() });
+      expect(await proxyBusy(db, since())).toBe(true);
+      await retire([id("lp-queued")]);
+    });
+
+    it("a coding run finished inside the window keeps the proxy busy; outside it does not", async () => {
+      const anchor = Date.now() + minutes(24 * 60);
+      const windowStart = new Date(anchor - minutes(30));
+      await seed(id("lp-old"), { status: "succeeded", finishedAt: new Date(anchor - minutes(40)) });
+      expect(await proxyBusy(db, windowStart)).toBe(false);
+      await seed(id("lp-recent"), { status: "succeeded", finishedAt: new Date(anchor - minutes(10)) });
+      expect(await proxyBusy(db, windowStart)).toBe(true);
+      // Leave nothing dated in the future for a later test.
+      await db.run.updateMany({
+        where: { id: { in: [id("lp-old"), id("lp-recent")] } },
+        data: { finishedAt: new Date() },
+      });
+    });
+
+    it("an active sandbox native run or active gateway session keeps the gateway busy", async () => {
+      // Busy-only assertions: other database test files create sandbox runs and
+      // gateway sessions in parallel (the false cases live in power-idle.test.ts).
+      const sandboxRun = id("lp-sandbox");
+      await db.run.create({
+        data: { id: sandboxRun, agentId, status: "running", nativeExecutionMode: "sandbox" },
+      });
+      expect(await gatewayBusy(db, since())).toBe(true);
+      await db.run.update({
+        where: { id: sandboxRun },
+        data: { status: "succeeded", finishedAt: new Date(Date.now() - minutes(40)) },
+      });
+
+      const sessionRun = id("lp-session");
+      await db.run.create({
+        data: {
+          id: sessionRun,
+          agentId,
+          status: "succeeded",
+          finishedAt: new Date(Date.now() - minutes(40)),
+          nativeExecutionMode: "control_plane",
+        },
+      });
+      await db.nativeGatewaySession.create({
+        data: {
+          runId: sessionRun,
+          capabilityHash: `cap-${sessionRun}`,
+          status: "active",
+          deadlineAt: new Date(Date.now() + minutes(15)),
+          budgetUsd: 1,
+          snapshot: {},
+        },
+      });
+      expect(await gatewayBusy(db, since())).toBe(true);
+      await db.nativeGatewaySession.update({ where: { runId: sessionRun }, data: { status: "finished" } });
+    });
+
+    it("the proxy is idle with no active coding run and nothing in the window", async () => {
+      // A window starting after every finishedAt in the database leaves only the
+      // active-run rule, which this file's baseline keeps empty.
+      expect(await proxyBusy(db, new Date(Date.now() + minutes(60)))).toBe(false);
+    });
   });
 });

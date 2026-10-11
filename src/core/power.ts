@@ -15,6 +15,8 @@ export const LOW_POWER_WAKE_TIMEOUT = "low_power_wake_timeout";
 export const LOW_POWER_SCALE_FORBIDDEN = "low_power_scale_forbidden";
 /** ISO-8601 time the control plane last scaled the Deployment up from zero. */
 export const POWER_WOKE_AT = "wardby.io/power-woke-at";
+/** sleepIfIdle does real work at most this often. */
+const SLEEP_SWEEP_INTERVAL_MS = 60_000;
 
 export interface PowerOptions {
   config: LowPowerConfig;
@@ -62,6 +64,28 @@ export function createPower(options: PowerOptions): Power {
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const pollMs = options.pollMs ?? 2000;
+  const { busy } = options;
+  const idleMinutes = options.config.idleMinutes;
+  const idleMs = idleMinutes * 60_000;
+  // A Deployment never stamped by a wake counts as woken when this process started.
+  const startedAt = now().getTime();
+  let lastSweep: number | undefined;
+
+  async function sleepTarget(target: PowerTarget, at: number): Promise<void> {
+    if (!api || !busy) return;
+    const name = deployments[target];
+    const dep = await api.readDeployment(namespace, name);
+    if (!dep || (dep.spec?.replicas ?? 1) === 0) return;
+    const stamped = Date.parse(dep.metadata?.annotations?.[POWER_WOKE_AT] ?? "");
+    const wokeAt = Number.isNaN(stamped) ? startedAt : stamped;
+    if (at - wokeAt < idleMs) return;
+    const since = new Date(at - idleMs);
+    if (await busy(target, since)) return;
+    // A run may have started since the first check; look again right before scaling down.
+    if (await busy(target, since)) return;
+    await api.patchDeployment(namespace, name, { replicas: 0 });
+    powerLog.info({ target }, `power: ${target} slept (idle ${idleMinutes}m)`);
+  }
 
   return {
     enabled: true,
@@ -103,7 +127,16 @@ export function createPower(options: PowerOptions): Power {
     },
 
     async sleepIfIdle() {
-      throw new Error("not implemented");
+      const at = now().getTime();
+      if (lastSweep !== undefined && at - lastSweep < SLEEP_SWEEP_INTERVAL_MS) return;
+      lastSweep = at;
+      for (const target of Object.keys(deployments) as PowerTarget[]) {
+        try {
+          await sleepTarget(target, at);
+        } catch (err) {
+          powerLog.warn({ err, target }, "power_sleep_failed");
+        }
+      }
     },
 
     async checkAccess() {
