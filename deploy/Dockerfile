@@ -32,6 +32,8 @@ RUN npm ci --ignore-scripts \
     && test -z "$(find node_modules/openai -name '*.map' -print -quit)"
 COPY prisma ./prisma
 COPY prisma.config.ts ./
+# DATABASE_AUTH=rds-iam: the migration Job mints its DATABASE_URL with this (see scripts/rds-iam-url.mjs).
+COPY scripts/rds-iam-url.mjs ./scripts/rds-iam-url.mjs
 # npm ci ran with --ignore-scripts, so Prisma's schema engine (which `migrate deploy` needs) isn't
 # installed yet. The migration Job runs as a non-root user on a read-only root filesystem, where
 # the CLI can't fetch it on first use, so fetch it here, for this image's platform.
