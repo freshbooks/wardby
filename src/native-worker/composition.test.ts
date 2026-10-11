@@ -90,6 +90,19 @@ describe("native sandbox configuration", () => {
     ).toMatchObject({ namespace: "native", gatewayService: "gw" });
   });
 
+  it("accepts the eks platform only under gVisor", () => {
+    const eks = {
+      NATIVE_SANDBOX_LAUNCHER: "kubernetes",
+      NATIVE_SANDBOX_WORKER_IMAGE: image,
+      KUBERNETES_PLATFORM: "eks",
+    };
+    expect(() => loadNativeSandboxConfig(eks)).toThrow(/runs native workers only under gVisor/);
+    expect(loadNativeSandboxConfig({ ...eks, NATIVE_SANDBOX_RUNTIME_CLASS: "gvisor" })).toMatchObject({
+      platform: "eks",
+      runtimeClassName: "gvisor",
+    });
+  });
+
   it("reads GKE Autopilot's platform, run priority, timeouts, and the concurrency cap, and requires gVisor there", () => {
     const k8s = { NATIVE_SANDBOX_LAUNCHER: "kubernetes", NATIVE_SANDBOX_WORKER_IMAGE: image };
     const gke = {

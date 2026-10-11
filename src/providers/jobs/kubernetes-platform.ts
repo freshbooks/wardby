@@ -30,8 +30,12 @@
  */
 import type { V1PodSpec, V1Toleration } from "@kubernetes/client-node";
 
-export type KubernetesPlatform = "generic" | "gke-autopilot";
-export const KUBERNETES_PLATFORMS: readonly KubernetesPlatform[] = Object.freeze(["generic", "gke-autopilot"] as const);
+export type KubernetesPlatform = "generic" | "gke-autopilot" | "eks";
+export const KUBERNETES_PLATFORMS: readonly KubernetesPlatform[] = Object.freeze([
+  "generic",
+  "gke-autopilot",
+  "eks",
+] as const);
 
 export const KUBERNETES_PLATFORM_ERROR = "kubernetes_platform_unconformable";
 
@@ -190,9 +194,44 @@ const GKE_AUTOPILOT: KubernetesPlatformProfile = {
   requiresGvisor: true,
 };
 
+/** Node label and taint key of the EKS sandbox node group; deploy/aws and overlays/eks use the same strings. */
+export const EKS_SANDBOX_NODE_LABEL = "wardby.dev/sandbox";
+export const EKS_SANDBOX_TAINT_KEY = "sandbox";
+
+/**
+ * Amazon EKS with a dedicated gVisor node group (deploy/aws). EKS has no managed sandbox runtime, so
+ * the node group's launch template installs runsc and the overlay's `gvisor` RuntimeClass schedules
+ * onto it: the RuntimeClass admission plugin merges its `scheduling` block into the pod, which is
+ * the toleration and nodeSelector below — wardby never sets either itself (see SYMMETRY CAVEAT).
+ *
+ * PROVISIONAL: written from the RuntimeClass spec, not yet a server-side dry-run capture. EKS has no
+ * Autopilot-style resource admission, so resources are the generic rules plus explicit ephemeral
+ * storage (kubelet eviction accounting on a shared sandbox node). Replace the fixture with a real
+ * capture before relying on the allowance list (fixtures/eks-dry-run.json).
+ */
+const EKS: KubernetesPlatformProfile = {
+  name: "eks",
+  resources: {
+    cpuFloorMillicores: 0,
+    cpuIncrementMillicores: 1,
+    memoryPerCpuMinMib: 0,
+    memoryPerCpuMaxMib: Number.POSITIVE_INFINITY,
+    explicitEphemeralStorage: true,
+  },
+  metadata: {
+    podAnnotationKeyPrefixes: [],
+    podLabelKeyPrefixes: [],
+    tolerations: [{ key: EKS_SANDBOX_TAINT_KEY, operator: "Equal", value: GVISOR_RUNTIME_CLASS, effect: "NoSchedule" }],
+    nodeSelector: { [EKS_SANDBOX_NODE_LABEL]: GVISOR_RUNTIME_CLASS },
+    dropsPodSeccompProfile: false,
+  },
+  requiresGvisor: true,
+};
+
 const PROFILES: Readonly<Record<KubernetesPlatform, KubernetesPlatformProfile>> = Object.freeze({
   generic: freezeProfile(GENERIC),
   "gke-autopilot": freezeProfile(GKE_AUTOPILOT),
+  eks: freezeProfile(EKS),
 });
 
 export function platformProfile(name: KubernetesPlatform): KubernetesPlatformProfile {

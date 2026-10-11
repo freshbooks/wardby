@@ -1,6 +1,8 @@
 import { availableParallelism } from "node:os";
 import { PrismaPg } from "@prisma/adapter-pg";
+import type { PoolConfig } from "pg";
 import { PrismaClient } from "#prisma";
+import { type DatabaseAuth, type PgAuthOptions, databaseAuthFromEnv, pgConnectionConfig } from "./pg-auth.js";
 
 /**
  * Connection-pool sizing for the node-postgres pool behind @prisma/adapter-pg.
@@ -64,23 +66,35 @@ class MissingUrlAdapter extends PrismaPg {
   }
 }
 
+export interface PrismaClientOptions {
+  /** Overrides the pool size for a caller that sizes its own pools
+   *  (the coding proxy keeps its ledger and its package registry apart). */
+  poolMax?: number;
+  /** Defaults to DATABASE_AUTH (see pg-auth.ts). */
+  auth?: DatabaseAuth;
+  /** Test seam for rds-iam (environment, token signer, CA file reader). */
+  pgAuth?: PgAuthOptions;
+}
+
+/** The pg pool config behind every Prisma client: auth (pg-auth.ts) plus pool sizing. */
+export function prismaPgConfig(url: string, options: PrismaClientOptions = {}): PoolConfig {
+  return {
+    ...pgConnectionConfig(url, options.auth ?? databaseAuthFromEnv(), options.pgAuth),
+    ...poolSettings(url),
+    ...(options.poolMax !== undefined ? { max: options.poolMax } : {}),
+  };
+}
+
 /**
  * The one way wardby builds a Prisma client. `url` defaults to DATABASE_URL
- * as read at call time.
+ * as read at call time. How it authenticates follows DATABASE_AUTH
+ * (password by default, or rds-iam; see pg-auth.ts).
  */
-/** `poolMax` overrides the pool size for a caller that sizes its own pools
- *  (the coding proxy keeps its ledger and its package registry apart). */
 export function createPrismaClient(
   url: string | undefined = process.env.DATABASE_URL,
-  options: { poolMax?: number } = {},
+  options: PrismaClientOptions = {},
 ): PrismaClient {
-  const adapter = url
-    ? new PrismaPg({
-        connectionString: url,
-        ...poolSettings(url),
-        ...(options.poolMax !== undefined ? { max: options.poolMax } : {}),
-      })
-    : new MissingUrlAdapter({ connectionString: "" });
+  const adapter = url ? new PrismaPg(prismaPgConfig(url, options)) : new MissingUrlAdapter({ connectionString: "" });
   return new PrismaClient({ adapter });
 }
 

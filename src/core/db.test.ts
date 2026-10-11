@@ -1,6 +1,6 @@
 import { availableParallelism } from "node:os";
 import { describe, expect, it } from "vitest";
-import { createPrismaClient, DEFAULT_POOL_TIMEOUT_MS, defaultPoolMax, poolSettings } from "./db.js";
+import { createPrismaClient, DEFAULT_POOL_TIMEOUT_MS, defaultPoolMax, poolSettings, prismaPgConfig } from "./db.js";
 
 const BASE = "postgresql://user@db.example:5432/wardby";
 const defaults = () => ({ max: defaultPoolMax(), connectionTimeoutMillis: DEFAULT_POOL_TIMEOUT_MS });
@@ -53,5 +53,57 @@ describe("createPrismaClient", () => {
     const client = createPrismaClient("");
     await expect(client.$queryRaw`SELECT 1`).rejects.toThrow("DATABASE_URL is not set");
     await client.$disconnect();
+  });
+});
+
+describe("prismaPgConfig", () => {
+  const rdsAuth = {
+    env: { AWS_REGION: "us-east-1" },
+    readFile: () => "CA",
+    makeSigner: () => ({ getAuthToken: async () => "t" }),
+  };
+
+  it("is today's adapter config under password auth: connectionString plus pool settings", () => {
+    const url = "postgresql://u:p@localhost:5432/db?connection_limit=7";
+    expect(prismaPgConfig(url, { auth: "password" })).toEqual({
+      connectionString: url,
+      max: 7,
+      connectionTimeoutMillis: DEFAULT_POOL_TIMEOUT_MS,
+    });
+    expect(prismaPgConfig(BASE, { auth: "password", poolMax: 4 })).toEqual({
+      connectionString: BASE,
+      max: 4,
+      connectionTimeoutMillis: DEFAULT_POOL_TIMEOUT_MS,
+    });
+  });
+
+  it("defaults to DATABASE_AUTH, which is password when unset", () => {
+    const saved = process.env.DATABASE_AUTH;
+    delete process.env.DATABASE_AUTH;
+    try {
+      expect(prismaPgConfig(BASE)).toEqual({ connectionString: BASE, ...defaults() });
+    } finally {
+      if (saved !== undefined) process.env.DATABASE_AUTH = saved;
+    }
+  });
+
+  it("applies poolMax over the URL's limit", () => {
+    expect(prismaPgConfig(`${BASE}?connection_limit=7`, { auth: "password", poolMax: 3 }).max).toBe(3);
+  });
+
+  it("uses explicit fields and a token password under rds-iam, keeping the URL's pool settings", () => {
+    const url =
+      "postgresql://app@db.example:5432/w?sslmode=verify-full&sslrootcert=/ca.pem&connection_limit=4&pool_timeout=2";
+    const config = prismaPgConfig(url, { auth: "rds-iam", pgAuth: rdsAuth });
+    expect(config.connectionString).toBeUndefined();
+    expect(typeof config.password).toBe("function");
+    expect(config).toMatchObject({ host: "db.example", port: 5432, user: "app", database: "w", max: 4 });
+    expect(config.connectionTimeoutMillis).toBe(2_000);
+  });
+
+  it("refuses a bad rds-iam URL with database_auth_invalid", () => {
+    expect(() => prismaPgConfig("postgresql://app@db.example/w", { auth: "rds-iam", pgAuth: rdsAuth })).toThrow(
+      "database_auth_invalid",
+    );
   });
 });

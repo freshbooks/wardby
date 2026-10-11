@@ -12,6 +12,7 @@ import {
 
 const generic = platformProfile("generic");
 const autopilot = platformProfile("gke-autopilot");
+const eks = platformProfile("eks");
 
 describe("conformResources", () => {
   it("leaves a generic request exactly as asked", () => {
@@ -110,7 +111,7 @@ describe("conformResources", () => {
 
 describe("the profiles themselves", () => {
   it("are frozen, so an allowance list cannot be widened at runtime", () => {
-    for (const profile of [generic, autopilot]) {
+    for (const profile of [generic, autopilot, eks]) {
       expect(Object.isFrozen(profile)).toBe(true);
       expect(Object.isFrozen(profile.resources)).toBe(true);
       expect(Object.isFrozen(profile.metadata)).toBe(true);
@@ -263,5 +264,45 @@ describe("normalizePlatformMetadata", () => {
     const afterGeneric = withArch();
     normalizePlatformMetadata(generic, afterGeneric);
     expect(afterGeneric).toEqual(beforeGeneric);
+  });
+});
+
+describe("the eks profile", () => {
+  it("requires gvisor and imposes no ephemeral-storage ceiling", () => {
+    expect(eks.requiresGvisor).toBe(true);
+    expect(eks.resources.ephemeralStorageCeilingMib).toBeUndefined();
+    expect(() => assertPlatformConfig(eks, { maxDiskMb: 2048 })).toThrow(
+      "KUBERNETES_PLATFORM=eks requires KUBERNETES_RUNTIME_CLASS=gvisor (found unset)",
+    );
+    expect(() => assertPlatformConfig(eks, { runtimeClassName: "gvisor", maxDiskMb: 32_768 })).not.toThrow();
+  });
+
+  it("emits explicit ephemeral storage but leaves CPU and memory as asked", () => {
+    expect(conformResources(eks, { cpuMillicores: 300, memoryMib: 700, ephemeralStorageMib: 2048 })).toEqual({
+      requests: { cpu: "300m", memory: "700Mi", "ephemeral-storage": "2048Mi" },
+      limits: { cpu: "300m", memory: "700Mi", "ephemeral-storage": "2048Mi" },
+    });
+  });
+
+  it("forgives exactly the gVisor RuntimeClass's injected toleration and nodeSelector", () => {
+    const view = {
+      labels: { "app.kubernetes.io/managed-by": "wardby" },
+      annotations: { "dev.gvisor.internal.seccomp.worker": "RuntimeDefault" },
+      spec: {
+        containers: [],
+        nodeSelector: { "wardby.dev/sandbox": "gvisor", "sandbox.gke.io/runtime": "gvisor" },
+        tolerations: [
+          { key: "sandbox", operator: "Equal", value: "gvisor", effect: "NoSchedule" },
+          { key: "sandbox.gke.io/runtime", operator: "Equal", value: "gvisor", effect: "NoSchedule" },
+        ],
+      } as V1PodSpec,
+    };
+    normalizePlatformMetadata(eks, view);
+    // Only the EKS entries are removed; GKE's, and the gVisor annotation GKE adds, still count as differences.
+    expect(view.spec.nodeSelector).toEqual({ "sandbox.gke.io/runtime": "gvisor" });
+    expect(view.spec.tolerations).toEqual([
+      { key: "sandbox.gke.io/runtime", operator: "Equal", value: "gvisor", effect: "NoSchedule" },
+    ]);
+    expect(view.annotations).toEqual({ "dev.gvisor.internal.seccomp.worker": "RuntimeDefault" });
   });
 });

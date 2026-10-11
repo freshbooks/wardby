@@ -14,7 +14,7 @@ appliesTo: ">=0.5.4"
 1. Describe the pod while it waits: `kubectl describe pod -n <namespace> -l wardby.io/component=native-run`. Look at the events for image pull errors, unschedulable reasons, or an unknown runtime class.
 2. Image pull: the cluster must be able to pull `NATIVE_SANDBOX_WORKER_IMAGE` (a registry digest) without interactive credentials; add a pull secret to the namespace's default service account if the registry is private.
 3. Scheduling: raise node capacity or lower `NATIVE_SANDBOX_CPUS` and `NATIVE_SANDBOX_MEMORY_MB`, and check namespace ResourceQuotas.
-4. Runtime class: confirm `NATIVE_SANDBOX_RUNTIME_CLASS` (or `KUBERNETES_RUNTIME_CLASS`) exists on the cluster.
+4. Runtime class: confirm `NATIVE_SANDBOX_RUNTIME_CLASS` (or `KUBERNETES_RUNTIME_CLASS`) exists on the cluster. On Amazon EKS (`KUBERNETES_PLATFORM=eks`) the `gvisor` RuntimeClass must use handler `runsc` and its scheduling block must match your sandbox nodes (label `wardby.dev/sandbox=gvisor`, taint `sandbox=gvisor:NoSchedule`); a mismatch leaves the pod pending.
 5. On a cold node, such as a first gVisor pod on GKE Autopilot (about two minutes), raise `NATIVE_SANDBOX_READY_TIMEOUT_MS` (1000 to 1800000; about 600000 on Autopilot).
 6. Trigger the run again.
 

@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import type { V1NetworkPolicy, V1Pod, V1Secret } from "@kubernetes/client-node";
 import { isRepositoryDigest } from "../providers/jobs/docker-isolation.js";
+import { CLOUD_METADATA_PROBES } from "../providers/jobs/metadata-probes.js";
 import {
   conformResources,
   GVISOR_RUNTIME_CLASS,
@@ -248,10 +249,10 @@ function buildNativePolicy(name: string, namespace: string, labels: Record<strin
 /** Exit codes of the in-pod enforcement probe. */
 export const NATIVE_PROBE = { proven: 0, gatewayUnreachable: 3, denyReachable: 4, outsideReachable: 5 } as const;
 
-/** Addresses a worker must not reach: the internet, and the cloud metadata server (node and workload credentials). */
+/** Addresses a worker must not reach: the internet, and the cloud metadata endpoints (node and workload credentials). */
 export const NATIVE_PROBE_OUTSIDE: readonly { host: string; port: number }[] = [
   { host: "1.1.1.1", port: 443 },
-  { host: "169.254.169.254", port: 80 },
+  ...CLOUD_METADATA_PROBES,
 ];
 
 /**
@@ -273,10 +274,15 @@ export function nativeEnforcementProbe(
     "});",
     "(async () => {",
     `  if (!(await reach(${JSON.stringify(gatewayHost)}, ${NATIVE_GATEWAY_PORT}))) process.exit(${NATIVE_PROBE.gatewayUnreachable});`,
-    `  if (await reach(${JSON.stringify(gatewayHost)}, ${NATIVE_GATEWAY_DENY_PORT})) process.exit(${NATIVE_PROBE.denyReachable});`,
-    ...outside.map(
-      (o) => `  if (await reach(${JSON.stringify(o.host)}, ${o.port})) process.exit(${NATIVE_PROBE.outsideReachable});`,
-    ),
+    // The deny port and every outside address run concurrently (each dropped connect waits the full
+    // timeout, so serial probing would eat the exec budget); the verdicts are still read in a fixed
+    // order, so when several fail the exit code is deterministic: deny port first, then outside.
+    `  const deny = reach(${JSON.stringify(gatewayHost)}, ${NATIVE_GATEWAY_DENY_PORT});`,
+    "  const outside = Promise.all([",
+    ...outside.map((o) => `    reach(${JSON.stringify(o.host)}, ${o.port}),`),
+    "  ]);",
+    `  if (await deny) process.exit(${NATIVE_PROBE.denyReachable});`,
+    `  if ((await outside).some(Boolean)) process.exit(${NATIVE_PROBE.outsideReachable});`,
     `  process.exit(${NATIVE_PROBE.proven});`,
     "})();",
   ].join("\n");

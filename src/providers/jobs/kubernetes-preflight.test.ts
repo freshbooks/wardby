@@ -649,7 +649,24 @@ describe("CANARY_SCRIPT", () => {
       "10.96.0.50:8787",
       "10.96.0.50:8788",
       "169.254.169.254:80",
+      "169.254.170.23:80",
+      "fd00:ec2::23:80",
+      "fd00:ec2::254:80",
     ]);
+  });
+
+  it("reports metadata true when any one metadata endpoint answers", async () => {
+    const { output } = await runCanaryScript((address) =>
+      address === "10.96.0.50:8787" || address === "169.254.170.23:80" ? "connect" : "timeout",
+    );
+    expect(output.wardbyCanary.metadata).toBe(true);
+  });
+
+  it("reports metadata false when a metadata endpoint errors instead of connecting", async () => {
+    const { output } = await runCanaryScript((address) =>
+      address === "10.96.0.50:8787" ? "connect" : address === "fd00:ec2::254:80" ? "error" : "timeout",
+    );
+    expect(output.wardbyCanary.metadata).toBe(false);
   });
 
   it("reports proxyDeny true when the policy is never enforced within the settle window", async () => {

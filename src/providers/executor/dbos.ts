@@ -19,6 +19,7 @@
  */
 
 import { DBOS, Error as DbosErrors } from "@dbos-inc/dbos-sdk";
+import pg from "pg";
 import type { PrismaClient } from "#prisma";
 import type { DbosConfig } from "../../config/providers.js";
 import { RunOwnershipLostError, type StepRunner } from "../engine/types.js";
@@ -28,6 +29,7 @@ import type { SelfDefectSink } from "../../core/self-defects.js";
 import { prisma as defaultDb } from "../../core/db.js";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/timing.js";
 import { logger } from "../../core/logger.js";
+import { type DatabaseAuth, type PgAuthOptions, databaseAuthFromEnv, pgConnectionConfig } from "../../core/pg-auth.js";
 import {
   ADOPTION_EXHAUSTED_REASON,
   decideRecovery,
@@ -42,6 +44,65 @@ const dbosLog = logger.child({ module: "dbos-executor" });
 
 type Providers = NativeRunProviders;
 type Db = RunnerDb & Pick<PrismaClient, "run">;
+
+/** DBOS's own system pool size (DEFAULT_POOL_SIZE in the SDK's system_database.js); kept for ours. */
+const DBOS_SYSTEM_POOL_SIZE = 10;
+/** DBOS's own connect timeout when the URL sets no connect_timeout (getClientConfig in the SDK's utils.js). */
+const DBOS_CONNECT_TIMEOUT_MS = 10_000;
+
+/**
+ * DBOS.setConfig input. Under password auth this is exactly what launch() always passed, and DBOS
+ * opens its own pool from the URL. Under rds-iam DBOS gets a pool whose password is the IAM token;
+ * DBOS then runs its migrations, queries and LISTEN through that pool and never opens a URL
+ * connection (system_database.js: a custom pool skips database creation and is what every
+ * connection borrows from). The pool copies what DBOS would have set on its own: size, connect
+ * timeout and application_name. DBOS never ends a pool it was given — see endSystemPool().
+ */
+export function dbosLaunchConfig(
+  config: DbosConfig,
+  executorId: string,
+  auth: DatabaseAuth,
+  pgAuth?: PgAuthOptions,
+): {
+  name: string;
+  systemDatabaseUrl: string;
+  systemDatabaseSchemaName: string;
+  executorID: string;
+  runAdminServer: false;
+  logLevel: "warn";
+  systemDatabasePool?: pg.Pool;
+} {
+  const url = config.systemDatabaseUrl!;
+  const launch = {
+    name: "wardby",
+    systemDatabaseUrl: url,
+    systemDatabaseSchemaName: config.schemaName,
+    executorID: executorId,
+    runAdminServer: false as const,
+    logLevel: "warn" as const,
+  };
+  if (auth !== "rds-iam") return launch;
+  const connection = pgConnectionConfig(url, auth, pgAuth); // validates the URL first
+  const connectTimeout = Number.parseInt(new URL(url).searchParams.get("connect_timeout") ?? "", 10);
+  const pool = new pg.Pool({
+    application_name: `dbos_transact_${executorId}`,
+    ...connection,
+    max: DBOS_SYSTEM_POOL_SIZE,
+    connectionTimeoutMillis: connectTimeout ? connectTimeout * 1000 : DBOS_CONNECT_TIMEOUT_MS,
+  });
+  // DBOS attaches no listener to a caller's pool; an idle connection's error would otherwise crash the process.
+  pool.on("error", (err) => dbosLog.warn({ err }, "DBOS system database pool error"));
+  return { ...launch, systemDatabasePool: pool };
+}
+
+/** The pool launch() handed DBOS, if any. Module-level like DBOS itself: whoever shuts DBOS down ends it. */
+let systemPool: pg.Pool | undefined;
+
+async function endSystemPool(): Promise<void> {
+  const pool = systemPool;
+  systemPool = undefined;
+  await pool?.end().catch((err: unknown) => dbosLog.warn({ err }, "failed to close the DBOS system database pool"));
+}
 
 /** The executor whose deps the registered workflow uses. Set by launch(). */
 let activeExecutor: DbosExecutor | undefined;
@@ -174,15 +235,24 @@ export class DbosExecutor implements Executor {
     }
     setActiveExecutor(this);
     if (!DBOS.isInitialized()) {
-      DBOS.setConfig({
-        name: "wardby",
-        systemDatabaseUrl: this.config.systemDatabaseUrl,
-        systemDatabaseSchemaName: this.config.schemaName,
-        executorID: this.id,
-        runAdminServer: false,
-        logLevel: "warn",
-      });
-      await DBOS.launch();
+      const launchConfig = dbosLaunchConfig(this.config, this.id, databaseAuthFromEnv());
+      systemPool = launchConfig.systemDatabasePool;
+      try {
+        DBOS.setConfig(launchConfig);
+        await DBOS.launch();
+      } catch (err) {
+        // DBOS.launch can throw after it initialized (registering the application version, starting
+        // event receivers). Shut that half-launched DBOS down so the next launch() starts clean, then
+        // end the pool either way: the next launch() makes a new one.
+        if (activeExecutor === this) setActiveExecutor(undefined);
+        if (DBOS.isInitialized()) {
+          await DBOS.shutdown().catch((shutdownErr: unknown) =>
+            dbosLog.warn({ err: shutdownErr }, "failed to shut down DBOS after a failed launch"),
+          );
+        }
+        await endSystemPool();
+        throw err;
+      }
     }
     this.launched = true;
     dbosLog.info({ executorId: DBOS.executorID }, "DBOS executor launched");
@@ -192,7 +262,11 @@ export class DbosExecutor implements Executor {
     if (!this.launched) return;
     this.launched = false;
     if (activeExecutor === this) setActiveExecutor(undefined);
-    await DBOS.shutdown({ workflowCompletionTimeoutMS: 5_000 });
+    try {
+      await DBOS.shutdown({ workflowCompletionTimeoutMS: 5_000 });
+    } finally {
+      await endSystemPool();
+    }
   }
 
   /** Where a run this executor marks failed files its self-defect (no-op without a configured issue tracker). */
