@@ -100,3 +100,26 @@ describe("deploy/aws database identities", () => {
     for (const account of bound) expect(accounts, account).toContain(account);
   });
 });
+
+/** Quoted strings inside `<name> = toset([ ... ])` in a .tf source. */
+function tosetList(source, name) {
+  const body = source.match(new RegExp(`${name}\\s*=\\s*toset\\(\\[([\\s\\S]*?)\\]\\)`))?.[1] ?? "";
+  return [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
+describe("deploy/aws parity with the GKE deployment", () => {
+  it("creates the same secret ids as deploy/gke", () => {
+    const gke = tosetList(readFileSync(join(repoRoot, "deploy", "gke", "secrets.tf"), "utf8"), "secret_ids");
+    expect(gke.length).toBeGreaterThan(0);
+    expect(tosetList(read("secrets.tf"), "secret_ids").sort()).toEqual(gke.sort());
+  });
+
+  it("creates one ECR repository per docker-bake.hcl default target", () => {
+    const bake = readFileSync(join(repoRoot, "deploy", "gke", "docker-bake.hcl"), "utf8");
+    const targets = [
+      ...bake.match(/group "default"\s*\{[\s\S]*?targets\s*=\s*\[([\s\S]*?)\]/)[1].matchAll(/"([^"]+)"/g),
+    ].map((m) => m[1]);
+    expect(targets.length).toBeGreaterThan(0);
+    expect(tosetList(read("ecr.tf"), "image_names").sort()).toEqual(targets.sort());
+  });
+});

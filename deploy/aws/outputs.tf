@@ -95,3 +95,25 @@ output "database_users" {
 output "database_role_arns" {
   value = { for k, r in aws_iam_role.database : k => r.arn }
 }
+
+output "ecr_registry" {
+  description = "REGISTRY for docker buildx bake; images are <ecr_registry>/<target>."
+  value       = "${local.account_id}.dkr.ecr.${var.region}.${local.dns_suffix}/${var.name_prefix}"
+}
+
+output "ecr_repository_urls" {
+  value = { for k, r in aws_ecr_repository.images : k => r.repository_url }
+}
+
+output "secret_name_prefix" {
+  description = "Secrets are named <secret_name_prefix><id>."
+  value       = "${var.name_prefix}/"
+}
+
+output "secret_arns" {
+  value = { for k, s in aws_secretsmanager_secret.deployment : k => s.arn }
+}
+
+output "external_secrets_role_arn" {
+  value = aws_iam_role.external_secrets.arn
+}
