@@ -125,6 +125,12 @@ agent how to continue each open one; see
 [Related pull requests across repositories](related-pull-requests.md). See
 the full guide for the recipe.
 
+To have a code reviewer check such a pull request against the ticket's own
+acceptance criteria, link the reviewer to the Jira project too (read access
+is enough): it then reads the ticket with `jira_get_issue`. Without that link
+it can only judge the criteria from the pull request's description; see
+[Run GitHub code-review agents](code-review-agents.md#reading-the-issue-a-pull-request-resolves).
+
 ## Trust rules
 
 Only people (not customers, apps, or the service account itself) can trigger

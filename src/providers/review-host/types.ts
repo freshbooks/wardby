@@ -128,6 +128,38 @@ export type FileReadResult =
   | { kind: "directory"; path: string; entries: string[] }
   | { kind: "not_found"; path: string };
 
+/** One issue comment; author-written text, untrusted. */
+export interface IssueCommentView {
+  author: string | null;
+  body: string;
+  createdAt: string;
+  /** The body was cut at the per-comment cap. */
+  truncated: boolean;
+}
+
+/** An issue as repo_issue_read shows it. Title, body, labels, and comments are untrusted text. */
+export interface IssueView {
+  number: number;
+  title: string;
+  state: "open" | "closed";
+  body: string;
+  bodyTruncated: boolean;
+  labels: string[];
+  author: string | null;
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+  /** The most recent comments, oldest first. */
+  comments: IssueCommentView[];
+  /** All comments on the issue, including any left out. */
+  totalComments: number;
+  /** Anything was cut: the body, a comment, or older comments left out. */
+  truncated: boolean;
+}
+
+export type IssueReadResult =
+  ({ kind: "issue" } & IssueView) | { kind: "pull_request"; number: number } | { kind: "not_found"; number: number };
+
 export interface FileListView {
   ref: string;
   count: number;
@@ -294,6 +326,8 @@ export interface CodeReviewHost {
     window: { startLine: number; maxLines: number },
   ): Promise<FileReadResult>;
   listFiles(repository: string, ref: string | undefined, pathPrefix?: string): Promise<FileListView>;
+  /** An issue and its most recent comments, read-only. Hosts without issues (a local repository) leave it out. */
+  readIssue?(repository: string, number: number): Promise<IssueReadResult>;
   publishReview(repository: string, input: PublishReviewInput): Promise<PublishReviewResult>;
   /** `id` identifies the new comment for editComment; a reply is an "inline" comment, anything else "conversation". */
   comment(repository: string, input: CommentInput): Promise<{ url: string; id: string }>;

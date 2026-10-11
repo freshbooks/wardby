@@ -315,6 +315,103 @@ describe("GitHubReviewHost reads", () => {
   });
 });
 
+describe("GitHubReviewHost.readIssue", () => {
+  const ISSUE = {
+    number: 3,
+    title: "Add a joke",
+    state: "open",
+    body: "<!-- wardby:run_1 -->\nResolves the thing.\n- [ ] tests",
+    labels: [{ name: "enhancement" }, "bug"],
+    user: { login: "octo" },
+    html_url: "https://github.com/chfields/knock-knock-jokes/issues/3",
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-02T00:00:00Z",
+    comments: 1,
+  };
+  const comment = (i: number, body = `c${i}`) => ({
+    id: i,
+    body,
+    user: { login: `u${i}` },
+    created_at: `2026-10-0${(i % 9) + 1}T00:00:00Z`,
+  });
+
+  it("reads an issue and its comments with an issues:read token, stripping wardby markers", async () => {
+    const { client, grants } = fakeGitHub(({ path }) => {
+      if (path === `${BASE}/issues/3`) return json(ISSUE);
+      if (path === `${BASE}/issues/3/comments?per_page=100&page=1`) {
+        return json([comment(1, "looks good <!-- wardby:review:a1 sha=x -->")]);
+      }
+      return undefined;
+    });
+    await expect(new GitHubReviewHost(client).readIssue(REPO, 3)).resolves.toEqual({
+      kind: "issue",
+      number: 3,
+      title: "Add a joke",
+      state: "open",
+      body: "\nResolves the thing.\n- [ ] tests",
+      bodyTruncated: false,
+      labels: ["enhancement", "bug"],
+      author: "octo",
+      url: ISSUE.html_url,
+      createdAt: ISSUE.created_at,
+      updatedAt: ISSUE.updated_at,
+      comments: [{ author: "u1", body: "looks good ", createdAt: "2026-10-02T00:00:00Z", truncated: false }],
+      totalComments: 1,
+      truncated: false,
+    });
+    expect(grants).toEqual([{ issues: "read" }]);
+  });
+
+  it("caps the body and each comment, and keeps only the 30 newest comments", async () => {
+    const all = Array.from({ length: 130 }, (_, i) => comment(i + 1));
+    all[129] = comment(130, "y".repeat(5000));
+    const { client, calls } = fakeGitHub(({ path }) => {
+      if (path === `${BASE}/issues/3`) return json({ ...ISSUE, body: "x".repeat(40_000), comments: 130 });
+      if (path === `${BASE}/issues/3/comments?per_page=100&page=2`) return json(all.slice(100));
+      if (path === `${BASE}/issues/3/comments?per_page=100&page=1`) return json(all.slice(0, 100));
+      return undefined;
+    });
+    const read = await new GitHubReviewHost(client).readIssue(REPO, 3);
+    if (read.kind !== "issue") throw new Error(read.kind);
+    expect(read.body).toHaveLength(32_000);
+    expect(read.bodyTruncated).toBe(true);
+    expect(read.comments).toHaveLength(30);
+    expect(read.comments[0].author).toBe("u101");
+    expect(read.comments[29]).toMatchObject({ author: "u130", truncated: true });
+    expect(read.comments[29].body).toHaveLength(4_000);
+    expect(read.totalComments).toBe(130);
+    expect(read.truncated).toBe(true);
+    // Page 2 alone held 30 comments: page 1 is never read.
+    expect(calls.map((c) => c.path)).not.toContain(`${BASE}/issues/3/comments?per_page=100&page=1`);
+  });
+
+  it("fills from the previous page when the last page is short", async () => {
+    const all = Array.from({ length: 105 }, (_, i) => comment(i + 1));
+    const { client } = fakeGitHub(({ path }) => {
+      if (path === `${BASE}/issues/3`) return json({ ...ISSUE, comments: 105 });
+      if (path === `${BASE}/issues/3/comments?per_page=100&page=2`) return json(all.slice(100));
+      if (path === `${BASE}/issues/3/comments?per_page=100&page=1`) return json(all.slice(0, 100));
+      return undefined;
+    });
+    const read = await new GitHubReviewHost(client).readIssue(REPO, 3);
+    if (read.kind !== "issue") throw new Error(read.kind);
+    expect(read.comments.map((c) => c.author)).toEqual(Array.from({ length: 30 }, (_, i) => `u${76 + i}`));
+    expect(read.truncated).toBe(true);
+  });
+
+  it("flags a pull request number and a missing issue without reading comments", async () => {
+    const { client, calls } = fakeGitHub(({ path }) => {
+      if (path === `${BASE}/issues/7`) return json({ ...ISSUE, number: 7, pull_request: { url: "x" } });
+      if (path === `${BASE}/issues/99`) return json({ message: "Not Found" }, 404);
+      return undefined;
+    });
+    const host = new GitHubReviewHost(client);
+    await expect(host.readIssue(REPO, 7)).resolves.toEqual({ kind: "pull_request", number: 7 });
+    await expect(host.readIssue(REPO, 99)).resolves.toEqual({ kind: "not_found", number: 99 });
+    expect(calls.map((c) => c.path)).toEqual([`${BASE}/issues/7`, `${BASE}/issues/99`]);
+  });
+});
+
 describe("GitHubReviewHost writes", () => {
   const input = {
     prNumber: 7,

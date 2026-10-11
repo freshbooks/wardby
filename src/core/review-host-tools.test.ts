@@ -32,6 +32,7 @@ function fakeHost(): CodeReviewHost {
     pullRequestHead: vi.fn(),
     readFile: vi.fn(async () => ({ kind: "not_found" as const, path: "x" })),
     listFiles: vi.fn(),
+    readIssue: vi.fn(async () => ({ kind: "not_found" as const, number: 1 })),
     publishReview: vi.fn(async () => ({
       published: true as const,
       reviewUrl: null,
@@ -776,6 +777,7 @@ describe("handleReviewHostTool repository authorization (H5-1)", () => {
       ["repo_pr_read", { repository: WRITE.repository, prNumber: 7 }],
       ["repo_read_file", { repository: WRITE.repository, path: "a.py" }],
       ["repo_list_files", { repository: WRITE.repository }],
+      ["repo_issue_read", { repository: WRITE.repository, number: 3 }],
       ["repo_comment", { repository: WRITE.repository, number: 7, body: "hi" }],
       [
         "repo_publish_review",
@@ -793,7 +795,14 @@ describe("handleReviewHostTool repository authorization (H5-1)", () => {
     expect(authorize).toHaveBeenCalledTimes(calls.length);
     expect(authorize).toHaveBeenCalledWith(WRITE);
     const host = c.hosts.github!;
-    for (const fn of [host.readPullRequest, host.readFile, host.listFiles, host.comment, host.publishReview]) {
+    for (const fn of [
+      host.readPullRequest,
+      host.readFile,
+      host.listFiles,
+      host.readIssue,
+      host.comment,
+      host.publishReview,
+    ]) {
       expect(fn).not.toHaveBeenCalled();
     }
   });
@@ -846,5 +855,74 @@ describe("handleReviewHostTool transient re-check failures (M-2)", () => {
     expect(result.error).toBe("repository_access_unavailable");
     expect(result.message).toMatch(/could not be reached/);
     expect(c.hosts.github!.listFiles).not.toHaveBeenCalled();
+  });
+});
+
+describe("repo_issue_read", () => {
+  const ISSUE = {
+    kind: "issue" as const,
+    number: 3,
+    title: "Add a joke",
+    state: "open" as const,
+    body: "- [ ] tests",
+    bodyTruncated: false,
+    labels: ["enhancement"],
+    author: "octo",
+    url: "https://github.com/chfields/knock-knock-jokes/issues/3",
+    createdAt: "2026-10-01T00:00:00Z",
+    updatedAt: "2026-10-02T00:00:00Z",
+    comments: [],
+    totalComments: 0,
+    truncated: false,
+  };
+  const read = (c: ReviewToolContext, repository: string, number = 3) =>
+    handleReviewHostTool("repo_issue_read", JSON.stringify({ repository, number }), c);
+
+  it("returns the issue without its kind on a linked repository, read links included", async () => {
+    const c = ctx();
+    vi.mocked(c.hosts.github!.readIssue!).mockResolvedValue(ISSUE);
+    const { kind: _kind, ...shown } = ISSUE;
+    expect(JSON.parse(await read(c, READ.repository))).toEqual(shown);
+    expect(c.hosts.github!.readIssue).toHaveBeenCalledWith(READ.repository, 3);
+    expect(c.authorize).toHaveBeenCalledWith(READ);
+  });
+
+  it("refuses an unlinked repository without touching the host", async () => {
+    const c = ctx();
+    expect(JSON.parse(await read(c, "someone/else"))).toMatchObject({ error: "repository_not_linked" });
+    expect(c.hosts.github!.readIssue).not.toHaveBeenCalled();
+  });
+
+  it("refuses a pull request number and reports a missing issue", async () => {
+    const c = ctx();
+    vi.mocked(c.hosts.github!.readIssue!).mockResolvedValueOnce({ kind: "pull_request", number: 7 });
+    expect(JSON.parse(await read(c, WRITE.repository, 7))).toMatchObject({
+      error: "is_pull_request",
+      message: expect.stringMatching(/repo_pr_read/),
+    });
+    vi.mocked(c.hosts.github!.readIssue!).mockResolvedValueOnce({ kind: "not_found", number: 99 });
+    expect(JSON.parse(await read(c, WRITE.repository, 99))).toMatchObject({ error: "issue_not_found" });
+  });
+
+  it("refuses a host without issues (a local repository)", async () => {
+    const LOCAL: RepositoryLink = {
+      provider: "local",
+      repository: "local:/srv/repos/app",
+      access: "read",
+      checkName: null,
+      waitForCi: false,
+    };
+    const { readIssue: _readIssue, ...localHost } = fakeHost();
+    const c = ctx({ links: [LOCAL], hosts: { local: { ...localHost, provider: "local" } } });
+    expect(JSON.parse(await read(c, LOCAL.repository))).toMatchObject({ error: "issues_unavailable" });
+  });
+
+  it("rejects malformed arguments", async () => {
+    const c = ctx();
+    expect(
+      JSON.parse(
+        await handleReviewHostTool("repo_issue_read", JSON.stringify({ repository: WRITE.repository, number: 0 }), c),
+      ),
+    ).toMatchObject({ error: "invalid_arguments" });
   });
 });
