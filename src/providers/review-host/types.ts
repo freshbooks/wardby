@@ -312,6 +312,21 @@ export interface CodeReviewHost {
    * post checks (e.g. a local repository) leave this out.
    */
   upsertNamedCheck?(repository: string, input: UpsertNamedCheckInput): Promise<void>;
+  /**
+   * This App's newest check run per name on one commit (names not found are absent).
+   * At most 10 names. Hosts that can't say leave it out.
+   */
+  readOwnChecks?(repository: string, headSha: string, names: string[]): Promise<Map<string, OwnCheckView>>;
+  /**
+   * Marks a draft pull request this App authored ready for review, only while it is
+   * open, a draft, and at `expectedHeadSha`. "skipped" covers every refusal.
+   */
+  markReadyForReview?(repository: string, prNumber: number, expectedHeadSha: string): Promise<"marked" | "skipped">;
+}
+
+export interface OwnCheckView {
+  status: string; // "queued" | "in_progress" | "completed"
+  conclusion: string | null;
 }
 
 export type ReviewHostErrorCode =
