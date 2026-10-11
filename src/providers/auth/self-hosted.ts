@@ -158,7 +158,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
   }
   async registerClient(params: RegisterClientParams) {
     const p = registration(this.config.mobile?.redirectUri).parse(params);
-    if (p.redirectUris.some((uri) => this.mobileDisabledFor(uri))) throw new MobileDisabledError();
+    if (p.redirectUris.some((uri) => this.refusedRedirect(uri))) throw new MobileDisabledError();
     return this.db.$transaction(async (tx) => {
       await tx.$queryRawUnsafe("SELECT 1 AS locked FROM pg_advisory_xact_lock(7412901)");
       if ((await tx.oAuthClient.count()) >= (this.config.maxClients ?? 1000))
@@ -180,7 +180,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
   }
   async handleAuthorize(input: AuthorizeParams) {
     const p = authorization.parse(input);
-    if (this.mobileDisabledFor(p.redirectUri)) throw new MobileDisabledError();
+    if (this.refusedRedirect(p.redirectUri)) throw new MobileDisabledError();
     if (p.resource !== this.config.canonicalUri) throw new Error("Invalid resource.");
     const client = await this.db.oAuthClient.findUnique({ where: { clientId: p.clientId } });
     const metadata = client?.metadata as { redirect_uris?: string[]; grant_types?: string[] } | undefined;
@@ -294,7 +294,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
       createHash("sha256").update(p.codeVerifier).digest("base64url") !== code.codeChallenge
     )
       throw new Error("Invalid grant: PKCE verifier mismatch.");
-    if (this.mobileDisabledFor(code.redirectUri)) throw new MobileDisabledError();
+    if (this.refusedRedirect(code.redirectUri)) throw new MobileDisabledError();
     return this.db.$transaction(async (tx) => {
       const user = await lockUser(tx, code.userId);
       const consumed = await tx.oAuthAuthorizationCode.updateMany({
@@ -341,9 +341,11 @@ export class SelfHostedAuthProvider implements AuthProvider {
         return "refresh token reused; family revoked";
       }
       // Not token reuse: refuse without revoking, so the family works again
-      // once mobile sign-in is re-enabled.
+      // once mobile sign-in is re-enabled. This checks every redirect the
+      // client registered, not just the one its code used: a client registered
+      // with both an https and a mobile redirect is refused while mobile is off.
       const redirects = (grant.family.client.metadata as { redirect_uris?: string[] }).redirect_uris ?? [];
-      if (redirects.some((uri) => this.mobileDisabledFor(uri))) return MOBILE_DISABLED;
+      if (redirects.some((uri) => this.refusedRedirect(uri))) return MOBILE_DISABLED;
       const result = await this.issue(tx, grant.family, user.principal.subject);
       await tx.oAuthGrant.update({
         where: { id: grant.id },
@@ -355,10 +357,17 @@ export class SelfHostedAuthProvider implements AuthProvider {
     if (typeof result === "string") throw new Error(`Invalid grant: ${result}.`);
     return result;
   }
-  /** Whether `redirectUri` is the mobile app's redirect while mobile sign-in is off. */
-  private mobileDisabledFor(redirectUri: string): boolean {
+  /**
+   * Whether `redirectUri` is a mobile (non-web, non-loopback) redirect this
+   * server refuses now. Only the currently configured mobile redirect, while
+   * mobile sign-in is enabled, passes - so a client registered under an earlier
+   * WARDBY_MOBILE_REDIRECT_URI is refused whether mobile is on or off.
+   * Web and loopback redirects are never affected.
+   */
+  private refusedRedirect(redirectUri: string): boolean {
+    if (validRedirect(redirectUri)) return false;
     const mobile = this.config.mobile;
-    return mobile !== undefined && redirectUri === mobile.redirectUri && !mobile.enabled;
+    return !(mobile?.enabled === true && redirectUri === mobile.redirectUri);
   }
   private async issue(tx: AuthDb, family: OAuthFamily, subject: string): Promise<TokenResult> {
     const refresh = this.credentials.create("rvr");

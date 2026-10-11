@@ -348,6 +348,53 @@ describe.skipIf(!process.env.DATABASE_URL)("secure self-hosted OAuth (PostgreSQL
     expect(next.refreshToken).not.toBe(first.refreshToken);
     await expect(mobileOn.verifyBearer(next.accessToken)).resolves.toMatchObject({ subject });
   });
+  it("refuses a client registered under an earlier mobile redirect, even with mobile enabled", async () => {
+    const moved = new SelfHostedAuthProvider(
+      { ...config, mobile: { enabled: true, redirectUri: "com.example.other:/oauth" } },
+      db,
+    );
+    const subject = "security-" + randomUUID();
+    subjects.push(subject);
+    const user = await identities.createUser(subject);
+    const client = await mobileOn.registerClient({ redirectUris: [mobileRedirect] });
+    clients.push(client.clientId);
+    const challenge = await mobileOn.sessions.challenge("login", null, "cookie:interaction");
+    const session = await mobileOn.sessions.login(user.loginKey, challenge, "cookie:interaction");
+    const verifier = randomBytes(32).toString("base64url");
+    const params = {
+      clientId: client.clientId,
+      redirectUri: mobileRedirect,
+      codeChallenge: createHash("sha256").update(verifier).digest("base64url"),
+      codeChallengeMethod: "S256",
+      resource: uri,
+      scope: "agents:read",
+    };
+    const code = async () => {
+      const request = await mobileOn.handleAuthorize(params);
+      const page = await mobileOn.consentPage(session, request.interactionId);
+      const redirect = new URL(await mobileOn.consent(session, request.interactionId, page.challenge, true));
+      return {
+        grantType: "authorization_code" as const,
+        clientId: client.clientId,
+        redirectUri: mobileRedirect,
+        code: redirect.searchParams.get("code")!,
+        codeVerifier: verifier,
+        resource: uri,
+      };
+    };
+    const first = await mobileOn.handleToken(await code());
+    const unused = await code();
+    await expect(moved.handleAuthorize(params)).rejects.toThrow(/^mobile_disabled/);
+    await expect(moved.handleToken(unused)).rejects.toThrow(/^mobile_disabled/);
+    const refresh = {
+      grantType: "refresh_token" as const,
+      clientId: client.clientId,
+      refreshToken: first.refreshToken,
+    };
+    await expect(moved.handleToken(refresh)).rejects.toThrow(/^mobile_disabled/);
+    // Not revoked: the original configuration still refreshes.
+    await expect(mobileOn.handleToken(refresh)).resolves.toMatchObject({ tokenType: "Bearer" });
+  });
   it("accepts loopback redirects that differ only in port (RFC 8252)", async () => {
     const loopbackClient = await provider.registerClient({
       redirectUris: ["http://127.0.0.1:1/callback"],
