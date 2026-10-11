@@ -85,6 +85,7 @@ import { emitRunFinishedEvents } from "./workflow-run-events.js";
 import { startReviewFixAfterReview } from "./review-fix.js";
 import { updateRelatedPullRequests } from "./related-pull-requests.js";
 import { syncMergeOrderChecksAfterRun } from "./merge-order-check.js";
+import { markReadyAfterRun } from "./mark-ready.js";
 import { startDeferredForRequest } from "./host-events.js";
 import { recordNativeModelUsage } from "./model-usage.js";
 import { pinNativeRunPricing } from "./run-pricing.js";
@@ -1467,6 +1468,10 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
   // host reads). Only for a tree root that delegated. Not gated on `claimed`: the sync is
   // idempotent (an unchanged check writes nothing). Never throws.
   await syncMergeOrderChecksAfterRun({ db, hosts: reviewHosts }, finished);
+  // A reviewer run's end may be the last thing a pull request waited for: mark it ready for review
+  // when its builder link opted in (#287). Last, so nothing above waits on its host reads; idempotent
+  // (claimed once per pull request); no host reads unless a link opted in. Never throws.
+  await markReadyAfterRun({ db, hosts: reviewHosts, log: runnerLog }, runId);
   return finished;
 }
 

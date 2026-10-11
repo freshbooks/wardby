@@ -22,6 +22,7 @@ import type { Run } from "#prisma";
 import { CODING_CODE_PROVIDER, normalizeGitHubRepository } from "../coding/protocol.js";
 import type { PullRequestOrigin, ReviewHostRegistry, UpsertNamedCheckInput } from "../providers/review-host/types.js";
 import { logger, type Logger } from "./logger.js";
+import { maybeMarkReady, type MarkReadyDb } from "./mark-ready.js";
 import { collectRelatedPullRequests, runTreeRoot, type RelatedPullRequestsDb } from "./related-pull-requests.js";
 
 const moduleLog = logger.child({ module: "merge-order-check" });
@@ -67,7 +68,7 @@ export function mergeOrderVerdict(self: MergeOrderMember, set: readonly MergeOrd
   return { status: "success", dependencies };
 }
 
-export type MergeOrderDb = RelatedPullRequestsDb;
+export type MergeOrderDb = RelatedPullRequestsDb & MarkReadyDb;
 
 export interface MergeOrderSyncDeps {
   db: MergeOrderDb;
@@ -267,11 +268,9 @@ export async function syncMergeOrderChecks(
       }
       const verdict = mergeOrderVerdict(self, set);
       if (verdict.status === "skip") continue;
+      const input = mergeOrderCheckInput(self, verdict, steps, target.headSha, leadRunning);
       try {
-        await host.upsertNamedCheck(
-          self.repository,
-          mergeOrderCheckInput(self, verdict, steps, target.headSha, leadRunning),
-        );
+        await host.upsertNamedCheck(self.repository, input);
         log.info(
           { seedRunId, repository: self.repository, number: self.number, status: verdict.status },
           "merge order check posted",
@@ -281,6 +280,11 @@ export async function syncMergeOrderChecks(
           { err, seedRunId, repository: self.repository, number: self.number },
           "could not post the merge order check",
         );
+        continue;
+      }
+      if (input.status === "completed" && input.conclusion === "success") {
+        // The last earlier step merged: the pull request may now be ready for review (#287).
+        await maybeMarkReady({ db: deps.db, hosts: deps.hosts, log: deps.log }, self.repository, self.number);
       }
     }
   } catch (err) {

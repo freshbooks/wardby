@@ -19,6 +19,7 @@ import { checkContinuation, dispatchRun } from "./dispatch.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
+import { maybeMarkReady } from "./mark-ready.js";
 import { syncMergeOrderChecksForPullRequest } from "./merge-order-check.js";
 import {
   MAX_SIBLING_HINTS,
@@ -1379,6 +1380,8 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       for (const prNumber of event.prNumbers) {
         runIds.push(...(await rereviewAfterCi(deps, host, event, prNumber, reviewerLinks)));
         runIds.push(...(await startDeferredAfterCi(deps, host, event, prNumber, reviewerLinks)));
+        // CI going green may be the last thing this pull request waited for (#287).
+        await maybeMarkReady({ db: deps.db, hosts: deps.hosts, log }, event.repository, prNumber, event.provider);
       }
       return { runIds, followUps: [] };
     }

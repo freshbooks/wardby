@@ -21,6 +21,8 @@ vi.mock("./related-pull-requests.js", async (orig) => ({
   openSiblings: vi.fn(async () => []),
 }));
 import { openSiblings } from "./related-pull-requests.js";
+vi.mock("./mark-ready.js", () => ({ maybeMarkReady: vi.fn(async () => "off") }));
+import { maybeMarkReady } from "./mark-ready.js";
 import { mentionTaskText, siblingContinuationHints } from "./host-events.js";
 
 // vi.mock factories are hoisted above every declaration, so shared state goes through vi.hoisted.
@@ -1490,6 +1492,26 @@ describe("routeHostEvent: CI finished", () => {
       updateMany: vi.fn(async () => ({ count: 1 })),
     });
     await expect(routeHostEvent(ci, d)).resolves.toEqual({ runIds: ["run-a2"], followUps: [] });
+  });
+
+  it("evaluates mark-ready for every pull request on the event, after the re-review and deferred starts (#287)", async () => {
+    vi.mocked(maybeMarkReady).mockClear();
+    const multi: HostEvent = { ...ci, prNumbers: [7, 8] };
+    const d = deps(reviewer);
+    await expect(routeHostEvent(multi, d)).resolves.toEqual({ runIds: [], followUps: [] });
+    expect(maybeMarkReady).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(maybeMarkReady).mock.calls[0]).toEqual([
+      { db: d.db, hosts: d.hosts, log: expect.anything() },
+      REPO,
+      7,
+      "github",
+    ]);
+    expect(vi.mocked(maybeMarkReady).mock.calls[1]).toEqual([
+      { db: d.db, hosts: d.hosts, log: expect.anything() },
+      REPO,
+      8,
+      "github",
+    ]);
   });
 });
 
