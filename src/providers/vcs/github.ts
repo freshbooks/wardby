@@ -31,6 +31,9 @@ export interface PackageReport {
   ecosystem: string;
   name: string;
   version: string;
+  /** Blocking advisories the run's packagePolicy.acceptedAdvisories waived
+   *  to serve it; listed under "Accepted advisories". */
+  acceptedAdvisories?: readonly string[];
 }
 
 /** One package the registry proxy refused during the run (RegistryFetch outcome "refused"). */
@@ -401,13 +404,17 @@ export const MAX_PR_PACKAGE_LINES = 100;
  *  contain, so the section can never push the body past GitHub's limit. */
 const MAX_PR_PACKAGE_LIST_CHARS = 16 * 1024;
 
-/** Renders at most MAX_PR_PACKAGE_LINES lines (and at most
- *  MAX_PR_PACKAGE_LIST_CHARS characters) of `lines`, then a count of the rest. */
-function cappedList(lines: readonly string[]): string[] {
+/** The accepted-advisories list's ceiling: smaller, so adding it keeps the
+ *  whole section's worst case well inside the body limit. */
+const MAX_PR_WAIVER_LIST_CHARS = 8 * 1024;
+
+/** Renders at most MAX_PR_PACKAGE_LINES lines (and at most `maxChars`
+ *  characters) of `lines`, then a count of the rest. */
+function cappedList(lines: readonly string[], maxChars = MAX_PR_PACKAGE_LIST_CHARS): string[] {
   const shown: string[] = [];
   let chars = 0;
   for (const line of lines.slice(0, MAX_PR_PACKAGE_LINES)) {
-    if (chars + line.length + 1 > MAX_PR_PACKAGE_LIST_CHARS) break;
+    if (chars + line.length + 1 > maxChars) break;
     shown.push(line);
     chars += line.length + 1;
   }
@@ -441,6 +448,12 @@ function packagesSection(input: PullRequestInput): string | undefined {
     ).values(),
   ];
   if (packages.length === 0 && refusals.length === 0) return undefined;
+  // Only ids safe in a Markdown line; a package whose ids are all unsafe is
+  // not listed here (it is still listed as installed).
+  const waivers = packages.flatMap((pkg) => {
+    const ids = (pkg.acceptedAdvisories ?? []).filter((id) => isSafeMarkdownFragment(id) && id.length > 0);
+    return ids.length > 0 ? [`- \`${pkg.name}@${pkg.version}\`: ${ids.join(", ")}`] : [];
+  });
   return [
     "<details>",
     `<summary>Packages installed during this run (${packages.length})</summary>`,
@@ -451,6 +464,13 @@ function packagesSection(input: PullRequestInput): string | undefined {
           "",
           "**Refused:**",
           ...cappedList(refusals.map((refusal) => `- ${refusal.ecosystem} \`${refusal.name}\`: ${refusal.reason}`)),
+        ]
+      : []),
+    ...(waivers.length > 0
+      ? [
+          "",
+          "**Accepted advisories** (waived by this agent's package policy):",
+          ...cappedList(waivers, MAX_PR_WAIVER_LIST_CHARS),
         ]
       : []),
     "</details>",

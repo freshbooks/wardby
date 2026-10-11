@@ -133,6 +133,15 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
       expect(await store.findApprovedVersion(runId, "npm", name, "1.0.1")).toEqual({
         integrity: "sha512-1",
         downloadUrl: facts[1].downloadUrl,
+        acceptedAdvisories: [],
+      });
+      await store.approveVersions(runId, "npm", [
+        { name, version: "1.0.3", integrity: "sha512-3", acceptedAdvisories: ["GHSA-a", "GHSA-b"] },
+      ]);
+      expect(await store.findApprovedVersion(runId, "npm", name, "1.0.3")).toEqual({
+        integrity: "sha512-3",
+        downloadUrl: facts[3].downloadUrl,
+        acceptedAdvisories: ["GHSA-a", "GHSA-b"],
       });
       expect(await store.findApprovedVersion(runId, "npm", name, "1.0.2")).toBeNull();
       await store.refusePlanVersions(runId, "npm", [

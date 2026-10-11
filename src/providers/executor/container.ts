@@ -605,7 +605,7 @@ export interface ContainerExecutorOptions {
 
 /** A run's deduplicated served packages and refusals (see summarizeRegistryFetches). */
 export interface RegistryReport {
-  packages: Array<{ ecosystem: string; name: string; version: string }>;
+  packages: Array<{ ecosystem: string; name: string; version: string; acceptedAdvisories?: string[] }>;
   packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
 }
 
