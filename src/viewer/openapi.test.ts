@@ -1,8 +1,23 @@
 import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
-import { VIEWER_SCHEMAS } from "./api-schema.js";
+import type { PrismaClient } from "#prisma";
+import type { McpRequestContext } from "../mcp/context.js";
+import { McpError, unauthorized } from "../mcp/errors.js";
+import { VIEWER_SCHEMAS, type InfraInfo } from "./api-schema.js";
+import type { ViewerEventBus } from "./event-bus.js";
 import { OPENAPI_PATH, buildViewerOpenApi, renderViewerOpenApi } from "./openapi.js";
+
+vi.mock("./graph.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./graph.js")>()),
+  loadGraph: vi.fn(),
+}));
+vi.mock("./run-detail.js", () => ({ loadRunDetail: vi.fn() }));
+import { loadGraph } from "./graph.js";
+import { loadRunDetail } from "./run-detail.js";
+import { createViewerApi, type ViewerApi } from "./http.js";
 
 type Obj = Record<string, unknown>;
 type Doc = {
@@ -90,5 +105,214 @@ describe("published viewer OpenAPI document", () => {
 
   it("round-trips through YAML", () => {
     expect(parse(renderViewerOpenApi(version))).toEqual(buildViewerOpenApi(version));
+  });
+});
+
+// Conformance: drive the real routes (createViewerApi) and compare with the document.
+// The fakes are copied from http.test.ts (it does not export them).
+const URI = "https://host/mcp";
+const INFRA = {
+  launcher: "kubernetes",
+  kubernetes: {
+    namespace: "wardby-coding",
+    platform: "gke-autopilot",
+    runtimeClass: "gvisor",
+    proxyService: "wardby-coding-proxy",
+    runLabel: "wardby.io/run-sha256",
+    runLabelHashChars: 40,
+    componentLabel: { "wardby.io/component": "coding-run" },
+    managedByLabel: { "app.kubernetes.io/managed-by": "wardby" },
+  },
+  native: null,
+} as const satisfies InfraInfo;
+const RUN = {
+  id: "r1",
+  parentRunId: null,
+  agentId: "a1",
+  agentName: "agent",
+  agentKind: "native",
+  model: "m",
+  codingProvider: null,
+  nativeExecutionMode: null,
+  warmWorkerName: null,
+  status: "succeeded",
+  trigger: { kind: "manual" },
+  turns: 1,
+  tokensIn: 1,
+  tokensOut: 2,
+  costUsd: 0.01,
+  budgetUsd: 1,
+  startedAt: "2026-10-02T00:00:00.000Z",
+  finishedAt: null,
+  heartbeatAt: null,
+  outcomes: [],
+  declaredServices: [],
+  services: [],
+};
+const SNAPSHOT = {
+  generatedAt: "2026-10-02T00:00:00.000Z",
+  since: "2026-10-01T23:00:00.000Z",
+  limit: 100,
+  truncated: false,
+  runs: [RUN],
+  spend: { todayUsd: 0.01, groups: [] },
+};
+const DETAIL = { ...RUN, error: null, finalText: "done", childRunIds: [], coding: null };
+
+const fakeBus = (): ViewerEventBus => ({
+  subscribe: () => () => {},
+  onState: () => () => {},
+  connected: () => true,
+  close: async () => {},
+});
+
+let server: Server | undefined;
+let viewer: ViewerApi | undefined;
+afterEach(async () => {
+  viewer?.closeStreams();
+  await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+  server?.closeAllConnections();
+  server = undefined;
+  vi.clearAllMocks();
+});
+
+/** Token "admin" is allowed, "noscope" lacks admin:view, no Authorization header is a 401. */
+async function start(): Promise<string> {
+  viewer = createViewerApi({
+    db: {} as PrismaClient,
+    bus: fakeBus(),
+    authenticate: async (authorization) => {
+      if (!authorization) throw unauthorized("no token", "https://host/.well-known/oauth-protected-resource");
+      const scopes = authorization === "Bearer noscope" ? [] : ["admin:view"];
+      return { scopes: new Set(scopes), roles: ["admin"] } as unknown as McpRequestContext;
+    },
+    canonicalUri: URI,
+    infra: INFRA,
+  });
+  const api = viewer;
+  server = createServer((req, res) => {
+    api
+      .handle(req, res, new URL(req.url ?? "/", "http://host"))
+      .then((handled) => {
+        if (!handled) res.writeHead(404).end();
+      })
+      .catch((err: unknown) => {
+        if (err instanceof McpError) {
+          res.writeHead(err.httpStatus, err.wwwAuthenticate ? { "www-authenticate": err.wwwAuthenticate } : {}).end();
+          return;
+        }
+        res.writeHead(500).end();
+      });
+  });
+  await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+const ADMIN = { authorization: "Bearer admin" };
+interface Scenario {
+  path: string; // concrete request path
+  init?: RequestInit;
+  expect: { contentType?: string; allow?: string; schema?: keyof typeof VIEWER_SCHEMAS };
+}
+// One request per (documented path, documented status).
+const SCENARIOS: Record<string, Record<string, Scenario>> = {
+  "/admin/api/graph": {
+    "200": { path: "/admin/api/graph", expect: { schema: "graph-snapshot" } },
+    "400": { path: "/admin/api/graph?limit=0", expect: {} },
+  },
+  "/admin/api/runs/{id}": {
+    "200": { path: "/admin/api/runs/r1", expect: { schema: "run-detail" } },
+    "404": { path: "/admin/api/runs/missing", expect: {} },
+  },
+  "/admin/api/infra": { "200": { path: "/admin/api/infra", expect: { schema: "infra-info" } } },
+  "/admin/api/events": { "200": { path: "/admin/api/events", expect: { contentType: "text/event-stream" } } },
+};
+const concrete = (docPath: string): string => docPath.replace("{id}", "r1");
+const schemaName = (response: Obj): string | undefined => {
+  const content = (response.content as Record<string, { schema?: { $ref?: string } }>)["application/json"];
+  return content?.schema?.$ref?.split("/").pop();
+};
+const documentedCodes = (response: Obj): string[] => response["x-error-codes"] as string[];
+
+describe("viewer OpenAPI document conforms to the routes", () => {
+  it("every documented status of every route happens, with its documented body", async () => {
+    vi.mocked(loadGraph).mockResolvedValue(SNAPSHOT as never);
+    vi.mocked(loadRunDetail).mockImplementation((async (_db: unknown, id: string) =>
+      id === "r1" ? DETAIL : null) as never);
+    const base = await start();
+    const doc = build();
+    for (const [docPath, item] of Object.entries(doc.paths)) {
+      for (const [status, response] of Object.entries(item.get.responses)) {
+        const label = `${docPath} ${status}`;
+        const path = concrete(docPath);
+        let res: Response;
+        if (status === "401") {
+          res = await fetch(`${base}${path}`);
+          expect(res.headers.get("www-authenticate"), label).toMatch(/^Bearer/);
+        } else if (status === "403") {
+          res = await fetch(`${base}${path}`, { headers: { authorization: "Bearer noscope" } });
+          expect(res.headers.get("www-authenticate"), label).toContain("admin:view");
+        } else if (status === "405") {
+          res = await fetch(`${base}${path}`, { method: "POST", headers: ADMIN });
+          expect(res.headers.get("allow"), label).toBe("GET");
+        } else {
+          const scenario = SCENARIOS[docPath]?.[status];
+          expect(scenario, `no scenario for ${label}`).toBeDefined();
+          res = await fetch(`${base}${scenario.path}`, { ...scenario.init, headers: ADMIN });
+          if (scenario.expect.contentType)
+            expect(res.headers.get("content-type"), label).toBe(scenario.expect.contentType);
+          const name = schemaName(response);
+          if (name) {
+            expect(name).toBe(scenario.expect.schema);
+            expect(VIEWER_SCHEMAS[name as keyof typeof VIEWER_SCHEMAS].safeParse(await res.json()).success, label).toBe(
+              true,
+            );
+          }
+        }
+        expect(res.status, label).toBe(Number(status));
+        if (documentedCodes(response)) {
+          const body = (await res.json()) as { error: string };
+          expect(documentedCodes(response), label).toContain(body.error);
+        } else if (status === "401" || status === "403") {
+          expect(await res.text(), label).toBe("");
+        }
+        res.body?.cancel().catch(() => {});
+      }
+    }
+  });
+
+  it("produces every documented error code", async () => {
+    vi.mocked(loadRunDetail).mockResolvedValue(null);
+    const base = await start();
+    const doc = build();
+    const seen = new Set<string>();
+    const probes = [
+      ["GET", "/admin/api/graph?limit=0"],
+      ["GET", "/admin/api/graph?limit=1000000"],
+      ["GET", "/admin/api/graph?limit=abc"],
+      ["GET", "/admin/api/graph?since=bogus"],
+      ["GET", "/admin/api/runs/missing"],
+      ["GET", "/admin/api/runs/%E0%A4%A"],
+      ["POST", "/admin/api/infra"],
+    ];
+    for (const [method, path] of probes) {
+      const res = await fetch(`${base}${path}`, { method, headers: ADMIN });
+      seen.add(((await res.json()) as { error: string }).error);
+    }
+    const documented = new Set(
+      Object.values(doc.paths).flatMap((i) => Object.values(i.get.responses).flatMap((r) => documentedCodes(r) ?? [])),
+    );
+    expect([...seen].sort()).toEqual([...documented].sort());
+  });
+
+  it("documents every error code http.ts sends", async () => {
+    const source = await readFile(new URL("./http.ts", import.meta.url), "utf8");
+    const sent = new Set([...source.matchAll(/error: "([a-z_]+)"/g)].map((m) => m[1]));
+    expect(sent.size).toBeGreaterThan(0);
+    const doc = build();
+    const documented = new Set(
+      Object.values(doc.paths).flatMap((i) => Object.values(i.get.responses).flatMap((r) => documentedCodes(r) ?? [])),
+    );
+    for (const code of sent) expect(documented, code).toContain(code);
   });
 });
