@@ -319,9 +319,16 @@ export interface CodeReviewHost {
   readOwnChecks?(repository: string, headSha: string, names: string[]): Promise<Map<string, OwnCheckView>>;
   /**
    * Marks a draft pull request this App authored ready for review, only while it is
-   * open, a draft, and at `expectedHeadSha`. "skipped" covers every refusal.
+   * open, a draft, at `expectedHeadSha`, and carrying `expectedMarkerRunId` in its
+   * description's run marker (mirrors replaceRelatedSection's expectedMarkerRunId).
+   * "skipped" covers every refusal.
    */
-  markReadyForReview?(repository: string, prNumber: number, expectedHeadSha: string): Promise<"marked" | "skipped">;
+  markReadyForReview?(
+    repository: string,
+    prNumber: number,
+    expectedHeadSha: string,
+    expectedMarkerRunId: string,
+  ): Promise<"marked" | "skipped">;
 }
 
 export interface OwnCheckView {

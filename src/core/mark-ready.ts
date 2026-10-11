@@ -72,6 +72,9 @@ export async function maybeMarkReady(
       )
       .map((l) => l.checkName as string);
     if (reviewChecks.length === 0) return "not_ready";
+    // readOwnChecks reads at most 10 names; MERGE_ORDER_CHECK_NAME plus the reviewer
+    // check names must fit, or the merge-order check would silently be read as absent.
+    if (reviewChecks.length > 9) return "not_ready";
 
     const origin = await host.pullRequestOrigin(repository, prNumber);
     if (origin.state !== "open" || origin.draft !== true || origin.isFork || !origin.markerRunId) return "not_ready";
@@ -89,7 +92,7 @@ export async function maybeMarkReady(
     if (pullRequestOutcome(root.result)?.pullRequestNumber !== prNumber) return "not_ready";
     if (root.markedReadyAt) return "skipped";
 
-    const checks = await host.readOwnChecks(repository, origin.headSha, [...reviewChecks, MERGE_ORDER_CHECK_NAME]);
+    const checks = await host.readOwnChecks(repository, origin.headSha, [MERGE_ORDER_CHECK_NAME, ...reviewChecks]);
     if (!reviewChecks.every((name) => passed(checks.get(name)))) return "not_ready";
     const order = checks.get(MERGE_ORDER_CHECK_NAME);
     if (order !== undefined && !passed(order)) return "not_ready";
@@ -98,6 +101,9 @@ export async function maybeMarkReady(
     if (!CI_GREEN.has(ci.state) || ci.truncated) return "not_ready";
 
     const claimedAt = new Date();
+    // CodingRun.updatedAt is @updatedAt, so this claim (and a release below) bumps it, which
+    // feeds the merge-order sweep's ordering. Harmless: the sweep re-derives state from the
+    // host each time, it doesn't rely on updatedAt being untouched by mark-ready.
     const claim = await deps.db.codingRun.updateMany({
       where: { runId: root.runId, markedReadyAt: null },
       data: { markedReadyAt: claimedAt },
@@ -110,7 +116,7 @@ export async function maybeMarkReady(
           deps.log?.warn({ err, repository, prNumber }, "could not release the mark-ready claim"),
         );
     try {
-      const result = await host.markReadyForReview(repository, prNumber, origin.headSha);
+      const result = await host.markReadyForReview(repository, prNumber, origin.headSha, origin.markerRunId);
       if (result === "marked") {
         deps.log?.info({ repository, prNumber }, "marked the pull request ready for review");
         return "marked";

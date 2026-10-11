@@ -959,14 +959,16 @@ export class GitHubReviewHost implements CodeReviewHost {
 
   /**
    * Marks a draft pull request ready for review, only when it is still open,
-   * a draft, at `expectedHeadSha`, and authored by this App (carries its run
-   * marker). "skipped" covers every refusal, including a head that moved
-   * since the caller last checked it.
+   * a draft, at `expectedHeadSha`, and carries `expectedMarkerRunId` in its
+   * description's run marker (this App's own PR for that run). "skipped"
+   * covers every refusal, including a head that moved since the caller last
+   * checked it.
    */
   async markReadyForReview(
     repository: string,
     prNumber: number,
     expectedHeadSha: string,
+    expectedMarkerRunId: string,
   ): Promise<"marked" | "skipped"> {
     if (!SAFE_SHA.test(expectedHeadSha)) throw new ReviewHostError("host_api_error", "head_sha_invalid");
     const { slug } = await this.client.appIdentity();
@@ -974,7 +976,7 @@ export class GitHubReviewHost implements CodeReviewHost {
       const pr = record(await (await get(`${repoPath(repository)}/pulls/${prNumber}`)).json());
       const head = record(pr.head ?? {});
       if (pr.state !== "open" || pr.draft !== true || head.sha !== expectedHeadSha) return "skipped";
-      if (!appMarkerRunId(pr, slug)) return "skipped";
+      if (appMarkerRunId(pr, slug) !== expectedMarkerRunId) return "skipped";
       if (typeof pr.node_id !== "string") return "skipped";
       await graphql(MARK_READY_MUTATION, { id: pr.node_id });
       return "marked";

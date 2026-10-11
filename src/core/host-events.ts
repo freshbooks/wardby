@@ -1377,13 +1377,16 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
     case "ci_completed": {
       if (reviewerLinks.length === 0) return none;
       const runIds: string[] = [];
+      // CI going green may be the last thing a pull request waited for (#287); evaluated
+      // after the response (a host read per PR could otherwise exceed the webhook timeout).
+      const followUps: RouteResult["followUps"] = event.prNumbers.map((prNumber) => async () => {
+        await maybeMarkReady({ db: deps.db, hosts: deps.hosts, log }, event.repository, prNumber, event.provider);
+      });
       for (const prNumber of event.prNumbers) {
         runIds.push(...(await rereviewAfterCi(deps, host, event, prNumber, reviewerLinks)));
         runIds.push(...(await startDeferredAfterCi(deps, host, event, prNumber, reviewerLinks)));
-        // CI going green may be the last thing this pull request waited for (#287).
-        await maybeMarkReady({ db: deps.db, hosts: deps.hosts, log }, event.repository, prNumber, event.provider);
       }
-      return { runIds, followUps: [] };
+      return { runIds, followUps };
     }
     case "check_rerun": {
       const owners = reviewerLinks.filter((l) => l.checkName === event.checkName);

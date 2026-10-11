@@ -89,11 +89,13 @@ function setup(
       statusesUnavailable: false,
       ...over.ci,
     })),
-    markReadyForReview: vi.fn(async (_repository: string, _prNumber: number, _sha: string) => {
-      const m = over.mark ?? "marked";
-      if (m instanceof Error) throw m;
-      return m;
-    }),
+    markReadyForReview: vi.fn(
+      async (_repository: string, _prNumber: number, _sha: string, _expectedMarkerRunId: string) => {
+        const m = over.mark ?? "marked";
+        if (m instanceof Error) throw m;
+        return m;
+      },
+    ),
   };
   const log = { info: vi.fn(), warn: vi.fn() };
   return { db, host, log, deps: { db, hosts: { github: host }, log } as never };
@@ -103,8 +105,8 @@ describe("maybeMarkReady", () => {
   it("marks when every condition holds", async () => {
     const { deps, host, db, log } = setup();
     expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
-    expect(host.markReadyForReview).toHaveBeenCalledWith("acme/web", 7, SHA);
-    expect(host.readOwnChecks).toHaveBeenCalledWith("acme/web", SHA, ["wardby review", "wardby merge order"]);
+    expect(host.markReadyForReview).toHaveBeenCalledWith("acme/web", 7, SHA, "root");
+    expect(host.readOwnChecks).toHaveBeenCalledWith("acme/web", SHA, ["wardby merge order", "wardby review"]);
     expect(db.codingRun.updateMany).toHaveBeenCalledTimes(1);
     const claim = (db.codingRun.updateMany.mock.calls[0] as unknown[])[0] as {
       where: { runId: string; markedReadyAt: null };
@@ -142,7 +144,35 @@ describe("maybeMarkReady", () => {
       links: [BUILDER, REVIEWER, { ...REVIEWER, agentId: "rogue", checkName: "rogue review", authorizedVia: null }],
     });
     expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
-    expect(host.readOwnChecks).toHaveBeenCalledWith("acme/web", SHA, ["wardby review", "wardby merge order"]);
+    expect(host.readOwnChecks).toHaveBeenCalledWith("acme/web", SHA, ["wardby merge order", "wardby review"]);
+  });
+
+  it("still reads the merge order check with 9 authorized reviewer check names", async () => {
+    const reviewers = Array.from({ length: 9 }, (_, i) => ({
+      ...REVIEWER,
+      agentId: `reviewer-${i}`,
+      checkName: `review-${i}`,
+    }));
+    const names = reviewers.map((r) => r.checkName);
+    const checks = new Map<string, CheckView>([
+      ...names.map((name): [string, CheckView] => [name, { status: "completed", conclusion: "success" }]),
+      ["wardby merge order", { status: "completed", conclusion: "success" }],
+    ]);
+    const { deps, host } = setup({ links: [BUILDER, ...reviewers], checks });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(host.readOwnChecks).toHaveBeenCalledWith("acme/web", SHA, ["wardby merge order", ...names]);
+  });
+
+  it("is not_ready with 10 authorized reviewer check names, without reading the host at all", async () => {
+    const reviewers = Array.from({ length: 10 }, (_, i) => ({
+      ...REVIEWER,
+      agentId: `reviewer-${i}`,
+      checkName: `review-${i}`,
+    }));
+    const { deps, host } = setup({ links: [BUILDER, ...reviewers] });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(host.pullRequestOrigin).not.toHaveBeenCalled();
+    expect(host.readOwnChecks).not.toHaveBeenCalled();
   });
 
   it("is off when the provider has no host", async () => {
@@ -321,7 +351,7 @@ describe("markReadyAfterRun", () => {
     });
     expect(await markReadyAfterRun(deps, "run-1")).toBe("marked");
     expect((db.runHostCheck.findUnique.mock.calls[0] as unknown[])[0]).toMatchObject({ where: { runId: "run-1" } });
-    expect(host.markReadyForReview).toHaveBeenCalledWith("acme/web", 7, SHA);
+    expect(host.markReadyForReview).toHaveBeenCalledWith("acme/web", 7, SHA, "root");
   });
 
   it("never throws", async () => {

@@ -1085,7 +1085,7 @@ describe("GitHubReviewHost.markReadyForReview", () => {
       }
       return undefined;
     });
-    expect(await new GitHubReviewHost(client).markReadyForReview(REPO, 7, SHA)).toBe("marked");
+    expect(await new GitHubReviewHost(client).markReadyForReview(REPO, 7, SHA, "run_1")).toBe("marked");
     expect(JSON.stringify(calls[0])).toContain("markPullRequestReadyForReview");
     expect(grants).toEqual([{ pull_requests: "write" }]);
   });
@@ -1099,6 +1099,13 @@ describe("GitHubReviewHost.markReadyForReview", () => {
     const { client } = fakeGitHub(({ method, path }) =>
       method === "GET" && path === `${BASE}/pulls/7` ? json(draftPr(over)) : undefined,
     );
-    expect(await new GitHubReviewHost(client).markReadyForReview(REPO, 7, SHA)).toBe("skipped");
+    expect(await new GitHubReviewHost(client).markReadyForReview(REPO, 7, SHA, "run_1")).toBe("skipped");
+  });
+
+  it("skips when the PR carries a different run's marker", async () => {
+    const { client } = fakeGitHub(({ method, path }) =>
+      method === "GET" && path === `${BASE}/pulls/7` ? json(draftPr()) : undefined,
+    );
+    expect(await new GitHubReviewHost(client).markReadyForReview(REPO, 7, SHA, "run_2")).toBe("skipped");
   });
 });
