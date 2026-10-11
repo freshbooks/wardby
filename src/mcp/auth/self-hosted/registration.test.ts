@@ -27,6 +27,7 @@ describe.skipIf(!process.env.DATABASE_URL)("self-hosted dynamic client registrat
         canonicalUri: origin + "/mcp",
         signingKey: "a1".repeat(32),
         credentialHashKey: randomBytes(32).toString("hex"),
+        mobile: { enabled: false, redirectUri: "com.wardby.mobile:/oauth" },
       },
       db,
     );
@@ -75,5 +76,22 @@ describe.skipIf(!process.env.DATABASE_URL)("self-hosted dynamic client registrat
     expect((await register({ ...base, scope: ["agents:read"] })).status).toBe(400);
     expect((await register({ ...base, application_type: "service" })).status).toBe(400);
     expect((await register({ ...base, jwks_uri: "https://evil.example/jwks" })).status).toBe(400);
+  });
+
+  it("names mobile_disabled for the mobile redirect while mobile sign-in is off", async () => {
+    const res = await register({ redirect_uris: ["com.wardby.mobile:/oauth"], token_endpoint_auth_method: "none" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; error_description: string };
+    expect(body.error).toBe("invalid_redirect_uri");
+    expect(body.error_description).toMatch(/^mobile_disabled:/);
+  });
+
+  it("keeps every other registration error generic", async () => {
+    const res = await register({ redirect_uris: ["com.wardby.evil:/oauth"], token_endpoint_auth_method: "none" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_request");
+    expect(typeof body.id).toBe("string");
+    expect(body).not.toHaveProperty("error_description");
   });
 });

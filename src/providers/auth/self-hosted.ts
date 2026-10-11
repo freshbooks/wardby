@@ -9,6 +9,7 @@ import { SCOPES_SUPPORTED, limitScope } from "../../mcp/auth/resource-server.js"
 import { canonicalUrl } from "../../mcp/transport/http-limits.js";
 import { Credentials, DAY, decodeKey, lockUser, type AuthDb } from "../../mcp/auth/self-hosted/credentials.js";
 import { Sessions } from "../../mcp/auth/self-hosted/session.js";
+import { MOBILE_DISABLED } from "../../config/mobile.js";
 import type {
   AuthorizeParams,
   RegisterClientParams,
@@ -59,7 +60,21 @@ export function redirectMatches(registered: readonly string[], requested: string
   });
 }
 
-function validRedirect(value: string): boolean {
+/** The mobile app's redirect while WARDBY_MOBILE_ENABLED is off. The message is safe to show to the client. */
+export class MobileDisabledError extends Error {
+  constructor() {
+    super(`${MOBILE_DISABLED}: mobile sign-in is not enabled on this server (WARDBY_MOBILE_ENABLED).`);
+    this.name = "MobileDisabledError";
+  }
+}
+
+/**
+ * A registrable redirect: https, loopback http, or exactly the configured
+ * mobile redirect (RFC 8252 §7.1). This checks format only; whether mobile
+ * sign-in is enabled is enforced in each flow.
+ */
+function validRedirect(value: string, mobileRedirect?: string): boolean {
+  if (mobileRedirect !== undefined && value === mobileRedirect) return true;
   try {
     const u = new URL(value);
     return (
@@ -72,18 +87,28 @@ function validRedirect(value: string): boolean {
     return false;
   }
 }
-const registration = z
-  .object({
-    redirectUris: z.array(z.string().min(1).max(2048).refine(validRedirect)).min(1).max(10),
-    clientName: z.string().max(100).optional(),
-    grantTypes: z
-      .array(z.enum(["authorization_code", "refresh_token"]))
-      .min(1)
-      .max(2)
-      .default(["authorization_code", "refresh_token"]),
-    tokenEndpointAuthMethod: z.literal("none").default("none"),
-  })
-  .strict();
+const registration = (mobileRedirect?: string) =>
+  z
+    .object({
+      redirectUris: z
+        .array(
+          z
+            .string()
+            .min(1)
+            .max(2048)
+            .refine((value) => validRedirect(value, mobileRedirect)),
+        )
+        .min(1)
+        .max(10),
+      clientName: z.string().max(100).optional(),
+      grantTypes: z
+        .array(z.enum(["authorization_code", "refresh_token"]))
+        .min(1)
+        .max(2)
+        .default(["authorization_code", "refresh_token"]),
+      tokenEndpointAuthMethod: z.literal("none").default("none"),
+    })
+    .strict();
 const authorization = z
   .object({
     clientId: z.string().max(100),
@@ -132,7 +157,8 @@ export class SelfHostedAuthProvider implements AuthProvider {
     };
   }
   async registerClient(params: RegisterClientParams) {
-    const p = registration.parse(params);
+    const p = registration(this.config.mobile?.redirectUri).parse(params);
+    if (p.redirectUris.some((uri) => this.mobileDisabledFor(uri))) throw new MobileDisabledError();
     return this.db.$transaction(async (tx) => {
       await tx.$queryRawUnsafe("SELECT 1 AS locked FROM pg_advisory_xact_lock(7412901)");
       if ((await tx.oAuthClient.count()) >= (this.config.maxClients ?? 1000))
@@ -154,6 +180,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
   }
   async handleAuthorize(input: AuthorizeParams) {
     const p = authorization.parse(input);
+    if (this.mobileDisabledFor(p.redirectUri)) throw new MobileDisabledError();
     if (p.resource !== this.config.canonicalUri) throw new Error("Invalid resource.");
     const client = await this.db.oAuthClient.findUnique({ where: { clientId: p.clientId } });
     const metadata = client?.metadata as { redirect_uris?: string[]; grant_types?: string[] } | undefined;
@@ -267,6 +294,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
       createHash("sha256").update(p.codeVerifier).digest("base64url") !== code.codeChallenge
     )
       throw new Error("Invalid grant: PKCE verifier mismatch.");
+    if (this.mobileDisabledFor(code.redirectUri)) throw new MobileDisabledError();
     return this.db.$transaction(async (tx) => {
       const user = await lockUser(tx, code.userId);
       const consumed = await tx.oAuthAuthorizationCode.updateMany({
@@ -312,6 +340,10 @@ export class SelfHostedAuthProvider implements AuthProvider {
         await this.revokeFamily(tx, grant.familyId);
         return "refresh token reused; family revoked";
       }
+      // Not token reuse: refuse without revoking, so the family works again
+      // once mobile sign-in is re-enabled.
+      const redirects = (grant.family.client.metadata as { redirect_uris?: string[] }).redirect_uris ?? [];
+      if (redirects.some((uri) => this.mobileDisabledFor(uri))) return MOBILE_DISABLED;
       const result = await this.issue(tx, grant.family, user.principal.subject);
       await tx.oAuthGrant.update({
         where: { id: grant.id },
@@ -319,8 +351,14 @@ export class SelfHostedAuthProvider implements AuthProvider {
       });
       return result;
     });
+    if (result === MOBILE_DISABLED) throw new MobileDisabledError();
     if (typeof result === "string") throw new Error(`Invalid grant: ${result}.`);
     return result;
+  }
+  /** Whether `redirectUri` is the mobile app's redirect while mobile sign-in is off. */
+  private mobileDisabledFor(redirectUri: string): boolean {
+    const mobile = this.config.mobile;
+    return mobile !== undefined && redirectUri === mobile.redirectUri && !mobile.enabled;
   }
   private async issue(tx: AuthDb, family: OAuthFamily, subject: string): Promise<TokenResult> {
     const refresh = this.credentials.create("rvr");

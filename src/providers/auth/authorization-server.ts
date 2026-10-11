@@ -1,8 +1,12 @@
+import type { MobileConfig } from "../../config/mobile.js";
+
 export interface SelfHostedAuthConfig {
   canonicalUri: string;
   signingKey: string;
   credentialHashKey: string;
   maxClients?: number;
+  /** Mobile sign-in: its one private-use redirect is accepted only while enabled. */
+  mobile?: MobileConfig;
 }
 export interface RegisterClientParams {
   redirectUris: string[];

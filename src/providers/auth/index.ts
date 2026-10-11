@@ -32,12 +32,17 @@ export function buildAuthProvider(kind: AuthProviderKind, config: AuthConfig, db
     }
     if (config.credentialHashKey.toLowerCase() === process.env.SECRET_APP_KEY?.toLowerCase())
       throw new Error("Credential and encryption keys must be distinct.");
+    logger.info(
+      { module: "auth", mobileEnabled: config.mobile.enabled, mobileRedirectUri: config.mobile.redirectUri },
+      "self-hosted OAuth mobile sign-in",
+    );
     return new SelfHostedAuthProvider(
       {
         canonicalUri: config.audience,
         signingKey: config.signingKey,
         credentialHashKey: config.credentialHashKey,
         maxClients: config.maxClients,
+        mobile: config.mobile,
       },
       db,
     );

@@ -273,6 +273,81 @@ describe.skipIf(!process.env.DATABASE_URL)("secure self-hosted OAuth (PostgreSQL
     await expect(db.oAuthClient.findUnique({ where: { clientId: abandoned.clientId } })).resolves.toBeNull();
     await expect(db.oAuthClient.findUnique({ where: { clientId: f.client.clientId } })).resolves.not.toBeNull();
   });
+  const mobileRedirect = "com.wardby.mobile:/oauth";
+  const mobileOn = new SelfHostedAuthProvider(
+    { ...config, mobile: { enabled: true, redirectUri: mobileRedirect } },
+    db,
+  );
+  const mobileOff = new SelfHostedAuthProvider(
+    { ...config, mobile: { enabled: false, redirectUri: mobileRedirect } },
+    db,
+  );
+  it("registers and authorizes the mobile redirect only when mobile is enabled", async () => {
+    const reg = { redirectUris: ["com.wardby.mobile:/oauth"] };
+    await expect(mobileOff.registerClient(reg)).rejects.toThrow(/^mobile_disabled:/);
+    await expect(provider.registerClient(reg)).rejects.toThrow(); // no mobile config: not a valid redirect at all
+    const client = await mobileOn.registerClient(reg);
+    clients.push(client.clientId);
+    const params = {
+      clientId: client.clientId,
+      redirectUri: "com.wardby.mobile:/oauth",
+      codeChallenge: createHash("sha256").update("verifier").digest("base64url"),
+      codeChallengeMethod: "S256" as const,
+      resource: uri,
+      scope: "admin:view",
+      state: "s",
+    };
+    expect((await mobileOn.handleAuthorize(params)).interactionId).toBeDefined();
+    await expect(mobileOff.handleAuthorize(params)).rejects.toThrow(/^mobile_disabled:/);
+  });
+  it("stops code exchange and refresh for mobile clients once mobile is disabled", async () => {
+    const subject = "security-" + randomUUID();
+    subjects.push(subject);
+    const user = await identities.createUser(subject);
+    const client = await mobileOn.registerClient({ redirectUris: [mobileRedirect] });
+    clients.push(client.clientId);
+    const challenge = await mobileOn.sessions.challenge("login", null, "cookie:interaction");
+    const session = await mobileOn.sessions.login(user.loginKey, challenge, "cookie:interaction");
+    const verifier = randomBytes(32).toString("base64url");
+    const params = {
+      clientId: client.clientId,
+      redirectUri: mobileRedirect,
+      codeChallenge: createHash("sha256").update(verifier).digest("base64url"),
+      codeChallengeMethod: "S256",
+      resource: uri,
+      scope: "agents:read",
+      state: "opaque-state",
+    };
+    const code = async () => {
+      const request = await mobileOn.handleAuthorize(params);
+      const page = await mobileOn.consentPage(session, request.interactionId);
+      const redirect = new URL(await mobileOn.consent(session, request.interactionId, page.challenge, true));
+      expect(redirect.protocol).toBe("com.wardby.mobile:");
+      return {
+        grantType: "authorization_code" as const,
+        clientId: client.clientId,
+        redirectUri: mobileRedirect,
+        code: redirect.searchParams.get("code")!,
+        codeVerifier: verifier,
+        resource: uri,
+      };
+    };
+    const first = await mobileOn.handleToken(await code());
+    const unused = await code();
+    // (a) a second, unused code is refused once mobile is off.
+    await expect(mobileOff.handleToken(unused)).rejects.toThrow(/^mobile_disabled/);
+    // (b) so is a refresh of the issued token...
+    const refresh = {
+      grantType: "refresh_token" as const,
+      clientId: client.clientId,
+      refreshToken: first.refreshToken,
+    };
+    await expect(mobileOff.handleToken(refresh)).rejects.toThrow(/^mobile_disabled/);
+    // (c) ...without revoking the family: it isn't token reuse.
+    const next = await mobileOn.handleToken(refresh);
+    expect(next.refreshToken).not.toBe(first.refreshToken);
+    await expect(mobileOn.verifyBearer(next.accessToken)).resolves.toMatchObject({ subject });
+  });
   it("accepts loopback redirects that differ only in port (RFC 8252)", async () => {
     const loopbackClient = await provider.registerClient({
       redirectUris: ["http://127.0.0.1:1/callback"],
@@ -293,6 +368,21 @@ describe.skipIf(!process.env.DATABASE_URL)("secure self-hosted OAuth (PostgreSQL
       where: { id: request.interactionId },
     });
     expect(storedRequest?.redirectUri).toBe("http://127.0.0.1:53123/callback");
+  });
+});
+
+describe("mobile redirect (RFC 8252 §7.1)", () => {
+  it("matches the private-use redirect exactly, with no loopback leniency", () => {
+    const registered = ["com.wardby.mobile:/oauth"];
+    expect(redirectMatches(registered, "com.wardby.mobile:/oauth")).toBe(true);
+    for (const other of [
+      "com.wardby.mobile:/oauth/x",
+      "com.wardby.mobile:/oauth?x=1",
+      "com.wardby.mobile:/OAUTH",
+      "com.wardby.evil:/oauth",
+    ]) {
+      expect(redirectMatches(registered, other)).toBe(false);
+    }
   });
 });
 

@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID, randomBytes } from "node:crypto";
-import type { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
+import { MobileDisabledError, type SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
 import { PostgresRateLimiter, RateLimitError } from "./rate-limit.js";
 import { logger } from "../../../core/logger.js";
 import { PAGE_STYLE } from "../../shared/page-style.js";
@@ -138,12 +138,23 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
         // here is already a public PKCE client with validated redirect URIs.
         if (p.application_type !== undefined && p.application_type !== "native" && p.application_type !== "web")
           throw new Error("unsupported application_type");
-        const registered = await provider.registerClient({
-          redirectUris: p.redirect_uris as string[],
-          clientName: p.client_name as string | undefined,
-          grantTypes: p.grant_types as string[] | undefined,
-          tokenEndpointAuthMethod: p.token_endpoint_auth_method as string | undefined,
-        });
+        let registered;
+        try {
+          registered = await provider.registerClient({
+            redirectUris: p.redirect_uris as string[],
+            clientName: p.client_name as string | undefined,
+            grantTypes: p.grant_types as string[] | undefined,
+            tokenEndpointAuthMethod: p.token_endpoint_auth_method as string | undefined,
+          });
+        } catch (err) {
+          // The one registration error that names its reason: the operator
+          // must turn mobile sign-in on. Everything else stays generic below.
+          if (err instanceof MobileDisabledError) {
+            json(res, 400, { error: "invalid_redirect_uri", error_description: err.message });
+            return true;
+          }
+          throw err;
+        }
         json(res, 201, {
           client_id: registered.clientId,
           token_endpoint_auth_method: "none",
