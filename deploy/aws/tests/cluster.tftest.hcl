@@ -52,6 +52,11 @@ variables {
 run "cluster" {
   command = apply
 
+  override_resource {
+    target = aws_iam_role.vpc_cni
+    values = { arn = "arn:aws:iam::111122223333:role/wardby-vpc-cni" }
+  }
+
   assert {
     condition     = aws_eks_cluster.main.name == "wardby" && aws_eks_cluster.main.version == "1.36"
     error_message = "Cluster name is name_prefix; version is kubernetes_version."
