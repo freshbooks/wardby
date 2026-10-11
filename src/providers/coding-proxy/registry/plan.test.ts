@@ -120,11 +120,16 @@ function setup(
     adapters: new Map([["npm", npmAdapter]]),
     store,
     audit: {
-      audit: async () => ({ withheld: () => [], reported: () => [] }),
+      audit: async () => ({ withheld: () => [], waived: () => [], reported: () => [] }),
       auditVersions: async (_adapter, versions) => {
         audited.push([...versions]);
         if (options.audit) return options.audit(versions);
-        return new Map(Object.entries(options.withheld ?? {}));
+        return new Map(
+          Object.entries(options.withheld ?? {}).map(([key, ids]) => [
+            key,
+            ids.map((id) => ({ id, malware: false, aliases: [] })),
+          ]),
+        );
       },
     },
     upstream: options.upstream ?? npm.upstream,

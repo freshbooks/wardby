@@ -12,7 +12,7 @@ function registryWith(store: InstanceType<typeof MemoryRegistryStore>) {
   return new RegistryService({
     adapters: new Map([["npm", npmAdapter]]),
     store,
-    audit: { audit: async () => ({ withheld: () => [], reported: () => [] }) },
+    audit: { audit: async () => ({ withheld: () => [], waived: () => [], reported: () => [] }) },
     upstream: async () => new Response("{}"),
     proxyBase: "http://wardby-proxy:8787/registry/",
     limits: { maxFileBytes: 1, maxTotalBytes: 1, maxFiles: 1, idleTimeoutMs: 1_000 },

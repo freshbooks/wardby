@@ -84,9 +84,10 @@ const fakeAdapter: RegistryAdapter = {
 
 type AdvisoryIndex = {
   withheld: (version: string) => readonly string[];
+  waived: (version: string) => readonly string[];
   reported: (version: string) => readonly string[];
 };
-const NO_ADVISORIES: AdvisoryIndex = { withheld: () => [], reported: () => [] };
+const NO_ADVISORIES: AdvisoryIndex = { withheld: () => [], waived: () => [], reported: () => [] };
 
 function service(
   overrides: {
@@ -120,6 +121,7 @@ function service(
         overrides.audit ??
         (async () => ({
           withheld: (version: string) => ((overrides.withheld ?? []).includes(version) ? ["GHSA-x"] : []),
+          waived: () => [],
           reported: () => [],
         })),
     },
@@ -1174,7 +1176,11 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
             throw new RegistryError(503, "wardby_audit_unavailable", `the audit for "${name}" is unreachable`);
           }
           const withheld = overrides.withheld?.[name] ?? [];
-          return { withheld: (v: string) => (withheld.includes(v) ? ["GHSA-x"] : []), reported: () => [] };
+          return {
+            withheld: (v: string) => (withheld.includes(v) ? ["GHSA-x"] : []),
+            waived: () => [],
+            reported: () => [],
+          };
         },
       },
       upstream: async (url, init) => {

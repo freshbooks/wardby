@@ -194,12 +194,12 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
     signal,
   );
   for (const entry of candidates) {
-    const ids = withheld.get(versionKey(entry.name, entry.version));
-    if (ids && ids.length > 0) {
+    const advisories = withheld.get(versionKey(entry.name, entry.version));
+    if (advisories && advisories.length > 0) {
       candidates.delete(entry);
       refusals.set(entry, {
         code: "wardby_version_filtered",
-        reason: `withheld by advisory ${ids.join(", ")} (high severity or malware)`,
+        reason: `withheld by advisory ${advisories.map(({ id }) => id).join(", ")} (high severity or malware)`,
         intrinsic: true,
       });
     }
