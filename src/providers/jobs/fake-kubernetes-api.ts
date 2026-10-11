@@ -1,5 +1,6 @@
 import type {
   V1ConfigMap,
+  V1Deployment,
   V1Endpoints,
   V1NetworkPolicy,
   V1Pod,
@@ -11,6 +12,7 @@ import type { Readable, Writable } from "node:stream";
 import {
   KubernetesAlreadyExistsError,
   KubernetesConflictError,
+  KubernetesForbiddenError,
   KubernetesNotFoundError,
   type KubernetesApi,
   type KubernetesExecOptions,
@@ -26,7 +28,7 @@ export interface FakeExecCall {
   timeoutMs: number;
 }
 
-type Kind = "configmap" | "secret" | "pod" | "networkpolicy" | "service" | "endpoints" | "resourcequota";
+type Kind = "configmap" | "secret" | "pod" | "networkpolicy" | "service" | "endpoints" | "resourcequota" | "deployment";
 type Obj = { metadata?: { name?: string; namespace?: string; resourceVersion?: string } };
 
 /** In-memory KubernetesApi for unit tests. Tests drive pod status and exec behavior directly. */
@@ -43,6 +45,11 @@ export class FakeKubernetesApi implements KubernetesApi {
   };
   /** The admission chain a dry-run create runs through. Default: echo the pod back unchanged. */
   onDryRunCreatePod: (namespace: string, body: V1Pod) => Promise<V1Pod> = async (_namespace, body) => body;
+  readonly deploymentPatches: Array<{ name: string; replicas?: number; annotations?: Record<string, string> }> = [];
+  /** Deployment names whose patch throws KubernetesForbiddenError. */
+  forbidden = new Set<string>();
+  /** "verb/resource/name" keys canI answers false for. */
+  accessDenied = new Set<string>();
   logs = new Map<string, string>();
   /** What readApiServerVersion reports; tests that care about provenance set it. */
   apiServerVersion = "v1.33.0";
@@ -154,6 +161,29 @@ export class FakeKubernetesApi implements KubernetesApi {
   }
   async readResourceQuota(namespace: string, name: string) {
     return this.read<V1ResourceQuota>("resourcequota", namespace, name);
+  }
+  async readDeployment(namespace: string, name: string) {
+    return this.read<V1Deployment>("deployment", namespace, name);
+  }
+  async patchDeployment(
+    namespace: string,
+    name: string,
+    patch: { replicas?: number; annotations?: Record<string, string> },
+  ) {
+    if (this.forbidden.has(name)) throw new KubernetesForbiddenError(this.key("deployment", namespace, name));
+    const key = this.key("deployment", namespace, name);
+    const current: V1Deployment | undefined = this.objects.get(key);
+    if (!current) throw new KubernetesNotFoundError(key);
+    const metadata = { ...current.metadata, resourceVersion: String(++this.version) };
+    if (patch.annotations) metadata.annotations = { ...current.metadata?.annotations, ...patch.annotations };
+    const next: V1Deployment = { ...current, metadata };
+    if (patch.replicas !== undefined)
+      next.spec = { selector: {}, template: {}, ...current.spec, replicas: patch.replicas };
+    this.objects.set(key, next);
+    this.deploymentPatches.push({ name, replicas: patch.replicas, annotations: patch.annotations });
+  }
+  async canI(_namespace: string, verb: string, _group: string, resource: string, name: string) {
+    return !this.accessDenied.has(`${verb}/${resource}/${name}`);
   }
   async readApiServerVersion() {
     return this.apiServerVersion;

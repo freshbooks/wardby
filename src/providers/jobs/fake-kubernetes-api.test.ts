@@ -1,7 +1,13 @@
+import type { V1Deployment } from "@kubernetes/client-node";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { FakeKubernetesApi } from "./fake-kubernetes-api.js";
-import { KubernetesAlreadyExistsError, KubernetesConflictError, KubernetesNotFoundError } from "./kubernetes-api.js";
+import {
+  KubernetesAlreadyExistsError,
+  KubernetesConflictError,
+  KubernetesForbiddenError,
+  KubernetesNotFoundError,
+} from "./kubernetes-api.js";
 
 describe("FakeKubernetesApi", () => {
   it("creates, reads, and conflict-checks ConfigMap replacement by resourceVersion", async () => {
@@ -87,5 +93,40 @@ describe("FakeKubernetesApi", () => {
     await expect(api.exec("ns", "p", "worker", ["true"], { timeoutMs: 1000 })).rejects.toBeInstanceOf(
       KubernetesNotFoundError,
     );
+  });
+});
+
+describe("FakeKubernetesApi deployments", () => {
+  const dep = (replicas: number): V1Deployment => ({
+    metadata: { name: "wardby-coding-proxy" },
+    spec: { replicas, selector: {}, template: {} },
+  });
+  it("patches replicas and annotations and records the call", async () => {
+    const api = new FakeKubernetesApi();
+    api.put("deployment", "wardby-coding", dep(0));
+    await api.patchDeployment("wardby-coding", "wardby-coding-proxy", {
+      replicas: 1,
+      annotations: { "wardby.io/power-woke-at": "t" },
+    });
+    const read = await api.readDeployment("wardby-coding", "wardby-coding-proxy");
+    expect(read?.spec?.replicas).toBe(1);
+    expect(read?.metadata?.annotations?.["wardby.io/power-woke-at"]).toBe("t");
+    expect(api.deploymentPatches).toEqual([
+      { name: "wardby-coding-proxy", replicas: 1, annotations: { "wardby.io/power-woke-at": "t" } },
+    ]);
+  });
+  it("throws KubernetesForbiddenError for a forbidden deployment", async () => {
+    const api = new FakeKubernetesApi();
+    api.put("deployment", "wardby-coding", dep(0));
+    api.forbidden.add("wardby-coding-proxy");
+    await expect(api.patchDeployment("wardby-coding", "wardby-coding-proxy", { replicas: 1 })).rejects.toBeInstanceOf(
+      KubernetesForbiddenError,
+    );
+  });
+  it("answers canI from accessDenied", async () => {
+    const api = new FakeKubernetesApi();
+    api.accessDenied.add("patch/deployments/wardby-native-gateway");
+    expect(await api.canI("wardby-coding", "patch", "apps", "deployments", "wardby-coding-proxy")).toBe(true);
+    expect(await api.canI("wardby-coding", "patch", "apps", "deployments", "wardby-native-gateway")).toBe(false);
   });
 });
