@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import type { V1NetworkPolicy, V1Pod, V1Secret } from "@kubernetes/client-node";
 import { isRepositoryDigest } from "../providers/jobs/docker-isolation.js";
+import { CLOUD_METADATA_PROBES } from "../providers/jobs/metadata-probes.js";
 import {
   conformResources,
   GVISOR_RUNTIME_CLASS,
@@ -248,10 +249,10 @@ function buildNativePolicy(name: string, namespace: string, labels: Record<strin
 /** Exit codes of the in-pod enforcement probe. */
 export const NATIVE_PROBE = { proven: 0, gatewayUnreachable: 3, denyReachable: 4, outsideReachable: 5 } as const;
 
-/** Addresses a worker must not reach: the internet, and the cloud metadata server (node and workload credentials). */
+/** Addresses a worker must not reach: the internet, and the cloud metadata endpoints (node and workload credentials). */
 export const NATIVE_PROBE_OUTSIDE: readonly { host: string; port: number }[] = [
   { host: "1.1.1.1", port: 443 },
-  { host: "169.254.169.254", port: 80 },
+  ...CLOUD_METADATA_PROBES,
 ];
 
 /**

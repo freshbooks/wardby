@@ -126,6 +126,8 @@ describe("native run Kubernetes objects", () => {
     expect(script).toContain('"10.96.0.42", 8791');
     expect(script).toContain('"1.1.1.1", 443');
     expect(script).toContain('"169.254.169.254", 80');
+    expect(script).toContain('"169.254.170.23", 80');
+    expect(script).toContain('"fd00:ec2::254", 80');
     const custom = nativeEnforcementProbe("10.96.0.42", [{ host: "10.1.2.3", port: 3307 }])[2];
     expect(custom).toContain('"10.1.2.3", 3307');
     expect(custom).not.toContain("1.1.1.1");
