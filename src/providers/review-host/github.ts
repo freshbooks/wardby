@@ -252,6 +252,10 @@ export class GitHubReviewHost implements CodeReviewHost {
 
   constructor(private readonly client: GitHubAppClient) {}
 
+  async appOwnerLogin(): Promise<string> {
+    return (await this.client.appIdentity()).ownerLogin;
+  }
+
   /** Runs `action` with a token for exactly `permissions`, translating failures to ReviewHostError. */
   protected async withToken<T>(
     repository: string,

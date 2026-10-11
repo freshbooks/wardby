@@ -777,11 +777,47 @@ describe("GitHubAppClient", () => {
   });
 
   it("reads and caches the App identity", async () => {
-    const fetchMock = vi.fn(async () => json({ id: 777, slug: "wardby" })) as unknown as typeof fetch;
+    const fetchMock = vi.fn(async () =>
+      json({ id: 777, slug: "wardby", owner: { login: "Acme" } }),
+    ) as unknown as typeof fetch;
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
-    await expect(client.appIdentity()).resolves.toEqual({ id: 777, slug: "wardby" });
+    await expect(client.appIdentity()).resolves.toEqual({
+      id: 777,
+      slug: "wardby",
+      ownerLogin: "Acme",
+    });
     await client.appIdentity();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an App identity without a valid owner login", async () => {
+    const fetchMock = vi.fn(async () =>
+      json({ id: 777, slug: "wardby", owner: { login: "*" } }),
+    ) as unknown as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    await expect(client.appIdentity()).rejects.toThrow("github_api_invalid_response");
+  });
+});
+
+describe("GitHubAppClient.deleteInstallation", () => {
+  it("deletes the installation with the App JWT and accepts 204", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    await client.deleteInstallation(123);
+    expect(calls[0].url).toMatch(/\/app\/installations\/123$/);
+    expect(calls[0].init.method).toBe("DELETE");
+    expect(String((calls[0].init.headers as Record<string, string>).authorization)).toMatch(/^Bearer ey/);
+  });
+
+  it("rejects a non-positive id without calling GitHub", async () => {
+    const fetchMock = vi.fn() as unknown as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    await expect(client.deleteInstallation(0)).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
