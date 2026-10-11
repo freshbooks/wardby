@@ -118,9 +118,14 @@ resource "aws_launch_template" "system" {
     }
   }
 
-  tag_specifications {
-    resource_type = "instance"
-    tags          = { Name = "${var.name_prefix}-system" }
+  # Provider default_tags do not reach the instances and volumes the node group
+  # launches, so they are tagged here.
+  dynamic "tag_specifications" {
+    for_each = toset(["instance", "volume"])
+    content {
+      resource_type = tag_specifications.value
+      tags          = merge({ Name = "${var.name_prefix}-system", "wardby:deployment" = var.name_prefix }, var.tags)
+    }
   }
 }
 
@@ -146,15 +151,21 @@ resource "aws_launch_template" "sandbox" {
     }
   }
 
-  tag_specifications {
-    resource_type = "instance"
-    tags          = { Name = "${var.name_prefix}-sandbox" }
+  # Provider default_tags do not reach the instances and volumes the node group
+  # launches, so they are tagged here.
+  dynamic "tag_specifications" {
+    for_each = toset(["instance", "volume"])
+    content {
+      resource_type = tag_specifications.value
+      tags          = merge({ Name = "${var.name_prefix}-sandbox", "wardby:deployment" = var.name_prefix }, var.tags)
+    }
   }
 }
 
 resource "aws_eks_node_group" "system" {
   cluster_name    = aws_eks_cluster.main.name
   node_group_name = "${var.name_prefix}-system"
+  version         = aws_eks_cluster.main.version
   node_role_arn   = aws_iam_role.node.arn
   subnet_ids      = local.private_subnet_ids
   ami_type        = "AL2023_x86_64_STANDARD"
@@ -183,12 +194,22 @@ resource "aws_eks_node_group" "system" {
     ignore_changes = [scaling_config[0].desired_size]
   }
 
-  depends_on = [aws_iam_role_policy_attachment.node, aws_eks_addon.vpc_cni]
+  # kube-proxy and egress first: nodes need kube-proxy for in-cluster service
+  # routing, and a sandbox node fails closed without its gVisor download. (The
+  # route resources have no instances with existing_vpc_id.)
+  depends_on = [
+    aws_iam_role_policy_attachment.node,
+    aws_eks_addon.vpc_cni,
+    aws_eks_addon.kube_proxy,
+    aws_route.private_nat,
+    aws_route_table_association.private,
+  ]
 }
 
 resource "aws_eks_node_group" "sandbox" {
   cluster_name    = aws_eks_cluster.main.name
   node_group_name = "${var.name_prefix}-sandbox"
+  version         = aws_eks_cluster.main.version
   node_role_arn   = aws_iam_role.node.arn
   subnet_ids      = local.private_subnet_ids
   ami_type        = "AL2023_x86_64_STANDARD"
@@ -223,12 +244,22 @@ resource "aws_eks_node_group" "sandbox" {
     ignore_changes = [scaling_config[0].desired_size]
   }
 
-  depends_on = [aws_iam_role_policy_attachment.node, aws_eks_addon.vpc_cni]
+  # kube-proxy and egress first: nodes need kube-proxy for in-cluster service
+  # routing, and a sandbox node fails closed without its gVisor download. (The
+  # route resources have no instances with existing_vpc_id.)
+  depends_on = [
+    aws_iam_role_policy_attachment.node,
+    aws_eks_addon.vpc_cni,
+    aws_eks_addon.kube_proxy,
+    aws_route.private_nat,
+    aws_route_table_association.private,
+  ]
 }
 
 resource "aws_eks_addon" "coredns" {
-  cluster_name = aws_eks_cluster.main.name
-  addon_name   = "coredns"
+  cluster_name  = aws_eks_cluster.main.name
+  addon_name    = "coredns"
+  addon_version = data.aws_eks_addon_version.coredns.version
 
-  depends_on = [aws_eks_node_group.system]
+  depends_on = [aws_eks_addon.kube_proxy, aws_eks_node_group.system]
 }

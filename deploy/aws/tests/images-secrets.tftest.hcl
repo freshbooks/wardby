@@ -12,6 +12,9 @@ mock_provider "aws" {
   mock_data "aws_subnet" {
     defaults = { cidr_block = "10.99.0.0/24" }
   }
+  mock_data "aws_eks_addon_version" {
+    defaults = { version = "v1.0.0-eksbuild.1" }
+  }
   mock_resource "aws_db_instance" {
     defaults = {
       resource_id        = "db-TESTRESOURCEID"

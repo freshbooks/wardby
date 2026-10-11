@@ -12,6 +12,9 @@ mock_provider "aws" {
   mock_data "aws_subnet" {
     defaults = { cidr_block = "10.99.0.0/24" }
   }
+  mock_data "aws_eks_addon_version" {
+    defaults = { version = "v1.0.0-eksbuild.1" }
+  }
   mock_resource "aws_db_instance" {
     defaults = {
       resource_id        = "db-TESTRESOURCEID"
@@ -61,6 +64,46 @@ run "cluster" {
   override_resource {
     target = aws_iam_role.vpc_cni
     values = { arn = "arn:aws:iam::111122223333:role/wardby-vpc-cni" }
+  }
+
+  # Distinct versions so an add-on wired to another add-on's lookup fails.
+  override_data {
+    target = data.aws_eks_addon_version.vpc_cni
+    values = { version = "v1.20.0-eksbuild.1" }
+  }
+  override_data {
+    target = data.aws_eks_addon_version.kube_proxy
+    values = { version = "v1.36.0-eksbuild.2" }
+  }
+  override_data {
+    target = data.aws_eks_addon_version.pod_identity_agent
+    values = { version = "v1.3.9-eksbuild.3" }
+  }
+  override_data {
+    target = data.aws_eks_addon_version.coredns
+    values = { version = "v1.12.4-eksbuild.4" }
+  }
+
+  assert {
+    condition     = aws_eks_addon.vpc_cni.addon_version == "v1.20.0-eksbuild.1" && aws_eks_addon.kube_proxy.addon_version == "v1.36.0-eksbuild.2" && aws_eks_addon.pod_identity_agent.addon_version == "v1.3.9-eksbuild.3" && aws_eks_addon.coredns.addon_version == "v1.12.4-eksbuild.4"
+    error_message = "Each managed add-on is pinned to the version its own aws_eks_addon_version lookup returns."
+  }
+  assert {
+    condition = alltrue([for d in [
+      [data.aws_eks_addon_version.vpc_cni, "vpc-cni"],
+      [data.aws_eks_addon_version.kube_proxy, "kube-proxy"],
+      [data.aws_eks_addon_version.pod_identity_agent, "eks-pod-identity-agent"],
+      [data.aws_eks_addon_version.coredns, "coredns"],
+    ] : d[0].addon_name == d[1] && d[0].kubernetes_version == aws_eks_cluster.main.version && d[0].most_recent != true])
+    error_message = "Add-on versions are the default for the cluster's Kubernetes version, looked up per add-on."
+  }
+  assert {
+    condition     = aws_eks_cluster.main.bootstrap_self_managed_addons == false
+    error_message = "EKS must install no self-managed add-ons: the module's managed add-ons are the only ones."
+  }
+  assert {
+    condition     = aws_cloudwatch_log_group.cluster.name == "/aws/eks/wardby/cluster" && aws_cloudwatch_log_group.cluster.retention_in_days == 90
+    error_message = "The module owns the control-plane log group (the name EKS writes to), with 90 days' retention by default."
   }
 
   assert {
@@ -120,6 +163,19 @@ run "extra_admins_get_cluster_admin" {
   assert {
     condition     = aws_eks_access_policy_association.admin["arn:aws:iam::111122223333:role/ops"].policy_arn == "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy" && aws_eks_access_policy_association.admin["arn:aws:iam::111122223333:role/ops"].access_scope[0].type == "cluster"
     error_message = "Extra admins get cluster-scoped AmazonEKSClusterAdminPolicy."
+  }
+}
+
+run "log_retention_follows_variable" {
+  command = apply
+  variables {
+    name_prefix                = "wardby-staging"
+    cluster_log_retention_days = 30
+  }
+
+  assert {
+    condition     = aws_cloudwatch_log_group.cluster.name == "/aws/eks/wardby-staging/cluster" && aws_cloudwatch_log_group.cluster.retention_in_days == 30
+    error_message = "The log group follows name_prefix and cluster_log_retention_days."
   }
 }
 

@@ -82,6 +82,51 @@ describe("deploy/aws sandbox node group", () => {
   });
 });
 
+/** The body of `resource "<type>" "<name>" { ... }` in a .tf source (brace-matched). */
+function resourceBlock(source, type, name) {
+  const start = source.indexOf(`resource "${type}" "${name}" {`);
+  if (start < 0) return "";
+  let depth = 0;
+  for (let i = source.indexOf("{", start); i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) return source.slice(start, i + 1);
+  }
+  return "";
+}
+
+/** The addresses listed in a block's `depends_on = [ ... ]`. */
+const dependsOn = (block) =>
+  (block.match(/^\s*depends_on\s*=\s*\[([\s\S]*?)\]/m)?.[1] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+// Ordering `terraform test` cannot observe: mocks create everything at once.
+describe("deploy/aws creation order", () => {
+  const nodegroups = read("nodegroups.tf");
+
+  it("creates the control-plane log group before the cluster, so EKS does not create an unmanaged one", () => {
+    expect(dependsOn(resourceBlock(read("cluster.tf"), "aws_eks_cluster", "main"))).toContain(
+      "aws_cloudwatch_log_group.cluster",
+    );
+  });
+
+  it("starts both node groups only after the private subnets have their NAT routes", () => {
+    for (const group of ["system", "sandbox"]) {
+      const deps = dependsOn(resourceBlock(nodegroups, "aws_eks_node_group", group));
+      expect(deps, group).toEqual(
+        expect.arrayContaining(["aws_route.private_nat", "aws_route_table_association.private"]),
+      );
+    }
+  });
+
+  it("installs coredns after kube-proxy and the system nodes", () => {
+    expect(dependsOn(resourceBlock(nodegroups, "aws_eks_addon", "coredns"))).toEqual(
+      expect.arrayContaining(["aws_eks_addon.kube_proxy", "aws_eks_node_group.system"]),
+    );
+  });
+});
+
 describe("deploy/aws database identities", () => {
   it("binds each database role to a service account the manifests define", () => {
     const manifests = walk(join(repoRoot, "deploy", "kind-coding", "manifests")).filter((f) => f.endsWith(".yaml"));

@@ -11,13 +11,14 @@ variable "region" {
 }
 
 variable "name_prefix" {
-  description = "Prefix for every resource name, and the EKS cluster's name. Lowercase letters, digits and hyphens; 3-20 characters; starts with a letter."
+  description = "Prefix for every resource name, and the EKS cluster's name. Lowercase letters, digits and single hyphens; 3-20 characters; starts with a letter. IAM role names are account-wide, so it must be unique in the account, not just in the region."
   type        = string
   default     = "wardby"
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,18}[a-z0-9]$", var.name_prefix))
-    error_message = "name_prefix must be 3-20 lowercase letters, digits or hyphens, starting with a letter and not ending with a hyphen."
+    # No "--": RDS identifiers and snapshot names refuse consecutive hyphens.
+    condition     = can(regex("^[a-z][a-z0-9-]{1,18}[a-z0-9]$", var.name_prefix)) && !strcontains(var.name_prefix, "--")
+    error_message = "name_prefix must be 3-20 lowercase letters, digits or hyphens, starting with a letter, not ending with a hyphen and without two hyphens in a row."
   }
 }
 
@@ -127,7 +128,7 @@ variable "public_access_cidrs" {
 }
 
 variable "additional_admin_principal_arns" {
-  description = "IAM principals (role or user ARNs) given cluster-admin, in addition to whoever runs terraform apply."
+  description = "IAM principals (role or user ARNs) given cluster-admin. Only the identity that created the cluster is admin otherwise, so list every later operator here; do not list the creator, whose access entry EKS already made (the apply would fail on the duplicate)."
   type        = list(string)
   default     = []
 }
@@ -138,8 +139,19 @@ variable "cluster_log_types" {
   default     = ["api", "audit", "authenticator"]
 }
 
+variable "cluster_log_retention_days" {
+  description = "Days CloudWatch Logs keeps the control-plane logs. One of CloudWatch's allowed retention values (1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653)."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.cluster_log_retention_days)
+    error_message = "cluster_log_retention_days must be one of CloudWatch's allowed retention values: 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288 or 3653."
+  }
+}
+
 variable "upgrade_support_type" {
-  description = "STANDARD: EKS upgrades the control plane when standard support ends. EXTENDED: stays on the version, billed at the extended-support rate."
+  description = "STANDARD: when standard support for the version ends, EKS upgrades the control plane itself; apply again afterwards so the add-ons and node groups follow. EXTENDED: stays on the version, billed at the extended-support rate."
   type        = string
   default     = "STANDARD"
 
@@ -158,7 +170,7 @@ variable "cluster_deletion_protection" {
 # --- Nodes -------------------------------------------------------------------
 
 variable "node_ami_release_version" {
-  description = "Pin the EKS-optimized AL2023 AMI release (e.g. 1.36.0-20261001) for both node groups. null takes the latest for kubernetes_version. Pin it when a gVisor or containerd change needs a known-good pairing."
+  description = "Pin the EKS-optimized AL2023 AMI release (e.g. 1.36.0-20261001) for both node groups. null takes the latest for kubernetes_version when a node group is created; nodes move to a newer AMI only when the launch template or Kubernetes version changes, or when you pin a newer release. Pin it when a gVisor or containerd change needs a known-good pairing."
   type        = string
   default     = null
 }

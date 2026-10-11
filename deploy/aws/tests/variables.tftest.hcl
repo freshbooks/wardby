@@ -12,6 +12,9 @@ mock_provider "aws" {
   mock_data "aws_subnet" {
     defaults = { cidr_block = "10.99.0.0/24" }
   }
+  mock_data "aws_eks_addon_version" {
+    defaults = { version = "v1.0.0-eksbuild.1" }
+  }
   mock_resource "aws_db_instance" {
     defaults = {
       resource_id        = "db-TESTRESOURCEID"
@@ -127,6 +130,19 @@ run "bad_name_prefix_is_refused" {
   command = plan
   variables { name_prefix = "Wardby_Prod" }
   expect_failures = [var.name_prefix]
+}
+
+# RDS identifiers and snapshot names refuse consecutive hyphens.
+run "name_prefix_with_double_hyphen_is_refused" {
+  command = plan
+  variables { name_prefix = "wardby--prod" }
+  expect_failures = [var.name_prefix]
+}
+
+run "unsupported_log_retention_is_refused" {
+  command = plan
+  variables { cluster_log_retention_days = 45 }
+  expect_failures = [var.cluster_log_retention_days]
 }
 
 run "bad_waf_window_is_refused" {

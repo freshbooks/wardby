@@ -12,6 +12,9 @@ mock_provider "aws" {
   mock_data "aws_subnet" {
     defaults = { cidr_block = "10.99.0.0/24" }
   }
+  mock_data "aws_eks_addon_version" {
+    defaults = { version = "v1.0.0-eksbuild.1" }
+  }
   mock_resource "aws_db_instance" {
     defaults = {
       resource_id        = "db-TESTRESOURCEID"
@@ -57,6 +60,18 @@ variables {
 
 run "node_groups" {
   command = apply
+  variables { tags = { team = "platform" } }
+
+  assert {
+    condition     = aws_eks_node_group.system.version == aws_eks_cluster.main.version && aws_eks_node_group.sandbox.version == aws_eks_cluster.main.version && aws_eks_node_group.sandbox.version == "1.36"
+    error_message = "Both node groups follow the cluster's Kubernetes version, so bumping kubernetes_version rolls them."
+  }
+  assert {
+    condition = alltrue(flatten([for lt in [[aws_launch_template.system, "wardby-system"], [aws_launch_template.sandbox, "wardby-sandbox"]] : [
+      for type in ["instance", "volume"] : one([for t in lt[0].tag_specifications : t.tags if t.resource_type == type]) == tomap({ Name = lt[1], "wardby:deployment" = "wardby", team = "platform" })
+    ]]))
+    error_message = "Instances and their EBS volumes carry Name, wardby:deployment and var.tags (provider default_tags do not reach them)."
+  }
 
   # Distinct ids so a swapped launch template (system nodes carry the
   # database's only admitted security group) fails the wiring asserts below.

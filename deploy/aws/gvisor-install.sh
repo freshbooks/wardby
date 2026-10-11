@@ -55,6 +55,7 @@ command -v bzip2 >/dev/null || dnf install -y -q bzip2
 
 work="$(mktemp -d)"
 curl --fail --silent --show-error --location --retry 5 --retry-connrefused \
+  --connect-timeout 15 --max-time 900 \
   -o "${work}/gvisor.tar.bz2" "${url}" || fail "download failed: ${url}"
 echo "${GVISOR_SHA512}  ${work}/gvisor.tar.bz2" | sha512sum -c - >/dev/null ||
   fail "checksum mismatch for ${url}"

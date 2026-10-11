@@ -108,6 +108,18 @@ describe("gvisor-install.sh", () => {
     expectBlocked(run({ ...good(), GVISOR_VERSION: "20250101.0" }));
   });
 
+  it("bounds the download in time, so a stalled mirror fails the boot instead of hanging it", () => {
+    const realCurl = spawnSync("sh", ["-c", "command -v curl"], { encoding: "utf8" }).stdout.trim();
+    const curlLog = join(root, "curl.log");
+    writeFileSync(join(bin, "curl"), `#!/bin/sh\necho "$@" >> "${curlLog}"\nexec "${realCurl}" "$@"\n`);
+    chmodSync(join(bin, "curl"), 0o755);
+    const result = run(good());
+    expect(result.status, result.stderr).toBe(0);
+    const args = readFileSync(curlLog, "utf8");
+    expect(args).toMatch(/--connect-timeout 15(\s|$)/);
+    expect(args).toMatch(/--max-time 900(\s|$)/);
+  });
+
   it("installs nothing and leaves no marker when its settings are missing", () => {
     expectBlocked(run({ GVISOR_VERSION: VERSION, GVISOR_BASE_URL: `file://${release}` }));
   });
