@@ -378,7 +378,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
             repoAccess: providers.repoAccess ?? createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
             ...(providers.issueTrackers ? { issueTrackers: providers.issueTrackers } : {}),
             webhookSecret: eventConfig.webhookSecret,
-            appIdentity: () => githubApp.appIdentity(),
+            appIdentity: (opts?: { fresh?: boolean }) => githubApp.appIdentity(opts),
             allowedAccounts: () => allowedAccounts,
             uninstallInstallation: (id: number) => githubApp.deleteInstallation(id),
           },

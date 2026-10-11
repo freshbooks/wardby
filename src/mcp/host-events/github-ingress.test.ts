@@ -211,12 +211,51 @@ describe("trusted GitHub accounts", () => {
 
   it("uninstalls a new installation on an account that is not served", async () => {
     const uninstallInstallation = vi.fn(async () => undefined);
-    const { deps: d, hostEventDelivery } = deps({ uninstallInstallation });
+    const appIdentity = vi.fn(async () => ({ id: 777, slug: "wardby", ownerLogin: "chfields" }));
+    const { deps: d, hostEventDelivery } = deps({ uninstallInstallation, appIdentity });
     const result = await handleGitHubEventIngress(installEvent("created", "Stranger", "d9"), d);
     expect(result).toMatchObject({ status: 202, body: { ignored: "account_not_allowed" } });
     await result.afterResponse!();
+    expect(appIdentity).toHaveBeenLastCalledWith({ fresh: true });
     expect(uninstallInstallation).toHaveBeenCalledWith(991);
     expect(hostEventDelivery.create).not.toHaveBeenCalled();
+  });
+
+  it("does not uninstall when a fresh owner read now serves the account", async () => {
+    const uninstallInstallation = vi.fn(async () => undefined);
+    const appIdentity = vi.fn(async (opts?: { fresh?: boolean }) => ({
+      id: 777,
+      slug: "wardby",
+      ownerLogin: opts?.fresh ? "stranger" : "acme",
+    }));
+    const { deps: d } = deps({ uninstallInstallation, appIdentity });
+    const result = await handleGitHubEventIngress(installEvent("created", "Stranger", "d13"), d);
+    expect(result).toMatchObject({ status: 202, body: { ignored: "account_not_allowed" } });
+    await result.afterResponse!();
+    expect(appIdentity).toHaveBeenLastCalledWith({ fresh: true });
+    expect(uninstallInstallation).not.toHaveBeenCalled();
+  });
+
+  it("does not uninstall when the fresh owner read fails", async () => {
+    const uninstallInstallation = vi.fn(async () => undefined);
+    const appIdentity = vi.fn(async (opts?: { fresh?: boolean }) => {
+      if (opts?.fresh) throw new Error("github_api_unavailable");
+      return { id: 777, slug: "wardby", ownerLogin: "acme" };
+    });
+    const { deps: d } = deps({ uninstallInstallation, appIdentity });
+    const result = await handleGitHubEventIngress(installEvent("created", "stranger", "d14"), d);
+    await expect(result.afterResponse!()).resolves.toBeUndefined();
+    expect(uninstallInstallation).not.toHaveBeenCalled();
+  });
+
+  it("only logs when the uninstall itself fails", async () => {
+    const uninstallInstallation = vi.fn(async () => {
+      throw new Error("github_api_unavailable");
+    });
+    const { deps: d } = deps({ uninstallInstallation });
+    const result = await handleGitHubEventIngress(installEvent("created", "stranger", "d15"), d);
+    await expect(result.afterResponse!()).resolves.toBeUndefined();
+    expect(uninstallInstallation).toHaveBeenCalledWith(991);
   });
 
   it("never uninstalls the owner's or a listed account's installation, nor on a deleted event", async () => {

@@ -705,8 +705,14 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
 
   private identity?: Promise<{ id: number; slug: string; ownerLogin: string }>;
 
-  /** The App's id, slug (its @-mention handle), and owner account, read once with the App JWT. */
-  appIdentity(): Promise<{ id: number; slug: string; ownerLogin: string }> {
+  /**
+   * The App's id, slug (its @-mention handle), and owner account, read once
+   * with the App JWT and memoized. `fresh` re-reads GET /app and replaces the
+   * memo (used before a destructive action, since the owner can change).
+   * A rejection is never cached.
+   */
+  appIdentity(opts?: { fresh?: boolean }): Promise<{ id: number; slug: string; ownerLogin: string }> {
+    if (opts?.fresh) this.identity = undefined;
     this.identity ??= (async () => {
       const response = await this.requestJson("/app", await this.appJwt());
       const payload = record(await response.json());
@@ -716,11 +722,13 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       const ownerLogin = record(payload.owner).login;
       if (!isGitHubLogin(ownerLogin)) throw new Error("github_api_invalid_response");
       return { id: positiveInteger(payload.id), slug: payload.slug, ownerLogin };
-    })().catch((err: unknown) => {
-      this.identity = undefined;
-      throw err;
+    })();
+    const pending = this.identity;
+    void pending.catch(() => {
+      // Only clear our own attempt: a newer (fresh) read may have replaced it.
+      if (this.identity === pending) this.identity = undefined;
     });
-    return this.identity;
+    return pending;
   }
 
   /** Removes this App from an installation (an account outside the trusted set). */

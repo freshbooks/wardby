@@ -790,6 +790,34 @@ describe("GitHubAppClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("re-reads the App identity when fresh and replaces the cached value", async () => {
+    let owner = "Acme";
+    const fetchMock = vi.fn(async () =>
+      json({ id: 777, slug: "wardby", owner: { login: owner } }),
+    ) as unknown as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    await expect(client.appIdentity()).resolves.toMatchObject({ ownerLogin: "Acme" });
+    owner = "acme-labs";
+    await expect(client.appIdentity()).resolves.toMatchObject({ ownerLogin: "Acme" });
+    await expect(client.appIdentity({ fresh: true })).resolves.toMatchObject({ ownerLogin: "acme-labs" });
+    await expect(client.appIdentity()).resolves.toMatchObject({ ownerLogin: "acme-labs" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not cache a rejected fresh read", async () => {
+    let fail = false;
+    const fetchMock = vi.fn(async () =>
+      fail ? json({ message: "boom" }, 500) : json({ id: 777, slug: "wardby", owner: { login: "Acme" } }),
+    ) as unknown as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    await client.appIdentity();
+    fail = true;
+    await expect(client.appIdentity({ fresh: true })).rejects.toThrow();
+    fail = false;
+    await expect(client.appIdentity()).resolves.toMatchObject({ ownerLogin: "Acme" });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("rejects an App identity without a valid owner login", async () => {
     const fetchMock = vi.fn(async () =>
       json({ id: 777, slug: "wardby", owner: { login: "*" } }),

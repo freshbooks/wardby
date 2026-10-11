@@ -28,8 +28,12 @@ export interface GitHubIngressDeps {
   /** For a merged/closed PR's linked issue; absent → closed PRs are ignored. */
   issueTrackers?: IssueTrackerRegistry;
   webhookSecret: string | undefined;
-  /** The App's id, slug, and owner (the owner is always served). Throwing fails the request closed. */
-  appIdentity: () => Promise<{ id: number; slug: string; ownerLogin: string }>;
+  /**
+   * The App's id, slug, and owner (the owner is always served). Throwing fails
+   * the request closed. `fresh` bypasses any cache; it is used before an
+   * uninstall, since the owner can change while the server runs.
+   */
+  appIdentity: (opts?: { fresh?: boolean }) => Promise<{ id: number; slug: string; ownerLogin: string }>;
   /** Accounts served in addition to the App's owner (WARDBY_GITHUB_ALLOWED_ACCOUNTS). */
   allowedAccounts: () => ReadonlySet<string>;
   /** Removes the App from an installation on an account that isn't served; absent = ignore only. */
@@ -117,6 +121,25 @@ export async function handleGitHubEventIngress(
       ...(account.uninstall && uninstall && installationId !== undefined
         ? {
             afterResponse: async () => {
+              // Destructive, so re-check against a fresh owner read: the cached
+              // owner may be stale after an ownership transfer or rename.
+              let fresh: { ownerLogin: string };
+              try {
+                fresh = await deps.appIdentity({ fresh: true });
+              } catch (err) {
+                log.warn(
+                  { err, account: account.login, installationId },
+                  "could not re-read the App owner; not removing the App from the installation",
+                );
+                return;
+              }
+              if (isGitHubAccountAllowed(trustedAccounts(fresh.ownerLogin, deps.allowedAccounts()), account.login)) {
+                log.info(
+                  { account: account.login, installationId },
+                  "account is served after re-reading the App owner; not removing the App from the installation",
+                );
+                return;
+              }
               try {
                 await uninstall(installationId);
                 log.warn(
