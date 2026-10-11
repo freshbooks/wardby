@@ -723,6 +723,13 @@ low-power mode until its rollout ends, and the mark stops it scaling them back
 down. With the mode on they stay up through the deploy (its database checks
 need them) and sleep one idle window later if nothing uses them.
 
+**Failed replicas.** Without the headroom placeholder, a rollout is more likely
+to hit Autopilot's admission race: the node rejects a new pod with `OutOfcpu`
+and the Deployment starts a replacement. The rejected pod stays behind as a
+Failed pod. After the rollouts, `up.sh` deletes Failed pods of the control
+plane, coding proxy and native gateway (never coding-run or sandbox pods), and
+the Viewer shows any such leftover as an old replica rather than a failure.
+
 **Sleeping now.** To skip the idle window (for example right after a test), an
 admin calls the MCP tool `power_sleep`, optionally with `target` set to `proxy`
 or `gateway` (default both). It scales the target to 0 at once, but never stops

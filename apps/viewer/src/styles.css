@@ -1445,6 +1445,13 @@ button:disabled {
   grid-column: 1 / -1;
 }
 
+/* An always-on component scaled to 0 (low-power mode asleep, or headroom off): present, not failing. */
+.infra-row-idle,
+.map-idle {
+  opacity: 0.7;
+  border-style: dashed;
+}
+
 .map-arrow {
   font-size: 0.7rem;
   color: var(--muted);

@@ -1,5 +1,5 @@
 import type { InfraInfo } from "../api/types";
-import { countsTowardReady, parseCpu, parseMemory, type Platform, type PodView } from "./adapter";
+import { countsTowardReady, parseCpu, parseMemory, type IdleView, type Platform, type PodView } from "./adapter";
 
 export function platformLabel(platform: Platform, info: InfraInfo | null): string {
   if (platform === "gke") return info?.kubernetes?.platform === "gke-autopilot" ? "GKE Autopilot" : "GKE";
@@ -52,7 +52,7 @@ export function containerDot(
 }
 
 export function statusKind(p: PodView): DotKind {
-  if (p.terminating || p.phase === "Succeeded") return "idle";
+  if (p.terminating || p.phase === "Succeeded" || p.stale) return "idle";
   if (p.phase === "Failed") return "bad";
   if (p.ready || p.status === "Running") return p.ready ? "ok" : "warn";
   if (/Error|BackOff|Failed|Invalid|OOM/.test(p.status)) return "bad";
@@ -63,7 +63,19 @@ export function statusKind(p: PodView): DotKind {
 export function podReadiness(p: PodView): { text: string; className: string } {
   if (p.terminating) return { text: "Terminating", className: "muted" };
   if (p.phase === "Succeeded") return { text: "Completed", className: "muted" };
+  if (p.stale) return { text: "Failed · old replica", className: "muted" };
   if (p.phase === "Failed") return { text: "Failed", className: "status bad" };
   const counted = p.containers.filter(countsTowardReady);
   return { text: `${counted.filter((c) => c.ready).length}/${counted.length}`, className: "muted" };
+}
+
+/** An always-on component with no pod: "asleep · low-power · woke 21:17", or "off · 0 replicas". */
+export function idleLabel(i: IdleView): { state: string; detail: string } {
+  if (i.state === "off") return { state: "off", detail: "0 replicas" };
+  const woke = i.wokeAt ? new Date(i.wokeAt) : null;
+  const at =
+    woke && !Number.isNaN(woke.getTime())
+      ? ` · woke ${woke.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+      : "";
+  return { state: "asleep", detail: `low-power${at}` };
 }

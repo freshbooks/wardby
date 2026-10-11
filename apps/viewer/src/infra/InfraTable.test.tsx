@@ -17,6 +17,28 @@ import { InfraTable } from "./InfraTable";
 const model = describeCluster(gkeCluster, gkeInfo);
 
 describe("InfraTable", () => {
+  it("shows a sleeping proxy as asleep and an old failed replica in grey", () => {
+    const m = describeCluster(
+      clusterOf({
+        pod: [
+          pod("wardby-control-plane-588d-fknw8", { owner: { kind: "ReplicaSet", name: "wardby-control-plane-588d" } }),
+          pod("wardby-control-plane-867d-9qf9x", {
+            owner: { kind: "ReplicaSet", name: "wardby-control-plane-867d" },
+            phase: "Failed",
+            ready: false,
+            containers: [],
+          }),
+        ],
+        deployment: [{ name: "wardby-coding-proxy", ready: 0, desired: 0, labels: {}, wokeAt: "2026-10-11T21:17:57Z" }],
+      }),
+      gkeInfo,
+    );
+    render(<InfraTable model={m} selected={null} onSelect={vi.fn()} onOpenRun={vi.fn()} />);
+    expect(screen.getByText(/asleep · low-power · woke/)).toBeInTheDocument();
+    const stale = screen.getByText("wardby-control-plane-867d-9qf9x").closest("[role=row]") as HTMLElement;
+    expect(within(stale).getByText("Failed").className).not.toMatch(/\bbad\b/);
+  });
+
   it("groups pods under ALWAYS ON, CODING RUNS and JOBS with the column headers", () => {
     render(<InfraTable model={model} selected={null} onSelect={vi.fn()} onOpenRun={vi.fn()} />);
     for (const h of ["ALWAYS ON", "CODING RUNS", "JOBS"]) expect(screen.getByText(h)).toBeInTheDocument();

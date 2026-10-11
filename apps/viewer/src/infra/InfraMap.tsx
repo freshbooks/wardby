@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import type { InfraModel, PodView } from "./adapter";
-import { containerDot, podReadiness } from "./format";
+import type { IdleView, InfraModel, PodView } from "./adapter";
+import { containerDot, idleLabel, podReadiness } from "./format";
 import { openUrl } from "../api/client";
 import { useEndedRuns, type EndedRun } from "./endedRuns";
 import { visibleJobs } from "./jobs";
@@ -64,6 +64,20 @@ function PodCard({
         {!compact && pod.identity && <span className="muted map-identity">{pod.identity}</span>}
       </button>
       <ConsoleLink pod={pod} />
+    </div>
+  );
+}
+
+/** An always-on component with no pod: low-power mode's sleeping proxy or gateway, or headroom turned off. */
+function IdleCard({ idle, compact }: { idle: IdleView; compact?: boolean }) {
+  const l = idleLabel(idle);
+  return (
+    <div className={`map-card map-static map-idle${compact ? " compact" : ""}`} title={idle.name}>
+      <span className="map-title">
+        <span>{idle.title}</span>
+        <span className="muted">{l.state}</span>
+      </span>
+      {!compact && <span className="muted">{l.detail}</span>}
     </div>
   );
 }
@@ -256,8 +270,11 @@ export function InfraMap({
   const endedAgents = allEnded.filter((e) => e.pod.group === "agent_sandbox");
   const jobs = visibleJobs(model.groups.jobs, jobFinishedAt, fixedNow ?? clock);
   const hosts = [...new Set(model.edge.flatMap((e) => e.hosts))];
-  const main = alwaysOn.filter((p) => p.title !== "headroom");
-  const headroom = alwaysOn.filter((p) => p.title === "headroom");
+  // Leftover failed replicas stay in the table; the map shows each component's live state.
+  const main = alwaysOn.filter((p) => p.title !== "headroom" && !p.stale);
+  const headroom = alwaysOn.filter((p) => p.title === "headroom" && !p.stale);
+  const idle = model.groups.idle.filter((i) => i.title !== "headroom");
+  const idleHeadroom = model.groups.idle.filter((i) => i.title === "headroom");
   const rules = model.isolation.egressRules;
   const secrets = model.secrets;
 
@@ -338,6 +355,9 @@ export function InfraMap({
           {main.map((p) => (
             <PodCard key={p.name} pod={p} selected={selected === p.name} onSelect={() => onSelect(p.name)} />
           ))}
+          {idle.map((i) => (
+            <IdleCard key={i.name} idle={i} />
+          ))}
         </div>
         {(codingRuns.length > 0 || ended.length > 0 || rules.length > 0) && (
           <div className="map-fence">
@@ -379,10 +399,13 @@ export function InfraMap({
             onClose={dismiss}
           />
         )}
-        {headroom.length > 0 && (
+        {(headroom.length > 0 || idleHeadroom.length > 0) && (
           <div className="map-pods map-small">
             {headroom.map((p) => (
               <PodCard key={p.name} pod={p} compact selected={selected === p.name} onSelect={() => onSelect(p.name)} />
+            ))}
+            {idleHeadroom.map((i) => (
+              <IdleCard key={i.name} idle={i} compact />
             ))}
           </div>
         )}
