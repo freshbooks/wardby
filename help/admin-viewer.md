@@ -3,7 +3,7 @@ id: admin-viewer
 title: Watch live runs with the admin viewer API
 summary: Read-only, deployment-wide live view of runs, sub-agent trees, triggers, outcomes and coding-run services for admins (admin:view).
 audience: operator
-tags: [viewer, admin, runs, live, desktop, infrastructure, kubernetes, download]
+tags: [viewer, admin, runs, live, desktop, infrastructure, kubernetes, download, openapi, api contract]
 appliesTo: ">=0.4.0"
 ---
 
@@ -46,6 +46,8 @@ setup. Its Map shows the request path (entry, protection layer such as Cloud
 Armor, routes), each NetworkPolicy with a plain-English summary, and on GKE a
 link from each pod to the Google Cloud console. The run graph's zoom controls
 include **Fit width**, which fills the canvas with the graph's width.
+
+From Wardby 0.6.0 the API is also published as OpenAPI 3.1 (`docs/viewer-api.openapi.yml` in the package), an API contract you can feed to client generators such as `openapi-typescript`.
 
 For parameters, status codes, frame formats and schemas, follow
 [`docs/viewer-api.md`](../docs/viewer-api.md).
