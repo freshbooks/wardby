@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CodeReviewHost, HostPermission } from "../providers/review-host/types.js";
 import { ReviewHostError } from "../providers/review-host/types.js";
-import { atLeast, createRepoAccessGate, describeDenial, requiredLevel } from "./repo-access.js";
+import { atLeast, createRepoAccessGate, describeDenial, requiredLevel, trustedAccountsFailure } from "./repo-access.js";
 
 const REPO = "chfields/knock-knock-jokes";
 
@@ -433,6 +433,18 @@ describe("RepoAccessGate trusted GitHub accounts", () => {
       if (saved === undefined) delete process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS;
       else process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS = saved;
     }
+  });
+
+  it("reduces a lookup failure to a fixed code, never the error's own text", () => {
+    expect(trustedAccountsFailure(new Error("github_allowed_accounts_invalid"))).toBe(
+      "github_allowed_accounts_invalid",
+    );
+    expect(trustedAccountsFailure(new Error("github_api_unavailable"))).toBe("github_api_unavailable");
+    expect(trustedAccountsFailure(new Error("github_api_error:502:ABC"))).toBe("github_api_error");
+    expect(trustedAccountsFailure(new Error('WARDBY_GITHUB_ALLOWED_ACCOUNTS: "x y" is not a GitHub login.'))).toBe(
+      "unexpected_error",
+    );
+    expect(trustedAccountsFailure("boom")).toBe("unexpected_error");
   });
 
   it("describes the denial with its code", () => {

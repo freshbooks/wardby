@@ -140,6 +140,20 @@ export function isTransientHostError(err: unknown): boolean {
   return err.message === "github_api_unavailable" || /^github_api_error:(5\d\d|429|403)(:|$)/.test(err.message);
 }
 
+/**
+ * Why the trusted GitHub accounts could not be read, as a fixed string: every
+ * branch returns a literal, so nothing from the error itself reaches a log.
+ */
+export function trustedAccountsFailure(err: unknown): string {
+  const message = err instanceof Error ? err.message : "";
+  if (message === "github_allowed_accounts_invalid") return "github_allowed_accounts_invalid";
+  if (message === "github_api_unavailable") return "github_api_unavailable";
+  if (message === "github_api_invalid_response") return "github_api_invalid_response";
+  if (message === "github_app_private_key_invalid") return "github_app_private_key_invalid";
+  if (message.startsWith("github_api_error:")) return "github_api_error";
+  return "unexpected_error";
+}
+
 type LevelAnswer = { ok: true; level: HostPermission; login: string } | { ok: false; transient: boolean };
 
 interface CacheEntry {
@@ -180,7 +194,9 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
     try {
       trusted = await readTrusted();
     } catch (err) {
-      log.warn({ err }, "could not read the GitHub App's trusted accounts; denying");
+      // Only a fixed code is logged, never the error: its message may carry
+      // WARDBY_GITHUB_ALLOWED_ACCOUNTS's value (CodeQL js/clear-text-logging).
+      log.warn({ code: trustedAccountsFailure(err) }, "could not read the GitHub App's trusted accounts; denying");
       return { ok: false, reason: "check_failed" };
     }
     if (trusted === undefined) return undefined;
