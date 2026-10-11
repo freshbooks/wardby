@@ -591,7 +591,7 @@ connects from inside the pod to a destination that must be blocked and requires
 three consecutive refusals. A cluster that does not enforce policy, or has not
 yet programmed this pod's rules, never reaches the point of running agent code.
 The same check runs at startup against a throwaway canary pod, which also
-verifies the pod cannot reach DNS, the internet or the cloud metadata endpoint.
+verifies the pod cannot reach DNS, the internet or the cloud metadata endpoints.
 
 **RBAC.** The control plane needs a namespace Role (`pods`, `pods/exec`,
 `pods/log`, `secrets`, `configmaps`, `networkpolicies`, `services`) and a
@@ -605,6 +605,15 @@ has none, so that configuration is development-only and says so. Set
 `KUBERNETES_RUNTIME_CLASS` to the cluster's sandboxed runtime class in
 production; the launcher warns loudly when it is unset.
 
+The `eks` platform profile (Amazon EKS with a gVisor node group) also requires
+the `gvisor` runtime class. The cluster supplies a RuntimeClass `gvisor`
+(handler `runsc`) whose scheduling block targets nodes labelled
+`wardby.dev/sandbox=gvisor` and tainted `sandbox=gvisor:NoSchedule`; the profile
+forgives that node selector and toleration and nothing else. The startup canary
+and the native sandbox gate probe the cloud metadata endpoints
+`169.254.169.254`, `169.254.170.23` (EKS Pod Identity agent) and `fd00:ec2::254`
+(EC2 IPv6), all on port 80, and require every one to be unreachable.
+
 The `gke-autopilot` platform profile contains narrow admission allowances
 captured from a real cluster and requires the `gvisor` runtime class. A dry-run
 capture cannot observe labels added after pod scheduling, so live-run behavior
@@ -617,6 +626,52 @@ Before production deployment, review the
 Per-run record ConfigMaps currently require operator-managed garbage collection,
 and the real-cluster suite does not yet cover every Docker containment
 scenario.
+
+## Database authentication
+
+By default `DATABASE_URL` carries the database password. On Amazon RDS (or
+Aurora) for PostgreSQL, set `DATABASE_AUTH=rds-iam` to authenticate with IAM
+database authentication instead: the password is a short-lived token signed with
+the workload's AWS credentials (for example EKS Pod Identity), minted when a
+connection opens. Any other value is refused with
+[`database_auth_invalid`](../help/errors/database-auth-invalid.md).
+
+Under `rds-iam`:
+
+- `DATABASE_URL` must be `postgresql://` (or `postgres://`) with the database
+  user and no password, and must contain `sslmode=verify-full` and
+  `sslrootcert=<path to the RDS CA bundle>`. The port defaults to 5432.
+- The region comes from `DATABASE_AWS_REGION`, else `AWS_REGION`.
+- The database user must be granted `rds_iam` and the workload's IAM role must
+  allow `rds-db:connect` for it.
+- Tokens are valid for 15 minutes and only for opening a connection; Wardby
+  reuses one for 10 minutes, and open connections outlive their token.
+- It applies to every app connection: the Prisma clients (server, scheduler,
+  coding proxy, native gateway), the DBOS system database
+  (`DBOS_SYSTEM_DATABASE_URL`, else `DATABASE_URL`, under the same rules) and
+  the viewer's LISTEN connection. The DBOS system pool holds up to 10
+  connections; count it in the database's connection budget.
+- URL parameters that are carried over: `application_name`,
+  `fallback_application_name`, `options`, `client_encoding`,
+  `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`,
+  `query_timeout`. `connection_limit` and `pool_timeout` still size and bound
+  the pool, `connect_timeout` (seconds) applies to the DBOS pool, and `schema`
+  is accepted with no run-time effect, as in password mode. Every other
+  parameter is refused by name, including `sslcert`, `sslkey`, `ssl`, `host` and
+  `pgbouncer`; the Cloud SQL `sslcert=` advice does not apply to RDS.
+- A misconfigured setup fails at process start, for every `wardby` command,
+  because the database module is loaded at start.
+- `prisma migrate deploy` and `dbos schema` take a URL, not a connection
+  config, so they are not covered. Mint a short-lived URL with the helper
+  shipped in the migration image and run them within its 15 minutes:
+
+  ```bash
+  export DATABASE_URL="$(node scripts/rds-iam-url.mjs)" && npm run prisma:migrate && npm run dbos:migrate
+  ```
+
+  The helper reads `DATABASE_URL`, `DATABASE_AWS_REGION`/`AWS_REGION` and the
+  ambient AWS credentials, and prints a URL containing a credential: never log
+  its output. `wardby quickstart` does not support `rds-iam`.
 
 ## Coding package registry
 

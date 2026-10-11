@@ -13,7 +13,7 @@ appliesTo: ">=0.5.4"
 
 1. Inspect an equivalent pod while a run is starting: `kubectl get pods -n <namespace> -l wardby.io/component=native-run -o yaml`.
 2. Find the admission controller that changes it (`kubectl get mutatingwebhookconfigurations`) and exempt pods labeled `wardby.io/component: native-run` and the run namespace's NetworkPolicies, for example by namespace or label selector. Do not disable sidecar-style injection by editing the pod after the fact.
-3. If `NATIVE_SANDBOX_RUNTIME_CLASS` or `NATIVE_SANDBOX_PRIORITY_CLASS` is set, confirm no policy overrides it. On GKE Autopilot set `KUBERNETES_PLATFORM=gke-autopilot` so pod resources are already in the form Autopilot admits and are not rewritten.
+3. If `NATIVE_SANDBOX_RUNTIME_CLASS` or `NATIVE_SANDBOX_PRIORITY_CLASS` is set, confirm no policy overrides it. On GKE Autopilot set `KUBERNETES_PLATFORM=gke-autopilot` so pod resources are already in the form Autopilot admits and are not rewritten. On Amazon EKS set `KUBERNETES_PLATFORM=eks` and make sure the `gvisor` RuntimeClass's scheduling block matches your sandbox nodes (label `wardby.dev/sandbox=gvisor`, taint `sandbox=gvisor:NoSchedule`); `eks` forgives only that node selector and toleration.
 4. Trigger the run again.
 
 See [Run native agents in a sandbox](../native-sandbox.md) and the

@@ -35,7 +35,10 @@ AWS can run the portable runtime and has a Bedrock Claude adapter, but a native
 AWS deployment module is planned and has not shipped. Other cloud providers
 can run the production container image with equivalent database, ingress,
 identity, secret, isolation, and observability controls; that infrastructure is
-operator-owned.
+operator-owned. On Amazon EKS, set `KUBERNETES_PLATFORM=eks` (gVisor node group
+required) and, for RDS, `DATABASE_AUTH=rds-iam`; see "Database
+authentication" in
+[`docs/security-deployment.md`](../docs/security-deployment.md).
 
 The older `deploy/gcp` Cloud Run module is deprecated. Do not choose it for a
 new installation.

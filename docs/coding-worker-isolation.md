@@ -596,6 +596,7 @@ Kubernetes-specific settings (`src/config/providers.ts`,
 | `KUBERNETES_CONTEXT`            | (unset → in-cluster/default kubeconfig context) | Which kubeconfig context `ClientNodeKubernetesApi` connects with.                                                                                                                                                                                                                                     |
 | `KUBERNETES_RUNTIME_CLASS`      | (unset)                                         | e.g. `gvisor` on GKE. Unset means pods run without a sandboxing runtime class — logged once per launch as `kubernetes_runtime_class_unset` and development-only.                                                                                                                                      |
 | `KUBERNETES_RESOURCE_QUOTA`     | (unset)                                         | Name of the namespace ResourceQuota run pods count against, e.g. `wardby-coding` in the GKE overlay. When set, a run whose pod would not fit the quota's free room waits in the coding queue instead of failing at pod create. Needs `get` on that one `resourcequotas` object. Unset means no check. |
+| `KUBERNETES_PLATFORM`           | `generic`                                       | `generic`, `gke-autopilot` or `eks`. Selects the cluster's admission rules that run pods are conformed to. `gke-autopilot` and `eks` both require `KUBERNETES_RUNTIME_CLASS=gvisor`; see the platform profile section below.                                                                          |
 | `KUBERNETES_RUN_PRIORITY_CLASS` | (unset)                                         | PriorityClass for run pods and the preflight canary, e.g. `wardby-coding-run` in the GKE overlay. Must be an existing class and a DNS-1123 subdomain; `system-` classes are refused. Unset means no class (priority 0).                                                                               |
 
 The `CODING_CPUS` / `CODING_MEMORY_MB` / `CODING_PIDS` / `CODING_DISK_MB` /
@@ -806,6 +807,16 @@ landed on — cannot appear in it. That case reached a live Autopilot launch wit
 every dry-run-derived check passing, and is now pinned by tests. Treat a
 captured fixture as a lower bound on what a platform mutates.
 
+The `eks` profile is for Amazon EKS clusters with a dedicated gVisor node group.
+EKS has no managed sandbox runtime, so the cluster must provide a RuntimeClass
+named `gvisor` with handler `runsc` whose `scheduling` block selects nodes
+labelled `wardby.dev/sandbox=gvisor` and tolerates the taint
+`sandbox=gvisor:NoSchedule` on those nodes. Kubernetes' RuntimeClass admission
+merges that block into each pod; Wardby sets neither the node selector nor the
+toleration itself, and the `eks` profile forgives exactly that nodeSelector and
+that toleration and nothing else. Pod resources follow the generic rules, plus
+an explicit ephemeral-storage request and limit.
+
 ### The enforcement gate
 
 The Kubernetes API can create a NetworkPolicy object without that policy
@@ -919,9 +930,9 @@ default 90,000ms):
 1. `platform` — pure configuration, checked before any cluster API call:
    `assertPlatformConfig` (`src/providers/jobs/kubernetes-platform.ts`) refuses
    a deployment that cannot work under `KUBERNETES_PLATFORM`. Under
-   `gke-autopilot` this means `KUBERNETES_RUNTIME_CLASS` must be `gvisor`
-   (gVisor is mandatory there — an unset or different runtime class is refused,
-   not warned about), and the effective `CODING_MAX_DISK_MB` must leave room
+   `gke-autopilot` and `eks` this means `KUBERNETES_RUNTIME_CLASS` must be `gvisor`
+   (gVisor is mandatory there, and under `eks` — an unset or different runtime
+   class is refused, not warned about), and the effective `CODING_MAX_DISK_MB` must leave room
    for the worker container's 1 GiB reservation inside Autopilot's 10 GiB pod
    ephemeral-storage ceiling. The same assertion runs again at process
    start-up in `buildConfiguredExecutor`
@@ -950,8 +961,10 @@ default 90,000ms):
 5. `canary` — creates a real run pod + NetworkPolicy from the same builders
    as a live run, running a script that waits for policy enforcement (as
    above) then attempts DNS resolution, a connect to the proxy's deny port,
-   the internet (`1.1.1.1:443`), the metadata server, and the proxy itself —
-   requiring every one of the first four to fail and the proxy connect to
+   the internet (`1.1.1.1:443`), the cloud metadata endpoints (`169.254.169.254:80`,
+   the EKS Pod Identity agent `169.254.170.23:80` and EC2's IPv6 metadata
+   address `[fd00:ec2::254]:80`), and the proxy itself —
+   requiring every one of the first four kinds to fail and the proxy connect to
    succeed. Any other outcome, or a canary pod that itself fails to
    schedule/run, is `kubernetes_isolation_unsupported:canary`.
 

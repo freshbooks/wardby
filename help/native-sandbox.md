@@ -53,7 +53,8 @@ example gVisor), `NATIVE_GATEWAY_SERVICE` (default `wardby-native-gateway`),
 replicas; unset means no cap), `NATIVE_SANDBOX_READY_TIMEOUT_MS` (default 120000) and `NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS` (default 30000).
 `NATIVE_SANDBOX_PIDS` applies to Docker only. On GKE Autopilot also set
 `KUBERNETES_PLATFORM=gke-autopilot`: pod resources are conformed to Autopilot's
-rules and the gVisor runtime class is required. The shipped GKE deployment
+rules and the gVisor runtime class is required. On Amazon EKS with a gVisor node
+group set `KUBERNETES_PLATFORM=eks`, which also requires the gVisor runtime class. The shipped GKE deployment
 runs the gateway for you; see the GKE guide. The
 server needs permission in that namespace to create, get, and delete pods,
 Secrets, and NetworkPolicies, list pods, exec into pods, and get Services.
@@ -61,7 +62,7 @@ Secrets, and NetworkPolicies, list pods, exec into pods, and get Services.
 Each run starts "not ready": the gateway refuses the worker until the server
 has verified the pod and its NetworkPolicy and proven from inside the pod that
 the gateway answers while the deny port, the outside world, and the cloud
-metadata server do not. Failures
+metadata endpoints do not. Failures
 there are
 [native_sandbox_network_unenforced](errors/native-sandbox-network-unenforced.md),
 [native_sandbox_isolation_mismatch](errors/native-sandbox-isolation-mismatch.md),
