@@ -418,6 +418,23 @@ describe("RepoAccessGate trusted GitHub accounts", () => {
     }
   });
 
+  it("fails closed on a malformed WARDBY_GITHUB_ALLOWED_ACCOUNTS", async () => {
+    const saved = process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS;
+    process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS = "acme,not a login";
+    try {
+      const host = {
+        provider: "github",
+        repositoryPermission: vi.fn(),
+        appOwnerLogin: async () => "owner-org",
+      } as unknown as CodeReviewHost;
+      const gate = createRepoAccessGate({ db: {} as never, hosts: { github: host } });
+      expect(await gate.checkAccount!("github", "owner-org/x")).toEqual({ ok: false, reason: "check_failed" });
+    } finally {
+      if (saved === undefined) delete process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS;
+      else process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS = saved;
+    }
+  });
+
   it("describes the denial with its code", () => {
     expect(describeDenial({ ok: false, reason: "github_account_not_allowed" }, REPO)).toMatch(
       /^github_account_not_allowed: .*WARDBY_GITHUB_ALLOWED_ACCOUNTS/,

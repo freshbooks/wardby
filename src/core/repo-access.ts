@@ -163,7 +163,14 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
     (async () => {
       const host = options.hosts.github;
       if (!host?.appOwnerLogin) return undefined;
-      return trustedAccountSet(await host.appOwnerLogin(), loadGitHubAllowedAccounts());
+      let extra: ReadonlySet<string>;
+      try {
+        extra = loadGitHubAllowedAccounts();
+      } catch {
+        // A fixed code: the parse error quotes the raw value, which must not reach the log.
+        throw new Error("github_allowed_accounts_invalid");
+      }
+      return trustedAccountSet(await host.appOwnerLogin(), extra);
     });
 
   /** A server-wide boundary, checked before any stamp, owner, or host call. Local repositories are exempt. */
