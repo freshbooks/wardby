@@ -79,15 +79,15 @@ Scopes and roles do different jobs:
 - **Roles authorize.** A user has a set of roles. With no roles, the user is a
   member:
 
-| Role               | Grants                                                                                 |
-| ------------------ | -------------------------------------------------------------------------------------- |
-| `admin`            | `agents:admin`, `packages:approve`, `services:manage`, `admin:view` and `models:admin` |
-| `package-approver` | `packages:approve`                                                                     |
-| `service-manager`  | `services:manage`                                                                      |
-| `model-manager`    | `models:admin`                                                                         |
-| (none)             | nothing privileged; every other scope works as the token allows                        |
+| Role               | Grants                                                                                                 |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| `admin`            | `agents:admin`, `packages:approve`, `services:manage`, `admin:view`, `models:admin` and `power:manage` |
+| `package-approver` | `packages:approve`                                                                                     |
+| `service-manager`  | `services:manage`                                                                                      |
+| `model-manager`    | `models:admin`                                                                                         |
+| (none)             | nothing privileged; every other scope works as the token allows                                        |
 
-Seven operations are privileged:
+Eight operations are privileged:
 
 - `make_owner`, which reassigns any agent's owner, including another
   principal's private agent (see [Sharing agents](#sharing-agents) for what
@@ -104,7 +104,10 @@ Seven operations are privileged:
   (`set_model`, `disable_model`, `reset_model`; reading the catalog is
   `agents:read`, see [models.md](models.md));
 - reading every owner's runs through the admin viewer API (see
-  [viewer-api.md](viewer-api.md)).
+  [viewer-api.md](viewer-api.md));
+- reading low-power state and scaling the coding proxy and native gateway to
+  zero now (`power_status`, `power_sleep`; see
+  [Low-power mode](getting-started-gke.md#low-power-mode)).
 
 Each needs **both** its scope on the token **and** a role that grants that
 permission:
@@ -114,10 +117,12 @@ permission:
 - Service catalog changes need `services:manage`.
 - Model catalog changes need `models:admin`.
 - The admin viewer API needs `admin:view`, which only the `admin` role grants.
+- `power_status` and `power_sleep` need `power:manage`, which only the `admin`
+  role grants.
 
 In practice:
 
-- an `admin` can do all seven;
+- an `admin` can do all eight;
 - a `package-approver` can approve packages only;
 - a `service-manager` can change the service catalog only;
 - a `model-manager` can change the model catalog only;

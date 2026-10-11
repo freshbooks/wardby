@@ -67,12 +67,13 @@ describe("supported scopes", () => {
       for (const scope of scopes) expect(SCOPES_SUPPORTED, `${name} needs ${scope}`).toContain(scope);
   });
 
-  it("treats exactly admin:view, agents:admin, packages:approve, services:manage and models:admin as privileged", () => {
+  it("treats exactly admin:view, agents:admin, packages:approve, services:manage, models:admin and power:manage as privileged", () => {
     expect([...PRIVILEGED_SCOPES].sort()).toEqual([
       "admin:view",
       "agents:admin",
       "models:admin",
       "packages:approve",
+      "power:manage",
       "services:manage",
     ]);
     for (const scope of PRIVILEGED_SCOPES) expect(SCOPES_SUPPORTED).toContain(scope);
@@ -85,6 +86,7 @@ describe("supported scopes", () => {
       "agents:admin",
       "models:admin",
       "packages:approve",
+      "power:manage",
       "services:manage",
     ]);
     expect(ROLE_PERMISSIONS["package-approver"]).toEqual(["packages:approve"]);
@@ -193,6 +195,20 @@ describe("privileged operations need the scope AND a role granting it", () => {
     expect(permissionsOf(["admin"]).has("models:admin")).toBe(true);
     expect(permissionsOf(["model-manager"])).toEqual(new Set(["models:admin"]));
     expect(permissionsOf(["service-manager"]).has("models:admin")).toBe(false);
+  });
+});
+
+describe("power:manage", () => {
+  it("is supported, privileged, granted by admin and by no other built-in role", () => {
+    expect(SCOPES_SUPPORTED).toContain("power:manage");
+    expect(PRIVILEGED_SCOPES).toContain("power:manage");
+    expect(ROLE_NAMES.filter((role) => ROLE_PERMISSIONS[role].includes("power:manage"))).toEqual(["admin"]);
+    const tools = requiredScopes();
+    expect(tools.get("power_sleep")).toEqual(["power:manage"]);
+    expect(tools.get("power_status")).toEqual(["power:manage"]);
+    expect(() => requireScope(ctx(["power:manage"], ["admin"]), URI, "power:manage")).not.toThrow();
+    for (const roles of [[], ["model-manager"], ["service-manager"], ["package-approver"]])
+      expect(denial(() => requireScope(ctx(["power:manage"], roles), URI, "power:manage"))?.httpStatus).toBe(403);
   });
 });
 

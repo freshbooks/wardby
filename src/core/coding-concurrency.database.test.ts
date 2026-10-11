@@ -15,7 +15,7 @@ import type { Executor } from "../providers/executor/types.js";
 import { PrismaContainerExecutionStore } from "../providers/executor/container.js";
 import { CODING_QUEUE_TIMEOUT_ERROR, drainCodingQueue } from "./coding-queue.js";
 import { reconcileOnce } from "./reconciler.js";
-import { gatewayBusy, proxyBusy } from "./power-idle.js";
+import { gatewayBusy, powerBlockers, proxyBusy } from "./power-idle.js";
 import type { Prisma, PrismaClient } from "#prisma";
 
 const db = createPrismaClient();
@@ -335,12 +335,14 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
     const minutes = (n: number) => n * 60_000;
     const ago = (n: number) => new Date(Date.now() - minutes(n));
 
-    /** A view of the database whose coding-run counts see only `runIds`. */
+    /** A view of the database whose coding-run counts and lists see only `runIds`. */
     function onlyRuns(runIds: string[]): PrismaClient {
+      const scoped = <W>(where: W | undefined) => ({ AND: [where ?? {}, { runId: { in: runIds } }] });
       return {
         codingRun: {
-          count: (args: Prisma.CodingRunCountArgs) =>
-            db.codingRun.count({ ...args, where: { AND: [args.where ?? {}, { runId: { in: runIds } }] } }),
+          count: (args: Prisma.CodingRunCountArgs) => db.codingRun.count({ ...args, where: scoped(args.where) }),
+          findMany: (args: Prisma.CodingRunFindManyArgs) =>
+            db.codingRun.findMany({ ...args, where: scoped(args.where) }),
         },
       } as unknown as PrismaClient;
     }
@@ -401,6 +403,51 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
         },
       });
       expect(await gatewayBusy(db, since())).toBe(true);
+      await db.nativeGatewaySession.update({ where: { runId: sessionRun }, data: { status: "finished" } });
+    });
+
+    it("powerBlockers(proxy) lists running and queued coding runs, not a run finished a minute ago", async () => {
+      const running = id("lp-block-running");
+      const queued = id("lp-block-queued");
+      const finished = id("lp-block-finished");
+      await seed(running, { status: "running" });
+      await seed(queued, { status: "pending", queuedAt: new Date() });
+      await seed(finished, { status: "succeeded", finishedAt: ago(1) });
+      expect(await powerBlockers(db, "proxy")).toEqual(expect.arrayContaining([running, queued]));
+      expect(await powerBlockers(onlyRuns([running, queued, finished]), "proxy")).toEqual([running, queued].sort());
+      await retire([running, queued]);
+      expect(await powerBlockers(onlyRuns([running, queued, finished]), "proxy")).toEqual([]);
+    });
+
+    it("powerBlockers(gateway) lists a running sandbox run and the run of an active gateway session", async () => {
+      // Inclusion-only assertions: other database test files create sandbox runs and sessions in parallel.
+      const sandboxRun = id("lp-block-sandbox");
+      const sessionRun = id("lp-block-session");
+      await db.run.create({ data: { id: sandboxRun, agentId, status: "running", nativeExecutionMode: "sandbox" } });
+      await db.run.create({
+        data: {
+          id: sessionRun,
+          agentId,
+          status: "succeeded",
+          finishedAt: ago(1),
+          nativeExecutionMode: "control_plane",
+        },
+      });
+      await db.nativeGatewaySession.create({
+        data: {
+          runId: sessionRun,
+          capabilityHash: `cap-${sessionRun}`,
+          status: "active",
+          deadlineAt: new Date(Date.now() + minutes(15)),
+          budgetUsd: 1,
+          snapshot: {},
+        },
+      });
+      const blockers = await powerBlockers(db, "gateway");
+      expect(blockers).toEqual(expect.arrayContaining([sandboxRun, sessionRun]));
+      expect(new Set(blockers).size).toBe(blockers.length);
+      expect(blockers).toEqual([...blockers].sort());
+      await db.run.update({ where: { id: sandboxRun }, data: { status: "succeeded", finishedAt: new Date() } });
       await db.nativeGatewaySession.update({ where: { runId: sessionRun }, data: { status: "finished" } });
     });
 

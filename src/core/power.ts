@@ -13,6 +13,7 @@ const powerLog = logger.child({ module: "power" });
 export type PowerTarget = "proxy" | "gateway";
 export const LOW_POWER_WAKE_TIMEOUT = "low_power_wake_timeout";
 export const LOW_POWER_SCALE_FORBIDDEN = "low_power_scale_forbidden";
+export const LOW_POWER_DISABLED = "low_power_disabled";
 /** ISO-8601 time the control plane last scaled the Deployment up from zero. */
 export const POWER_WOKE_AT = "wardby.io/power-woke-at";
 /** sleepIfIdle does real work at most this often. */
@@ -27,6 +28,8 @@ export interface PowerOptions {
   deployments: Record<PowerTarget, string>;
   /** Whether the target has had work since `since` (used by sleepIfIdle). */
   busy?: (target: PowerTarget, since: Date) => Promise<boolean>;
+  /** Run ids keeping the target busy right now (active or queued; ignores recent finishes). Needed by sleepNow. */
+  blockers?: (target: PowerTarget) => Promise<string[]>;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   /** How often ensureAwake polls for a ready endpoint. Default 2000. */
@@ -41,6 +44,30 @@ export interface Power {
   sleepIfIdle(): Promise<void>;
   /** Missing permissions, e.g. "patch deployments/wardby-coding-proxy". */
   checkAccess(): Promise<string[]>;
+  /** Each target's state. A target whose Deployment does not exist is left out. Disabled: `{ enabled: false }`, no API call. */
+  status(): Promise<PowerStatus>;
+  /**
+   * Scales each target to zero now, skipping the idle window and woke-at grace,
+   * unless it has blockers (then it is reported, untouched). Never stops a run.
+   * A target whose Deployment does not exist is neither slept nor blocked.
+   */
+  sleepNow(targets: PowerTarget[]): Promise<SleepNowResult>;
+}
+
+export interface PowerTargetStatus {
+  target: PowerTarget;
+  replicas: number;
+  ready: boolean;
+  wokeAt: string | null;
+  blockers: string[];
+}
+export interface PowerStatus {
+  enabled: boolean;
+  targets?: PowerTargetStatus[];
+}
+export interface SleepNowResult {
+  slept: PowerTarget[];
+  blocked: Array<{ target: PowerTarget; runIds: string[] }>;
 }
 
 export const DISABLED_POWER: Power = {
@@ -53,9 +80,24 @@ export const DISABLED_POWER: Power = {
   async checkAccess() {
     return [];
   },
+  async status() {
+    return { enabled: false };
+  },
+  async sleepNow() {
+    throw new Error(`${LOW_POWER_DISABLED}: WARDBY_LOW_POWER is not 1 on this deployment.`);
+  },
 };
 
 const ready = (ep?: V1Endpoints) => (ep?.subsets ?? []).some((s) => (s.addresses ?? []).length > 0);
+
+/** Rethrows a Forbidden patch as low_power_scale_forbidden; anything else unchanged. */
+function scaleError(error: unknown, name: string): unknown {
+  if (!(error instanceof KubernetesForbiddenError)) return error;
+  return new Error(
+    `${LOW_POWER_SCALE_FORBIDDEN}: the control plane may not patch Deployment "${name}"; apply the wardby-power Role (up.sh with WARDBY_LOW_POWER=1).`,
+    { cause: error },
+  );
+}
 
 export function createPower(options: PowerOptions): Power {
   if (!options.config.enabled) return DISABLED_POWER;
@@ -64,7 +106,7 @@ export function createPower(options: PowerOptions): Power {
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const pollMs = options.pollMs ?? 2000;
-  const { busy } = options;
+  const { busy, blockers } = options;
   const idleMinutes = options.config.idleMinutes;
   const idleMs = idleMinutes * 60_000;
   // A Deployment never stamped by a wake counts as woken when this process started.
@@ -101,13 +143,7 @@ export function createPower(options: PowerOptions): Power {
             annotations: { [POWER_WOKE_AT]: now().toISOString() },
           });
         } catch (error) {
-          if (error instanceof KubernetesForbiddenError) {
-            throw new Error(
-              `${LOW_POWER_SCALE_FORBIDDEN}: the control plane may not patch Deployment "${name}"; apply the wardby-power Role (up.sh with WARDBY_LOW_POWER=1).`,
-              { cause: error },
-            );
-          }
-          throw error;
+          throw scaleError(error, name);
         }
         powerLog.info({ target, runId }, `power: ${target} woke`);
       }
@@ -137,6 +173,53 @@ export function createPower(options: PowerOptions): Power {
           powerLog.warn({ err, target }, "power_sleep_failed");
         }
       }
+    },
+
+    async status() {
+      const targets: PowerTargetStatus[] = [];
+      for (const target of Object.keys(deployments) as PowerTarget[]) {
+        const name = deployments[target];
+        const dep = await api.readDeployment(namespace, name);
+        if (!dep) continue;
+        targets.push({
+          target,
+          replicas: dep.spec?.replicas ?? 1,
+          ready: ready(await api.readEndpoints(namespace, name)),
+          wokeAt: dep.metadata?.annotations?.[POWER_WOKE_AT] ?? null,
+          blockers: blockers ? await blockers(target) : [],
+        });
+      }
+      return { enabled: true, targets };
+    },
+
+    async sleepNow(targets) {
+      // Without a blockers check this could scale a target out from under a run.
+      if (!blockers) throw new Error("power: sleepNow needs a blockers check.");
+      const result: SleepNowResult = { slept: [], blocked: [] };
+      for (const target of targets) {
+        const name = deployments[target];
+        const dep = await api.readDeployment(namespace, name);
+        if (!dep) continue;
+        if ((dep.spec?.replicas ?? 1) === 0) {
+          result.slept.push(target);
+          continue;
+        }
+        let runIds = await blockers(target);
+        // A run may have started since the first check; look again right before scaling down.
+        if (runIds.length === 0) runIds = await blockers(target);
+        if (runIds.length > 0) {
+          result.blocked.push({ target, runIds });
+          continue;
+        }
+        try {
+          await api.patchDeployment(namespace, name, { replicas: 0 });
+        } catch (error) {
+          throw scaleError(error, name);
+        }
+        powerLog.info({ target }, `power: ${target} slept (forced)`);
+        result.slept.push(target);
+      }
+      return result;
     },
 
     async checkAccess() {

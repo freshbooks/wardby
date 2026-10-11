@@ -12,6 +12,7 @@ function setup(
     ready?: boolean;
     onSleep?: (calls: number, api: FakeKubernetesApi) => void;
     busy?: (target: PowerTarget, since: Date) => Promise<boolean>;
+    blockers?: (target: PowerTarget) => Promise<string[]>;
     /** Seeds the proxy Deployment's POWER_WOKE_AT annotation. */
     wokeAt?: string;
     enabled?: boolean;
@@ -31,6 +32,7 @@ function setup(
     namespace: NS,
     deployments: names,
     busy: opts.busy,
+    blockers: opts.blockers,
     now: () => new Date(t),
     sleep: async (ms) => {
       t += ms;
@@ -248,5 +250,99 @@ describe("power (sleep)", () => {
     expect(api.readDeployment).not.toHaveBeenCalled();
     expect(busy).not.toHaveBeenCalled();
     expect(api.deploymentPatches).toEqual([]);
+  });
+});
+
+describe("power (sleep now and status)", () => {
+  it("sleepNow scales an awake, unblocked target to 0 regardless of woke-at", async () => {
+    const { api, power } = setup(1, {
+      busy: async () => true,
+      blockers: async () => [],
+      wokeAt: new Date().toISOString(),
+    });
+    expect(await power.sleepNow(["proxy"])).toEqual({ slept: ["proxy"], blocked: [] });
+    expect(api.deploymentPatches.at(-1)).toEqual({ name: names.proxy, replicas: 0 });
+  });
+
+  it("sleepNow refuses a target with blockers and reports them", async () => {
+    const { api, power } = setup(1, { blockers: async () => ["run_1", "run_2"] });
+    expect(await power.sleepNow(["proxy"])).toEqual({
+      slept: [],
+      blocked: [{ target: "proxy", runIds: ["run_1", "run_2"] }],
+    });
+    expect(api.deploymentPatches).toEqual([]);
+  });
+
+  it("sleepNow re-checks blockers right before patching", async () => {
+    const blockers = vi.fn<(target: PowerTarget) => Promise<string[]>>();
+    blockers.mockResolvedValueOnce([]).mockResolvedValueOnce(["run_late"]);
+    const { api, power } = setup(1, { blockers });
+    expect((await power.sleepNow(["proxy"])).blocked).toEqual([{ target: "proxy", runIds: ["run_late"] }]);
+    expect(blockers).toHaveBeenCalledTimes(2);
+    expect(api.deploymentPatches).toEqual([]);
+  });
+
+  it("sleepNow on an already-sleeping target reports it slept without patching", async () => {
+    const blockers = vi.fn(async () => ["run_1"]);
+    const { api, power } = setup(0, { blockers });
+    expect((await power.sleepNow(["proxy"])).slept).toEqual(["proxy"]);
+    expect(api.deploymentPatches).toEqual([]);
+    expect(blockers).not.toHaveBeenCalled();
+  });
+
+  it("sleepNow handles each target on its own and skips a Deployment that does not exist", async () => {
+    const { api, power } = setup(1, { blockers: async (target) => (target === "gateway" ? ["run_g"] : []) });
+    // Only the proxy Deployment exists: the gateway is neither slept nor blocked.
+    expect(await power.sleepNow(["proxy", "gateway"])).toEqual({ slept: ["proxy"], blocked: [] });
+    api.put("deployment", NS, { metadata: { name: names.gateway }, spec: { replicas: 2, selector: {}, template: {} } });
+    expect(await power.sleepNow(["proxy", "gateway"])).toEqual({
+      slept: ["proxy"],
+      blocked: [{ target: "gateway", runIds: ["run_g"] }],
+    });
+    expect(api.deploymentPatches).toEqual([{ name: names.proxy, replicas: 0 }]);
+  });
+
+  it("sleepNow fails with low_power_scale_forbidden when it may not patch", async () => {
+    const { api, power } = setup(1, { blockers: async () => [] });
+    api.forbidden.add(names.proxy);
+    await expect(power.sleepNow(["proxy"])).rejects.toThrow(/^low_power_scale_forbidden: .*wardby-coding-proxy/);
+  });
+
+  it("sleepNow refuses to scale anything without a blockers check", async () => {
+    const { api, power } = setup(1);
+    await expect(power.sleepNow(["proxy"])).rejects.toThrow(/blockers/);
+    expect(api.deploymentPatches).toEqual([]);
+  });
+
+  it("status reports replicas, readiness, wokeAt and blockers; disabled reports enabled false with no API call", async () => {
+    // Enabled: an awake, ready, busy proxy and a sleeping gateway.
+    const blockers = vi.fn(async (target: PowerTarget) => (target === "proxy" ? ["run_1", "run_2"] : []));
+    const { api, power } = setup(1, { ready: true, wokeAt: "2026-10-11T11:00:00.000Z", blockers });
+    api.put("deployment", NS, { metadata: { name: names.gateway }, spec: { replicas: 0, selector: {}, template: {} } });
+    expect(await power.status()).toEqual({
+      enabled: true,
+      targets: [
+        { target: "proxy", replicas: 1, ready: true, wokeAt: "2026-10-11T11:00:00.000Z", blockers: ["run_1", "run_2"] },
+        { target: "gateway", replicas: 0, ready: false, wokeAt: null, blockers: [] },
+      ],
+    });
+    expect(api.deploymentPatches).toEqual([]);
+
+    // Disabled: no Kubernetes call, no blockers query.
+    const offBlockers = vi.fn(async () => ["run_1"]);
+    const off = setup(1, { ready: true, blockers: offBlockers, enabled: false });
+    vi.spyOn(off.api, "readDeployment");
+    vi.spyOn(off.api, "readEndpoints");
+    expect(await off.power.status()).toEqual({ enabled: false });
+    expect(off.api.readDeployment).not.toHaveBeenCalled();
+    expect(off.api.readEndpoints).not.toHaveBeenCalled();
+    expect(offBlockers).not.toHaveBeenCalled();
+    expect(await DISABLED_POWER.status()).toEqual({ enabled: false });
+  });
+
+  it("DISABLED_POWER.sleepNow fails with low_power_disabled", async () => {
+    await expect(DISABLED_POWER.sleepNow(["proxy"])).rejects.toThrow(
+      "low_power_disabled: WARDBY_LOW_POWER is not 1 on this deployment.",
+    );
   });
 });

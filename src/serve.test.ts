@@ -186,6 +186,8 @@ describe.skipIf(!process.env.DATABASE_URL)("startServe (database)", () => {
         isAsleep: vi.fn(async () => false),
         sleepIfIdle: vi.fn(async () => {}),
         checkAccess: vi.fn(async () => []),
+        status: async () => ({ enabled: true, targets: [] }),
+        sleepNow: async () => ({ slept: [], blocked: [] }),
         ...over,
       };
     }

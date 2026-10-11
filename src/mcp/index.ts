@@ -58,6 +58,7 @@ import { registerAgentTools } from "./tools/agents.js";
 import { registerServiceTools } from "./tools/services.js";
 import { registerBudgetGroupTools } from "./tools/budget-groups.js";
 import { registerModelCatalogTools } from "./tools/model-catalog.js";
+import { registerPowerTools } from "./tools/power.js";
 import { registerHelpTools } from "./tools/help.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
@@ -137,6 +138,7 @@ export function registerAllTools(
   registerServiceTools(mcp);
   registerBudgetGroupTools(mcp);
   registerModelCatalogTools(mcp, { refresh: opts.refreshModelCatalog });
+  registerPowerTools(mcp);
   registerHelpTools(mcp);
   registerTriggerTool(mcp);
   registerToolAuthoringTools(mcp);

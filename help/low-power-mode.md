@@ -3,7 +3,7 @@ id: low-power-mode
 title: Low power mode on GKE
 summary: Low power mode: scale the coding proxy and native gateway to zero when idle to cut the cost of a lightly used GKE deployment, and what changes when they wake.
 audience: operator
-tags: [gke, cost, low-power, scale-to-zero, kubernetes, autoscaling, idle]
+tags: [gke, cost, low-power, scale-to-zero, kubernetes, autoscaling, idle, power_sleep, power_status, sleep now, power:manage]
 appliesTo: ">=0.6.0"
 ---
 
@@ -53,6 +53,28 @@ from 5 to 1440 (default 30) set on the control-plane Deployment.
   after 10 minutes). A run executes on the copy that started it, so scheduled
   runs stay on the scheduler leader; webhook and MCP-started runs spread. The
   autoscaler owns the replica count while the mode is on.
+
+## Sleep now
+
+To skip the idle window, for example right after a test, call `power_sleep`.
+Pass `target: "proxy"` or `target: "gateway"` to sleep one; omit it for both.
+
+- It scales the target to 0 at once, ignoring the idle window and the woke-at
+  grace.
+- It never stops a run. A target with a pending or running run, or for the
+  gateway an active gateway session, stays up, and its run ids are returned:
+  `{ "slept": ["proxy"], "blocked": [{ "target": "gateway", "runIds": ["..."] }] }`.
+  Recently finished runs do not block it.
+- The next run wakes the target as usual.
+- Each call is logged with `event: "power.sleep"` and the caller's principal.
+
+`power_status` returns, for each target, `replicas`, `ready`, `wokeAt` and
+`blockers` (the run ids keeping it busy).
+
+Both tools need the `power:manage` scope, which only the `admin` role grants
+(see [Identity and access](identity-and-access.md)). With the mode off,
+`power_sleep` fails with `409 low_power_disabled` and `power_status` returns
+`{ "enabled": false }`.
 
 ## Trade-offs and requirements
 

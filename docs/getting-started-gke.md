@@ -702,6 +702,19 @@ while the proxy sleeps (`kubernetes_preflight_deferred`). A deploy leaves the
 proxy and gateway at 1 replica, since the deploy's database checks need them;
 they sleep after the idle window.
 
+**Sleeping now.** To skip the idle window (for example right after a test), an
+admin calls the MCP tool `power_sleep`, optionally with `target` set to `proxy`
+or `gateway` (default both). It scales the target to 0 at once, but never stops
+a run: a target with a pending or running run, or for the gateway an active
+gateway session, is left up and its run ids are returned under `blocked`.
+Recently finished runs do not block it. The next run wakes the target as usual.
+`power_status` shows each target's replicas, readiness, last wake time and
+blocking run ids. Both tools need the `power:manage` scope, which only the
+`admin` role grants; with the mode off, `power_sleep` fails with
+`409 low_power_disabled` and `power_status` returns `{ "enabled": false }`.
+Each `power_sleep` is logged as `event: "power.sleep"` with the caller's
+principal.
+
 **Control-plane autoscaling.** The control plane scales between 1 and 2 copies
 on CPU (placeholder 40% target, scale-down after 10 minutes). A run executes on
 the copy that started it, so scheduled runs stay on the scheduler leader, while

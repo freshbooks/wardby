@@ -613,6 +613,8 @@ describe("KubernetesJobLauncher low-power mode", () => {
       isAsleep: async () => asleep,
       sleepIfIdle: async () => {},
       checkAccess: async () => [],
+      status: async () => ({ enabled: true, targets: [] }),
+      sleepNow: async () => ({ slept: [], blocked: [] }),
     };
     return { power, calls };
   }

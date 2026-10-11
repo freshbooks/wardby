@@ -216,6 +216,8 @@ describe("buildConfiguredExecutor", () => {
       isAsleep,
       sleepIfIdle: async () => {},
       checkAccess: async () => [],
+      status: async () => ({ enabled: true, targets: [] }),
+      sleepNow: async () => ({ slept: [], blocked: [] }),
     };
     const executor = buildConfiguredExecutor({
       native,

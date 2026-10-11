@@ -9,7 +9,7 @@ import { loadLowPowerConfig } from "../config/low-power.js";
 import { ClientNodeKubernetesApi } from "../providers/jobs/kubernetes-client.js";
 import { logger } from "./logger.js";
 import { createPower, DISABLED_POWER, type Power } from "./power.js";
-import { powerBusy } from "./power-idle.js";
+import { powerBlockers, powerBusy } from "./power-idle.js";
 
 const log = logger.child({ module: "power-composition" });
 
@@ -30,5 +30,6 @@ export function buildPower({ env = process.env, db }: { env?: NodeJS.ProcessEnv;
       gateway: env.NATIVE_GATEWAY_SERVICE?.trim() || DEFAULT_NATIVE_GATEWAY_SERVICE,
     },
     busy: powerBusy(db),
+    blockers: (target) => powerBlockers(db, target),
   });
 }
