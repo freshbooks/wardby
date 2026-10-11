@@ -128,6 +128,12 @@ describe("native run Kubernetes objects", () => {
     expect(script).toContain('"169.254.169.254", 80');
     expect(script).toContain('"169.254.170.23", 80');
     expect(script).toContain('"fd00:ec2::254", 80');
+    // Pinned shape: outside addresses are probed concurrently, verdicts read deny-first then outside.
+    expect(script).toContain("Promise.all([");
+    expect(script.indexOf("if (await deny) process.exit(4)")).toBeGreaterThan(-1);
+    expect(script.indexOf("if (await deny) process.exit(4)")).toBeLessThan(
+      script.indexOf("(await outside).some(Boolean)) process.exit(5)"),
+    );
     const custom = nativeEnforcementProbe("10.96.0.42", [{ host: "10.1.2.3", port: 3307 }])[2];
     expect(custom).toContain('"10.1.2.3", 3307');
     expect(custom).not.toContain("1.1.1.1");

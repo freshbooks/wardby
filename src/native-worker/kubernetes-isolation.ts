@@ -274,10 +274,15 @@ export function nativeEnforcementProbe(
     "});",
     "(async () => {",
     `  if (!(await reach(${JSON.stringify(gatewayHost)}, ${NATIVE_GATEWAY_PORT}))) process.exit(${NATIVE_PROBE.gatewayUnreachable});`,
-    `  if (await reach(${JSON.stringify(gatewayHost)}, ${NATIVE_GATEWAY_DENY_PORT})) process.exit(${NATIVE_PROBE.denyReachable});`,
-    ...outside.map(
-      (o) => `  if (await reach(${JSON.stringify(o.host)}, ${o.port})) process.exit(${NATIVE_PROBE.outsideReachable});`,
-    ),
+    // The deny port and every outside address run concurrently (each dropped connect waits the full
+    // timeout, so serial probing would eat the exec budget); the verdicts are still read in a fixed
+    // order, so when several fail the exit code is deterministic: deny port first, then outside.
+    `  const deny = reach(${JSON.stringify(gatewayHost)}, ${NATIVE_GATEWAY_DENY_PORT});`,
+    "  const outside = Promise.all([",
+    ...outside.map((o) => `    reach(${JSON.stringify(o.host)}, ${o.port}),`),
+    "  ]);",
+    `  if (await deny) process.exit(${NATIVE_PROBE.denyReachable});`,
+    `  if ((await outside).some(Boolean)) process.exit(${NATIVE_PROBE.outsideReachable});`,
     `  process.exit(${NATIVE_PROBE.proven});`,
     "})();",
   ].join("\n");
