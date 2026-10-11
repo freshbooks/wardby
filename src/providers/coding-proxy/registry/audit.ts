@@ -82,17 +82,57 @@ function blocks(vuln: OsvVuln): boolean {
 export type AuditAdapter = Pick<RegistryAdapter, "osvEcosystem" | "normalizeName" | "compareVersions">;
 
 export interface AdvisoryIndex {
-  /** Advisory ids with HIGH or CRITICAL severity that affect `version`. */
-  withheld(version: string): readonly string[];
+  /** Ids of the blocking advisories (HIGH, CRITICAL or malware) that affect
+   *  `version`, minus those waived by `accepted` (see `isWaived`). Without
+   *  `accepted`, or with an empty set, every blocking advisory. */
+  withheld(version: string, accepted?: ReadonlySet<string>): readonly string[];
+  /** Ids of the blocking advisories affecting `version` that `accepted`
+   *  waives: exactly those `withheld` subtracts. For reporting. */
+  waived(version: string, accepted: ReadonlySet<string>): readonly string[];
   /** Advisory ids of any other severity that affect `version`. */
   reported(version: string): readonly string[];
 }
 
-interface Advisory {
+/** A blocking advisory, with what deciding a waiver needs. */
+export interface WithheldAdvisory {
   id: string;
+  /** Reports malicious code (`isMalware`): never waived. */
+  malware: boolean;
+  /** The advisory's OSV aliases (CVE ids, other GHSA ids, …). */
+  aliases: readonly string[];
+}
+
+/** Whether `accepted` waives a blocking advisory: it is not malware, and
+ *  its id or one of its aliases is accepted. Malware is never waived,
+ *  whatever the accepted set lists. */
+export function isWaived(advisory: WithheldAdvisory, accepted?: ReadonlySet<string>): boolean {
+  if (advisory.malware || !accepted || accepted.size === 0) return false;
+  // Belt and braces for entries not built from an OSV record here.
+  if ([advisory.id, ...advisory.aliases].some((id) => id.startsWith("MAL-"))) return false;
+  return accepted.has(advisory.id) || advisory.aliases.some((alias) => accepted.has(alias));
+}
+
+/** Splits the blocking advisories affecting one version into those still
+ *  withholding it and those `accepted` waives. The version is withheld
+ *  while `withheld` is non-empty. */
+export function splitWaived<T extends WithheldAdvisory>(
+  advisories: readonly T[],
+  accepted?: ReadonlySet<string>,
+): { withheld: T[]; waived: T[] } {
+  const withheld: T[] = [];
+  const waived: T[] = [];
+  for (const advisory of advisories) (isWaived(advisory, accepted) ? waived : withheld).push(advisory);
+  return { withheld, waived };
+}
+
+interface Advisory extends WithheldAdvisory {
+  /** HIGH, CRITICAL or malware. */
   blocking: boolean;
   affected: OsvAffected[];
 }
+
+const aliasesOf = (vuln: OsvVuln): string[] =>
+  Array.isArray(vuln.aliases) ? vuln.aliases.filter((alias): alias is string => typeof alias === "string") : [];
 
 type Compare = (a: string, b: string) => number;
 
@@ -155,12 +195,16 @@ function indexOf(advisories: readonly Advisory[], adapter: AuditAdapter): Adviso
   const matching = (version: string, blocking: boolean) =>
     advisories
       .filter((advisory) => advisory.blocking === blocking)
-      .filter((advisory) => advisory.affected.some((affected) => affects(version, affected, compare)))
-      .map((advisory) => advisory.id);
-  return { withheld: (version) => matching(version, true), reported: (version) => matching(version, false) };
+      .filter((advisory) => advisory.affected.some((affected) => affects(version, affected, compare)));
+  const ids = (list: readonly Advisory[]) => list.map((advisory) => advisory.id);
+  return {
+    withheld: (version, accepted) => ids(splitWaived(matching(version, true), accepted).withheld),
+    waived: (version, accepted) => ids(splitWaived(matching(version, true), accepted).waived),
+    reported: (version) => ids(matching(version, false)),
+  };
 }
 
-const EMPTY_INDEX: AdvisoryIndex = { withheld: () => [], reported: () => [] };
+const EMPTY_INDEX: AdvisoryIndex = { withheld: () => [], waived: () => [], reported: () => [] };
 
 export const DEFAULT_AUDIT_CACHE_ENTRIES = 5000;
 
@@ -170,9 +214,17 @@ export interface AuditedVersion {
   version: string;
 }
 
-/** `name@version` -> the HIGH/CRITICAL advisory ids affecting it; a
- *  version with none is absent. */
-export type WithheldVersions = Map<string, string[]>;
+/** `name@version` -> the blocking (HIGH/CRITICAL or malware) advisories
+ *  affecting it; a version with none is absent. Independent of any
+ *  accepted set: callers subtract waivers with `splitWaived`. */
+export type WithheldVersions = Map<string, WithheldAdvisory[]>;
+
+interface VulnDetail {
+  modified: string;
+  blocking: boolean;
+  malware: boolean;
+  aliases: readonly string[];
+}
 
 export const versionKey = (name: string, version: string) => `${name}@${version}`;
 
@@ -183,9 +235,9 @@ export class OsvAudit {
   private readonly cache = new Map<string, { expires: number; advisories: Advisory[] }>();
   /** Single-flight: concurrent audits of one package share one OSV query. */
   private readonly loads = new Map<string, Promise<Advisory[]>>();
-  /** Advisory severities by id, with the OSV `modified` time they were
-   *  read at, least recently used first. */
-  private readonly vulns = new Map<string, { modified: string; blocking: boolean }>();
+  /** Advisory severities (and malware flag and aliases) by id, with the
+   *  OSV `modified` time they were read at, least recently used first. */
+  private readonly vulns = new Map<string, VulnDetail>();
   /** Advisory ids (and their `modified` time) per exact version from
    *  querybatch, for the audit TTL, least recently used first, so repeated
    *  plans don't re-query. */
@@ -357,8 +409,10 @@ export class OsvAudit {
       while (cursor < ids.length) {
         const id = ids[cursor++];
         const advisory = found.get(id)!;
-        if (!(await this.blocking(id, advisory.modified, signal))) continue;
-        for (const key of advisory.versions) withheld.set(key, [...(withheld.get(key) ?? []), id]);
+        const detail = await this.detail(id, advisory.modified, signal);
+        if (!detail.blocking) continue;
+        const entry: WithheldAdvisory = { id, malware: detail.malware, aliases: detail.aliases };
+        for (const key of advisory.versions) withheld.set(key, [...(withheld.get(key) ?? []), entry]);
       }
     };
     await Promise.all(Array.from({ length: Math.min(OSV_VULN_CONCURRENCY, ids.length) }, worker));
@@ -377,28 +431,34 @@ export class OsvAudit {
     this.batchCache.set(key, { expires: now + this.ttlMs, vulns });
   }
 
-  /** Whether an advisory is HIGH or CRITICAL, cached by id while OSV's
-   *  `modified` time for it is unchanged. */
-  private async blocking(id: string, modified: string, signal?: AbortSignal): Promise<boolean> {
+  /** Whether an advisory blocks (HIGH, CRITICAL or malware), whether it is
+   *  malware, and its aliases, cached by id while OSV's `modified` time for
+   *  it is unchanged. */
+  private async detail(id: string, modified: string, signal?: AbortSignal): Promise<VulnDetail> {
     const cached = this.vulns.get(id);
     if (cached && modified !== "" && cached.modified === modified) {
       this.vulns.delete(id);
       this.vulns.set(id, cached); // most recently used
-      return cached.blocking;
+      return cached;
     }
     const response = await this.fetch(`${OSV_VULN}${encodeURIComponent(id)}`, { accept: "application/json", signal });
     if (!response.ok) throw new Error(`osv_status_${response.status}`);
     const vuln = (await response.json()) as OsvVuln & { modified?: unknown };
     if (typeof vuln.id !== "string") throw new Error("osv_vuln_invalid");
-    const blocking = blocks(vuln);
+    const detail: VulnDetail = {
+      modified: typeof vuln.modified === "string" ? vuln.modified : modified,
+      blocking: blocks(vuln),
+      malware: isMalware(vuln),
+      aliases: aliasesOf(vuln),
+    };
     this.vulns.delete(id);
     while (this.vulns.size >= (this.options.maxVulnEntries ?? DEFAULT_VULN_CACHE_ENTRIES)) {
       const oldest = this.vulns.keys().next();
       if (oldest.done) break;
       this.vulns.delete(oldest.value);
     }
-    this.vulns.set(id, { modified: typeof vuln.modified === "string" ? vuln.modified : modified, blocking });
-    return blocking;
+    this.vulns.set(id, detail);
+    return detail;
   }
 
   private remember(key: string, advisories: Advisory[]): void {
@@ -424,7 +484,13 @@ export class OsvAudit {
           adapter.normalizeName(entry.package.name) === wanted,
       );
       if (affected.length === 0) continue;
-      advisories.push({ id: vuln.id, blocking: blocks(vuln), affected });
+      advisories.push({
+        id: vuln.id,
+        blocking: blocks(vuln),
+        malware: isMalware(vuln),
+        aliases: aliasesOf(vuln),
+        affected,
+      });
     }
     return advisories;
   }

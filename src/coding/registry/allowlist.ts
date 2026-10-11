@@ -9,11 +9,29 @@ import type { AllowlistEntry, RegistryAdapter } from "./types.js";
 export type PackageAllowlist = Readonly<Record<string, readonly string[]>>;
 export interface PackagePolicy {
   minReleaseAgeDays: number;
+  /** Advisory ids (GHSA-…, CVE-…) whose installs this agent may proceed with; malware (MAL-…) is never acceptable. */
+  acceptedAdvisories: readonly string[];
 }
 export const DEFAULT_MIN_RELEASE_AGE_DAYS = 3;
+export const ACCEPTED_ADVISORY_ID = /^[A-Z][A-Z0-9]*-[A-Za-z0-9-]{3,64}$/;
+export const MAX_ACCEPTED_ADVISORIES = 32;
+
+/** The one definition of the acceptedAdvisories field, shared by the policy and the coding profile. */
+export const acceptedAdvisoriesSchema = z
+  .array(
+    z
+      .string()
+      .refine((id) => !id.startsWith("MAL-"), "acceptedAdvisories: malware advisories (MAL-…) can never be accepted.")
+      .pipe(z.string().regex(ACCEPTED_ADVISORY_ID, "must look like GHSA-xxxx-xxxx-xxxx or CVE-2026-12345")),
+  )
+  .max(MAX_ACCEPTED_ADVISORIES)
+  .refine((ids) => new Set(ids).size === ids.length, "must not contain duplicates");
 
 const PolicySchema = z
-  .object({ minReleaseAgeDays: z.number().int().min(0).max(30).default(DEFAULT_MIN_RELEASE_AGE_DAYS) })
+  .object({
+    minReleaseAgeDays: z.number().int().min(0).max(30).default(DEFAULT_MIN_RELEASE_AGE_DAYS),
+    acceptedAdvisories: acceptedAdvisoriesSchema.default([]),
+  })
   .strict();
 
 export function resolvePolicy(value: unknown): PackagePolicy {

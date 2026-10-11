@@ -216,6 +216,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
     expect(await registry.findApprovedVersion(runId, "npm", factName, "1.0.0")).toEqual({
       integrity: "sha512-f",
       downloadUrl: fact.downloadUrl,
+      acceptedAdvisories: [],
     });
     expect(await registry.findApprovedVersion(runId, "npm", factName, "2.0.0")).toBeNull();
     const publishedAt = new Date("2026-09-25T00:00:00Z");

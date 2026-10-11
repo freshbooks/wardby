@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { npmAdapter } from "../../../coding/registry/npm.js";
 import { pypiAdapter } from "../../../coding/registry/pypi.js";
-import { inOsvRange, OsvAudit } from "./audit.js";
+import { inOsvRange, isWaived, OsvAudit, splitWaived, versionKey } from "./audit.js";
 
 /** Trimmed real `POST /v1/query` responses from api.osv.dev (2026-09-25):
  *  `details` and `references` dropped, everything else as served. */
@@ -281,8 +281,8 @@ describe("OsvAudit exact versions (querybatch)", () => {
     );
     const withheld = await new OsvAudit({ fetch, failOpen: false }).auditVersions(npmAdapter, versionsOf(1501));
     expect([...withheld]).toEqual([
-      ["p1@1.0.0", ["GHSA-high"]],
-      ["p1500@1.0.0", ["GHSA-crit"]],
+      ["p1@1.0.0", [{ id: "GHSA-high", malware: false, aliases: [] }]],
+      ["p1500@1.0.0", [{ id: "GHSA-crit", malware: false, aliases: [] }]],
     ]);
     const batches = fetch.mock.calls.filter(([url]) => url.endsWith("/querybatch"));
     expect(batches.map(([, init]) => JSON.parse(init!.body!).queries.length)).toEqual([1000, 501]);
@@ -305,12 +305,13 @@ describe("OsvAudit exact versions (querybatch)", () => {
       { "GHSA-page1": { severity: "LOW" }, "GHSA-page2": { severity: "HIGH" } },
     );
     const audit = new OsvAudit({ fetch, failOpen: false, now: () => now });
+    const page2 = [["p0@1.0.0", [{ id: "GHSA-page2", malware: false, aliases: [] }]]];
     const batchCalls = () => fetch.mock.calls.filter(([url]) => url.endsWith("/querybatch")).length;
     const vulnCalls = () => fetch.mock.calls.filter(([url]) => url.includes("/v1/vulns/")).length;
-    expect([...(await audit.auditVersions(npmAdapter, versionsOf(1)))]).toEqual([["p0@1.0.0", ["GHSA-page2"]]]);
+    expect([...(await audit.auditVersions(npmAdapter, versionsOf(1)))]).toEqual(page2);
     expect([batchCalls(), vulnCalls()]).toEqual([2, 2]);
     // A repeated plan within the TTL makes no OSV request at all.
-    expect([...(await audit.auditVersions(npmAdapter, versionsOf(1)))]).toEqual([["p0@1.0.0", ["GHSA-page2"]]]);
+    expect([...(await audit.auditVersions(npmAdapter, versionsOf(1)))]).toEqual(page2);
     expect([batchCalls(), vulnCalls()]).toEqual([2, 2]);
     // Past the TTL it queries again; an unchanged advisory is not re-read.
     now += 3_600_001;
@@ -384,6 +385,160 @@ describe("malware advisories", () => {
     const withheld = await new OsvAudit({ fetch, failOpen: false }).auditVersions(npmAdapter, [
       { name: "evil", version: "1.0.0" },
     ]);
-    expect(withheld.get("evil@1.0.0")?.sort()).toEqual(malware.map((vuln) => vuln.id).sort());
+    expect(
+      withheld
+        .get("evil@1.0.0")
+        ?.map(({ id, malware: isMal, aliases }) => [id, isMal, aliases])
+        .sort(),
+    ).toEqual(malware.map((vuln) => [vuln.id, true, vuln.aliases ?? []]).sort());
+  });
+});
+
+describe("accepted advisories", () => {
+  const lodashIndex = async () =>
+    new OsvAudit({ fetch: osv(await fixture("osv-npm-lodash.json")), failOpen: false }).audit(npmAdapter, "lodash");
+  // lodash 4.17.20: only GHSA-35jh-r3h4-6jhm (HIGH) blocks; GHSA-29mw-wpgm-hmr9 (MODERATE) is reported.
+  // lodash 4.17.10: GHSA-35jh-r3h4-6jhm, GHSA-4xc9-xhrj-v574 and GHSA-p6mc-m468-83gw (all HIGH) block.
+  const BLOCKING_4_17_10 = ["GHSA-35jh-r3h4-6jhm", "GHSA-4xc9-xhrj-v574", "GHSA-p6mc-m468-83gw"];
+
+  it("no longer withholds a HIGH advisory accepted by id, and reports it as waived", async () => {
+    const index = await lodashIndex();
+    const accepted = new Set(["GHSA-35jh-r3h4-6jhm"]);
+    expect(index.withheld("4.17.20", accepted)).toEqual([]);
+    expect(index.waived("4.17.20", accepted)).toEqual(["GHSA-35jh-r3h4-6jhm"]);
+    // Lower-severity reporting is unchanged.
+    expect(index.reported("4.17.20")).toEqual(["GHSA-29mw-wpgm-hmr9"]);
+  });
+
+  it.each(["CVE-2021-23337", "CVE-2026-4800", "GHSA-r5fr-rjxr-66jc"])(
+    "accepts an advisory through its alias %s",
+    async (alias) => {
+      const index = await lodashIndex();
+      expect(index.withheld("4.17.20", new Set([alias]))).toEqual([]);
+      expect(index.waived("4.17.20", new Set([alias]))).toEqual(["GHSA-35jh-r3h4-6jhm"]);
+    },
+  );
+
+  it("still withholds a version while any other blocking advisory affecting it is not accepted", async () => {
+    const index = await lodashIndex();
+    expect(index.withheld("4.17.10")).toEqual(BLOCKING_4_17_10);
+    const one = new Set(["GHSA-35jh-r3h4-6jhm"]);
+    expect(index.withheld("4.17.10", one)).toEqual(["GHSA-4xc9-xhrj-v574", "GHSA-p6mc-m468-83gw"]);
+    expect(index.waived("4.17.10", one)).toEqual(["GHSA-35jh-r3h4-6jhm"]);
+    // Every one accepted (two by alias): the version is no longer withheld.
+    const all = new Set(["GHSA-35jh-r3h4-6jhm", "CVE-2018-16487", "CVE-2020-8203"]);
+    expect(index.withheld("4.17.10", all)).toEqual([]);
+    expect(index.waived("4.17.10", all)).toEqual(BLOCKING_4_17_10);
+  });
+
+  it("is unchanged without an accepted set, with an empty one, or with one that does not apply", async () => {
+    const index = await lodashIndex();
+    for (const version of ["0.1.0", "4.17.10", "4.17.20", "4.17.21"]) {
+      const plain = index.withheld(version);
+      expect(index.withheld(version, undefined)).toEqual(plain);
+      expect(index.withheld(version, new Set())).toEqual(plain);
+      expect(index.withheld(version, new Set(["GHSA-unrelated-1234"]))).toEqual(plain);
+      expect(index.waived(version, new Set())).toEqual([]);
+    }
+    // Accepting a MODERATE advisory neither withholds nor waives anything.
+    expect(index.waived("4.17.20", new Set(["GHSA-29mw-wpgm-hmr9"]))).toEqual([]);
+    expect(index.reported("4.17.20")).toEqual(["GHSA-29mw-wpgm-hmr9"]);
+  });
+
+  const malware = [
+    { id: "MAL-2026-1", database_specific: { "malicious-packages-origins": [{ source: "ghsa-malware" }] } },
+    { id: "GHSA-alias-mal", aliases: ["MAL-2026-2", "CVE-2026-0001"], database_specific: {} },
+    { id: "GHSA-cwe506", aliases: ["CVE-2026-0002"], database_specific: { severity: "HIGH", cwe_ids: ["CWE-506"] } },
+  ];
+  const malwareIds = malware.map((vuln) => vuln.id);
+  // Everything an operator could list for these, bypassing set-time validation (MAL- ids included).
+  const everything = new Set(malware.flatMap((vuln) => [vuln.id, ...(vuln.aliases ?? [])]));
+  const malwareFetch = () =>
+    osv({
+      vulns: malware.map((vuln) => ({
+        ...vuln,
+        affected: [{ package: { name: "evil", ecosystem: "npm" }, versions: ["1.0.0"] }],
+      })),
+    });
+
+  it("never waives malware, whether listed by MAL- id, by a GHSA that aliases MAL-, by alias, or CWE-506", async () => {
+    const index = await new OsvAudit({ fetch: malwareFetch(), failOpen: false }).audit(npmAdapter, "evil");
+    expect(index.withheld("1.0.0", everything)).toEqual(malwareIds);
+    expect(index.waived("1.0.0", everything)).toEqual([]);
+    for (const id of everything) expect(index.withheld("1.0.0", new Set([id]))).toEqual(malwareIds);
+  });
+
+  it("isWaived refuses a MAL- id or alias even on an entry not flagged as malware", () => {
+    const accepted = new Set(["MAL-2026-9", "GHSA-x-mal", "CVE-2026-0009"]);
+    expect(isWaived({ id: "MAL-2026-9", malware: false, aliases: [] }, accepted)).toBe(false);
+    expect(isWaived({ id: "GHSA-x-mal", malware: false, aliases: ["MAL-2026-9"] }, accepted)).toBe(false);
+    expect(isWaived({ id: "GHSA-x-mal", malware: true, aliases: [] }, accepted)).toBe(false);
+    expect(isWaived({ id: "GHSA-ok", malware: false, aliases: ["CVE-2026-0009"] }, accepted)).toBe(true);
+    expect(isWaived({ id: "GHSA-ok", malware: false, aliases: ["CVE-2026-0009"] }, undefined)).toBe(false);
+  });
+
+  it("gives the same results on the exact-version (plan) path, carrying id, malware and aliases", async () => {
+    const lodash = await fixture("osv-npm-lodash.json");
+    const evil = malware.map((vuln) => ({
+      ...vuln,
+      affected: [{ package: { name: "evil", ecosystem: "npm" }, versions: ["1.0.0"] }],
+    }));
+    const records = [...lodash.vulns, ...evil] as { id: string }[];
+    const indexes = {
+      lodash: await lodashIndex(),
+      evil: await new OsvAudit({ fetch: malwareFetch(), failOpen: false }).audit(npmAdapter, "evil"),
+    };
+    // OSV's querybatch answers which advisories affect each exact version; the
+    // per-package index computed from the same records stands in for it.
+    const fetch = vi.fn(async (url: string, init?: { body?: string }) => {
+      if (url.endsWith("/querybatch")) {
+        const { queries } = JSON.parse(init!.body!) as {
+          queries: { package: { name: "lodash" | "evil" }; version: string }[];
+        };
+        return Response.json({
+          results: queries.map(({ package: { name }, version }) => ({
+            vulns: [...indexes[name].withheld(version), ...indexes[name].reported(version)].map((id) => ({
+              id,
+              modified: "m",
+            })),
+          })),
+        });
+      }
+      const id = decodeURIComponent(url.slice("https://api.osv.dev/v1/vulns/".length));
+      return Response.json({ ...records.find((vuln) => vuln.id === id), modified: "m" });
+    });
+    const versions = [
+      ...["0.1.0", "4.17.10", "4.17.20", "4.17.21"].map((version) => ({ name: "lodash" as const, version })),
+      { name: "evil" as const, version: "1.0.0" },
+    ];
+    const batch = await new OsvAudit({ fetch, failOpen: false }).auditVersions(npmAdapter, versions);
+    expect(batch.get("lodash@4.17.20")).toEqual([
+      {
+        id: "GHSA-35jh-r3h4-6jhm",
+        malware: false,
+        aliases: ["CVE-2021-23337", "CVE-2026-4800", "GHSA-r5fr-rjxr-66jc"],
+      },
+    ]);
+    expect(batch.has("lodash@4.17.21")).toBe(false);
+    expect(
+      batch
+        .get("evil@1.0.0")
+        ?.map(({ id, malware: isMal }) => [id, isMal])
+        .sort(),
+    ).toEqual(malwareIds.map((id) => [id, true]).sort());
+    const acceptedSets = [
+      undefined,
+      new Set<string>(),
+      new Set(["GHSA-35jh-r3h4-6jhm"]),
+      new Set(["CVE-2021-23337", "CVE-2018-16487", "CVE-2020-8203"]),
+      everything,
+    ];
+    for (const accepted of acceptedSets)
+      for (const { name, version } of versions) {
+        const split = splitWaived(batch.get(versionKey(name, version)) ?? [], accepted);
+        const ids = (list: readonly { id: string }[]) => list.map(({ id }) => id).sort();
+        expect(ids(split.withheld)).toEqual([...indexes[name].withheld(version, accepted)].sort());
+        expect(ids(split.waived)).toEqual(accepted ? [...indexes[name].waived(version, accepted)].sort() : []);
+      }
   });
 });

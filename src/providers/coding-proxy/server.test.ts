@@ -264,7 +264,10 @@ describe("coding proxy registry routing", () => {
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
       store: new MemoryRegistryStore(),
-      audit: { audit: async () => ({ withheld: () => [], reported: () => [] }), auditVersions: async () => new Map() },
+      audit: {
+        audit: async () => ({ withheld: () => [], waived: () => [], reported: () => [] }),
+        auditVersions: async () => new Map(),
+      },
       upstream: async () => new Response("", { status: 500 }),
       proxyBase: "http://wardby-proxy:8787/registry/",
       limits: { maxFileBytes: 1, maxTotalBytes: 1, maxFiles: 1, idleTimeoutMs: 1_000 },
@@ -408,7 +411,7 @@ describe("coding proxy registry routing", () => {
       const registry = new RegistryService({
         adapters: new Map([["npm", adapter]]),
         store,
-        audit: { audit: async () => ({ withheld: () => [], reported: () => [] }) },
+        audit: { audit: async () => ({ withheld: () => [], waived: () => [], reported: () => [] }) },
         upstream: async () => {
           upstreamCalls += 1;
           // One chunk, then a stall: only a cancel ends it.

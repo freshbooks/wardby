@@ -3,6 +3,7 @@ import type { PackageAllowlist } from "../../../coding/registry/allowlist.js";
 import type { DeclaredDependency, FileDependency } from "../../../coding/registry/types.js";
 import { extraAllowanceName, extraOfAllowanceName } from "./store.js";
 import type {
+  ApprovedDownload,
   ApprovedVersion,
   PlanRefusedVersion,
   RegistryFetchRecord,
@@ -152,7 +153,14 @@ export class PrismaRegistryStore implements RegistryStore {
   async approveVersions(runId: string, ecosystem: string, versions: readonly ApprovedVersion[]): Promise<void> {
     if (versions.length === 0) return;
     await this.db.registryApprovedVersion.createMany({
-      data: versions.map(({ name, version, integrity }) => ({ runId, ecosystem, name, version, integrity })),
+      data: versions.map(({ name, version, integrity, acceptedAdvisories }) => ({
+        runId,
+        ecosystem,
+        name,
+        version,
+        integrity,
+        acceptedAdvisories: [...(acceptedAdvisories ?? [])],
+      })),
       skipDuplicates: true,
     });
   }
@@ -162,17 +170,23 @@ export class PrismaRegistryStore implements RegistryStore {
     ecosystem: string,
     name: string,
     version: string,
-  ): Promise<{ integrity: string; downloadUrl: string } | null> {
+  ): Promise<ApprovedDownload | null> {
     const approval = await this.db.registryApprovedVersion.findUnique({
       where: { runId_ecosystem_name_version: { runId, ecosystem, name, version } },
-      select: { integrity: true },
+      select: { integrity: true, acceptedAdvisories: true },
     });
     if (!approval) return null;
     const fact = await this.db.registryVersionFact.findUnique({
       where: { ecosystem_name_version: { ecosystem, name, version } },
       select: { downloadUrl: true },
     });
-    return fact ? { integrity: approval.integrity, downloadUrl: fact.downloadUrl } : null;
+    return fact
+      ? {
+          integrity: approval.integrity,
+          downloadUrl: fact.downloadUrl,
+          acceptedAdvisories: approval.acceptedAdvisories,
+        }
+      : null;
   }
 
   async refusePlanVersions(runId: string, ecosystem: string, versions: readonly PlanRefusedVersion[]): Promise<void> {

@@ -51,7 +51,13 @@ export interface FinalizeChangesDetails {
   tests?: readonly { command: string; outcome: "passed" | "failed" | "skipped" }[];
   tag?: string;
   /** Packages the registry proxy served/refused during this run (RegistryFetch), for the PR body. */
-  packages?: readonly { ecosystem: string; name: string; version: string }[];
+  packages?: readonly {
+    ecosystem: string;
+    name: string;
+    version: string;
+    /** Blocking advisories the run's accepted set waived to serve it. */
+    acceptedAdvisories?: readonly string[];
+  }[];
   packageRefusals?: readonly { ecosystem: string; name: string; reason: string }[];
   /** Originating issue (control-plane data): named in the PR title and body. Provider-neutral. */
   issue?: { key: string; url?: string; trackerName?: string };
