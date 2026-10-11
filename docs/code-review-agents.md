@@ -455,6 +455,32 @@ A GitHub App has exactly one webhook URL. Register a **separate App** for
 local development or a staging environment rather than pointing your
 production App's webhook at a dev host.
 
+### Which accounts the App serves (`WARDBY_GITHUB_ALLOWED_ACCOUNTS`)
+
+A GitHub App has one webhook URL, so every account that installs it sends its
+events to your server. wardby serves only trusted accounts:
+
+- **The App's owner** (the user or organization that owns the App), always.
+- **Accounts in `WARDBY_GITHUB_ALLOWED_ACCOUNTS`**, comma-separated logins:
+
+      WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme-labs
+
+Every other account is refused: its events are answered `202` and ignored before
+anything is recorded, the App is removed from its installations straight away,
+and `link_repository` and coding profiles refuse its repositories with
+`github_account_not_allowed`, even with `adminOverride`. There is no setting
+that serves every account.
+
+A private App can only be installed on its owner, so it needs nothing here. Set
+the variable when the App must be installable by other accounts, for example
+when an organization owns the App and a user's repositories should be served
+too. Logins are matched case-insensitively; a malformed value stops the server
+at startup. If wardby cannot read the App's owner from GitHub, it refuses rather
+than guesses.
+
+Each wardby server should have its own GitHub App: never point other people at
+yours; give them the setup steps above instead.
+
 ### `GITHUB_APP_WEBHOOK_SECRET`
 
 Set alongside `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`
