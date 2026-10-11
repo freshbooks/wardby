@@ -142,6 +142,14 @@ export function pgConnectionConfig(url: string, auth: DatabaseAuth, options: PgA
   const database = decode(parsed.pathname.replace(/^\//, ""), "database name") || undefined;
   const makeSigner = options.makeSigner ?? ((params) => new Signer(params));
   const readFile = options.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+  let ca: string;
+  try {
+    ca = readFile(rootCert);
+  } catch (err) {
+    // The error code only (ENOENT, EACCES, ...): the message repeats the path.
+    const code = (err as NodeJS.ErrnoException).code;
+    refuse(`could not read the sslrootcert file named in DATABASE_URL${code ? ` (${code})` : ""}`);
+  }
   const session: Record<string, string> = {};
   for (const name of SESSION_PARAMS) {
     const value = parsed.searchParams.get(name);
@@ -154,6 +162,6 @@ export function pgConnectionConfig(url: string, auth: DatabaseAuth, options: PgA
     user,
     database,
     password: cachedToken(makeSigner({ hostname: host, port, username: user, region }), options.now),
-    ssl: { ca: readFile(rootCert), rejectUnauthorized: true, servername: host },
+    ssl: { ca, rejectUnauthorized: true, servername: host },
   };
 }

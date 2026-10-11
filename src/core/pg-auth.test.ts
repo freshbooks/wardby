@@ -139,6 +139,18 @@ describe("pgConnectionConfig", () => {
     );
   });
 
+  it("reports an unreadable sslrootcert as database_auth_invalid with the error code, not the path", () => {
+    const missing = (path: string): string => {
+      throw Object.assign(new Error(`ENOENT: no such file or directory, open '${path}'`), { code: "ENOENT" });
+    };
+    expect(() => pgConnectionConfig(RDS_URL, "rds-iam", { env, readFile: missing })).toThrow(
+      `${DATABASE_AUTH_ERROR}: DATABASE_AUTH=rds-iam could not read the sslrootcert file named in DATABASE_URL (ENOENT)`,
+    );
+    expect(() => pgConnectionConfig(RDS_URL, "rds-iam", { env, readFile: missing })).toThrow(
+      expect.objectContaining({ message: expect.not.stringContaining("global-bundle.pem") }),
+    );
+  });
+
   it("never echoes the URL's password in a refusal", () => {
     const url = RDS_URL.replace("wardby_app@", "wardby_app:s3cr3t-value@");
     expect(() => pgConnectionConfig(url, "rds-iam", { env, readFile })).toThrow(

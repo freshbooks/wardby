@@ -6,6 +6,15 @@ import pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { dbosLaunchConfig, DbosExecutor } from "./dbos.js";
 
+// Keeps the executor's "DBOS executor launched" lines out of the test output.
+vi.mock("../../core/logger.js", () => {
+  const make = (): Record<string, unknown> => {
+    const quiet = (): void => {};
+    return { child: () => make(), trace: quiet, debug: quiet, info: quiet, warn: quiet, error: quiet, fatal: quiet };
+  };
+  return { logger: make() };
+});
+
 const config = {
   systemDatabaseUrl: "postgresql://u:p@localhost:5432/wardby?connect_timeout=4",
   schemaName: "dbos",
@@ -86,6 +95,32 @@ describe("dbosLaunchConfig", () => {
     expect(pool!.options.application_name).toBe("mine");
   });
 
+  it("treats connect_timeout=0 as unset and keeps DBOS's 10 s default", () => {
+    const pool = dbosLaunchConfig(
+      { ...config, systemDatabaseUrl: `${RDS_URL}&connect_timeout=0` },
+      "exec-1",
+      "rds-iam",
+      pgAuth,
+    ).systemDatabasePool;
+    pools.push(pool!);
+    expect(pool!.options.connectionTimeoutMillis).toBe(10_000);
+  });
+
+  it("signs tokens for the DBOS system database's own host when it differs from DATABASE_URL's", () => {
+    const signed: { hostname: string; port: number; username: string }[] = [];
+    const url = "postgresql://dbos_user@dbos.example:6543/dbos?sslmode=verify-full&sslrootcert=/ca.pem";
+    const pool = dbosLaunchConfig({ ...config, systemDatabaseUrl: url }, "exec-1", "rds-iam", {
+      ...pgAuth,
+      makeSigner: (p) => {
+        signed.push(p);
+        return { getAuthToken: async () => "t" };
+      },
+    }).systemDatabasePool;
+    pools.push(pool!);
+    expect(pool!.options).toMatchObject({ host: "dbos.example", port: 6543, user: "dbos_user", database: "dbos" });
+    expect(signed).toEqual([{ hostname: "dbos.example", port: 6543, username: "dbos_user", region: "us-east-1" }]);
+  });
+
   it.each(["postgresql://app@db.example/w", "not a url"])("refuses the bad rds-iam URL %j", (url) => {
     expect(() => dbosLaunchConfig({ ...config, systemDatabaseUrl: url }, "exec-1", "rds-iam", pgAuth)).toThrow(
       "database_auth_invalid",
@@ -98,9 +133,14 @@ async function withRdsIamEnv(fn: (url: string) => Promise<void>): Promise<void> 
   const dir = mkdtempSync(join(tmpdir(), "wardby-dbos-ca-"));
   const ca = join(dir, "ca.pem");
   writeFileSync(ca, "CA");
-  const saved = { DATABASE_AUTH: process.env.DATABASE_AUTH, AWS_REGION: process.env.AWS_REGION };
+  const saved = {
+    DATABASE_AUTH: process.env.DATABASE_AUTH,
+    AWS_REGION: process.env.AWS_REGION,
+    DATABASE_AWS_REGION: process.env.DATABASE_AWS_REGION,
+  };
   process.env.DATABASE_AUTH = "rds-iam";
   process.env.AWS_REGION = "us-east-1";
+  delete process.env.DATABASE_AWS_REGION;
   try {
     await fn(`postgresql://app@db.example/wardby?sslmode=verify-full&sslrootcert=${ca}`);
   } finally {
@@ -148,6 +188,32 @@ describe("DbosExecutor system database pool", () => {
       await expect(executor.launch()).rejects.toThrow("db down");
       pools.push(handed.pool!);
       expect(handed.pool!.ended).toBe(true);
+    });
+  });
+
+  it("shuts down a DBOS that initialized before its launch threw, and ends the pool", async () => {
+    await withRdsIamEnv(async (url) => {
+      let initialized = false;
+      const { handed, shutdown } = stubDbos(async () => {
+        initialized = true;
+        throw new Error("version registration failed");
+      });
+      vi.spyOn(DBOS, "isInitialized").mockImplementation(() => initialized);
+      shutdown.mockImplementation(async () => {
+        initialized = false;
+      });
+      const executor = new DbosExecutor({} as never, { ...config, systemDatabaseUrl: url }, {} as never);
+      await expect(executor.launch()).rejects.toThrow("version registration failed");
+      pools.push(handed.pool!);
+      expect(shutdown).toHaveBeenCalledOnce();
+      expect(handed.pool!.ended).toBe(true);
+      // A retry starts over: a fresh pool, handed to a fresh DBOS.setConfig.
+      const first = handed.pool;
+      vi.spyOn(DBOS, "launch").mockResolvedValue(undefined);
+      await executor.launch();
+      pools.push(handed.pool!);
+      expect(handed.pool).not.toBe(first);
+      await executor.close();
     });
   });
 

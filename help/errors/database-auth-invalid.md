@@ -17,11 +17,9 @@ Under `rds-iam` check each of these:
 
 1. `DATABASE_URL` starts with `postgresql://` or `postgres://`, has a user, and has no password.
 2. `AWS_REGION` or `DATABASE_AWS_REGION` is set (`DATABASE_AWS_REGION` wins).
-3. The URL has `sslmode=verify-full` and `sslrootcert=<path to the RDS CA bundle>`, and that file exists in the container.
+3. The URL has `sslmode=verify-full` and `sslrootcert=<path to the RDS CA bundle>`, and that file exists and is readable in the container. An unreadable file is reported with its error code, such as `ENOENT` for a missing file or `EACCES` for one the process cannot read.
 4. Only supported parameters are present: `sslmode`, `sslrootcert`, `application_name`, `fallback_application_name`, `options`, `client_encoding`, `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `query_timeout`, `connection_limit`, `pool_timeout`, `connect_timeout`, `schema`. Anything else (`sslcert`, `sslkey`, `ssl`, `host`, `pgbouncer`, ...) is refused by name; remove it.
 5. User and database names in the URL are correctly percent-encoded.
-
-If `sslrootcert` points at a file that cannot be read, the failure currently appears as a file-read error (`ENOENT` for a missing file) rather than `database_auth_invalid`. Fix the path or mount the CA bundle.
 
 If the code is not raised but connections are rejected, the configuration is valid and the problem is on the AWS side: the workload's IAM role needs `rds-db:connect` for the database user, and that user needs the `rds_iam` role in the database.
 

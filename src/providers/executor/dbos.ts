@@ -241,8 +241,16 @@ export class DbosExecutor implements Executor {
         DBOS.setConfig(launchConfig);
         await DBOS.launch();
       } catch (err) {
-        // A failed launch leaves DBOS uninitialized and the next launch() makes a new pool.
-        if (!DBOS.isInitialized()) await endSystemPool();
+        // DBOS.launch can throw after it initialized (registering the application version, starting
+        // event receivers). Shut that half-launched DBOS down so the next launch() starts clean, then
+        // end the pool either way: the next launch() makes a new one.
+        if (activeExecutor === this) setActiveExecutor(undefined);
+        if (DBOS.isInitialized()) {
+          await DBOS.shutdown().catch((shutdownErr: unknown) =>
+            dbosLog.warn({ err: shutdownErr }, "failed to shut down DBOS after a failed launch"),
+          );
+        }
+        await endSystemPool();
         throw err;
       }
     }
