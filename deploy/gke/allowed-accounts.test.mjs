@@ -24,14 +24,20 @@ const run = (env) =>
 describe("deploy/gke/up.sh WARDBY_GITHUB_ALLOWED_ACCOUNTS", () => {
   it("is validated, substituted into the overlay, and covered by assert_no_placeholders", () => {
     expect(script.indexOf(START)).toBeGreaterThan(0);
-    expect(script).toContain("value: wardby-github-allowed-accounts$|");
-    expect(placeholderCheck).toContain("value: wardby-github-allowed-accounts");
+    expect(script).toContain("value: wardby_github_allowed_accounts$|");
+    expect(placeholderCheck).toContain("value: wardby_github_allowed_accounts");
   });
 
   it("accepts unset, empty, and a comma-separated list of logins", () => {
     expect(run({}).stdout).toContain("ok");
     expect(run({ WARDBY_GITHUB_ALLOWED_ACCOUNTS: "" }).stdout).toContain("ok");
     expect(run({ WARDBY_GITHUB_ALLOWED_ACCOUNTS: "acme,acme-labs" }).stdout).toContain("ok");
+  });
+
+  it("rejects the overlay placeholder, so an unsubstituted overlay cannot name a real account", () => {
+    const result = run({ WARDBY_GITHUB_ALLOWED_ACCOUNTS: "wardby_github_allowed_accounts" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/WARDBY_GITHUB_ALLOWED_ACCOUNTS/);
   });
 
   it("rejects anything else, including a wildcard, before rendering", () => {

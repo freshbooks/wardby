@@ -123,7 +123,7 @@ iam_substitutions() {
 # match a real registry path (which never starts with "wardby-").
 assert_no_placeholders() {
   local leftover
-  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*|value: wardby-github-allowed-accounts' || true)"
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*|value: wardby_github_allowed_accounts' || true)"
   if [[ -n "$leftover" ]]; then
     echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
     echo "$leftover" | sort -u >&2
@@ -436,7 +436,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
         -e "s|value: wardby-native-worker-image$|value: ${NATIVE_WORKER_IMAGE}|" \
         -e "s|value: wardby-apiserver-host|value: ${API_HOST}|" \
         -e "s|wardby-control-plane-hostname|${WARDBY_HOSTNAME}|g" \
-        -e "s|value: wardby-github-allowed-accounts$|value: \"${WARDBY_GITHUB_ALLOWED_ACCOUNTS}\"|" \
+        -e "s|value: wardby_github_allowed_accounts$|value: \"${WARDBY_GITHUB_ALLOWED_ACCOUNTS}\"|" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
   | iam_substitutions)"
 assert_no_placeholders "$OVERLAY_MANIFEST"
