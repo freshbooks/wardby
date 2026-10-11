@@ -3,7 +3,10 @@
 #   system  -- untainted; the control plane, coding proxy, native gateway, ESO,
 #              the load balancer controller, coredns.
 #   sandbox -- tainted sandbox=gvisor:NoSchedule and labelled
-#              wardby.dev/sandbox=gvisor; gVisor is installed at boot. Only pods
+#              wardby.dev/sandbox=gvisor; gVisor is installed at boot by
+#              gvisor-install.sh, which gates kubelet on a marker file it
+#              writes only after a verified install: kubelet will not start
+#              (and the node never joins) until the marker exists. Only pods
 #              using the gvisor RuntimeClass (coding runs, native workers) land
 #              here: the RuntimeClass adds the matching nodeSelector and
 #              toleration.

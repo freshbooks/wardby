@@ -55,6 +55,26 @@ variables {
 run "node_groups" {
   command = apply
 
+  # Distinct ids so a swapped launch template (system nodes carry the
+  # database's only admitted security group) fails the wiring asserts below.
+  override_resource {
+    target = aws_launch_template.system
+    values = { id = "lt-0aaaaaaaaaaaaaaa1", latest_version = 3 }
+  }
+  override_resource {
+    target = aws_launch_template.sandbox
+    values = { id = "lt-0bbbbbbbbbbbbbbb2", latest_version = 7 }
+  }
+
+  assert {
+    condition     = aws_eks_node_group.system.launch_template[0].id == aws_launch_template.system.id && aws_eks_node_group.system.launch_template[0].version == tostring(aws_launch_template.system.latest_version)
+    error_message = "The system node group uses the system launch template, at its latest version."
+  }
+  assert {
+    condition     = aws_eks_node_group.sandbox.launch_template[0].id == aws_launch_template.sandbox.id && aws_eks_node_group.sandbox.launch_template[0].version == tostring(aws_launch_template.sandbox.latest_version)
+    error_message = "The sandbox node group uses the sandbox launch template, at its latest version."
+  }
+
   assert {
     condition     = aws_eks_node_group.sandbox.labels["wardby.dev/sandbox"] == "gvisor"
     error_message = "Sandbox nodes carry wardby.dev/sandbox=gvisor (the gvisor RuntimeClass's nodeSelector)."
