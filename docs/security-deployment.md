@@ -195,7 +195,10 @@ See the [Fetch standard](https://fetch.spec.whatwg.org/#append-a-request-origin-
 
 Clients must re-register as public clients (`token_endpoint_auth_method=none`).
 Only S256 PKCE and exact registered redirect strings are accepted. Redirects
-must be HTTPS or loopback HTTP, without credentials or fragments. Registration
+must be HTTPS or loopback HTTP, or, only with `WARDBY_MOBILE_ENABLED=true`,
+exactly the configured mobile redirect (`WARDBY_MOBILE_REDIRECT_URI`, default
+`com.wardby.mobile:/oauth`; see the `mobile-app` help article), without
+credentials or fragments. Registration
 allows 1-10 redirects and a bounded client name. `AUTH_MAX_CLIENTS` defaults to
 1000; PostgreSQL serializes capacity checks and shares rate limits across
 processes. There is no confidential-client support or client secret.

@@ -180,7 +180,6 @@ export class SelfHostedAuthProvider implements AuthProvider {
   }
   async handleAuthorize(input: AuthorizeParams) {
     const p = authorization.parse(input);
-    if (this.refusedRedirect(p.redirectUri)) throw new MobileDisabledError();
     if (p.resource !== this.config.canonicalUri) throw new Error("Invalid resource.");
     const client = await this.db.oAuthClient.findUnique({ where: { clientId: p.clientId } });
     const metadata = client?.metadata as { redirect_uris?: string[]; grant_types?: string[] } | undefined;
@@ -189,6 +188,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
       !metadata?.grant_types?.includes("authorization_code")
     )
       throw new Error("Invalid client or redirect.");
+    if (this.refusedRedirect(p.redirectUri)) throw new MobileDisabledError();
     const scope = limitScope(p.scope, SCOPES_SUPPORTED);
     const request = await this.db.oAuthAuthorizationRequest.create({
       data: {

@@ -47,3 +47,8 @@ again; nothing is revoked.
 
 If the app's registration or sign-in is refused with `mobile_disabled`, see
 [Mobile sign-in is not enabled](errors/mobile-disabled.md).
+
+## See also
+
+- [Watch live runs with the admin viewer API](admin-viewer.md)
+- The viewer API reference in `docs/viewer-api.md`.

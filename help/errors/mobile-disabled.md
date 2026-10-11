@@ -9,11 +9,15 @@ appliesTo: ">=0.6.0"
 
 # Mobile sign-in is not enabled
 
-Client registration returns `400 invalid_redirect_uri` with the description
-`mobile_disabled: mobile sign-in is not enabled on this server
-(WARDBY_MOBILE_ENABLED)`, or sign-in and token refresh are refused with the
-same reason. The server does not allow mobile access, which an operator controls
-with `WARDBY_MOBILE_ENABLED`.
+Mobile sign-in is switched off. An operator turns it on with
+`WARDBY_MOBILE_ENABLED`.
+
+Only client registration returns the reason: `400 invalid_redirect_uri` with the
+description `mobile_disabled: mobile sign-in is not enabled on this server
+(WARDBY_MOBILE_ENABLED)`. Sign-in (authorize) and token refresh return the
+generic `invalid_request` or `invalid_grant` with an `id`. The `mobile_disabled`
+reason appears only in the control-plane log line "self-hosted OAuth request
+rejected" for that `id`, so look the `id` up in the control-plane logs.
 
 1. Set `WARDBY_MOBILE_ENABLED=true` on the control plane and restart it. On GKE,
    redeploy with `WARDBY_MOBILE_ENABLED=true` passed to `deploy/gke/up.sh`; a

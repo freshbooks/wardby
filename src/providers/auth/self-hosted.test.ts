@@ -299,6 +299,12 @@ describe.skipIf(!process.env.DATABASE_URL)("secure self-hosted OAuth (PostgreSQL
     };
     expect((await mobileOn.handleAuthorize(params)).interactionId).toBeDefined();
     await expect(mobileOff.handleAuthorize(params)).rejects.toThrow(/^mobile_disabled:/);
+    // Garbage redirects are an invalid client/redirect, not a mobile_disabled refusal.
+    for (const redirectUri of ["javascript:/x", ""]) {
+      const err = await mobileOff.handleAuthorize({ ...params, redirectUri }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).not.toMatch(/^mobile_disabled/);
+    }
   });
   it("stops code exchange and refresh for mobile clients once mobile is disabled", async () => {
     const subject = "security-" + randomUUID();
