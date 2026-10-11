@@ -1,0 +1,120 @@
+/**
+ * Low-power mode: the control plane scales the coding proxy and native gateway
+ * Deployments to zero when idle and wakes them before a run needs them. With
+ * the mode off every method is a no-op and no Kubernetes API call is made.
+ */
+import type { V1Endpoints } from "@kubernetes/client-node";
+import type { LowPowerConfig } from "../config/low-power.js";
+import { KubernetesForbiddenError, type KubernetesApi } from "../providers/jobs/kubernetes-api.js";
+import { logger } from "./logger.js";
+
+const powerLog = logger.child({ module: "power" });
+
+export type PowerTarget = "proxy" | "gateway";
+export const LOW_POWER_WAKE_TIMEOUT = "low_power_wake_timeout";
+export const LOW_POWER_SCALE_FORBIDDEN = "low_power_scale_forbidden";
+/** ISO-8601 time the control plane last scaled the Deployment up from zero. */
+export const POWER_WOKE_AT = "wardby.io/power-woke-at";
+
+export interface PowerOptions {
+  config: LowPowerConfig;
+  /** Required when config.enabled. */
+  api?: KubernetesApi;
+  namespace: string;
+  /** Deployment name per target; each has the same name as its Service. */
+  deployments: Record<PowerTarget, string>;
+  /** Whether the target has had work since `since` (used by sleepIfIdle). */
+  busy?: (target: PowerTarget, since: Date) => Promise<boolean>;
+  now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+  /** How often ensureAwake polls for a ready endpoint. Default 2000. */
+  pollMs?: number;
+}
+
+export interface Power {
+  readonly enabled: boolean;
+  /** Scales the target up from zero if needed and waits for a ready endpoint. */
+  ensureAwake(target: PowerTarget, opts: { timeoutMs: number; runId: string }): Promise<void>;
+  isAsleep(target: PowerTarget): Promise<boolean>;
+  sleepIfIdle(): Promise<void>;
+  /** Missing permissions, e.g. "patch deployments/wardby-coding-proxy". */
+  checkAccess(): Promise<string[]>;
+}
+
+export const DISABLED_POWER: Power = {
+  enabled: false,
+  async ensureAwake() {},
+  async isAsleep() {
+    return false;
+  },
+  async sleepIfIdle() {},
+  async checkAccess() {
+    return [];
+  },
+};
+
+const ready = (ep?: V1Endpoints) => (ep?.subsets ?? []).some((s) => (s.addresses ?? []).length > 0);
+
+export function createPower(options: PowerOptions): Power {
+  if (!options.config.enabled) return DISABLED_POWER;
+  const { api, namespace, deployments } = options;
+  if (!api) throw new Error("Low-power mode needs a Kubernetes API client.");
+  const now = options.now ?? (() => new Date());
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const pollMs = options.pollMs ?? 2000;
+
+  return {
+    enabled: true,
+
+    async ensureAwake(target, { timeoutMs, runId }) {
+      const name = deployments[target];
+      const dep = await api.readDeployment(namespace, name);
+      if (!dep) throw new Error(`${LOW_POWER_WAKE_TIMEOUT}: Deployment "${name}" not found in "${namespace}".`);
+      if ((dep.spec?.replicas ?? 1) === 0) {
+        try {
+          await api.patchDeployment(namespace, name, {
+            replicas: 1,
+            annotations: { [POWER_WOKE_AT]: now().toISOString() },
+          });
+        } catch (error) {
+          if (error instanceof KubernetesForbiddenError) {
+            throw new Error(
+              `${LOW_POWER_SCALE_FORBIDDEN}: the control plane may not patch Deployment "${name}"; apply the wardby-power Role (up.sh with WARDBY_LOW_POWER=1).`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+        powerLog.info({ target, runId }, `power: ${target} woke`);
+      }
+      const deadline = now().getTime() + timeoutMs;
+      while (!ready(await api.readEndpoints(namespace, name))) {
+        if (now().getTime() >= deadline) {
+          throw new Error(
+            `${LOW_POWER_WAKE_TIMEOUT}: ${target} "${name}" had no ready endpoint within ${timeoutMs} ms.`,
+          );
+        }
+        await sleep(pollMs);
+      }
+    },
+
+    async isAsleep(target) {
+      return ((await api.readDeployment(namespace, deployments[target]))?.spec?.replicas ?? 1) === 0;
+    },
+
+    async sleepIfIdle() {
+      throw new Error("not implemented");
+    },
+
+    async checkAccess() {
+      const missing: string[] = [];
+      for (const name of Object.values(deployments)) {
+        for (const verb of ["get", "patch"]) {
+          if (!(await api.canI(namespace, verb, "apps", "deployments", name)))
+            missing.push(`${verb} deployments/${name}`);
+        }
+      }
+      return missing;
+    },
+  };
+}
