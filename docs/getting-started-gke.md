@@ -210,6 +210,13 @@ on. A value already in Secret Manager is never overwritten, so after the first
 deployment Secret Manager is the source of truth. You can then remove the
 production values from `.env.local`.
 
+External Secrets Operator runs as three small pods in the `external-secrets`
+namespace. `deploy/gke/eso-values.yaml` requests 100m CPU and 256 MiB of
+memory for each (memory limited to the same), because Autopilot bills a pod
+that requests nothing at 500m CPU and 2 GiB. If one is ever restarted for
+exceeding its memory limit, raise the limit and request together in that file
+and re-run `up.sh`; the Secrets it already synced are unaffected.
+
 Redeploying onto a cluster that already runs Wardby carries its existing
 `SECRET_APP_KEY` and login signing keys over, so stored credentials still
 decrypt and nobody has to sign in again.
