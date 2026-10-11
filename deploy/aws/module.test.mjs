@@ -5,6 +5,11 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import {
+  EKS_SANDBOX_NODE_LABEL,
+  EKS_SANDBOX_TAINT_KEY,
+  GVISOR_RUNTIME_CLASS,
+} from "../../src/providers/jobs/kubernetes-platform.ts";
 
 const moduleDir = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = join(moduleDir, "..", "..");
@@ -64,5 +69,15 @@ describe("deploy/aws hygiene", () => {
 
   it("configures no backend: state location is the operator's choice", () => {
     for (const source of tfSources) expect(source).not.toMatch(/^\s*backend\s+"/m);
+  });
+});
+
+describe("deploy/aws sandbox node group", () => {
+  const local = (name) => read("nodegroups.tf").match(new RegExp(`^\\s*${name}\\s*=\\s*"([^"]+)"`, "m"))?.[1];
+
+  it("labels and taints sandbox nodes exactly as the eks platform profile expects", () => {
+    expect(local("sandbox_label_key")).toBe(EKS_SANDBOX_NODE_LABEL);
+    expect(local("sandbox_taint_key")).toBe(EKS_SANDBOX_TAINT_KEY);
+    expect(local("sandbox_value")).toBe(GVISOR_RUNTIME_CLASS);
   });
 });

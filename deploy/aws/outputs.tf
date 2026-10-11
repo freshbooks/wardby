@@ -49,3 +49,13 @@ output "kubeconfig_command" {
   description = "Creates the kubectl context for this cluster."
   value       = "aws eks update-kubeconfig --region ${var.region} --name ${aws_eks_cluster.main.name}"
 }
+
+output "sandbox_node_selector" {
+  description = "nodeSelector the gvisor RuntimeClass's scheduling block must add."
+  value       = { (local.sandbox_label_key) = local.sandbox_value }
+}
+
+output "sandbox_toleration" {
+  description = "Taint on sandbox nodes (key=value:effect) the gvisor RuntimeClass must tolerate."
+  value       = "${local.sandbox_taint_key}=${local.sandbox_value}:NoSchedule"
+}

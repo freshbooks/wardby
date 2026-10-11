@@ -24,6 +24,9 @@ mock_provider "aws" {
   mock_resource "aws_eks_cluster" {
     defaults = { arn = "arn:aws:eks:us-test-1:111122223333:cluster/wardby" }
   }
+  mock_resource "aws_launch_template" {
+    defaults = { id = "lt-0123456789abcdef0" }
+  }
   mock_resource "aws_acm_certificate" {
     defaults = {
       domain_validation_options = [{
