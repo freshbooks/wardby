@@ -21,6 +21,9 @@ mock_provider "aws" {
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::111122223333:role/mock-role" }
   }
+  mock_resource "aws_iam_policy" {
+    defaults = { arn = "arn:aws:iam::111122223333:policy/mock-policy" }
+  }
   mock_resource "aws_eks_cluster" {
     defaults = { arn = "arn:aws:eks:us-test-1:111122223333:cluster/wardby" }
   }

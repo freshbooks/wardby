@@ -117,3 +117,26 @@ output "secret_arns" {
 output "external_secrets_role_arn" {
   value = aws_iam_role.external_secrets.arn
 }
+
+output "certificate_arn" {
+  description = "ACM certificate for hostname, for the load balancer's HTTPS listener."
+  value       = aws_acm_certificate.control_plane.arn
+}
+
+output "certificate_validation_records" {
+  description = "DNS records that validate the certificate. Create them yourself when route53_zone_id is null."
+  value = [for o in aws_acm_certificate.control_plane.domain_validation_options : {
+    name  = o.resource_record_name
+    type  = o.resource_record_type
+    value = o.resource_record_value
+  }]
+}
+
+output "waf_web_acl_arn" {
+  description = "WAF web ACL for the load balancer."
+  value       = aws_wafv2_web_acl.control_plane.arn
+}
+
+output "lbc_role_arn" {
+  value = aws_iam_role.lbc.arn
+}
