@@ -32,6 +32,19 @@ self-hosted mode a client may register a loopback redirect
 use any port at sign-in, as RFC 8252 describes. Everything except the port
 must match the registered redirect.
 
+Mobile clients sign in with PKCE and a private-use redirect URI,
+`com.wardby.mobile:/oauth` by default. A self-hosted server accepts it only when
+`WARDBY_MOBILE_ENABLED=true`, and only by exact match; every other non-web
+redirect is refused. Turning mobile off refuses new sign-ins and stops existing
+mobile sessions at their next token refresh (an access token already issued
+works until it expires, at most 10 minutes); turning it back on lets those
+sessions refresh again. While it is off, client registration returns
+`400 invalid_redirect_uri` with a `mobile_disabled` description. White-label
+builds set `WARDBY_MOBILE_REDIRECT_URI` to their own reverse-domain URI, such as
+`com.example.app:/oauth`; changing it also signs out clients registered under the
+old value. A malformed value for either variable stops startup in every auth
+mode. See the help article `mobile-app`.
+
 ## Endpoints
 
 All three endpoints accept only `GET`.

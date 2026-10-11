@@ -36,6 +36,8 @@ your server's canonical URI, sign in with an `admin` user in the browser, and it
 shows the live graph. Each GitHub release has an unsigned macOS build of the viewer attached (see the README for opening it past Gatekeeper). Its README covers setup, and what an external identity
 provider client needs when the server runs in delegating mode.
 
+From Wardby 0.6.0, admins can also sign in to a mobile app for the same read-only live view; see the help article `mobile-app`.
+
 The Infrastructure tab shows the Kubernetes pods where your deployment runs
 coding jobs, read-only. It uses your kubeconfig (switchable per server) and
 requires a minimal read-only Kubernetes role. See the Infrastructure view

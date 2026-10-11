@@ -193,6 +193,11 @@ that case, register the MCP client manually as a **public/native application**:
 - register the client's exact loopback callback URI; and
 - allow it to request the Wardby audience and scopes.
 
+To let the Wardby mobile app sign in, also register its private-use redirect
+URI, `com.wardby.mobile:/oauth` (or your white-label build's redirect, such as
+`com.example.app:/oauth`), as an allowed redirect URI on the IdP client that
+requests `admin:view`. Wardby needs no setting for this in delegating mode.
+
 For Claude Code, a fixed callback port makes the redirect URI predictable:
 
 ```sh
@@ -315,6 +320,7 @@ test procedure and cleanup.
 | Wardby returns `403 insufficient_scope`       | The token is valid but `scope`/`scp` lacks the operation's required permission.      |
 | Client registration returns `403`             | Anonymous dynamic registration is disabled; pre-register a public client.            |
 | Browser flow rejects the redirect             | The provider's registered loopback callback does not exactly match the client.       |
+| Mobile sign-in fails with a redirect error    | The IdP client doesn't list the mobile redirect URI.                                 |
 | Wardby cannot validate any newly issued token | The control plane cannot reach the JWKS URI, or provider key rotation is incomplete. |
 | One person appears as multiple principals     | The provider is emitting different or pairwise `sub` values for different clients.   |
 
