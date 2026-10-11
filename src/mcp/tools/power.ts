@@ -5,7 +5,8 @@
  * for the admin role (resource-server.ts). power_sleep never stops a run: a
  * target with active or queued runs (or, for the gateway, an active gateway
  * session) is refused and its run ids returned. Each power_sleep is audited
- * (event power.sleep).
+ * (event power.sleep, outcome ok or error, naming the principal), including a
+ * failed or refused call, since a failure can follow a target already slept.
  */
 import { z } from "zod";
 import { logger } from "../../core/logger.js";
@@ -64,18 +65,19 @@ export function registerPowerTools(mcp: WardbyMcpServer): void {
       const { target } = parse(SleepSchema, "power_sleep arguments", rawArgs);
       const targets: PowerTarget[] = target ? [target] : [...TARGETS];
       const power = ctx.providers.power ?? DISABLED_POWER;
+      const audit = { event: "power.sleep", principal: ctx.principal.id, targets };
       let result;
       try {
         result = await power.sleepNow(targets);
       } catch (err) {
+        // Audited before rethrowing: sleepNow may already have slept an earlier target.
+        const error = err instanceof Error ? err.message : String(err);
+        powerToolLog.warn({ ...audit, outcome: "error", error }, "power_sleep");
         if (err instanceof Error && err.message.startsWith(`${LOW_POWER_DISABLED}:`))
           throw new McpError(409, err.message);
         throw err;
       }
-      powerToolLog.info(
-        { event: "power.sleep", principal: ctx.principal.id, targets, slept: result.slept, blocked: result.blocked },
-        "power_sleep",
-      );
+      powerToolLog.info({ ...audit, outcome: "ok", slept: result.slept, blocked: result.blocked }, "power_sleep");
       return textResult(result);
     },
   });

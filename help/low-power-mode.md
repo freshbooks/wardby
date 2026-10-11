@@ -73,8 +73,9 @@ Pass `target: "proxy"` or `target: "gateway"` to sleep one; omit it for both.
 
 Both tools need the `power:manage` scope, which only the `admin` role grants
 (see [Identity and access](identity-and-access.md)). With the mode off,
-`power_sleep` fails with `409 low_power_disabled` and `power_status` returns
-`{ "enabled": false }`.
+`power_sleep` fails with
+[`409 low_power_disabled`](errors/low-power-disabled.md) and `power_status`
+returns `{ "enabled": false }`.
 
 ## Trade-offs and requirements
 
@@ -100,6 +101,8 @@ full table.
 
 - [`low_power_wake_timeout`](errors/low-power-wake-timeout.md): the target did
   not become ready in time, or its Deployment does not exist.
+- [`low_power_disabled`](errors/low-power-disabled.md): `power_sleep` was
+  called while the mode is off.
 - [`low_power_scale_forbidden`](errors/low-power-scale-forbidden.md): the
   control plane may not scale the Deployment (Role `wardby-power` missing).
 - Also: `power_sleep_failed`, `low_power_access_check_failed`,

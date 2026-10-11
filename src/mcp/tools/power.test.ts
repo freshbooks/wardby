@@ -5,6 +5,8 @@ import type { PrismaClient } from "#prisma";
 import { buildMcpServer } from "../server.js";
 import type { McpRequestContext } from "../context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
+import { McpError } from "../errors.js";
+import type { WardbyMcpServer } from "../server.js";
 import { registerPowerTools } from "./power.js";
 
 const logged = vi.hoisted(() => [] as { level: string; payload: Record<string, unknown>; message: string }[]);
@@ -68,6 +70,17 @@ async function connect(who: { scopes: string[]; roles: string[] }, power: Power 
   return client;
 }
 
+/** The registered handler itself, to see the McpError (and its HTTP status) a client only sees as text. */
+function handlerOf(name: string, power: Power | undefined) {
+  const handlers = new Map<string, (args: unknown, ctx: McpRequestContext) => Promise<unknown>>();
+  registerPowerTools({
+    registerTool: (spec: { name: string; handler: (args: unknown, ctx: McpRequestContext) => Promise<unknown> }) =>
+      handlers.set(spec.name, spec.handler),
+  } as unknown as WardbyMcpServer);
+  const ctx = { principal: { id: "p-admin" }, providers: { power } } as unknown as McpRequestContext;
+  return (args: unknown) => handlers.get(name)!(args, ctx);
+}
+
 const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
 
 describe("power tools", () => {
@@ -121,6 +134,7 @@ describe("power tools", () => {
       event: "power.sleep",
       principal: "p-admin",
       targets: ["proxy", "gateway"],
+      outcome: "ok",
       slept: ["proxy"],
       blocked: [{ target: "gateway", runIds: ["r1"] }],
     });
@@ -156,6 +170,49 @@ describe("power tools", () => {
     const r = await client.callTool({ name: "power_sleep", arguments: {} });
     expect(r.isError).toBe(true);
     expect(text(r)).toContain("low_power_disabled: WARDBY_LOW_POWER is not 1 on this deployment.");
+    await client.close();
+    const err = await handlerOf("power_sleep", power)({}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect((err as McpError).httpStatus).toBe(409);
+    expect((err as McpError).message).toBe("low_power_disabled: WARDBY_LOW_POWER is not 1 on this deployment.");
+  });
+
+  it("power_sleep audits a refused call (mode off) with the principal", async () => {
+    logged.length = 0;
+    await handlerOf("power_sleep", undefined)({ target: "proxy" }).catch(() => undefined);
+    expect(logged.find((entry) => entry.payload.event === "power.sleep")?.payload).toEqual({
+      event: "power.sleep",
+      principal: "p-admin",
+      targets: ["proxy"],
+      outcome: "error",
+      error: "low_power_disabled: WARDBY_LOW_POWER is not 1 on this deployment.",
+    });
+  });
+
+  it("power_sleep audits a call that fails after sleeping a target, then rethrows", async () => {
+    logged.length = 0;
+    // As if the proxy was patched to 0 and the gateway's patch was then forbidden.
+    const power = fakePower({
+      sleepNow: vi.fn(async () => {
+        throw new Error(
+          'low_power_scale_forbidden: the control plane may not patch Deployment "wardby-native-gateway"',
+        );
+      }),
+    });
+    const client = await connect(ADMIN, power);
+    const r = await client.callTool({ name: "power_sleep", arguments: {} });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toContain("low_power_scale_forbidden");
+    const audit = logged.filter((entry) => entry.payload.event === "power.sleep");
+    expect(audit).toHaveLength(1);
+    expect(audit[0].level).toBe("warn");
+    expect(audit[0].payload).toEqual({
+      event: "power.sleep",
+      principal: "p-admin",
+      targets: ["proxy", "gateway"],
+      outcome: "error",
+      error: 'low_power_scale_forbidden: the control plane may not patch Deployment "wardby-native-gateway"',
+    });
     await client.close();
   });
 
