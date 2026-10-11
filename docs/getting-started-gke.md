@@ -657,6 +657,93 @@ class, `KUBERNETES_PLATFORM=gke-autopilot`, and the run priority class.
   To undo a bad gateway release, run
   `kubectl -n wardby-coding rollout undo deploy/wardby-native-gateway`.
 
+### Low-power mode
+
+Low-power mode requires Wardby 0.6.0 or later.
+
+Low-power mode cuts the idle cost of a deployment that runs agents only now and
+then. The coding proxy and the native gateway scale to zero replicas when
+nothing needs them, and wake on demand; the headroom placeholder is turned off;
+and the control plane runs 1 copy, scaling to 2 under load. The control plane,
+database, and edge are unchanged.
+
+Turn it on by deploying with the flag:
+
+```sh
+WARDBY_HOSTNAME=wardby.example.com WARDBY_LOW_POWER=1 deploy/gke/up.sh
+```
+
+To turn it off, re-run `up.sh` without the flag. That removes the autoscaler
+(HorizontalPodAutoscaler `wardby-control-plane`) and the Role and RoleBinding
+`wardby-power`, and restores the normal sizes: proxy 1, gateway 2, headroom 1,
+control plane 1.
+
+| Variable                 | Where it is set                    | Values                          | Meaning                                                                                                                                                  |
+| ------------------------ | ---------------------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WARDBY_LOW_POWER`       | `up.sh` environment; control plane | unset, `0` (off) or `1` (on)    | Anything else fails `up.sh` and stops the control plane at start-up. Needs `JOB_LAUNCHER=kubernetes`, else it logs `low_power_ignored` and does nothing. |
+| `LOW_POWER_IDLE_MINUTES` | Control-plane Deployment           | integer 5 to 1440, default `30` | How long a target must be unused before it sleeps.                                                                                                       |
+
+**Sleeping.** Every minute the scheduler leader scales the coding proxy
+(`wardby-coding-proxy`) to 0 when no coding run is pending or running and none
+finished within the idle window. It scales the native gateway
+(`wardby-native-gateway`) to 0 when no sandbox native run is pending, running or
+recently finished, the gateway has no active session, and it was woken at least
+one idle window ago (recorded in the `wardby.io/power-woke-at` annotation).
+The condition is checked again immediately before scaling. The control plane
+logs `power: proxy slept (idle 30m)`.
+
+**Waking.** Starting a coding run scales the proxy to 1 and waits for a ready
+endpoint, up to `KUBERNETES_READY_TIMEOUT_MS` (default 120000). Starting a
+sandbox run does the same for the gateway, up to
+`NATIVE_SANDBOX_READY_TIMEOUT_MS`. On a cold Autopilot node expect about 1 to 2
+minutes of extra start-up. The first coding run after a control-plane restart
+also runs the cluster preflight canary, because start-up preflight is deferred
+while the proxy sleeps (`kubernetes_preflight_deferred`). A deploy leaves the
+proxy and gateway at 1 replica, since the deploy's database checks need them;
+they sleep after the idle window.
+
+**Control-plane autoscaling.** The control plane scales between 1 and 2 copies
+on CPU (placeholder 40% target, scale-down after 10 minutes). A run executes on
+the copy that started it, so scheduled runs stay on the scheduler leader, while
+runs started by a webhook or over MCP spread across copies. While the mode is on
+the autoscaler owns the replica count, so do not set it by hand.
+
+**Trade-offs.**
+
+- Headroom is off, so the control plane has less protection against being
+  preempted when the cluster is short of capacity (see
+  [Pod priority and headroom](#pod-priority-and-headroom)).
+- The gateway runs 1 replica instead of 2 while awake, so there is no
+  redundancy.
+- `NATIVE_SANDBOX_WARM_POOL_SIZE` must be 0; the control plane refuses to start
+  otherwise, because a warm pool needs the gateway running.
+- The gateway must be in the same namespace as `KUBERNETES_NAMESPACE`.
+- The control plane needs the `wardby-power` Role to scale the Deployments. If
+  it is missing, start-up warns `low_power_scale_forbidden: missing ...` and
+  waking fails with that error; re-run `up.sh` with the flag.
+
+**Cost.** Autopilot bills Pod requests while a Pod exists. The table uses
+us-central1 list prices of $0.0445 per vCPU-hour and $0.0049225 per GiB-hour and
+730 hours a month; substitute your region's current rates. Requests include the
+Cloud SQL sidecar.
+
+| Workload                     | Requests per replica  | Per hour | Per month, always on | In low-power mode                       |
+| ---------------------------- | --------------------- | -------- | -------------------- | --------------------------------------- |
+| Control plane                | 1.1 vCPU / 2.125 GiB  | $0.0594  | $43.37               | 1 copy always; $0.0594/h per extra copy |
+| Coding proxy                 | 1.1 vCPU / 3.125 GiB  | $0.0643  | $46.96               | $0.0643/h only while awake              |
+| Native gateway (per replica) | 0.35 vCPU / 0.625 GiB | $0.0187  | $13.62 (x2 = $27.23) | 1 replica, $0.0187/h only while awake   |
+| Headroom placeholder         | 0.25 vCPU / 0.5 GiB   | $0.0136  | $9.92                | $0                                      |
+
+With the mode off, those four workloads cost about $127.48 a month at these
+rates. In low-power mode the control plane is still always on, and a fully
+awake moment costs about $0.142 an hour for one control-plane copy, the proxy
+and one gateway replica. Your total depends on how many hours the proxy and
+gateway stay awake. Cloud SQL, the static address, load balancer, Cloud Armor
+and any other always-on component are unchanged.
+
+For error codes and log lines, see the
+[low-power mode help article](../help/low-power-mode.md).
+
 ### Coding-run services
 
 A coding run whose agent allows [services](coding-services.md) waits for each

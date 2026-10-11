@@ -85,6 +85,12 @@ plane manifest. Idle workers are extra pods, so raise the ResourceQuota to cover
 pods; each idle worker is billed for its 500m / 512Mi requests. See the
 [warm pool](../../docs/native-sandbox.md#warm-pool).
 
+## Low-power mode
+
+`WARDBY_LOW_POWER=1 deploy/gke/up.sh` scales the coding proxy and native
+gateway to zero when idle and runs fewer always-on pods; see
+[Low-power mode](../../docs/getting-started-gke.md#low-power-mode).
+
 ## Egress
 
 The namespace is default-deny. The control plane, the coding proxy, and the

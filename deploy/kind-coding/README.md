@@ -258,6 +258,15 @@ cluster's deployed gateway, with no database or model needed. It requires
 `NATIVE_TEST_FORBIDDEN` (a list of `host:port` addresses that must be
 unreachable from a worker).
 
+## Low-power mode on the kind harness
+
+`WARDBY_LOW_POWER=1 bash deploy/kind-coding/up.sh` also applies the
+`wardby-power` Role that lets the control plane scale the coding proxy. The
+kind control plane runs on your host, so set `WARDBY_LOW_POWER=1` (and
+optionally `LOW_POWER_IDLE_MINUTES`) in the environment of the locally run
+`wardby serve` as well. See the
+[low-power mode article](../../help/low-power-mode.md).
+
 ## Load testing (contributors)
 
 `manifests/overlays/kind-load` is the kind overlay plus a mock model upstream
