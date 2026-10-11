@@ -779,7 +779,8 @@ fresh from GitHub on its current head:
   the head completed with conclusion `success`;
 - CI is green: every check run and commit status on the head that is not
   one of Wardby's own checks has completed with `success`, `neutral`, or
-  `skipped` — or the repository reports no CI at all. CI that is truncated
+  `skipped`, with at least one `success` — or the repository reports no CI
+  at all. All-neutral or all-skipped CI counts as inconclusive and waits. CI that is truncated
   (more checks exist than wardby could read), still pending, failing, or
   unreadable leaves the pull request in draft; wardby tries again the next
   time something changes.

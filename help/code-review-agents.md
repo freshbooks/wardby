@@ -187,8 +187,8 @@ Wardby marks a pull request ready once it is open and a draft, Wardby's own
 App opened it (and its head isn't in a fork), every authorized reviewer
 linked with the `pull_request` trigger has approved the head with its own
 check, CI on the head is green (every check run and commit status that
-isn't Wardby's own has completed with success, neutral, or skipped, or
-there is no CI at all), and the `wardby merge order` check is `success` or
+isn't Wardby's own has completed with success, neutral, or skipped, at
+least one with success, or there is no CI at all), and the `wardby merge order` check is `success` or
 isn't posted on it. Commit statuses only count if the App can read them:
 grant **Commit statuses: Read** if your CI reports statuses rather than
 check runs. Wardby marks a given pull request ready at most once; moving it
