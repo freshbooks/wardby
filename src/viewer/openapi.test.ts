@@ -1,0 +1,78 @@
+import { readFile } from "node:fs/promises";
+import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
+import { VIEWER_SCHEMAS } from "./api-schema.js";
+import { OPENAPI_PATH, buildViewerOpenApi, renderViewerOpenApi } from "./openapi.js";
+
+type Obj = Record<string, unknown>;
+type Doc = {
+  openapi: string;
+  info: Obj;
+  servers: unknown;
+  paths: Record<string, { get: Obj & { security: unknown; description: string; responses: Record<string, Obj> } }>;
+  components: { securitySchemes: Obj; schemas: Obj };
+};
+
+const version = (
+  JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }
+).version;
+
+const build = (): Doc => buildViewerOpenApi(version) as unknown as Doc;
+
+describe("published viewer OpenAPI document", () => {
+  it("is up to date (run `npm run build:viewer-schemas` and commit)", async () => {
+    expect(await readFile(OPENAPI_PATH, "utf8")).toBe(renderViewerOpenApi(version));
+  });
+
+  it("is OpenAPI 3.1 with the package version and a placeholder server", () => {
+    const doc = build();
+    expect(doc.openapi).toBe("3.1.0");
+    expect(doc.info).toMatchObject({ title: "wardby admin viewer API", version });
+    expect(doc.servers).toEqual([{ url: "https://{host}", variables: { host: { default: "wardby.example.com" } } }]);
+  });
+
+  it("documents exactly the four GET operations, each behind bearer auth", () => {
+    const doc = build();
+    expect(Object.keys(doc.paths).sort()).toEqual([
+      "/admin/api/events",
+      "/admin/api/graph",
+      "/admin/api/infra",
+      "/admin/api/runs/{id}",
+    ]);
+    for (const item of Object.values(doc.paths)) {
+      expect(Object.keys(item)).toEqual(["get"]);
+      expect(item.get.security).toEqual([{ bearer: [] }]);
+      expect(item.get.description).toMatch(/admin:view/);
+    }
+    expect(doc.components.securitySchemes.bearer).toEqual({ type: "http", scheme: "bearer" });
+  });
+
+  it("has a component schema for every viewer schema, and every $ref resolves", () => {
+    const doc = build();
+    for (const name of Object.keys(VIEWER_SCHEMAS)) expect(doc.components.schemas).toHaveProperty(name);
+    expect(doc.components.schemas).toHaveProperty("ViewerError");
+    const refs = JSON.stringify(doc).match(/"#\/components\/schemas\/[^"]+"/g) ?? [];
+    expect(refs.length).toBeGreaterThan(0);
+    for (const ref of refs) {
+      const name = ref.slice('"#/components/schemas/'.length, -1);
+      expect(doc.components.schemas, ref).toHaveProperty(name);
+    }
+    const text = JSON.stringify(doc.components.schemas);
+    expect(text).not.toContain('"$schema"');
+    expect(text).not.toContain('"definitions"');
+  });
+
+  it("documents the event stream as text/event-stream with its frames", () => {
+    const doc = build();
+    const ok = doc.paths["/admin/api/events"].get.responses["200"] as { content: Obj };
+    expect(Object.keys(ok.content)).toEqual(["text/event-stream"]);
+    for (const frame of ["hello", "run", "service", "outcome", "status", "resync", "ping"]) {
+      expect(doc.paths["/admin/api/events"].get.description).toContain(frame);
+    }
+    expect(doc.paths["/admin/api/events"].get.description).toMatch(/no replay/i);
+  });
+
+  it("round-trips through YAML", () => {
+    expect(parse(renderViewerOpenApi(version))).toEqual(buildViewerOpenApi(version));
+  });
+});

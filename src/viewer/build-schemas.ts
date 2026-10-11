@@ -1,9 +1,10 @@
 /** Writes src/viewer/schemas/<name>.schema.json from VIEWER_SCHEMAS (npm run build:viewer-schemas). */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { VIEWER_SCHEMAS } from "./api-schema.js";
+import { OPENAPI_PATH, renderViewerOpenApi } from "./openapi.js";
 
 export const SCHEMA_DIR = join(dirname(fileURLToPath(import.meta.url)), "schemas");
 
@@ -19,4 +20,6 @@ export function renderSchemas(): Record<string, string> {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   await mkdir(SCHEMA_DIR, { recursive: true });
   for (const [file, text] of Object.entries(renderSchemas())) await writeFile(join(SCHEMA_DIR, file), text);
+  const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string };
+  await writeFile(OPENAPI_PATH, renderViewerOpenApi(pkg.version));
 }
