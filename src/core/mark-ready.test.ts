@@ -3,6 +3,40 @@ import { markReadyAfterRun, maybeMarkReady } from "./mark-ready.js";
 
 const SHA = "a".repeat(40);
 
+const AUTH = "host_permission";
+const BUILDER = {
+  agentId: "builder",
+  access: "write",
+  triggers: [],
+  checkName: null,
+  markReadyWhenPassing: true,
+  authorizedVia: AUTH,
+};
+const REVIEWER = {
+  agentId: "reviewer",
+  access: "write",
+  triggers: ["pull_request"],
+  checkName: "wardby review",
+  markReadyWhenPassing: false,
+  authorizedVia: AUTH,
+};
+const OPENED = {
+  outcome: "pull_request_opened",
+  repository: "acme/web",
+  pullRequestNumber: 7,
+  pullRequestUrl: "https://github.com/acme/web/pull/7",
+};
+
+const rootRow = (fields: Record<string, unknown>) => ({
+  runId: "root",
+  repository: "acme/web",
+  rootCodingRunId: null,
+  markedReadyAt: null,
+  result: OPENED,
+  run: { agentId: "builder" },
+  ...fields,
+});
+
 interface CheckView {
   status: string;
   conclusion: string | null;
@@ -20,29 +54,12 @@ function setup(
     hostCheck: Record<string, unknown> | null;
   }> = {},
 ) {
-  const links = over.links ?? [
-    { agentId: "builder", access: "write", triggers: [], checkName: null, markReadyWhenPassing: true },
-    {
-      agentId: "reviewer",
-      access: "write",
-      triggers: ["pull_request"],
-      checkName: "wardby review",
-      markReadyWhenPassing: false,
-    },
-  ];
+  const links = over.links ?? [BUILDER, REVIEWER];
   const db = {
     agentRepository: { findMany: vi.fn(async (_args: unknown) => links) },
     codingRun: {
       findUnique: vi.fn(async (_args: unknown): Promise<Record<string, unknown> | null> =>
-        over.root === undefined
-          ? {
-              runId: "root",
-              repository: "acme/web",
-              rootCodingRunId: null,
-              markedReadyAt: null,
-              run: { agentId: "builder" },
-            }
-          : over.root,
+        over.root === undefined ? rootRow({}) : over.root,
       ),
       updateMany: vi.fn(async (_args: unknown) => ({ count: over.claimCount ?? 1 })),
     },
@@ -82,15 +99,6 @@ function setup(
   return { db, host, log, deps: { db, hosts: { github: host }, log } as never };
 }
 
-const rootRow = (fields: Record<string, unknown>) => ({
-  runId: "root",
-  repository: "acme/web",
-  rootCodingRunId: null,
-  markedReadyAt: null,
-  run: { agentId: "builder" },
-  ...fields,
-});
-
 describe("maybeMarkReady", () => {
   it("marks when every condition holds", async () => {
     const { deps, host, db, log } = setup();
@@ -109,7 +117,7 @@ describe("maybeMarkReady", () => {
 
   it("is off with no host reads when no write link opted in", async () => {
     const { deps, host } = setup({
-      links: [{ agentId: "builder", access: "write", triggers: [], checkName: null, markReadyWhenPassing: false }],
+      links: [{ ...BUILDER, markReadyWhenPassing: false }],
     });
     expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("off");
     expect(host.pullRequestOrigin).not.toHaveBeenCalled();
@@ -117,10 +125,24 @@ describe("maybeMarkReady", () => {
 
   it("is off when only a read link opted in", async () => {
     const { deps, host } = setup({
-      links: [{ agentId: "builder", access: "read", triggers: [], checkName: null, markReadyWhenPassing: true }],
+      links: [{ ...BUILDER, access: "read" }],
     });
     expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("off");
     expect(host.pullRequestOrigin).not.toHaveBeenCalled();
+  });
+
+  it("is off with no host reads when the opted-in builder link is unauthorized", async () => {
+    const { deps, host } = setup({ links: [{ ...BUILDER, authorizedVia: null }, REVIEWER] });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("off");
+    expect(host.pullRequestOrigin).not.toHaveBeenCalled();
+  });
+
+  it("a second, unauthorized reviewer whose check is missing does not block marking", async () => {
+    const { deps, host } = setup({
+      links: [BUILDER, REVIEWER, { ...REVIEWER, agentId: "rogue", checkName: "rogue review", authorizedVia: null }],
+    });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(host.readOwnChecks).toHaveBeenCalledWith("acme/web", SHA, ["wardby review", "wardby merge order"]);
   });
 
   it("is off when the provider has no host", async () => {
@@ -129,10 +151,7 @@ describe("maybeMarkReady", () => {
   });
 
   it.each([
-    [
-      "no reviewer link",
-      { links: [{ agentId: "builder", access: "write", triggers: [], checkName: null, markReadyWhenPassing: true }] },
-    ],
+    ["no reviewer link", { links: [BUILDER] }],
     ["not a draft", { origin: { draft: false } }],
     ["closed", { origin: { state: "closed" } }],
     ["a fork", { origin: { isFork: true } }],
@@ -156,6 +175,12 @@ describe("maybeMarkReady", () => {
     ["the marker names no coding run", { root: null }],
     ["opened by another agent", { root: rootRow({ run: { agentId: "someone-else" } }) }],
     ["opener repository differs", { root: rootRow({ repository: "acme/other" }) }],
+    ["the only reviewer link is unauthorized", { links: [BUILDER, { ...REVIEWER, authorizedVia: null }] }],
+    [
+      "the opener recorded a different pull request",
+      { root: rootRow({ result: { ...OPENED, pullRequestNumber: 8 } }) },
+    ],
+    ["the opener recorded no pull request", { root: rootRow({ result: null }) }],
   ])("is not ready when %s", async (_why, over) => {
     const { deps, host } = setup(over);
     expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
@@ -241,6 +266,23 @@ describe("maybeMarkReady", () => {
       .mockResolvedValueOnce(null);
     expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
     expect(host.markReadyForReview).not.toHaveBeenCalled();
+  });
+
+  it("is not ready when a continuation in this repository has its root in another", async () => {
+    const { deps, db, host } = setup();
+    db.codingRun.findUnique
+      .mockResolvedValueOnce({
+        runId: "cont",
+        repository: "acme/web",
+        rootCodingRunId: "root",
+        markedReadyAt: null,
+        result: { ...OPENED, outcome: "pull_request_updated" },
+        run: { agentId: "builder" },
+      })
+      .mockResolvedValueOnce(rootRow({ repository: "acme/other", result: { ...OPENED, repository: "acme/other" } }));
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(host.readOwnChecks).not.toHaveBeenCalled();
+    expect(db.codingRun.updateMany).not.toHaveBeenCalled();
   });
 
   it("never throws", async () => {

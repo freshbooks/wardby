@@ -60,7 +60,14 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
       await db.agent.create({ data: { id: a, name: a, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner } });
     }
     await db.agentRepository.create({
-      data: { agentId: builder, provider: "github", repository, access: "write", markReadyWhenPassing: true },
+      data: {
+        agentId: builder,
+        provider: "github",
+        repository,
+        access: "write",
+        markReadyWhenPassing: true,
+        authorizedVia: "host_permission",
+      },
     });
     await db.agentRepository.create({
       data: {
@@ -70,6 +77,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
         access: "write",
         triggers: ["pull_request"],
         checkName: `wardby review ${s8}`,
+        authorizedVia: "host_permission",
       },
     });
     await db.run.create({ data: { id: id("root"), agentId: builder, status: "succeeded" } });

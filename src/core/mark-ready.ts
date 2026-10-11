@@ -7,12 +7,14 @@
  *
  * The host only confirms the pull request was authored by this App. The trust boundary is
  * here: the pull request's marker must resolve (through rootCodingRunId) to a root coding run
- * in this repository whose agent has an opted-in write link.
+ * in this repository, recorded as this pull request, whose agent has an authorized, opted-in
+ * write link. Only authorized links (authorizedVia set) count, for opting in and for review checks.
  *
  * Never approves, merges, or converts back to draft. Never throws.
  */
 import type { PrismaClient } from "#prisma";
 import type { ReviewHostRegistry } from "../providers/review-host/types.js";
+import { pullRequestOutcome } from "./host-status.js";
 import type { Logger } from "./logger.js";
 import { MERGE_ORDER_CHECK_NAME } from "./merge-order-check.js";
 
@@ -31,6 +33,7 @@ const CODING_RUN_SELECT = {
   repository: true,
   rootCodingRunId: true,
   markedReadyAt: true,
+  result: true,
   run: { select: { agentId: true } },
 } as const;
 
@@ -48,12 +51,25 @@ export async function maybeMarkReady(
     if (!host?.pullRequestOrigin || !host.readOwnChecks || !host.readCi || !host.markReadyForReview) return "off";
     const links = await deps.db.agentRepository.findMany({
       where: { provider, repository },
-      select: { agentId: true, access: true, triggers: true, checkName: true, markReadyWhenPassing: true },
+      select: {
+        agentId: true,
+        access: true,
+        triggers: true,
+        checkName: true,
+        markReadyWhenPassing: true,
+        authorizedVia: true,
+      },
     });
-    const optedIn = new Set(links.filter((l) => l.access === "write" && l.markReadyWhenPassing).map((l) => l.agentId));
+    const optedIn = new Set(
+      links
+        .filter((l) => l.access === "write" && l.authorizedVia !== null && l.markReadyWhenPassing)
+        .map((l) => l.agentId),
+    );
     if (optedIn.size === 0) return "off";
     const reviewChecks = links
-      .filter((l) => l.access === "write" && l.triggers.includes("pull_request") && l.checkName)
+      .filter(
+        (l) => l.access === "write" && l.authorizedVia !== null && l.triggers.includes("pull_request") && l.checkName,
+      )
       .map((l) => l.checkName as string);
     if (reviewChecks.length === 0) return "not_ready";
 
@@ -70,6 +86,7 @@ export async function maybeMarkReady(
       : marked;
     if (!root || root.repository.toLowerCase() !== repository.toLowerCase()) return "not_ready";
     if (!optedIn.has(root.run.agentId)) return "not_ready";
+    if (pullRequestOutcome(root.result)?.pullRequestNumber !== prNumber) return "not_ready";
     if (root.markedReadyAt) return "skipped";
 
     const checks = await host.readOwnChecks(repository, origin.headSha, [...reviewChecks, MERGE_ORDER_CHECK_NAME]);
