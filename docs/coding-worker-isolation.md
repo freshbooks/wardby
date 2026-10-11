@@ -962,8 +962,8 @@ default 90,000ms):
    as a live run, running a script that waits for policy enforcement (as
    above) then attempts DNS resolution, a connect to the proxy's deny port,
    the internet (`1.1.1.1:443`), the cloud metadata endpoints (`169.254.169.254:80`,
-   the EKS Pod Identity agent `169.254.170.23:80` and EC2's IPv6 metadata
-   address `[fd00:ec2::254]:80`), and the proxy itself —
+   the EKS Pod Identity agent `169.254.170.23:80` and its IPv6 address
+   `[fd00:ec2::23]:80`, and EC2's IPv6 metadata address `[fd00:ec2::254]:80`), and the proxy itself —
    requiring every one of the first four kinds to fail and the proxy connect to
    succeed. Any other outcome, or a canary pod that itself fails to
    schedule/run, is `kubernetes_isolation_unsupported:canary`.

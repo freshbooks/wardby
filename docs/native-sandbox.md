@@ -131,13 +131,13 @@ The gateway is the same Wardby build as the server, started with the
 `native-gateway` command. It needs the server's database, LLM, secrets, and
 integration settings, and **no Docker access**.
 
-| Gateway variable        | Purpose                                                                                                             |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `NATIVE_GATEWAY_LISTEN` | `host:port` to listen on. Default `0.0.0.0:8790`.                                                                   |
-| `DATABASE_URL`          | The same database the server uses.                                                                                  |
-| LLM provider keys       | The same provider settings as the server (for example `OPENAI_API_KEY`).                                            |
-| `SECRET_APP_KEY`        | Same value as the server, so tools can read their bound secrets or send brokered ones ([details](tool-secrets.md)). |
-| Integration settings    | The same repository-host and issue-tracker settings as the server.                                                  |
+| Gateway variable        | Purpose                                                                                                                                                                                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NATIVE_GATEWAY_LISTEN` | `host:port` to listen on. Default `0.0.0.0:8790`.                                                                                                                                                                                                          |
+| `DATABASE_URL`          | The same database the server uses. With `DATABASE_AUTH=rds-iam` the gateway also needs `DATABASE_AUTH`, `AWS_REGION` (or `DATABASE_AWS_REGION`) and the CA bundle file named by `sslrootcert` ([details](security-deployment.md#database-authentication)). |
+| LLM provider keys       | The same provider settings as the server (for example `OPENAI_API_KEY`).                                                                                                                                                                                   |
+| `SECRET_APP_KEY`        | Same value as the server, so tools can read their bound secrets or send brokered ones ([details](tool-secrets.md)).                                                                                                                                        |
+| Integration settings    | The same repository-host and issue-tracker settings as the server.                                                                                                                                                                                         |
 
 If sandboxed agents delegate to coding agents, give the gateway the same
 coding image settings as the server (for example `CODING_WORKER_IMAGE`); the
@@ -350,7 +350,8 @@ starts **not ready**: the gateway refuses every call from it with a
    must reach the gateway on 8790, must fail to reach the gateway's deny port
    8791 at the same address, and must fail to reach an outside address or any
    cloud metadata endpoint: `169.254.169.254:80`, the EKS Pod Identity agent
-   `169.254.170.23:80` and EC2's IPv6 metadata address `[fd00:ec2::254]:80`.
+   (`169.254.170.23:80` and its IPv6 address `[fd00:ec2::23]:80`) and EC2's IPv6
+   metadata address `[fd00:ec2::254]:80`.
 3. Only when the probe passes does it mark the run ready. The gateway then
    accepts the worker's calls.
 

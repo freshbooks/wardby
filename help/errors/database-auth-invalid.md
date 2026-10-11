@@ -25,6 +25,6 @@ If `sslrootcert` points at a file that cannot be read, the failure currently app
 
 If the code is not raised but connections are rejected, the configuration is valid and the problem is on the AWS side: the workload's IAM role needs `rds-db:connect` for the database user, and that user needs the `rds_iam` role in the database.
 
-`prisma migrate deploy` and `dbos schema` take a URL and do not follow `DATABASE_AUTH`. Mint a short-lived URL with the migration image's helper: `export DATABASE_URL="$(node scripts/rds-iam-url.mjs)" && npm run prisma:migrate && npm run dbos:migrate`. It reports the same `database_auth_invalid` errors for the checks it shares. `wardby quickstart` does not support `rds-iam`.
+`prisma migrate deploy` and `dbos schema` take a URL and do not follow `DATABASE_AUTH`. Mint a short-lived URL with the migration image's helper: `DATABASE_URL="$(node scripts/rds-iam-url.mjs)" && export DATABASE_URL && npm run prisma:migrate && npm run dbos:migrate`. It reports the same `database_auth_invalid` errors for the checks it shares. `wardby quickstart` does not support `rds-iam`.
 
 See [Database authentication](../../docs/security-deployment.md#database-authentication).

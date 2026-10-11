@@ -49,4 +49,37 @@ describe("main", () => {
     expect(err.message).toContain("database_auth_invalid: DATABASE_AUTH=rds-iam needs a postgresql://");
     expect(err.message).not.toContain("secret");
   });
+
+  describe("parity with pg-auth", () => {
+    const refusal = async (databaseUrl) => {
+      let signed = false;
+      const err = await main({ DATABASE_URL: databaseUrl, AWS_REGION: "us-east-1" }, () => {
+        signed = true;
+        return { getAuthToken: async () => "tok" };
+      }).catch((e) => e);
+      expect(signed).toBe(false);
+      expect(err).toBeInstanceOf(Error);
+      return err.message;
+    };
+
+    it("refuses an empty user name", async () => {
+      const msg = await refusal(URL_IN.replace("wardby_migrator@", ""));
+      expect(msg).toContain("database_auth_invalid: DATABASE_AUTH=rds-iam needs a user name in DATABASE_URL");
+    });
+
+    it("refuses a URL without sslmode=verify-full and sslrootcert", async () => {
+      const want = "needs sslmode=verify-full and sslrootcert=<path to the RDS CA bundle> in DATABASE_URL";
+      expect(await refusal(URL_IN.split("?")[0])).toContain(want);
+      expect(await refusal(URL_IN.replace("verify-full", "require"))).toContain(want);
+      expect(await refusal(URL_IN.replace(/&sslrootcert=.*/, ""))).toContain(want);
+    });
+
+    it("refuses a malformed percent-encoded user name without echoing the URL", async () => {
+      const msg = await refusal(URL_IN.replace("wardby_migrator", "bad%zzuser"));
+      expect(msg).toContain(
+        "database_auth_invalid: DATABASE_AUTH=rds-iam needs a correctly percent-encoded user name in DATABASE_URL",
+      );
+      expect(msg).not.toContain("bad%zz");
+    });
+  });
 });

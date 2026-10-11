@@ -611,8 +611,8 @@ the `gvisor` runtime class. The cluster supplies a RuntimeClass `gvisor`
 `wardby.dev/sandbox=gvisor` and tainted `sandbox=gvisor:NoSchedule`; coding-pod attestation
 forgives that node selector and toleration and nothing else. The startup canary
 and the native sandbox gate probe the cloud metadata endpoints
-`169.254.169.254`, `169.254.170.23` (EKS Pod Identity agent) and `fd00:ec2::254`
-(EC2 IPv6), all on port 80, and require every one to be unreachable.
+`169.254.169.254`, `169.254.170.23` and `fd00:ec2::23` (EKS Pod Identity agent, IPv4 and IPv6) and
+`fd00:ec2::254` (EC2 IPv6), all on port 80, and require every one to be unreachable.
 
 The `gke-autopilot` platform profile contains narrow admission allowances
 captured from a real cluster and requires the `gvisor` runtime class. A dry-run
@@ -666,7 +666,7 @@ Under `rds-iam`:
   shipped in the migration image and run them within its 15 minutes:
 
   ```bash
-  export DATABASE_URL="$(node scripts/rds-iam-url.mjs)" && npm run prisma:migrate && npm run dbos:migrate
+  DATABASE_URL="$(node scripts/rds-iam-url.mjs)" && export DATABASE_URL && npm run prisma:migrate && npm run dbos:migrate
   ```
 
   The helper reads `DATABASE_URL`, `DATABASE_AWS_REGION`/`AWS_REGION` and the

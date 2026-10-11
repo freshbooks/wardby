@@ -151,6 +151,32 @@ describe("DbosExecutor system database pool", () => {
     });
   });
 
+  it("still ends the pool when DBOS.shutdown throws", async () => {
+    await withRdsIamEnv(async (url) => {
+      const { handed, shutdown } = stubDbos(async () => {});
+      shutdown.mockRejectedValue(new Error("shutdown failed"));
+      const executor = new DbosExecutor({} as never, { ...config, systemDatabaseUrl: url }, {} as never);
+      await executor.launch();
+      pools.push(handed.pool!);
+      await expect(executor.close()).rejects.toThrow("shutdown failed");
+      expect(handed.pool!.ended).toBe(true);
+    });
+  });
+
+  it("ends the pool when DBOS.setConfig throws after the pool was created", async () => {
+    await withRdsIamEnv(async (url) => {
+      const { handed } = stubDbos(async () => {});
+      vi.spyOn(DBOS, "setConfig").mockImplementation((c) => {
+        handed.pool = c.systemDatabasePool;
+        throw new Error("bad config");
+      });
+      const executor = new DbosExecutor({} as never, { ...config, systemDatabaseUrl: url }, {} as never);
+      await expect(executor.launch()).rejects.toThrow("bad config");
+      pools.push(handed.pool!);
+      expect(handed.pool!.ended).toBe(true);
+    });
+  });
+
   it("hands DBOS no pool under password auth", async () => {
     const saved = process.env.DATABASE_AUTH;
     delete process.env.DATABASE_AUTH;

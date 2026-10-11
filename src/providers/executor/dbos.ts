@@ -237,8 +237,8 @@ export class DbosExecutor implements Executor {
     if (!DBOS.isInitialized()) {
       const launchConfig = dbosLaunchConfig(this.config, this.id, databaseAuthFromEnv());
       systemPool = launchConfig.systemDatabasePool;
-      DBOS.setConfig(launchConfig);
       try {
+        DBOS.setConfig(launchConfig);
         await DBOS.launch();
       } catch (err) {
         // A failed launch leaves DBOS uninitialized and the next launch() makes a new pool.
@@ -254,8 +254,11 @@ export class DbosExecutor implements Executor {
     if (!this.launched) return;
     this.launched = false;
     if (activeExecutor === this) setActiveExecutor(undefined);
-    await DBOS.shutdown({ workflowCompletionTimeoutMS: 5_000 });
-    await endSystemPool();
+    try {
+      await DBOS.shutdown({ workflowCompletionTimeoutMS: 5_000 });
+    } finally {
+      await endSystemPool();
+    }
   }
 
   /** Where a run this executor marks failed files its self-defect (no-op without a configured issue tracker). */
