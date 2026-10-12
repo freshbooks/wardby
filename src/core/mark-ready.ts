@@ -95,8 +95,8 @@ export async function maybeMarkReady(
       ? await deps.db.codingRun.findUnique({ where: { runId: marked.rootCodingRunId }, select: CODING_RUN_SELECT })
       : marked;
     if (!root || root.repository.toLowerCase() !== repository.toLowerCase()) return "not_ready";
-    if (!(await optedInInRunTree(deps.db, root.run, optedIn))) return "not_ready";
     if (pullRequestOutcome(root.result)?.pullRequestNumber !== prNumber) return "not_ready";
+    if (!(await optedInInRunTree(deps.db, root.run, optedIn))) return "not_ready";
     if (root.markedReadyAt) return "skipped";
 
     const checks = await host.readOwnChecks(repository, origin.headSha, [MERGE_ORDER_CHECK_NAME, ...reviewChecks]);

@@ -394,17 +394,28 @@ describe("maybeMarkReady with a delegating lead", () => {
     expect(db.run.findUnique).not.toHaveBeenCalled();
   });
 
-  it("bounds the walk up the run tree", async () => {
+  // A chain where the lead's run is `hops` parent links above the builder's run.
+  const chainTo = (hops: number) => {
     const runs: Record<string, { agentId: string; parentRunId: string | null }> = {};
-    for (let i = 0; i < 20; i++) runs[`run-${i}`] = { agentId: `mid-${i}`, parentRunId: `run-${i + 1}` };
-    runs["run-20"] = { agentId: "lead", parentRunId: null };
-    const { deps, db, host } = setup({
+    for (let i = 1; i < hops; i++) runs[`run-${i}`] = { agentId: `mid-${i}`, parentRunId: `run-${i + 1}` };
+    runs[`run-${hops}`] = { agentId: "lead", parentRunId: null };
+    return setup({
       links: [LEAD, REVIEWER],
-      root: rootRow({ run: { agentId: "builder", parentRunId: "run-0" } }),
+      root: rootRow({ run: { agentId: "builder", parentRunId: "run-1" } }),
       runs,
     });
+  };
+
+  it("finds an opted-in lead exactly 10 hops up the run tree", async () => {
+    const { deps, db } = chainTo(10);
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(db.run.findUnique).toHaveBeenCalledTimes(10);
+  });
+
+  it("bounds the walk: an opted-in lead 11 hops up does not count", async () => {
+    const { deps, db, host } = chainTo(11);
     expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
-    expect(db.run.findUnique.mock.calls.length).toBeLessThanOrEqual(10);
+    expect(db.run.findUnique).toHaveBeenCalledTimes(10);
     expect(host.markReadyForReview).not.toHaveBeenCalled();
   });
 

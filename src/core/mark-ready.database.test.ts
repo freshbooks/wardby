@@ -22,6 +22,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
   const lead = id("lead");
   const subBuilder = id("sub-builder");
   const stranger = id("stranger");
+  const otherLead = id("other-lead");
   const repository = `markready/web-${s8}`;
   const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -60,7 +61,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
 
   beforeAll(async () => {
     await db.principal.create({ data: { id: owner, subject: owner } });
-    for (const a of [builder, reviewer, lead, subBuilder, stranger]) {
+    for (const a of [builder, reviewer, lead, subBuilder, stranger, otherLead]) {
       await db.agent.create({ data: { id: a, name: a, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner } });
     }
     await db.agentRepository.create({
@@ -85,18 +86,21 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
       },
     });
     // The lead (native, triggered by mentions) is opted in; the coding builder it delegates
-    // to has no repository link at all. The stranger is opted in but outside that run tree.
-    await db.agentRepository.create({
-      data: {
-        agentId: lead,
-        provider: "github",
-        repository,
-        access: "write",
-        triggers: ["mention", "review_fix"],
-        markReadyWhenPassing: true,
-        authorizedVia: "host_permission",
-      },
-    });
+    // to has no repository link at all. The stranger has the same opted-in, authorized link
+    // but starts no run tree here, so it must never count for another agent's pull request.
+    for (const a of [lead, stranger]) {
+      await db.agentRepository.create({
+        data: {
+          agentId: a,
+          provider: "github",
+          repository,
+          access: "write",
+          triggers: ["mention", "review_fix"],
+          markReadyWhenPassing: true,
+          authorizedVia: "host_permission",
+        },
+      });
+    }
     const codingRun = async (runId: string, prNumber: number) =>
       db.codingRun.create({
         data: {
@@ -120,15 +124,15 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
       });
     await db.run.create({ data: { id: id("root"), agentId: builder, status: "succeeded" } });
     await codingRun(id("root"), 7);
-    // PR 8: lead -> sub-builder. PR 9: stranger -> sub-builder, stranger not linked here.
+    // PR 8: lead -> sub-builder. PR 9: other lead (no link here) -> sub-builder.
     await db.run.create({ data: { id: id("lead-run"), agentId: lead, status: "succeeded" } });
     await db.run.create({
       data: { id: id("sub-8"), agentId: subBuilder, status: "succeeded", parentRunId: id("lead-run") },
     });
     await codingRun(id("sub-8"), 8);
-    await db.run.create({ data: { id: id("stranger-run"), agentId: stranger, status: "succeeded" } });
+    await db.run.create({ data: { id: id("other-lead-run"), agentId: otherLead, status: "succeeded" } });
     await db.run.create({
-      data: { id: id("sub-9"), agentId: subBuilder, status: "succeeded", parentRunId: id("stranger-run") },
+      data: { id: id("sub-9"), agentId: subBuilder, status: "succeeded", parentRunId: id("other-lead-run") },
     });
     await codingRun(id("sub-9"), 9);
   });
@@ -140,7 +144,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
   });
 
   afterAll(async () => {
-    const agents = [builder, reviewer, lead, subBuilder, stranger];
+    const agents = [builder, reviewer, lead, subBuilder, stranger, otherLead];
     await db.codingRun.deleteMany({ where: { runId: { in: [id("root"), id("sub-8"), id("sub-9")] } } });
     await db.run.deleteMany({ where: { agentId: { in: [subBuilder] } } });
     await db.run.deleteMany({ where: { agentId: { in: agents } } });
@@ -183,7 +187,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
     expect(row.markedReadyAt).toBeInstanceOf(Date);
   });
 
-  it("does not mark when the builder's parent is not the opted-in agent", async () => {
+  it("does not mark for an opted-in agent outside the builder's run tree", async () => {
     expect(await maybeMarkReady(deps, repository, 9)).toBe("not_ready");
     const row = await db.codingRun.findUniqueOrThrow({
       where: { runId: id("sub-9") },

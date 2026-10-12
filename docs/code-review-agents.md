@@ -768,8 +768,8 @@ request itself, or — for a lead that delegates to a coding builder sub-agent
 — the lead's link. The coding builder needs no repository link of its own
 (coding agents can't have one). The setting counts for a pull request
 opened by that agent's own coding run or by a coding run anywhere below it
-in its run tree (up to 10 delegation levels); an opted-in agent on the same
-repository that did not start that run tree never counts. Re-linking that
+in its run tree (up to 10 delegation levels); an opted-in agent that is not the
+opener or one of its ancestors in the run tree never counts. Re-linking that
 repository without it clears it, like every other link setting (see
 above); `list_repositories` shows its current value.
 
