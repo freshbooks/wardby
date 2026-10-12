@@ -568,9 +568,9 @@ the cache doesn't fail the run: its projects report `tool_unavailable`. See
      that `docker compose down -v` removes. This requires wardby 0.6.1 or
      later (earlier runtime images can't write to the volume).
 2. **Database grants.** Where the coding proxy has its own restricted database
-   role (GKE), re-run `bootstrap-database-iam.sh` before deploying a release
-   that includes the cache: the proxy needs access to `DependencySnapshot` and
-   a few `CodingRun` columns.
+   role (GKE), it needs access to `DependencySnapshot` and a few `CodingRun`
+   columns. `deploy/gke/up.sh` applies them before the rollout; see
+   [Upgrading an existing deployment](getting-started-gke.md#upgrading-an-existing-deployment).
 3. **Per agent.** Once the [worker images](#worker-images) are current, set
    `codingProfile.dependencyCache` to `true` with `create_agent` or
    `update_agent`. Like the package allowlist, it needs

@@ -33,7 +33,10 @@ cd "$ROOT_DIR"
 source deploy/gke/eso.env
 source deploy/gke/lib-secrets.sh
 
-for tool in terraform gcloud kubectl docker helm node; do
+# curl, openssl and base64 are for step 9 (bootstrap-database-iam.sh), checked here
+# so a missing one stops the deploy before anything changes rather than after the
+# migrations.
+for tool in terraform gcloud kubectl docker helm node curl openssl base64; do
   command -v "$tool" >/dev/null || { echo "up.sh: ${tool} is required." >&2; exit 1; }
 done
 
@@ -53,7 +56,7 @@ fi
 OVERLAY="deploy/kind-coding/manifests/overlays/${OVERLAY_DIR_NAME}"
 # end low-power mode selection
 NAMESPACE="wardby-coding"
-TOTAL_STEPS=12
+TOTAL_STEPS=13
 
 # Not HOSTNAME: bash and zsh set that to the machine's own name, so a required-variable check on
 # it always passes and the machine name ends up in the Gateway, routes and auth audience.
@@ -71,7 +74,7 @@ esac
 
 # --- WARDBY_GITHUB_ALLOWED_ACCOUNTS check ---
 # Optional: GitHub accounts the App serves in addition to its owner
-# (comma-separated logins). Empty = the App's owner only. Substituted in step 9.
+# (comma-separated logins). Empty = the App's owner only. Substituted in step 10.
 WARDBY_GITHUB_ALLOWED_ACCOUNTS="${WARDBY_GITHUB_ALLOWED_ACCOUNTS:-}"
 if [[ -n "$WARDBY_GITHUB_ALLOWED_ACCOUNTS" ]] &&
   ! [[ "$WARDBY_GITHUB_ALLOWED_ACCOUNTS" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}(,[A-Za-z0-9][A-Za-z0-9-]{0,38})*$ ]]; then
@@ -83,7 +86,7 @@ echo "up.sh: the GitHub App will serve its owner${WARDBY_GITHUB_ALLOWED_ACCOUNTS
 
 # --- WARDBY_MOBILE_ENABLED check ---
 # Optional: true lets the wardby mobile app sign in. Empty = false. Substituted
-# in step 9; the overlay placeholder is neither true nor false, so the server
+# in step 10; the overlay placeholder is neither true nor false, so the server
 # refuses to start if it is ever left unsubstituted.
 WARDBY_MOBILE_ENABLED="${WARDBY_MOBILE_ENABLED:-false}"
 case "$WARDBY_MOBILE_ENABLED" in
@@ -368,7 +371,7 @@ if ! render_secrets external-secrets.yaml | kubectl apply -f - >/dev/null; then
   exit 1
 fi
 # Forces a sync and waits for a fresh one, so a secret version that step 5
-# just added (e.g. a newly generated auth key) is in the Secret before step 9
+# just added (e.g. a newly generated auth key) is in the Secret before step 10
 # rolls the Deployments.
 SYNCED_SECRETS=(wardby-coding-proxy-env wardby-control-plane-env wardby-native-gateway-env)
 # Jira is optional: synced when every Jira secret is set, removed when none is
@@ -400,8 +403,8 @@ if ! wait_external_secrets_synced 180s "${SYNCED_SECRETS[@]}"; then
 fi
 
 echo "==> 8/${TOTAL_STEPS} run migrations as wardby-migrator"
-# Before the Deployments, so a failed migration stops the deploy with the
-# running version untouched.
+# Before the grants and the Deployments, so a failed migration stops the
+# deploy with the running version untouched.
 #
 # Applied as two separate `kubectl apply` calls -- migrator.yaml (the
 # ServiceAccount and its NetworkPolicy) before job.yaml (the Job itself) --
@@ -493,7 +496,22 @@ for i in $(seq 1 "$MIGRATE_POLL_ITERATIONS"); do
 done
 echo "    migrations applied"
 
-echo "==> 9/${TOTAL_STEPS} render and apply the overlay (low-power mode: ${LOW_POWER_LABEL})"
+echo "==> 9/${TOTAL_STEPS} apply database grants"
+# After the migrations, so a grant on a table this release adds has its table,
+# and before the overlay, so no new pod ever runs without the grants it needs.
+# bootstrap-database-iam.sh (default mode) applies database-grants.sql in one
+# transaction as the built-in owner, through a one-time password it resets on
+# every exit. It reads the same Terraform outputs, and KUBE_CONTEXT (exported in
+# step 2). A failure stops here with the running version untouched; the
+# migrations already applied are additive, which the running version tolerates.
+# database grants
+if ! bash deploy/gke/bootstrap-database-iam.sh; then
+  echo "up.sh: applying the database grants failed; nothing was rolled out and the running version is untouched. Fix the refusal above (deploy/gke/bootstrap-database-iam.sh --check reproduces it without changing anything), then run up.sh again." >&2
+  exit 1
+fi
+# end database grants
+
+echo "==> 10/${TOTAL_STEPS} render and apply the overlay (low-power mode: ${LOW_POWER_LABEL})"
 # What is running now, recorded before it is replaced: rollback means going back
 # to exactly these digests (see the rollback note at the end).
 PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardby-coding-proxy wardby-native-gateway \
@@ -529,7 +547,7 @@ assert_no_placeholders "$OVERLAY_MANIFEST"
 # control plane still running serves until its rollout ends -- and that one may
 # be in low-power mode even when this deploy turns the mode off. Stamp both as
 # just woken first, in either mode, so it does not scale them straight back to
-# 0 mid-deploy (and steps 10-11 find their pods). With the mode off the stamp is
+# 0 mid-deploy (and steps 11-12 find their pods). With the mode off the stamp is
 # never read again. A Deployment not created yet is skipped.
 LOW_POWER_WOKE_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 for low_power_target in wardby-coding-proxy wardby-native-gateway; do
@@ -555,14 +573,14 @@ if [ "$LOW_POWER" = 0 ]; then
 fi
 # end low-power undo
 
-echo "==> 10/${TOTAL_STEPS} wait for rollouts"
+echo "==> 11/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-native-gateway --timeout=300s
 if ! kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s; then
   # The previous pod keeps serving (maxUnavailable 0). The durable executor
   # launches before anything else, so a missing `dbos` schema grant shows here
-  # as a crash loop rather than in step 11.
-  echo "up.sh: the control plane did not roll out. If its log shows \"permission denied\" for the database or schema \"dbos\", the durable executor's grants are missing: run deploy/gke/bootstrap-database-iam.sh, then up.sh again (docs/getting-started-gke.md, \"Durable executor\")." >&2
+  # as a crash loop rather than in step 12.
+  echo "up.sh: the control plane did not roll out. If its log shows \"permission denied\" for the database or schema \"dbos\", the durable executor's grants are missing even though step 9 applied database-grants.sql: check that the file covers what this release uses (docs/getting-started-gke.md, \"Durable executor\")." >&2
   exit 1
 fi
 # failed always-on pods
@@ -574,7 +592,7 @@ kubectl -n "$NAMESPACE" delete pods --field-selector=status.phase=Failed --ignor
   -l 'app.kubernetes.io/name in (wardby-control-plane,wardby-coding-proxy,wardby-native-gateway)' >/dev/null
 # end failed always-on pods
 
-echo "==> 11/${TOTAL_STEPS} prove the new pods can use the database"
+echo "==> 12/${TOTAL_STEPS} prove the new pods can use the database"
 # A Ready pod has not necessarily touched the database: the control plane and
 # the coding proxy each run one query through their own Prisma client, Auth
 # Proxy sidecar and database role. The query runs in the container itself
@@ -621,11 +639,11 @@ DATABASE_OK=true
 database_roundtrip wardby-control-plane control-plane Agent "control plane" || DATABASE_OK=false
 database_roundtrip wardby-coding-proxy proxy CodingProxySession "coding proxy" || DATABASE_OK=false
 database_roundtrip wardby-native-gateway gateway NativeGatewaySession "native gateway" || DATABASE_OK=false
-# The proxy's grants only take effect when bootstrap-database-iam.sh runs, and
-# this script does not run it: a release that adds proxy tables deploys fine
-# and then fails every registry request with "permission denied" (an unlogged
-# 502 to npm or pip). Check every privilege database-grants.sql gives
-# wardby_proxy, as the proxy's own role, inside its pod.
+# proxy grants check
+# Step 9 applied database-grants.sql; this proves it took, as the proxy's own
+# role, inside its pod. A proxy missing a grant fails every registry request
+# with "permission denied" (an unlogged 502 to npm or pip), so check every
+# privilege database-grants.sql gives wardby_proxy rather than trust the step.
 proxy_grants_check() {
   local pod query out script
   query="$(node deploy/gke/proxy-grant-checks.mjs)" || return 1
@@ -645,7 +663,7 @@ import("/app/dist/core/db.js")
   fi
   echo "up.sh: the coding proxy is missing database grants that database-grants.sql gives it:" >&2
   echo "${out:-(no output)}" | sed 's/^/    /' >&2
-  echo "up.sh: run deploy/gke/bootstrap-database-iam.sh (--check first), then up.sh again." >&2
+  echo "up.sh: step 9 should have applied these; run deploy/gke/bootstrap-database-iam.sh --check to see whether the database refuses one, then up.sh again." >&2
   return 1
 }
 proxy_grants_check || DATABASE_OK=false
@@ -655,21 +673,18 @@ up.sh: the new pods cannot use the database.
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-control-plane
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-coding-proxy
   kubectl -n ${NAMESPACE} rollout undo deploy/wardby-native-gateway
-restores the previous images and pod templates (any revision since the IAM
-cutover), which also log in through IAM -- there is no password login to
-restore.
-"permission denied" means the grants are missing or incomplete. On a fresh
-install the coding proxy's are expected to be missing until the bootstrap runs
-again after the first migrations, and the native gateway's until the bootstrap
-has run once since its identity was added: run deploy/gke/bootstrap-database-iam.sh
-(default mode), then up.sh again (docs/getting-started-gke.md, "Database
-login"). --password-from-stdin is only for a deployment still on password
-login.
+restores the previous images and pod templates, which also log in through IAM.
+"permission denied" means the grants are missing or incomplete even though
+step 9 applied database-grants.sql: check that the file covers every table and
+column the release uses, and run deploy/gke/bootstrap-database-iam.sh --check
+to see whether the database refuses a statement (docs/getting-started-gke.md,
+"Database login"). Then up.sh again.
 EOF
   exit 1
 fi
+# end proxy grants check
 
-echo "==> 12/${TOTAL_STEPS} verify the public endpoint"
+echo "==> 13/${TOTAL_STEPS} verify the public endpoint"
 # A finished rollout proves the pods are Ready, not that the load balancer routes
 # to them or that authentication is enforced. These are the same checks an
 # operator would run by hand, made to fail the deploy instead of scrolling past.
@@ -738,7 +753,7 @@ Images before this deploy:
 ${PREVIOUS_IMAGES:-  (none: first deploy)}
 Migrations only go forward, so a rollback is safe only while the schema change it
 rolls back over was additive. See docs/getting-started-gke.md, "Roll back".
-rollout undo reverts only the Deployments' images and pod templates -- there is
-no password path to fall back to any more. It does not touch any NetworkPolicy:
+rollout undo reverts only the Deployments' images and pod templates. It does
+not touch the database grants or any NetworkPolicy:
 a change to the database egress rules themselves is not undone by rollout undo.
 EOF

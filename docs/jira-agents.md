@@ -602,11 +602,9 @@ How to read the numbers:
 - You see the runs of agents you own and runs you triggered, the same as
   `list_runs` and `get_run`.
 
-On GKE, existing deployments must re-run the database grants bootstrap
-(`deploy/gke/bootstrap-database-iam.sh`) after upgrading, so the coding proxy
-can write per-model usage for coding runs. Until then coding runs still work,
-but their per-model breakdown isn't recorded. See
-[Getting started on GKE](getting-started-gke.md).
+On GKE, the coding proxy needs a database grant to write per-model usage for
+coding runs; `deploy/gke/up.sh` applies it when you upgrade. See
+[Upgrading an existing deployment](getting-started-gke.md#upgrading-an-existing-deployment).
 
 ### Company-managed projects using Epic Link
 

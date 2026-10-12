@@ -1,36 +1,24 @@
 #!/usr/bin/env bash
 #
-# One-time setup for password-less database access, and the emergency admin
-# login afterwards. Applies deploy/gke/database-grants.sql as the built-in
-# owner from inside the cluster (the instance has no public address).
+# Applies deploy/gke/database-grants.sql as the built-in owner from inside the
+# cluster (the instance has no public address). up.sh runs it as its own step,
+# after the migrations and before the rollout, so an upgrade needs nothing by
+# hand. Run it yourself on a brand-new project, between `terraform apply` and the
+# first up.sh (the migrator needs its grants before any migration can run), or
+# with --check.
 #
-#   deploy/gke/bootstrap-database-iam.sh                        # default
-#   <current password> | deploy/gke/bootstrap-database-iam.sh --password-from-stdin
-#   deploy/gke/bootstrap-database-iam.sh --force-rotate         # emergency only
-#   ... --check                                                  # dry run, any mode
+#   deploy/gke/bootstrap-database-iam.sh            # apply the grants
+#   deploy/gke/bootstrap-database-iam.sh --check    # dry run
 #
-# Default -- the path for a new deployment, and for reapplying grants on an
-# existing one (e.g. once the coding proxy's ledger table exists): sets a
-# random owner password through the Cloud SQL Admin API (creating the owner if
-# it does not exist), uses it once, then resets it to another random value
-# that is never stored. The reset runs on every exit, including a failed
-# grant. --password-from-stdin: uses the given current password and leaves it
-# unchanged -- for moving an older deployment, whose pods still hold a
-# password DATABASE_URL, to IAM login.
-#
-# Default mode refuses while the Secret wardby-control-plane-env still has a
-# DATABASE_URL key: that means an older, not-yet-migrated deployment whose
-# pods still log in with the owner password, and changing it would cut them
-# off. Use --password-from-stdin to move that deployment to IAM login instead.
-# --force-rotate (default mode only) overrides that check -- an emergency
-# measure that cuts off any pod still using the password.
+# Sets a random owner password through the Cloud SQL Admin API (creating the
+# owner if it does not exist), uses it once, then resets it to another random
+# value that is never stored. The reset runs on every exit, including a failed
+# grant.
 #
 # The grants run in one transaction: a statement the database refuses leaves
 # nothing applied. --check runs them in a transaction that is then rolled back,
-# and reports success or the exact refusal while changing no grant. It needs a
-# password like any run: combine it with --password-from-stdin (the live path),
-# or in default mode it obeys the same refusal as a real run. On a live
-# deployment, run --check first, then the real run.
+# and reports success or the exact refusal while changing no grant (it still
+# sets and resets the one-time owner password, which nothing else uses).
 #
 # No password or token is ever a process argument, printed, or written to a
 # file. The password reaches the cluster only as a Secret that exists for the
@@ -44,6 +32,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# Arguments first, so a usage error never depends on what is installed.
+CHECK=false
+for arg in "$@"; do
+  case "$arg" in
+    --check) CHECK=true ;;
+    *) echo "usage: $0 [--check]" >&2; exit 2 ;;
+  esac
+done
+
 for tool in terraform gcloud kubectl curl openssl base64; do
   command -v "$tool" >/dev/null || { echo "bootstrap: ${tool} is required." >&2; exit 1; }
 done
@@ -53,22 +50,6 @@ MIGRATE_DIR="deploy/kind-coding/manifests/overlays/gke-autopilot/migrate"
 NAMESPACE="wardby-coding"
 JOB="wardby-database-grants"
 out() { terraform -chdir="$TF_DIR" output -raw "$1"; }
-
-FROM_STDIN=false
-FORCE_ROTATE=false
-CHECK=false
-for arg in "$@"; do
-  case "$arg" in
-    --password-from-stdin) FROM_STDIN=true ;;
-    --force-rotate) FORCE_ROTATE=true ;;
-    --check) CHECK=true ;;
-    *) echo "usage: $0 [--password-from-stdin | --force-rotate] [--check]" >&2; exit 2 ;;
-  esac
-done
-if $FROM_STDIN && $FORCE_ROTATE; then
-  echo "bootstrap: --force-rotate applies only to the default mode; --password-from-stdin never changes the password." >&2
-  exit 2
-fi
 
 PROJECT_ID="$(out project_id)"
 REGION="$(out region)"
@@ -88,18 +69,6 @@ KUBE_CONTEXT="${KUBE_CONTEXT:-$DEFAULT_KUBE_CONTEXT}"
 # Every call is bounded, so an unresponsive API server cannot hang the script
 # (or its cleanup, which ignores signals) indefinitely.
 k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s "$@"; }
-
-# Read first, so nothing else on stdin can be mistaken for it.
-PASSWORD=""
-if $FROM_STDIN; then
-  if [[ -t 0 ]]; then
-    IFS= read -rs -p "Current ${OWNER} password: " PASSWORD || true
-    echo >&2
-  else
-    IFS= read -r PASSWORD || true
-  fi
-  [[ -n "$PASSWORD" ]] || { echo "bootstrap: no password on stdin." >&2; exit 1; }
-fi
 
 # A new deployment runs this before up.sh ever has, so there may be no kubectl
 # context for the cluster yet: fetch it the way up.sh's step 2 does. Like
@@ -121,24 +90,6 @@ if ! has_context; then
   echo "==> kubectl context for ${CLUSTER}"
   gcloud container clusters get-credentials "$CLUSTER" --region "$REGION" --project "$PROJECT_ID" </dev/null >/dev/null
   has_context || { echo "bootstrap: no kubectl context ${KUBE_CONTEXT} after get-credentials." >&2; exit 1; }
-fi
-
-# Default mode changes the owner password. Refuse while the running pods still
-# log in with it. Only whether the DATABASE_URL key exists is read (its length
-# via wc -c), never its value. A missing Secret (fresh deployment) passes; any
-# other kubectl error stops the script.
-if ! $FROM_STDIN && ! $FORCE_ROTATE; then
-  url_bytes="$(k get secret wardby-control-plane-env --ignore-not-found -o jsonpath='{.data.DATABASE_URL}' | wc -c)"
-  if ((url_bytes > 0)); then
-    cat >&2 <<EOF
-bootstrap: refusing to change the ${OWNER} password: Secret wardby-control-plane-env
-still has a DATABASE_URL, so this is an older deployment whose running pods
-still log in with this password. Use --password-from-stdin with the current
-password to move it to IAM login. Pass --force-rotate only in an emergency,
-knowing it cuts off any pod still using the password.
-EOF
-    exit 1
-  fi
 fi
 
 # --- placeholders ------------------------------------------------------------
@@ -290,7 +241,7 @@ cleanup() {
     fi
   fi
   if ! k delete secret wardby-database-bootstrap --ignore-not-found >/dev/null 2>&1; then
-    echo "bootstrap: WARNING: deleting Secret ${NAMESPACE}/wardby-database-bootstrap failed; it may still hold the ${OWNER} password (the live one, with --password-from-stdin). Delete it: kubectl -n ${NAMESPACE} delete secret wardby-database-bootstrap" >&2
+    echo "bootstrap: WARNING: deleting Secret ${NAMESPACE}/wardby-database-bootstrap failed; it may still hold the one-time ${OWNER} password. Delete it: kubectl -n ${NAMESPACE} delete secret wardby-database-bootstrap" >&2
   fi
   k delete job "$JOB" --ignore-not-found >/dev/null 2>&1
   k delete configmap wardby-database-grants --ignore-not-found >/dev/null 2>&1
@@ -315,14 +266,12 @@ k delete job "$JOB" --ignore-not-found >/dev/null
 render_grants | k create configmap wardby-database-grants --from-file=database-grants.sql=/dev/stdin \
   --from-literal=check.sql="$CHECK_SQL" --dry-run=client -o yaml | k apply -f - >/dev/null
 
-if ! $FROM_STDIN; then
-  PASSWORD="$(openssl rand -hex 24)"
-  # Set before the call: a request that fails after the server applied it
-  # must still be reset.
-  PASSWORD_SET=true
-  set_owner_password "$PASSWORD"
-  echo "==> set a one-time password for ${OWNER}"
-fi
+PASSWORD="$(openssl rand -hex 24)"
+# Set before the call: a request that fails after the server applied it must
+# still be reset.
+PASSWORD_SET=true
+set_owner_password "$PASSWORD"
+echo "==> set a one-time password for ${OWNER}"
 
 # `create`, not `apply`: apply would copy the data into a
 # last-applied-configuration annotation.
