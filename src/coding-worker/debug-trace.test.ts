@@ -179,7 +179,8 @@ describe("workerDebugTracer", () => {
       debugTrace: { kind: "limit_reached", data: { maxTotalBytes: MAX_DEBUG_TRACE_TOTAL_BYTES } },
     });
     expect(run(8).some((line) => line.includes("limit_reached"))).toBe(false);
-  });
+    // CPU-bound (~1.5 s alone): the 5 s default is too tight while the full suite runs in parallel.
+  }, 15_000);
 
   it("redacts the capability and the registry token derived from it", () => {
     const lines: string[] = [];
