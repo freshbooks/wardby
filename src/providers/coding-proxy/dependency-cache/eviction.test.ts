@@ -57,7 +57,6 @@ describe("dependency cache eviction order", () => {
         projectPath: ".",
         lockHash: id,
         workerImage: "img",
-        policyHash: "p",
         sha256: "x",
         createdByRunId: null,
       });
@@ -87,7 +86,6 @@ describe("dependency cache eviction order", () => {
         projectPath: ".",
         lockHash: "lock",
         workerImage: "img",
-        policyHash: "pol",
         sha256: "x",
         createdByRunId: null,
       };

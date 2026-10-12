@@ -435,7 +435,7 @@ these ways, reported per project in [`get_run`](#what-get_run-reports):
   verified, and put in place. Nothing is installed. A snapshot that fails to
   download or verify is not used: the project is installed `cold` instead.
 - **`nearest`**: no exact snapshot, but one exists for the same repository,
-  folder, worker image and package policy with a different lockfile. It is
+  folder and worker image with a different lockfile. It is
   restored, `npm install --no-save` brings it to the committed lockfile
   (usually a small change), the committed `package.json` and
   `package-lock.json` are put back byte for byte, and a new snapshot is
@@ -444,19 +444,26 @@ these ways, reported per project in [`get_run`](#what-get_run-reports):
 - **`skipped`** or **`refused`**: nothing was prepared and the agent installs
   for itself as it always did. A skip never fails the run.
 
-Snapshots are keyed by repository, project folder, lockfile hash, worker image
-(the Claude Code tool-runner image for Claude Code runs) and the agent's
-package policy, all derived on the server. Changing the allowlist, the policy
-or the image starts a new key.
+Snapshots are keyed by repository, project folder, lockfile hash and worker
+image (the Claude Code tool-runner image for Claude Code runs), all derived on
+the server. Changing the image starts a new key; changing the lockfile falls
+back to `nearest`. The agent's package policy is not part of the key: a
+snapshot holds exactly the lockfile's integrity-checked packages, so agents on
+the same repository share snapshots, and each restore is still gated by the
+restoring agent's own current policy (see
+[A restore needs the plan first](#the-trust-model)).
 
 ### The trust model
 
 A snapshot holds only what Wardby's own code installed, from packages the
-agent's policy approved, before the run's agent existed; and a run restores
+uploading run's policy approved, before the run's agent existed; and a run restores
 one only after the proxy re-approves the committed lockfile for that run. The
 packages themselves are whatever your allowlist and policy approve: the cache
 doesn't vet their contents beyond what a normal install through the registry
-does.
+does. A `nearest` base may come from another agent on the same repository and
+contain packages outside this agent's policy; the delta install prunes them,
+and the consistency check verifies that the tree matches the approved lockfile
+before the agent starts.
 
 - **Only Wardby builds snapshots, and only before the agent exists.** The
   worker uploads a snapshot as part of its own preparation step, then seals the
@@ -476,7 +483,7 @@ does.
   and serves a snapshot only for a recorded hash. If the policy now refuses
   something, the project is `refused` and no snapshot is used.
 - **Keys are server-derived.** The worker supplies only the project folder and
-  the lockfile hash. The repository, image and policy come from the run's own
+  the lockfile hash. The repository and image come from the run's own
   record, and an id that is neither the run's own key nor the recomputed
   nearest snapshot for the same scope is answered 404.
 - **Integrity is checked on download.** The proxy stores each snapshot's
@@ -565,9 +572,9 @@ the cache doesn't fail the run: its projects report `tool_unavailable`. See
      that `docker compose down -v` removes. This requires wardby 0.6.1 or
      later (earlier runtime images can't write to the volume).
 2. **Database grants.** Where the coding proxy has its own restricted database
-   role (GKE), re-run `bootstrap-database-iam.sh` before deploying a release
-   that includes the cache: the proxy needs access to `DependencySnapshot` and
-   a few `CodingRun` columns.
+   role (GKE), it needs access to `DependencySnapshot` and a few `CodingRun`
+   columns. `deploy/gke/up.sh` applies them before the rollout; see
+   [Upgrading an existing deployment](getting-started-gke.md#upgrading-an-existing-deployment).
 3. **Per agent.** Once the [worker images](#worker-images) are current, set
    `codingProfile.dependencyCache` to `true` with `create_agent` or
    `update_agent`. Like the package allowlist, it needs
@@ -580,14 +587,14 @@ These variables are read by the coding proxy, and only when
 `WARDBY_DEPENDENCY_CACHE=true`. Each limit must be a positive integer; the
 proxy refuses to start otherwise.
 
-| Variable                                  | Default | Meaning                                                                                                                   |
-| ----------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `WARDBY_DEPENDENCY_CACHE`                 | `false` | Master switch (`true` or `false`). Also needs `BLOB_STORE`.                                                               |
-| `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` | 1024    | Largest snapshot accepted. A bigger one is not stored.                                                                    |
-| `WARDBY_DEPENDENCY_CACHE_REPO_CAP_MB`     | 4096    | Snapshot bytes kept per repository. Least recently used go first.                                                         |
-| `WARDBY_DEPENDENCY_CACHE_TOTAL_CAP_MB`    | 20480   | Snapshot bytes kept in all. Least recently used go first.                                                                 |
-| `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS`    | 14      | A snapshot's lifetime, counted from creation rather than last use, so every snapshot is rebuilt under the current policy. |
-| `WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS`  | 900     | How long after a run's proxy session starts the proxy still accepts an upload.                                            |
+| Variable                                  | Default | Meaning                                                                                                                        |
+| ----------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `WARDBY_DEPENDENCY_CACHE`                 | `false` | Master switch (`true` or `false`). Also needs `BLOB_STORE`.                                                                    |
+| `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` | 1024    | Largest snapshot accepted. A bigger one is not stored.                                                                         |
+| `WARDBY_DEPENDENCY_CACHE_REPO_CAP_MB`     | 4096    | Snapshot bytes kept per repository. Least recently used go first.                                                              |
+| `WARDBY_DEPENDENCY_CACHE_TOTAL_CAP_MB`    | 20480   | Snapshot bytes kept in all. Least recently used go first.                                                                      |
+| `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS`    | 14      | A snapshot's lifetime, counted from creation rather than last use, so even a constantly used snapshot is rebuilt periodically. |
+| `WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS`  | 900     | How long after a run's proxy session starts the proxy still accepts an upload.                                                 |
 
 The proxy evicts hourly: snapshots past the maximum age, then least recently
 used ones over the per-repository cap, then over the total cap. It deletes the

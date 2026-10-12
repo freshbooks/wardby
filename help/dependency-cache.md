@@ -41,6 +41,9 @@ for folders restored from a snapshot.
 - A restore happens only after the coding proxy re-approves the committed
   lockfile under the agent's current allowlist, release age and advisory
   policy. A policy that now refuses a package means no restore.
+- Agents on the same repository share snapshots (the key is the repository,
+  project folder, lockfile and image, not the package policy), and each
+  restore is still gated by that agent's own current policy.
 - Keys come from the server, not the worker. Downloads are checked against the
   SHA-256 and size the proxy recorded (that is the integrity check), the
   archive is scanned, and the tree's recorded package versions are compared
@@ -75,8 +78,8 @@ for folders restored from a snapshot.
    `WARDBY_DEPENDENCY_CACHE=true bash deploy/kind-coding/up.sh` (not durable).
    Docker quickstart: add `WARDBY_DEPENDENCY_CACHE=true` to `.wardby/.env`
    (requires wardby 0.6.1 or later).
-2. GKE: re-run `bootstrap-database-iam.sh` before deploying so the proxy can
-   use the `DependencySnapshot` table.
+2. GKE: nothing extra. `up.sh` grants the proxy the `DependencySnapshot`
+   table before the rollout.
 3. Per agent, once the worker images are current: `update_agent` with
    `codingProfile.dependencyCache: true`. This needs `packages:approve` or
    `agents:admin`.

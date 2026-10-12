@@ -29,8 +29,8 @@ deletion_protection = true
 # destroy. Set false and apply before `terraform destroy`, like the flags above.
 secrets_deletion_protection = true
 
-# REQUIRED refuses connections that bypass the Cloud SQL Auth Proxy. Set
-# NOT_REQUIRED only while moving an older deployment off password login.
+# REQUIRED refuses connections that bypass the Cloud SQL Auth Proxy. Leave it:
+# every workload connects through the Auth Proxy.
 connector_enforcement = "REQUIRED"
 
 # Run dependency cache (off by default). Creates a private bucket only the

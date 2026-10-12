@@ -42,7 +42,7 @@ const scripts = [
     offPreApplyCalls: ["-n wardby-coding delete hpa/wardby-control-plane --ignore-not-found"],
     apply: 'echo "$OVERLAY_MANIFEST" | kubectl apply -f -',
     prelude: "NAMESPACE=wardby-coding",
-    banner: /echo "==> 9\/\$\{TOTAL_STEPS\} render and apply the overlay \(low-power mode: \$\{LOW_POWER_LABEL\}\)"/,
+    banner: /echo "==> 10\/\$\{TOTAL_STEPS\} render and apply the overlay \(low-power mode: \$\{LOW_POWER_LABEL\}\)"/,
     firstAction: "terraform -chdir",
   },
   {
@@ -181,7 +181,7 @@ describe("deploy/gke/up.sh failed always-on pods", () => {
 
   it("runs after the rollout waits and before the database checks", () => {
     expect(cleanup.start).toBeGreaterThan(script.indexOf("rollout status deploy/wardby-control-plane"));
-    expect(cleanup.start).toBeLessThan(script.indexOf('echo "==> 11/'));
+    expect(cleanup.start).toBeLessThan(script.indexOf('echo "==> 12/'));
   });
 
   it("deletes only Failed pods of the three always-on Deployments, never run pods", () => {

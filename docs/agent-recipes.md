@@ -480,12 +480,13 @@ the lead's `maxDelegationsPerRun` (1 to 20) with `create_agent` or
   blocks a merge by itself: add `wardby merge order` as a required status
   check in branch protection to gate on it. See
   [The wardby merge order check](../help/merge-order-check.md).
-- With Wardby 0.7.0 or later, set `markReadyWhenPassing: true` on a
-  builder's own write link (`link_repository`) to have Wardby mark its
-  draft pull requests ready for review once they pass, instead of leaving
-  that to a person. With a `mergeOrder` set, a later step only becomes ready
-  this way once the `wardby merge order` check above reports `success` on
-  it — that is, once the steps it depends on have merged. See [Mark ready
+- With Wardby 0.7.0 or later, set `markReadyWhenPassing: true` on the
+  lead's write link (`link_repository`) to have Wardby mark the draft pull
+  requests its builders open ready for review once they pass, instead of
+  leaving that to a person; the coding builders need no link of their own.
+  With a `mergeOrder` set, a later step only becomes ready this way once the
+  `wardby merge order` check above reports `success` on it — that is, once
+  the steps it depends on have merged. See [Mark ready
   when passing](code-review-agents.md#mark-ready-when-passing-markreadywhenpassing).
 - The section, and the follow-up hints below, list every pull request in the
   set by repository name and number. A request that spans repositories of

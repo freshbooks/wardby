@@ -3,7 +3,7 @@ id: troubleshooting/coding-workers
 title: Troubleshoot coding workers
 summary: Investigate coding-worker setup, isolation preflight, and safe failure handling.
 audience: operator
-tags: [coding-agents, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, claude-code, codex]
+tags: [coding-agents, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex]
 appliesTo: >=0.2.1
 ---
 
@@ -53,6 +53,22 @@ summary and debug trace (`codingProfile.debugTraceMinutes`) to tell which;
 raise `codingProfile.maxTurns` (up to 1000) with `update_agent` for the first,
 or narrow the task for the second. Codex runs have no turn limit. See
 [Coding run reached its turn limit](../errors/coding-turn-limit.md).
+
+## Claude Code replies that exceed the output token maximum
+
+A Claude Code run caps each model reply at 32000 output tokens by default,
+thinking included. When a reply needs more, Claude Code ends with an error
+that the response exceeded the output token maximum and the run fails as a
+stream failure. Raise `codingProfile.maxOutputTokens` (1024 to 128000; `null`
+restores the default) with `update_agent`, for example
+`{ "id": "<agent id>", "codingProfile": { "maxOutputTokens": 64000 } }`. The
+coding proxy reserves `maxOutputTokens` × the model's output price against the
+run's budget for every model request, so a higher value needs a larger
+`budgetUsd`; a request whose reservation does not fit ends the run as
+`budget_exhausted`, so a small budget runs out sooner. Codex agents refuse the
+setting. The default and the setting need a Claude Code worker image from
+Wardby 0.7.0 or later: an older pinned image still caps replies at 4096 tokens
+and rejects a run whose agent sets `maxOutputTokens`.
 
 ## Debug trace
 

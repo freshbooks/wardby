@@ -10,7 +10,7 @@ import { MemoryProxyLedger } from "../memory-ledger.js";
 import { CodingProxy, capabilityHash } from "../proxy.js";
 import { MemoryRegistryStore, type RegistryRunContext } from "../registry/store.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "../server.js";
-import { computePolicyHash, deriveSnapshotKey, newBlobKey } from "./key.js";
+import { deriveSnapshotKey, newBlobKey } from "./key.js";
 import { DependencyCacheService } from "./service.js";
 import { MemoryDependencyCacheStore } from "./store.js";
 
@@ -119,13 +119,7 @@ async function setup(
       fetch(`${base}/cache/npm/blob/${id}${query(params)}`, { headers: auth(token) }),
     seal: (token?: string) => fetch(`${base}/cache/npm/seal`, { method: "POST", headers: auth(token) }).then(json),
     derived: (projectPath = ".", lockHash = LOCK, repository = "owner/repo") =>
-      deriveSnapshotKey({
-        repository,
-        projectPath,
-        lockHash,
-        workerImage: IMAGE,
-        policyHash: computePolicyHash(ALLOWLIST, POLICY),
-      }),
+      deriveSnapshotKey({ repository, projectPath, lockHash, workerImage: IMAGE }),
   };
 }
 
@@ -282,7 +276,6 @@ describe("dependency cache upload and download", () => {
         projectPath: ".",
         lockHash: LOCK,
         workerImage: IMAGE,
-        policyHash: computePolicyHash(ALLOWLIST, POLICY),
         blobKey: expect.stringMatching(/^dependency-cache\/npm\/.+-[0-9a-f-]{36}\.tgz$/),
         sha256: hex(archive),
         sizeBytes: archive.byteLength,
@@ -319,7 +312,7 @@ describe("dependency cache upload and download", () => {
 
   it("answers an upload for a key already stored as success without storing it again", async () => {
     const { upload, store } = await setup();
-    // Same repository, lock, image and policy in another run: the same key.
+    // Same repository, lock and image in another run: the same key.
     expect((await upload(archive)).status).toBe(201);
     const otherSameRepo = await setup();
     otherSameRepo.store.rows.push(...store.rows.map((row) => ({ ...row, createdByRunId: "run-earlier" })));
@@ -458,6 +451,64 @@ describe("dependency cache upload and download", () => {
       expect(store.rows).toHaveLength(1);
       expect(await blobs.head(row.blobKey)).not.toBeNull();
     });
+  });
+});
+
+describe("the agent's package policy is not part of the key", () => {
+  const THIRD_TOKEN = "rrg_third_token";
+  /** Changes run-1's allowlist (the agent's policy was edited between runs). */
+  const changePolicy = (registry: MemoryRegistryStore) => {
+    const run = registry.contexts.get(capabilityHash(TOKEN))!;
+    registry.contexts.set(capabilityHash(TOKEN), { ...run, allowlist: { npm: ["react", "vue"] }, policy: {} });
+  };
+  /** A run of a second agent on the same repository, with its own allowlist. */
+  const addSecondAgent = (registry: MemoryRegistryStore, lockHashes: string[]) => {
+    registry.contexts.set(
+      capabilityHash(THIRD_TOKEN),
+      context({ runId: "run-3", allowlist: { npm: ["lodash"] }, policy: { minReleaseAgeDays: 7 } }),
+    );
+    registry.cacheSessions.set("run-3", { lockHashes, sealedAt: null, createdAt: new Date() });
+  };
+
+  it("restores a snapshot for the same lockfile after the allowlist changes", async () => {
+    const { upload, lookup, download, registry, derived } = await setup();
+    expect((await upload(archive)).status).toBe(201);
+    changePolicy(registry);
+    const { body } = await lookup();
+    expect(body).toMatchObject({ key: derived().keyId, hit: true });
+    const response = await download(derived().keyId);
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(archive);
+  });
+
+  it("gives a second agent on the same repository, with a different allowlist, the hit", async () => {
+    const { upload, lookup, download, registry, derived } = await setup();
+    expect((await upload(archive)).status).toBe(201);
+    addSecondAgent(registry, [LOCK]);
+    expect((await lookup({ lock: LOCK }, THIRD_TOKEN)).body).toMatchObject({ key: derived().keyId, hit: true });
+    const response = await download(derived().keyId, { lock: LOCK }, THIRD_TOKEN);
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(archive);
+  });
+
+  it("offers the nearest snapshot across a policy change", async () => {
+    const { upload, lookup, download, registry, store } = await setup({ lockHashes: [LOCK, LOCK_TWO] });
+    expect((await upload(archive, { lock: LOCK_TWO })).status).toBe(201);
+    changePolicy(registry);
+    const { body } = await lookup({ lock: LOCK });
+    expect(body).toMatchObject({ hit: false, nearest: { id: store.rows[0].id } });
+    const response = await download(store.rows[0].id, { lock: LOCK });
+    expect(response.status).toBe(200);
+    await response.arrayBuffer();
+  });
+
+  it("still restores nothing for a lockfile the current policy did not approve (the plan gate)", async () => {
+    const { upload, lookup, download, registry, derived } = await setup();
+    expect((await upload(archive)).status).toBe(201);
+    // The second agent's policy refused this lockfile: its plan approved none.
+    addSecondAgent(registry, []);
+    expect(await lookup({ lock: LOCK }, THIRD_TOKEN)).toEqual({ status: 409, body: { error: "plan_required" } });
+    expect((await download(derived().keyId, { lock: LOCK }, THIRD_TOKEN)).status).toBe(409);
   });
 });
 

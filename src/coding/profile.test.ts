@@ -23,6 +23,7 @@ describe("CodingProfileSchema", () => {
       workerImageRef: null,
       workspaceDiskMb: null,
       maxTurns: null,
+      maxOutputTokens: null,
       collectExclude: [],
       packageAllowlist: {},
       packagePolicy: {},
@@ -105,6 +106,27 @@ describe("CodingProfileSchema", () => {
       expect(() => CodingProfileSchema.parse({ ...base, workspaceDiskMb: bad })).toThrow();
     }
     expect(CodingProfilePatchSchema.parse({ workspaceDiskMb: null })).toEqual({ workspaceDiskMb: null });
+  });
+
+  it("accepts a Claude Code agent's maxOutputTokens between 1024 and 128000", () => {
+    const base = { repository: "openai/example", provider: "claude-code" };
+    expect(CodingProfileSchema.parse(base).maxOutputTokens).toBeNull();
+    expect(CodingProfileSchema.parse({ ...base, maxOutputTokens: 1024 }).maxOutputTokens).toBe(1024);
+    expect(CodingProfileSchema.parse({ ...base, maxOutputTokens: 128_000 }).maxOutputTokens).toBe(128_000);
+    for (const bad of [0, 1023, 128_001, 4096.5]) {
+      expect(() => CodingProfileSchema.parse({ ...base, maxOutputTokens: bad })).toThrow();
+    }
+    expect(CodingProfilePatchSchema.parse({ maxOutputTokens: null })).toEqual({ maxOutputTokens: null });
+  });
+
+  it("refuses maxOutputTokens on a Codex agent", () => {
+    const result = CodingProfileSchema.safeParse({ repository: "openai/example", maxOutputTokens: 32_000 });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error?.issues)).toMatch(/Claude Code/);
+    expect(
+      CodingProfileSchema.parse({ repository: "openai/example", provider: "codex", maxOutputTokens: null })
+        .maxOutputTokens,
+    ).toBeNull();
   });
 
   it("accepts per-agent collection exclusions and rejects unsafe paths", () => {

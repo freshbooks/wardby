@@ -724,6 +724,31 @@ describe("dispatchRun", () => {
   });
 
   it.each([
+    ["the profile's output cap", 64_000, 64_000],
+    ["no output cap", null, null],
+  ] as const)("fixes maxOutputTokens on the run at dispatch from %s", async (_label, maxOutputTokens, expected) => {
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      model: "claude-sonnet-5",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "claude-code",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+        maxOutputTokens,
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = { async start() {}, async stop() {} };
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, maxOutputTokens: expected })]);
+  });
+
+  it.each([
     ["skills on", true, true],
     ["skills off", false, false],
   ] as const)("fixes repoSkills on the run at dispatch from %s", async (_label, repoSkills, expected) => {
