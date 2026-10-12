@@ -11,7 +11,7 @@ const { MemoryProxyLedger } = await import("../memory-ledger.js");
 const { CodingProxy, capabilityHash } = await import("../proxy.js");
 const { MemoryRegistryStore } = await import("../registry/store.js");
 const { startCodingProxyServer } = await import("../server.js");
-const { computePolicyHash, deriveSnapshotKey } = await import("./key.js");
+const { deriveSnapshotKey } = await import("./key.js");
 const { DependencyCacheService } = await import("./service.js");
 const { MemoryDependencyCacheStore } = await import("./store.js");
 
@@ -55,7 +55,6 @@ async function setup() {
     projectPath: ".",
     lockHash: LOCK,
     workerImage: "worker:1",
-    policyHash: computePolicyHash({}, {}),
   }).keyId;
   return { registry, store, blobs, call, keyId };
 }

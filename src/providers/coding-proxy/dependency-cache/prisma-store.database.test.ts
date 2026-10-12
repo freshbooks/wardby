@@ -11,7 +11,7 @@ import { PrismaRegistryStore } from "../registry/prisma-store.js";
 import { startCodingProxyServer } from "../server.js";
 import { PrismaDependencyCacheStore } from "./prisma-store.js";
 import { DependencyCacheService } from "./service.js";
-import type { NewSnapshot } from "./store.js";
+import { POLICY_ANY, type NewSnapshot } from "./store.js";
 
 const db = createPrismaClient();
 const hex = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -83,7 +83,6 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
     projectPath: ".",
     lockHash: hex(lock),
     workerImage: "worker:1",
-    policyHash: hex("policy"),
     blobKey: `dependency-cache/npm/${hex(repository)}/${hex(lock)}-${randomUUID()}.tgz`,
     sha256: hex(`${lock} bytes`),
     sizeBytes: 3_000_000_000,
@@ -161,13 +160,29 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
       repository,
       projectPath: ".",
       workerImage: "worker:1",
-      policyHash: hex("policy"),
       blobKey: "ignored",
       keyId: "ignored",
     };
     expect((await cache.findNearest(scope, hex("current")))?.lockHash).toBe(hex("newer"));
     expect((await cache.findNearest(scope, hex("newer")))?.lockHash).toBe(hex("current"));
-    expect(await cache.findNearest({ ...scope, policyHash: hex("other") }, hex("current"))).toBeNull();
+    expect(await cache.findNearest({ ...scope, workerImage: "worker:3" }, hex("current"))).toBeNull();
+  });
+
+  it("writes every row with POLICY_ANY and never matches a row stored under a real policy hash", async () => {
+    const { runId, repository } = await seedRun();
+    const cache = new PrismaDependencyCacheStore(db);
+    // A row written before the policy left the key.
+    const { createdByRunId: _run, ...legacy } = snapshot(repository, runId, "legacy");
+    await db.dependencySnapshot.create({
+      data: { ...legacy, policyHash: hex("old policy"), sizeBytes: BigInt(legacy.sizeBytes) },
+    });
+    expect(await cache.findByIdentity(snapshot(repository, runId, "legacy"))).toBeNull();
+    expect(await cache.findNearest(snapshot(repository, runId, "current"), hex("current"))).toBeNull();
+    // The same identity stores alongside it, under POLICY_ANY.
+    expect(await cache.insert(snapshot(repository, runId, "legacy"))).toBe("inserted");
+    const rows = await db.dependencySnapshot.findMany({ where: { repository }, select: { policyHash: true } });
+    expect(rows.map((row) => row.policyHash).sort()).toEqual([POLICY_ANY, hex("old policy")].sort());
+    expect(await cache.findByIdentity(snapshot(repository, runId, "legacy"))).not.toHaveProperty("policyHash");
   });
 
   it("touches, lists and deletes rows for eviction", async () => {

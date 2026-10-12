@@ -1,13 +1,21 @@
 import { randomUUID } from "node:crypto";
 import type { DependencyCacheSessionState } from "../registry/store.js";
 
+/**
+ * The value every snapshot row stores in its `policyHash` column, and the only
+ * value lookups match. The column and its unique index predate dropping the
+ * agent's package policy from the key (see key.ts for why), so they stay
+ * unchanged; rows written before carry a real policy hash, never match again,
+ * and age out through eviction.
+ */
+export const POLICY_ANY = "any";
+
 /** The parts every snapshot of one project shares, whatever its lockfile. */
 export interface SnapshotScope {
   ecosystem: string;
   repository: string;
   projectPath: string;
   workerImage: string;
-  policyHash: string;
 }
 
 export interface SnapshotIdentity extends SnapshotScope {
@@ -61,8 +69,7 @@ const sameScope = (row: SnapshotScope, scope: SnapshotScope) =>
   row.ecosystem === scope.ecosystem &&
   row.repository === scope.repository &&
   row.projectPath === scope.projectPath &&
-  row.workerImage === scope.workerImage &&
-  row.policyHash === scope.policyHash;
+  row.workerImage === scope.workerImage;
 
 /** In-memory adapter for tests. `sessions` may be shared with a MemoryRegistryStore's `cacheSessions`. */
 export class MemoryDependencyCacheStore implements DependencyCacheStore {
