@@ -98,6 +98,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
     await admin.registryApprovedVersion.deleteMany({ where: { runId } });
     await admin.registryPlanRefusal.deleteMany({ where: { runId } });
     await admin.registryVersionFact.deleteMany({ where: { name: factName } });
+    await admin.dependencySnapshot.deleteMany({ where: { repository: `grants/${suffix}` } });
     await admin.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${sessionId}`;
     await admin.codingRun.deleteMany({ where: { runId } });
     await admin.run.deleteMany({ where: { id: runId } });
@@ -241,6 +242,66 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       await expect(proxy.$executeRawUnsafe(`DELETE FROM "${table}" WHERE false`)).rejects.toThrow(/permission denied/);
     }
 
+    // The dependency cache: the proxy reads the run's cache inputs, keeps the
+    // session's approved lock hashes and seal, and owns the snapshot metadata.
+    await admin.codingRun.update({
+      where: { runId },
+      data: { dependencyCache: true, workerImage: "ghcr.io/example/worker@sha256:1", toolImage: null },
+    });
+    expect(
+      await proxy.$queryRawUnsafe(
+        `SELECT "repository", "workerImage", "toolImage", "dependencyCache" FROM "CodingRun" WHERE "runId" = $1`,
+        runId,
+      ),
+    ).toEqual([
+      {
+        repository: "openai/example",
+        workerImage: "ghcr.io/example/worker@sha256:1",
+        toolImage: null,
+        dependencyCache: true,
+      },
+    ]);
+    await proxy.codingProxySession.update({
+      where: { id: sessionId },
+      data: { dependencyCacheLockHashes: { push: "lock-a" }, dependencyCacheSealedAt: new Date() },
+    });
+    expect(
+      await proxy.codingProxySession.findUniqueOrThrow({
+        where: { id: sessionId },
+        select: { dependencyCacheLockHashes: true },
+      }),
+    ).toEqual({ dependencyCacheLockHashes: ["lock-a"] });
+    const snapshot = await proxy.dependencySnapshot.create({
+      data: {
+        ecosystem: "npm",
+        repository: `grants/${suffix}`,
+        projectPath: "apps/web",
+        lockHash: "lock-a",
+        workerImage: "ghcr.io/example/worker@sha256:1",
+        policyHash: "policy-a",
+        blobKey: `dependency-cache/npm/grants-${suffix}.tgz`,
+        sha256: "0".repeat(64),
+        sizeBytes: 3_000_000_000n,
+        createdByRunId: runId,
+      },
+    });
+    expect(snapshot).toMatchObject({ projectPath: "apps/web", sizeBytes: 3_000_000_000n, createdByRunId: runId });
+    await proxy.dependencySnapshot.update({ where: { id: snapshot.id }, data: { lastUsedAt: new Date() } });
+    expect(
+      await proxy.dependencySnapshot.findMany({ where: { createdByRunId: runId, projectPath: "apps/web" } }),
+    ).toHaveLength(1);
+    await proxy.dependencySnapshot.delete({ where: { id: snapshot.id } });
+    // ...but the run's cache result is the control plane's to write, and the proxy cannot read it either.
+    await expect(
+      proxy.$executeRawUnsafe(`UPDATE "CodingRun" SET "dependencyCacheResult" = NULL WHERE false`),
+    ).rejects.toThrow(/permission denied/);
+    await expect(proxy.$queryRawUnsafe(`SELECT "dependencyCacheResult" FROM "CodingRun" LIMIT 1`)).rejects.toThrow(
+      /permission denied/,
+    );
+    await expect(
+      proxy.$executeRawUnsafe(`UPDATE "CodingRun" SET "dependencyCache" = false WHERE false`),
+    ).rejects.toThrow(/permission denied/);
+
     await expect(proxy.$queryRawUnsafe(`SELECT "id" FROM "Agent" LIMIT 1`)).rejects.toThrow(/permission denied/);
     await expect(proxy.$queryRawUnsafe(`SELECT "agentId" FROM "Run" LIMIT 1`)).rejects.toThrow(/permission denied/);
     // The ledger only ever writes these four columns; it may not read them back.
@@ -262,6 +323,8 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       const missing = await client.$queryRawUnsafe(query);
       expect(missing).toHaveLength(proxyGrantChecks(GRANTS).length);
       expect(missing).toContainEqual({ grant: "INSERT ON RegistryPlanRefusal" });
+      expect(missing).toContainEqual({ grant: "DELETE ON DependencySnapshot" });
+      expect(missing).toContainEqual({ grant: "SELECT (dependencyCache) ON CodingRun" });
     } finally {
       await client.$disconnect();
       await admin.$executeRawUnsafe(`DROP OWNED BY "${bare}"`);
@@ -352,9 +415,10 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
         .replace(/\bRegistryVersionFact\b/g, `RegistryVersionFact${missing}`)
         .replace(/\bRegistryApprovedVersion\b/g, `RegistryApprovedVersion${missing}`)
         .replace(/\bRegistryPlanRefusal\b/g, `RegistryPlanRefusal${missing}`)
+        .replace(/\bDependencySnapshot\b/g, `DependencySnapshot${missing}`)
         .replace(/\b_prisma_migrations\b/g, `_prisma_migrations${missing}`);
       expect(sql).not.toMatch(
-        /"(CodingProxySession|CodingProxyRequest|Run|RunModelUsage|CodingRun|RegistryAllowance|RegistryFetch|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|_prisma_migrations)"/,
+        /"(CodingProxySession|CodingProxyRequest|Run|RunModelUsage|CodingRun|RegistryAllowance|RegistryFetch|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|DependencySnapshot|_prisma_migrations)"/,
       );
       for (const st of statements(sql)) await admin.$executeRawUnsafe(st);
       const [{ tables, columns }] = await admin.$queryRawUnsafe(
