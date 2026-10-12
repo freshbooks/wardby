@@ -845,6 +845,21 @@ describe("ContainerExecutor", () => {
     expect(await launchedInput({ maxTurns: null })).not.toHaveProperty("maxTurns");
   });
 
+  it("hands the worker maxOutputTokens only when the run has one, leaving other inputs unchanged", async () => {
+    const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return input!;
+    };
+    expect(await launchedInput({ maxOutputTokens: 64_000 })).toMatchObject({ runId: "run-1", maxOutputTokens: 64_000 });
+    expect(await launchedInput({ maxOutputTokens: null })).not.toHaveProperty("maxOutputTokens");
+    expect(await launchedInput({})).not.toHaveProperty("maxOutputTokens");
+  });
+
   it("hands the worker repoSkills only when the run turned skills off", async () => {
     const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
       const created = await harness(overrides);

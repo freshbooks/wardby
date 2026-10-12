@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CodingTaskInput } from "../coding/protocol.js";
+import { DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS, type CodingTaskInput } from "../coding/protocol.js";
 import {
   CLAUDE_OUTPUT_JSON_SCHEMA,
   CLAUDE_WORKER_SECURITY_INSTRUCTIONS,
@@ -95,6 +95,31 @@ describe("runClaudeCodingWorker", () => {
     await runClaudeCodingWorker({ ...base, input });
     await runClaudeCodingWorker({ ...base, input: { ...input, maxTurns: 40 } });
     expect(seen).toEqual([200, 40]);
+  });
+
+  it("caps each reply at 32000 output tokens by default, or the run's maxOutputTokens", async () => {
+    const seen: (string | undefined)[] = [];
+    const createQuery: ClaudeQueryFactory = (options) => {
+      seen.push(options.environment.CLAUDE_CODE_MAX_OUTPUT_TOKENS);
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify({
+            schemaVersion: 1,
+            runId: input.runId,
+            outcome: "no_changes",
+            summary: "None.",
+            tests: [],
+          }),
+        };
+      })();
+    };
+    const base = { proxyBaseUrl: "http://proxy", capability: "cap", signal: new AbortController().signal, createQuery };
+    await runClaudeCodingWorker({ ...base, input });
+    await runClaudeCodingWorker({ ...base, input: { ...input, maxOutputTokens: 64_000 } });
+    expect(DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS).toBe(32_000);
+    expect(seen).toEqual(["32000", "64000"]);
   });
 
   it("reports running out of turns as coding_turn_limit, whether the SDK returns or throws it", async () => {

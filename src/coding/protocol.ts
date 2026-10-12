@@ -386,6 +386,16 @@ const testResultSchema = z
 export const MAX_CODING_TURNS = 1000;
 /** The Claude Code worker's turn limit when the agent sets none; the run's budget and timeout are the real limits. */
 export const DEFAULT_CLAUDE_MAX_TURNS = 200;
+/**
+ * The most output tokens per model reply on a Claude Code run when the agent sets
+ * none (CodingAgentProfile.maxOutputTokens); thinking counts toward it. The coding
+ * proxy reserves maxOutputTokens x the model's output price per request against
+ * the run budget, so higher values need a larger budget.
+ */
+export const DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS = 32_000;
+/** Bounds on CodingAgentProfile.maxOutputTokens (Claude Code runs). */
+export const MIN_CLAUDE_MAX_OUTPUT_TOKENS = 1024;
+export const MAX_CLAUDE_MAX_OUTPUT_TOKENS = 128_000;
 
 /** Longest line a debug-traced worker writes to its log (src/coding-worker/debug-trace.ts). */
 export const MAX_DEBUG_TRACE_LINE_BYTES = 16 * 1024;
@@ -491,6 +501,13 @@ export const CodingTaskInputSchema = z
      * sets one, so other runs' input is unchanged for workers that predate it.
      */
     maxTurns: z.number().int().min(1).max(MAX_CODING_TURNS).optional(),
+    /**
+     * Claude Code output tokens per model reply (CodingAgentProfile.maxOutputTokens,
+     * fixed on the run at dispatch). Absent means the worker default
+     * (DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS); written only when the agent sets one, so
+     * other runs' input is unchanged for workers that predate it.
+     */
+    maxOutputTokens: z.number().int().min(MIN_CLAUDE_MAX_OUTPUT_TOKENS).max(MAX_CLAUDE_MAX_OUTPUT_TOKENS).optional(),
     /**
      * Coding-run services started next to this run (docs/coding-services.md):
      * each one's catalog name and version, and the variables the agent's shells

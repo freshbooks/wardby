@@ -430,6 +430,89 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  it("codingProfile.maxOutputTokens round-trips on a Claude Code agent through create_agent, get_agent, and update_agent(null)", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const created = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "claude-coder",
+        systemPrompt: "Make the requested change.",
+        model: "claude-sonnet-5",
+        budgetUsd: 2,
+        kind: "coding",
+        codingProfile: { provider: "claude-code", repository: "openai/example", maxOutputTokens: 64_000 },
+      },
+    });
+    expect(created.isError).toBeFalsy();
+    const createdAgent = JSON.parse((created.content as { text: string }[])[0].text);
+    expect(createdAgent.codingProfile.maxOutputTokens).toBe(64_000);
+
+    const fetched = await client.callTool({ name: "get_agent", arguments: { id: createdAgent.id } });
+    expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.maxOutputTokens).toBe(64_000);
+
+    const tooHigh = await client.callTool({
+      name: "update_agent",
+      arguments: { id: createdAgent.id, codingProfile: { maxOutputTokens: 128_001 } },
+    });
+    expect(tooHigh.isError).toBe(true);
+
+    const updated = await client.callTool({
+      name: "update_agent",
+      arguments: { id: createdAgent.id, codingProfile: { maxOutputTokens: null } },
+    });
+    expect(updated.isError).toBeFalsy();
+    expect(JSON.parse((updated.content as { text: string }[])[0].text).codingProfile.maxOutputTokens).toBeNull();
+    await client.close();
+  });
+
+  it("refuses codingProfile.maxOutputTokens on a Codex agent, at create and at update", async () => {
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+
+    const refused = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "codex-coder",
+        systemPrompt: "Make the requested change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        kind: "coding",
+        codingProfile: { repository: "openai/example", maxOutputTokens: 64_000 },
+      },
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused)).toMatch(/maxOutputTokens.*Claude Code/);
+
+    const created = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "codex-coder",
+        systemPrompt: "Make the requested change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 1,
+        kind: "coding",
+        codingProfile: { repository: "openai/example" },
+      },
+    });
+    expect(created.isError).toBeFalsy();
+    const createdAgent = JSON.parse((created.content as { text: string }[])[0].text);
+    const updated = await client.callTool({
+      name: "update_agent",
+      arguments: { id: createdAgent.id, codingProfile: { maxOutputTokens: 64_000 } },
+    });
+    expect(updated.isError).toBe(true);
+    expect(JSON.stringify(updated)).toMatch(/maxOutputTokens.*Claude Code/);
+    await client.close();
+  });
+
   it("codingProfile.repoSkills round-trips through create_agent, get_agent, and update_agent", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

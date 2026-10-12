@@ -9,7 +9,10 @@ import { Prisma, type CodingAgentProfile, type NativeExecutionMode } from "#pris
 import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
 import {
+  DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
+  MAX_CLAUDE_MAX_OUTPUT_TOKENS,
+  MIN_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_DEBUG_TRACE_MAX_MB,
   MAX_CODING_TURNS,
   MAX_DEBUG_TRACE_MAX_MB,
@@ -319,6 +322,12 @@ const profileJsonSchema = {
       maximum: MAX_CODING_TURNS,
       description: `Claude Code runs only: the most agent turns (model calls) a run may take before it stops with coding_turn_limit. Null uses the worker default (${DEFAULT_CLAUDE_MAX_TURNS}). The run's budget and timeout still apply. Codex runs have no turn limit.`,
     },
+    maxOutputTokens: {
+      type: ["integer", "null"],
+      minimum: MIN_CLAUDE_MAX_OUTPUT_TOKENS,
+      maximum: MAX_CLAUDE_MAX_OUTPUT_TOKENS,
+      description: `Claude Code runs only: the most output tokens per model reply (default ${DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS}, up to ${MAX_CLAUDE_MAX_OUTPUT_TOKENS}). The coding proxy reserves this × the model's output price per request against the run budget, so higher values need a larger budgetUsd. Refused on a Codex agent. Null uses the default.`,
+    },
     repoSkills: {
       type: "boolean",
       description:
@@ -471,6 +480,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     workerImageRef: profile.workerImageRef,
     workspaceDiskMb: profile.workspaceDiskMb,
     maxTurns: profile.maxTurns,
+    maxOutputTokens: profile.maxOutputTokens,
     packageAllowlist: profile.packageAllowlist,
     packagePolicy: profile.packagePolicy,
     services: profile.services,
