@@ -7,14 +7,14 @@
 -- Privileges go to NOLOGIN group roles, so nothing below names a project; the
 -- IAM users only become members. If the coding proxy's code starts using
 -- another table, deploy/gke/database-grants.database.test.mjs fails: extend
--- wardby_proxy here and re-run the bootstrap. Each statement ends with a
+-- wardby_proxy here; up.sh applies this file after its migrations. Each statement ends with a
 -- "-- ;;" line, which is how the test splits the file.
 --
 -- The bootstrap runs the whole file in one transaction: a refused statement
 -- leaves nothing applied. Order: group roles, then memberships, then
 -- privileges. Grants on named tables apply only once those tables exist, so the
 -- file also runs on a fresh, unmigrated database (for the migrator's
--- membership); running it again after the migrations applies the rest.
+-- membership); up.sh applies it again after its migrations, which adds the rest.
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wardby_app') THEN CREATE ROLE wardby_app NOLOGIN; END IF;
@@ -87,7 +87,7 @@ GRANT USAGE ON SCHEMA public TO wardby_proxy;
 -- ;;
 
 -- Grants on named tables, each only once its table exists (skipped on an
--- unmigrated database; re-run the bootstrap after the migrations). The app
+-- unmigrated database; up.sh applies them after its migrations). The app
 -- loses the migration history the default privileges gave it: only the
 -- migrator, acting as the owner, has any business there.
 DO $$ BEGIN

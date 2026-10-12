@@ -178,10 +178,9 @@ kubectl -n wardby-coding delete externalsecret wardby-control-plane-env --cascad
 ```
 
 (A plain delete would also delete the Secret, because ESO owns it.) Then
-recreate it directly — `deploy/kind-coding/control-plane-secret.sh` is
-written for the password era and takes `DATABASE_URL` from the existing
-`wardby-coding-proxy-env` Secret, which no longer has one on this deployment;
-don't run it here. `DATABASE_URL` isn't a secret value on GKE at all: the
+recreate it directly — don't use `deploy/kind-coding/control-plane-secret.sh`,
+which is for the kind harness and expects a `DATABASE_URL` this deployment's
+Secrets don't have. `DATABASE_URL` isn't a secret value on GKE at all: the
 Deployment's own manifest supplies it directly (`control-plane.yaml`), not
 the Secret, so a hand-rebuilt Secret needs none. Recreate every
 `secret_ids` key (`secrets.tf`) plus `AUTH_PROVIDER` (the constant

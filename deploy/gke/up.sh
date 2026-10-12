@@ -506,7 +506,7 @@ echo "==> 9/${TOTAL_STEPS} apply database grants"
 # migrations already applied are additive, which the running version tolerates.
 # database grants
 if ! bash deploy/gke/bootstrap-database-iam.sh; then
-  echo "up.sh: applying the database grants failed; nothing was rolled out and the running version is untouched. Fix the refusal above (deploy/gke/bootstrap-database-iam.sh --check reproduces it without changing anything), then run up.sh again." >&2
+  echo "up.sh: applying the database grants failed; nothing was rolled out and the running version is untouched. Fix the cause above, then run up.sh again: a refused statement (deploy/gke/bootstrap-database-iam.sh --check reproduces it without changing anything), or a warning that resetting the owner password failed -- the next run sets and resets it again." >&2
   exit 1
 fi
 # end database grants

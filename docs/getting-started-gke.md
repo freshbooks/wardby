@@ -484,6 +484,10 @@ therefore never runs without it.
   with a non-zero exit and the list of what's missing, rather than letting
   the proxy fail registry requests with "permission denied".
 
+Never run two `up.sh` deploys against the same project at once: both would
+run migrations, set and reset the database owner's password, and roll out
+over each other. Nothing locks against it, so wait for one to finish.
+
 You run `bootstrap-database-iam.sh` by hand only on a brand-new project,
 between `terraform apply` and the first `up.sh` (see
 [Database login](#database-login)), or as `--check` for a dry run.
