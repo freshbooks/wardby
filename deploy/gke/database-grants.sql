@@ -80,8 +80,9 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "{{owner}}" IN SCHEMA dbos
   GRANT EXECUTE ON FUNCTIONS TO wardby_app;
 -- ;;
 
--- The coding proxy: its budget ledger (src/providers/coding-proxy/prisma-ledger.ts)
--- and its package registry store (src/providers/coding-proxy/registry/prisma-store.ts).
+-- The coding proxy: its budget ledger (src/providers/coding-proxy/prisma-ledger.ts),
+-- its package registry store (src/providers/coding-proxy/registry/prisma-store.ts)
+-- and its dependency cache.
 GRANT USAGE ON SCHEMA public TO wardby_proxy;
 -- ;;
 
@@ -106,9 +107,13 @@ DO $$ BEGIN
   -- The package registry (src/providers/coding-proxy/registry/prisma-store.ts):
   -- it reads a run's package allowlist and policy snapshot, and records the
   -- allowances and fetches of that run. It never updates or deletes either.
+  -- The dependency cache derives its keys from the run's repository and
+  -- images and checks the run's cache flag; the run's cache result is the
+  -- control plane's to write, so the proxy never writes CodingRun.
   IF to_regclass('public."CodingRun"') IS NOT NULL THEN
-    EXECUTE format('GRANT SELECT (%I, %I, %I) ON public.%I TO wardby_proxy',
-      'runId', 'packageAllowlist', 'packagePolicy', 'CodingRun');
+    EXECUTE format('GRANT SELECT (%I, %I, %I, %I, %I, %I, %I) ON public.%I TO wardby_proxy',
+      'runId', 'packageAllowlist', 'packagePolicy', 'repository', 'workerImage', 'toolImage', 'dependencyCache',
+      'CodingRun');
   END IF;
   IF to_regclass('public."RegistryAllowance"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryAllowance');
@@ -126,6 +131,13 @@ DO $$ BEGIN
   END IF;
   IF to_regclass('public."RegistryPlanRefusal"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryPlanRefusal');
+  END IF;
+  -- The dependency cache's snapshot metadata: the proxy records snapshots,
+  -- marks them used, and evicts them. (Its session columns,
+  -- dependencyCacheLockHashes and dependencyCacheSealedAt, are covered by the
+  -- table-wide CodingProxySession grant above.)
+  IF to_regclass('public."DependencySnapshot"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO wardby_proxy', 'DependencySnapshot');
   END IF;
   IF to_regclass('public."_prisma_migrations"') IS NOT NULL THEN
     EXECUTE format('REVOKE ALL ON public.%I FROM wardby_app', '_prisma_migrations');

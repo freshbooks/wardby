@@ -8,6 +8,7 @@ import type { ProxyAuditEvent } from "./types.js";
 import { CodingProxyError, PROXY_MAX_BODY_BYTES, type CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import { RegistryError } from "../../coding/registry/types.js";
 import { MAX_PLAN_BODY_BYTES, type RegistryResponse, type RegistryService } from "./registry/service.js";
+import type { DependencyCacheService } from "./dependency-cache/service.js";
 import type { ProxyProtocol } from "./types.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
@@ -27,6 +28,10 @@ export interface CodingProxyServerConfig {
   port: number;
   expectedHost?: string;
   registry?: Pick<RegistryService, "handle"> & Partial<Pick<RegistryService, "plan">>;
+  /** The dependency cache (`/cache/...`); absent when the deployment has it off. */
+  dependencyCache?: Pick<DependencyCacheService, "handle" | "uploadMs">;
+  /** Time to receive a whole request (default HTTP_LIMITS.requestMs); a cache upload gets its upload window instead. */
+  requestMs?: number;
   onRequest?: (event: { protocol: ProxyProtocol | "other"; status: number; durationMs: number }) => void;
 }
 
@@ -117,6 +122,12 @@ function readPlanBody(request: IncomingMessage, signal: AbortSignal): Promise<st
   });
 }
 
+/** An error answer to a request whose body was not read: close the
+ *  connection rather than read (or keep) what the client is still sending. */
+function closeIfBodyUnread(request: IncomingMessage, response: ServerResponse): void {
+  if (!request.complete && !response.headersSent) response.setHeader("connection", "close");
+}
+
 function routeProtocol(method: string | undefined, url: string | undefined): ProxyProtocol | undefined {
   if (method !== "POST") return undefined;
   if (url === "/v1/responses") return "openai-responses";
@@ -148,8 +159,23 @@ export async function startCodingProxyServer(
   proxy: CodingProxy,
   config: CodingProxyServerConfig,
 ): Promise<CodingProxyServerHandle> {
+  const requestMs = config.requestMs ?? HTTP_LIMITS.requestMs;
+  // A snapshot upload (up to WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB) cannot
+  // arrive within requestMs, and Node's requestTimeout is server-wide: with
+  // the cache on it is widened to cover the upload window (which the cache
+  // enforces on the upload itself), and every request gets a requestMs timer
+  // of its own. Only the cache lifts that timer, and only for an upload it
+  // has authenticated, found eligible and given its upload slot.
+  const extendedRequests = config.dependencyCache !== undefined;
   const server = createServer({ maxHeaderSize: 16 * 1024, requireHostHeader: true }, (request, response) => {
     const startedAt = performance.now();
+    const bodyTimer = extendedRequests
+      ? setTimeout(() => {
+          if (!request.complete) request.socket.destroy();
+        }, requestMs).unref()
+      : undefined;
+    // Done with once the response is over (finished or closed early).
+    if (bodyTimer) response.once("close", () => clearTimeout(bodyTimer));
     const protocol = routeProtocol(request.method, request.url) ?? "other";
     response.once("finish", () => {
       try {
@@ -160,7 +186,19 @@ export async function startCodingProxyServer(
     });
     void (async () => {
       if (config.expectedHost && request.headers.host !== config.expectedHost) {
+        closeIfBodyUnread(request, response);
         sendError(response, 403, "invalid_host");
+        return;
+      }
+      if (request.url?.startsWith("/cache/")) {
+        if (!config.dependencyCache) {
+          closeIfBodyUnread(request, response);
+          sendError(response, 404, "not_found");
+          return;
+        }
+        await config.dependencyCache.handle(request, response, registryToken(request.headers.authorization), () =>
+          clearTimeout(bodyTimer),
+        );
         return;
       }
       if (request.url?.startsWith("/registry/")) {
@@ -284,6 +322,7 @@ export async function startCodingProxyServer(
         if (!response.destroyed) response.destroy();
         return;
       }
+      closeIfBodyUnread(request, response);
       if (error instanceof CodingProxyError || error instanceof HttpBoundaryError) {
         proxyLog.info(
           { event: "request.rejected", code: error instanceof CodingProxyError ? error.code : error.message },
@@ -301,7 +340,7 @@ export async function startCodingProxyServer(
       sendError(response, 500, "internal_error");
     });
   });
-  server.requestTimeout = HTTP_LIMITS.requestMs;
+  server.requestTimeout = extendedRequests ? requestMs + config.dependencyCache!.uploadMs : requestMs;
   server.headersTimeout = HTTP_LIMITS.headersMs;
   server.keepAliveTimeout = 5_000;
   server.maxRequestsPerSocket = 100;

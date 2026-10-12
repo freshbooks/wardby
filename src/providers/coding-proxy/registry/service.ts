@@ -29,6 +29,7 @@ import {
 } from "../../../coding/registry/types.js";
 import { capabilityHash } from "../proxy.js";
 import type { OsvAudit } from "./audit.js";
+import { DEPENDENCY_CACHE_ECOSYSTEM, MAX_DEPENDENCY_CACHE_LOCK_HASHES, sha256Hex } from "../dependency-cache/key.js";
 import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIMEOUT_MS } from "./bounded-fetch.js";
 import { DEFAULT_PLAN_MAX_ENTRIES, DEFAULT_PLAN_TIMEOUT_MS, verifyLockfilePlan, type PlanRefusal } from "./plan.js";
 import type { RegistryRunContext, RegistryStore } from "./store.js";
@@ -461,11 +462,15 @@ export class RegistryService {
       // The body is read only while a slot is held: a queued plan holds no
       // lockfile text, and at most `planConcurrency` bodies exist at once.
       return await this.planSlots.run(async () => {
-        const lockfile = support.parse(await request.readBody(), {
+        const body = await request.readBody();
+        // The dependency cache's lockHash: computed here, from the bytes the
+        // proxy itself verified, never from anything a client claims.
+        const lockHash = context.dependencyCache && adapter.id === DEPENDENCY_CACHE_ECOSYSTEM ? sha256Hex(body) : null;
+        const lockfile = support.parse(body, {
           maxEntries: this.options.planMaxEntries ?? DEFAULT_PLAN_MAX_ENTRIES,
           proxyRegistryUrl: `${this.options.proxyBase}${adapter.id}/`,
         });
-        return this.verifyPlan(request, adapter, support, lockfile, auditVersions, context);
+        return this.verifyPlan(request, adapter, support, lockfile, auditVersions, context, lockHash);
       });
     } finally {
       tally.planning = false;
@@ -479,6 +484,7 @@ export class RegistryService {
     lockfile: ParsedLockfile,
     auditVersions: OsvAudit["auditVersions"],
     context: RegistryRunContext,
+    lockHash: string | null,
   ): Promise<RegistryResponse> {
     const entries = parseAllowlist(context.allowlist, this.options.adapters).get(adapter.id) ?? [];
     const { minReleaseAgeDays, acceptedAdvisories } = resolvePolicy(context.policy);
@@ -528,6 +534,10 @@ export class RegistryService {
         .map(({ name, version, code, reason, publishedAt }) => ({ name, version, code, reason, publishedAt })),
     );
     await this.recordPlanRefusals(context, adapter, result.refused);
+    // Only a lockfile approved whole may be restored from the dependency
+    // cache; the store ignores it once the session is sealed or full.
+    if (lockHash && result.refused.length === 0)
+      await store.recordDependencyCacheLockHash(context.runId, lockHash, MAX_DEPENDENCY_CACHE_LOCK_HASHES);
     return {
       status: 200,
       contentType: "application/json",

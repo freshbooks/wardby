@@ -31,6 +31,7 @@ import {
   describeFailure,
   normalizeCollectedLockfiles,
   type CodingSessionController,
+  type CodingRunRecord,
   type ContainerExecutionStore,
   type ContainerExecutorOptions,
   type ContainerRunSnapshot,
@@ -157,7 +158,7 @@ function gateWith(
 }
 
 class FakeStore implements ContainerExecutionStore {
-  completions: Array<{ status: string; result: unknown; record?: { resultBranch?: string; baseSha?: string } }> = [];
+  completions: Array<{ status: string; result: unknown; record?: CodingRunRecord }> = [];
   terminations: unknown[] = [];
   /** Every handle written, in order, so tests can see whether one was stored before launching. */
   persistedHandles: JobHandle[] = [];
@@ -215,7 +216,7 @@ class FakeStore implements ContainerExecutionStore {
     runId: string,
     status: "succeeded" | "budget_exhausted",
     result: never,
-    record?: { resultBranch?: string; baseSha?: string },
+    record?: CodingRunRecord,
   ): Promise<void> {
     if (runId !== this.run.runId || ["succeeded", "budget_exhausted"].includes(this.run.status)) return;
     this.run.status = status;
@@ -896,6 +897,32 @@ describe("ContainerExecutor", () => {
     expect(tracedRest).toEqual(plainRest);
   });
 
+  it("hands the worker dependencyCache (and the launcher spec) only when the run has it on", async () => {
+    const launched = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { input: input!, spec: created.jobs.lastSpec! };
+    };
+    const on = await launched({ dependencyCache: true });
+    // The volume size rides along, so the cache can stay inside it: the deployment default here...
+    expect(on.input).toMatchObject({ dependencyCache: true, diskMb: on.spec.limits.diskMb });
+    expect(on.spec.dependencyCache).toBe(true);
+    // ...and the agent's own workspace size when it sets one.
+    const sized = await launched({ dependencyCache: true, workspaceDiskMb: 512 });
+    expect(sized.input).toMatchObject({ dependencyCache: true, diskMb: 512 });
+    expect(sized.spec.limits.diskMb).toBe(512);
+    for (const overrides of [{ dependencyCache: false }, {}, { workspaceDiskMb: 512 }]) {
+      const off = await launched(overrides);
+      expect(off.input).not.toHaveProperty("dependencyCache");
+      expect(off.input).not.toHaveProperty("diskMb");
+      expect(off.spec).not.toHaveProperty("dependencyCache");
+    }
+  });
+
   it("hands the worker debugTraceMaxMb only on a traced run that sets one", async () => {
     const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
       const created = await harness(overrides);
@@ -1512,6 +1539,55 @@ describe("ContainerExecutor", () => {
       tag: "JIRA-123",
     });
     expect(created.store.run.result).toMatchObject({ tag: "JIRA-123" });
+  });
+
+  describe("dependency cache report", () => {
+    const report = {
+      projects: [
+        { path: ".", result: "hit", key: "abc", sizeBytes: 10, restoreMs: 4, rebuild: "skipped" },
+        { path: "web", result: "cold", installMs: 900 },
+        { path: "api", result: "nearest" },
+      ],
+    };
+    const artifact = (outcome: string) =>
+      JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome,
+        summary: "Fixed it.",
+        tests: [],
+        dependencyCache: report,
+      });
+
+    it("stores the worker's report and names the restored folders for the PR body", async () => {
+      const created = await harness();
+      created.jobs.result.resultArtifact = artifact("changes_ready");
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.completions[0]?.record).toEqual({
+        baseSha: "a".repeat(40),
+        dependencyCacheResult: report,
+      });
+      expect(created.vcs.lastFinalizeDetails?.restoredDependencies).toEqual([".", "api"]);
+      // Only in its own column: the run's result JSON is unchanged.
+      expect(created.store.run.result).not.toHaveProperty("dependencyCache");
+    });
+
+    it("stores it on a no_changes run and a budget-exhausted one too", async () => {
+      for (const outcome of ["no_changes", "budget_exhausted"]) {
+        const created = await harness();
+        created.jobs.result.resultArtifact = artifact(outcome);
+        await created.executor.start("run-1");
+        expect(created.store.completions[0]?.record).toEqual({ dependencyCacheResult: report });
+      }
+    });
+
+    it("records nothing and passes no folders on a run without a report", async () => {
+      const created = await harness();
+      await created.executor.start("run-1");
+      expect(created.store.completions[0]?.record).toEqual({ baseSha: "a".repeat(40) });
+      expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("restoredDependencies");
+    });
   });
 
   it("loads the registry report and passes packages/refusals through to VCS finalization", async () => {

@@ -340,6 +340,31 @@ describe("KubernetesJobLauncher", () => {
     expect(await h.launcher.collect(handle)).toMatchObject({ exitCode: 137, reason: "failed" });
   });
 
+  it("collects a worker's dependency cache report with its result, bounded", async () => {
+    const h = await harness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.finish(handle);
+    const output = {
+      schemaVersion: 1,
+      runId: h.spec.runId,
+      outcome: "no_changes",
+      summary: "None.",
+      tests: [],
+    };
+    h.setResult(JSON.stringify({ ...output, dependencyCache: { projects: [{ path: ".", result: "hit" }] } }));
+    const collected = await h.launcher.collect(handle);
+    expect(JSON.parse(collected.resultArtifact!).dependencyCache).toEqual({ projects: [{ path: ".", result: "hit" }] });
+    // A report the worker wrote malformed is bounded, never a failed collection.
+    const other = await harness();
+    const otherHandle = await other.launcher.launch(other.spec);
+    await other.finish(otherHandle);
+    other.setResult(JSON.stringify({ ...output, runId: other.spec.runId, dependencyCache: { projects: "x" } }));
+    expect(JSON.parse((await other.launcher.collect(otherHandle)).resultArtifact!).dependencyCache).toEqual({
+      projects: [],
+      reason: "report_invalid",
+    });
+  });
+
   it("rejects an oversized or mismatched result artifact", async () => {
     const h = await harness();
     const handle = await h.launcher.launch(h.spec);

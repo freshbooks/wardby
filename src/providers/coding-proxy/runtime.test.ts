@@ -4,6 +4,7 @@ import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from ".
 import { logger } from "../../core/logger.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
 import type { CodingProxy, CodingProxyOptions, ProxyResponseSink } from "./proxy.js";
+import { DependencyCacheService } from "./dependency-cache/service.js";
 import { RegistryService } from "./registry/service.js";
 import { createRegistryUpstream, startConfiguredCodingProxy } from "./runtime.js";
 import type { CodingProxyServerHandle } from "./server.js";
@@ -95,6 +96,37 @@ describe("configured coding proxy runtime", () => {
     expect(started.port).toBe(CODING_PROXY_PORT);
     await started.close();
     expect(closed).toEqual(["deny", "proxy"]);
+  });
+
+  it("wires the dependency cache only when it is on and a blob store is configured", async () => {
+    const handle: CodingProxyServerHandle = { port: CODING_PROXY_PORT, close: async () => {} };
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    const cacheOf = async (env: NodeJS.ProcessEnv) => {
+      const startServer = vi.fn(async () => handle);
+      const started = await startConfiguredCodingProxy({ db: {} as PrismaClient, env, startServer, startDenyPort });
+      await started.close();
+      const [proxy, config] = startServer.mock.calls[0] as unknown[];
+      return {
+        ...(config as { dependencyCache?: unknown }),
+        sealsOnModelRequest: (proxy as { onModelRequest?: unknown }).onModelRequest !== undefined,
+      };
+    };
+    const base = { OPENAI_API_KEY: "test-secret" };
+    const blob = { BLOB_STORE: "local", BLOB_STORE_LOCAL_DIR: "/tmp/wardby-cache-test" };
+    const off = await cacheOf(base);
+    expect([off.dependencyCache, off.sealsOnModelRequest]).toEqual([undefined, false]);
+    expect((await cacheOf({ ...base, ...blob })).dependencyCache).toBeUndefined();
+    const warn = vi.spyOn(logger, "warn");
+    expect((await cacheOf({ ...base, WARDBY_DEPENDENCY_CACHE: "true" })).dependencyCache).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "proxy.dependency_cache_no_blob_store" }),
+      expect.any(String),
+    );
+    warn.mockRestore();
+    const on = await cacheOf({ ...base, ...blob, WARDBY_DEPENDENCY_CACHE: "true" });
+    expect(on.dependencyCache).toBeInstanceOf(DependencyCacheService);
+    expect(on.sealsOnModelRequest).toBe(true);
+    expect((on.dependencyCache as DependencyCacheService).uploadMs).toBe(900_000);
   });
 
   it("closes the proxy server when the deny port cannot bind", async () => {

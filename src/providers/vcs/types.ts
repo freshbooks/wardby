@@ -59,6 +59,8 @@ export interface FinalizeChangesDetails {
     acceptedAdvisories?: readonly string[];
   }[];
   packageRefusals?: readonly { ecosystem: string; name: string; reason: string }[];
+  /** Folders whose node_modules the run's dependency cache restored from a snapshot ("." for the root), for the PR body. */
+  restoredDependencies?: readonly string[];
   /** Originating issue (control-plane data): named in the PR title and body. Provider-neutral. */
   issue?: { key: string; url?: string; trackerName?: string };
   /** The request's other pull requests (control-plane rows): the PR body's Related pull requests section. */

@@ -20,6 +20,10 @@ describe("coding worker image policy", () => {
     expect(dockerfile).toContain("COPY src/coding-worker/npm-shim.mjs ./bin/npm-shim.mjs");
     expect(dockerfile).toContain("ln -s npm-shim.mjs /opt/wardby/bin/npm");
     expect(dockerfile).toContain("/etc/profile.d/wardby-shims.sh");
+    // The dependency cache module, next to driver.js, which imports it on a run that asks for it;
+    // the build fails, not the run, when it is missing.
+    expect(dockerfile).toContain("COPY src/coding-worker/dependency-cache.mjs ./coding-worker/dependency-cache.mjs");
+    expect(dockerfile).toContain("/opt/wardby/coding-worker/dependency-cache.mjs");
   });
 
   it("Dockerfile pins its FROM to the driver by digest and excludes privileged or general-purpose host tooling", async () => {

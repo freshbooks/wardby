@@ -215,6 +215,37 @@ now runs and apply, so they catch up.
   maintenance window and the apply reports a failure deleting the old parameter
   group, which the instance still uses; apply again once the window has passed.
 
+## Run dependency cache
+
+Off by default. The coding-run dependency cache (see
+[Dependency cache](../../docs/coding-packages.md#dependency-cache)) keeps npm
+`node_modules` snapshots in a private S3 bucket. Set
+`dependency_cache_enabled = true` and a globally unique
+`dependency_cache_bucket_name`. The module then creates the bucket (public
+access blocked, AES256 encryption, TLS-only policy, no versioning) and lets
+the coding proxy's Pod Identity role, and nothing else, read, write and delete
+its objects. The control plane, gateway and worker pods get no access.
+
+A lifecycle rule deletes objects older than `dependency_cache_max_age_days + 7`
+days (and incomplete multipart uploads after a day) as a backstop for objects
+the proxy never recorded. Keep `dependency_cache_max_age_days` equal to the
+proxy's `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS` (default 14).
+
+Terraform does not configure the proxy itself. Give the coding proxy container
+these environment variables:
+
+| Variable                  | Value                                |
+| ------------------------- | ------------------------------------ |
+| `BLOB_STORE`              | `s3`                                 |
+| `BLOB_STORE_S3_BUCKET`    | the `dependency_cache_bucket` output |
+| `BLOB_STORE_S3_REGION`    | the `region` output                  |
+| `WARDBY_DEPENDENCY_CACHE` | `true`                               |
+
+The base proxy network policy already allows HTTPS to the public internet, so
+S3's public endpoint is reachable. If you add a VPC gateway endpoint for S3
+(private addresses), add a matching egress rule for the proxy. The tuning variables are
+in [Dependency cache limits](../../docs/coding-packages.md#dependency-cache-limits).
+
 ## Inputs
 
 Only `region` and `hostname` have no default, and `public_access_cidrs` is
@@ -277,6 +308,9 @@ required while `endpoint_public_access` is true.
 | `lbc_iam_policy_sha256`             | the policy's checksum                                    | SHA-256 of that release's `iam_policy.json`; a mismatching download is refused.                                                                                                       |
 | `lbc_namespace`                     | `kube-system`                                            | Namespace of the load balancer controller.                                                                                                                                            |
 | `lbc_service_account`               | `aws-load-balancer-controller`                           | Service account of the load balancer controller.                                                                                                                                      |
+| `dependency_cache_enabled`          | `false`                                                  | Create the run dependency cache bucket, readable and writable by the coding proxy's role only.                                                                                        |
+| `dependency_cache_bucket_name`      | `""`                                                     | Name of that bucket (global across S3). Required when the cache is enabled.                                                                                                           |
+| `dependency_cache_max_age_days`     | `14`                                                     | Match `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS`; the bucket deletes objects older than this plus 7 days as a backstop.                                                                   |
 
 ## Outputs
 
@@ -312,6 +346,7 @@ required while `endpoint_public_access` is true.
 | `certificate_validation_records`  | DNS records that validate the certificate; create them yourself when `route53_zone_id` is unset.  |
 | `waf_web_acl_arn`                 | WAF web ACL for the load balancer.                                                                |
 | `lbc_role_arn`                    | IAM role of the AWS Load Balancer Controller.                                                     |
+| `dependency_cache_bucket`         | The run dependency cache bucket (`BLOB_STORE_S3_BUCKET`); empty when disabled.                    |
 
 ## Cost
 

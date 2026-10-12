@@ -12,13 +12,15 @@ import {
   platformProfile,
   type KubernetesPlatform,
 } from "../providers/jobs/kubernetes-platform.js";
+import type { BlobStoreConfig } from "../providers/storage/index.js";
 import { loadMobileConfig, type MobileConfig } from "./mobile.js";
 
 export type JobLauncherKind = "local" | "docker" | "kubernetes";
 export type EmailProviderKind = "smtp" | "ses";
 export type SecretCipherKind = "app-key" | "kms";
 export type AuthProviderKind = "delegating" | "self-hosted";
-export type BlobStoreKind = "local" | "s3";
+export type BlobStoreKind = "local" | "gcs" | "s3";
+const BLOB_STORE_KINDS: readonly BlobStoreKind[] = ["local", "gcs", "s3"];
 export type ExecutorKind = "in-process" | "dbos";
 export type DatastoreKind = "postgres";
 export type EngineKind = "native" | "langgraph";
@@ -29,11 +31,43 @@ export interface ProviderConfig {
   email: EmailProviderKind;
   secrets: SecretCipherKind;
   auth: AuthProviderKind;
-  storage: BlobStoreKind;
+  /** Unset BLOB_STORE means no blob store is configured. */
+  storage: BlobStoreKind | undefined;
   executor: ExecutorKind;
   datastore: DatastoreKind;
   engine: EngineKind;
   vcs: VcsProviderKind;
+}
+
+function loadBlobStoreKind(env: NodeJS.ProcessEnv): BlobStoreKind | undefined {
+  const value = env.BLOB_STORE?.trim();
+  if (value === undefined || value === "") return undefined;
+  if (!(BLOB_STORE_KINDS as readonly string[]).includes(value)) {
+    throw new Error(`BLOB_STORE must be one of ${BLOB_STORE_KINDS.join(", ")} (got "${value}").`);
+  }
+  return value as BlobStoreKind;
+}
+
+/** Blob store settings from the environment; undefined when BLOB_STORE is unset (no blob store). */
+export function loadBlobStoreConfig(env: NodeJS.ProcessEnv = process.env): BlobStoreConfig | undefined {
+  const kind = loadBlobStoreKind(env);
+  if (kind === undefined) return undefined;
+  if (kind === "local") {
+    const localDir = env.BLOB_STORE_LOCAL_DIR?.trim();
+    if (!localDir) throw new Error("BLOB_STORE_LOCAL_DIR is required when BLOB_STORE=local.");
+    return { kind, localDir };
+  }
+  if (kind === "gcs") {
+    const bucket = env.BLOB_STORE_GCS_BUCKET?.trim();
+    if (!bucket) throw new Error("BLOB_STORE_GCS_BUCKET is required when BLOB_STORE=gcs.");
+    return { kind, bucket };
+  }
+  const bucket = env.BLOB_STORE_S3_BUCKET?.trim();
+  if (!bucket) throw new Error("BLOB_STORE_S3_BUCKET is required when BLOB_STORE=s3.");
+  const region = env.BLOB_STORE_S3_REGION?.trim();
+  if (!region) throw new Error("BLOB_STORE_S3_REGION is required when BLOB_STORE=s3.");
+  const endpoint = env.BLOB_STORE_S3_ENDPOINT?.trim();
+  return { kind, bucket, region, ...(endpoint ? { endpoint } : {}) };
 }
 
 /** Read provider selection from environment variables, defaulting to portable. */
@@ -43,7 +77,7 @@ export function loadProviderConfig(env: NodeJS.ProcessEnv = process.env): Provid
     email: (env.EMAIL_PROVIDER as EmailProviderKind) ?? "smtp",
     secrets: (env.SECRET_CIPHER as SecretCipherKind) ?? "app-key",
     auth: (env.AUTH_PROVIDER as AuthProviderKind) ?? "delegating",
-    storage: (env.BLOB_STORE as BlobStoreKind) ?? "local",
+    storage: loadBlobStoreKind(env),
     executor: (env.EXECUTOR as ExecutorKind) ?? "in-process",
     datastore: (env.DATASTORE as DatastoreKind) ?? "postgres",
     engine: (env.ENGINE as EngineKind) ?? "native",

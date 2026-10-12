@@ -28,3 +28,11 @@ public_access_cidrs = ["203.0.113.10/32"] # your own address
 
 # Your own HTTPS mirror of gVisor releases (<base>/<version>/x86_64/gvisor.tar.bz2).
 # gvisor_download_base_url = "https://your-mirror.example.com/gvisor/release"
+
+# Run dependency cache (off by default). Creates a private bucket only the
+# coding proxy's Pod Identity role can use. Bucket names are global: pick one
+# unique to you. Keep max_age_days equal to WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS
+# (default 14).
+# dependency_cache_enabled      = true
+# dependency_cache_bucket_name  = "your-unique-dependency-cache-bucket"
+# dependency_cache_max_age_days = 14

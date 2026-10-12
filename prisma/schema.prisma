@@ -464,6 +464,9 @@ model CodingAgentProfile {
   /// Claude Code runs only: keep Claude Code's bare mode (CLAUDE_CODE_SIMPLE=1); wardby injects
   /// repo instructions and the skill list into the system prompt. False = Claude Code's native loading.
   claudeBareMode           Boolean   @default(true)
+  /// Restore node_modules from a cached snapshot (written only by trusted wardby code before the
+  /// agent starts) instead of a full install. Owner-set; off by default.
+  dependencyCache          Boolean   @default(false)
 
   /// How `repository` was authorized for this agent (see AgentRepository.authorizedVia):
   /// "host_permission", "admin", or "grandfathered". Null = never authorized; runs are refused.
@@ -476,69 +479,74 @@ model CodingAgentProfile {
 /// Phase 5: immutable dispatch inputs plus opaque execution/result state for
 /// one coding run. Policy is copied from the profile before work starts.
 model CodingRun {
-  runId             String              @id
-  run               Run                 @relation(fields: [runId], references: [id], onDelete: Cascade)
-  task              String
-  repository        String
-  baseRef           String
-  headRef           String
-  provider          String
-  model             String
-  timeoutSec        Int
+  runId                 String              @id
+  run                   Run                 @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task                  String
+  repository            String
+  baseRef               String
+  headRef               String
+  provider              String
+  model                 String
+  timeoutSec            Int
   /// Unused; dropped after rollout (see the package-registry plan, Task 14).
-  allowedEgress     Json                @default("[]")
-  protectedPaths    Json
-  collectExclude    Json                @default("[]")
-  jobBackend        String?
-  jobHandle         String?
-  result            Json?
-  resultSchema      Int                 @default(1)
+  allowedEgress         Json                @default("[]")
+  protectedPaths        Json
+  collectExclude        Json                @default("[]")
+  jobBackend            String?
+  jobHandle             String?
+  result                Json?
+  resultSchema          Int                 @default(1)
   /// Sanitized terminal classification and an opaque log correlation reference.
   /// Neither field may contain task, repository, environment, or credential data.
-  failureCategory   String?
-  diagnosticId      String?
-  workerImage       String?
+  failureCategory       String?
+  diagnosticId          String?
+  workerImage           String?
   /// Claude Code's tool-runner image, resolved from the agent's toolchain at dispatch; null for Codex runs.
-  toolImage         String?
-  budgetReservedUsd Decimal             @db.Decimal(10, 6)
+  toolImage             String?
+  budgetReservedUsd     Decimal             @db.Decimal(10, 6)
   /// Phase 12 concurrency queue: set when start() found every coding slot
   /// taken (CODING_MAX_CONCURRENT), cleared when the run claims a slot. A
   /// pending run with queuedAt set is waiting, not orphaned.
-  queuedAt          DateTime?
+  queuedAt              DateTime?
   /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
-  workspaceDiskMb   Int?
-  packageAllowlist  Json                @default("{}")
-  packagePolicy     Json                @default("{}")
+  workspaceDiskMb       Int?
+  packageAllowlist      Json                @default("{}")
+  packagePolicy         Json                @default("{}")
   /// Fixed at dispatch from the profile's debugTraceUntil: the worker writes a
   /// full stream trace to its own pod log (never to the database).
-  debugTrace        Boolean             @default(false)
+  debugTrace            Boolean             @default(false)
   /// Fixed at dispatch from the profile's debugTraceMaxMb, only on a traced run. Null = the worker default.
-  debugTraceMaxMb   Int?
+  debugTraceMaxMb       Int?
   /// Fixed at dispatch from the profile's maxTurns: the Claude Code worker's turn limit. Null = the worker default.
-  maxTurns          Int?
+  maxTurns              Int?
   /// Fixed at dispatch from the profile's repoSkills.
-  repoSkills        Boolean             @default(true)
+  repoSkills            Boolean             @default(true)
   /// Fixed at dispatch from the profile's claudeBareMode.
-  claudeBareMode    Boolean             @default(true)
+  claudeBareMode        Boolean             @default(true)
   /// Coding-run services resolved at dispatch from the base branch's
   /// .wardby/services.yaml: one snapshot per service (the catalog entry minus
   /// kind), fixed for the run's lifetime. Empty = none.
-  services          Json                @default("[]")
+  services              Json                @default("[]")
   /// The originating tracker issue ("jira" + key), set by the control plane from the run tree, never from model output.
-  issueProvider     String?
-  issueKey          String?
+  issueProvider         String?
+  issueKey              String?
   /// The branch a run pushed to a local repository (no pull request exists); null otherwise.
-  resultBranch      String?
+  resultBranch          String?
   /// The commit the run started from (the base ref's tip when the workspace was prepared).
-  baseSha           String?
+  baseSha               String?
   /// Step in the request's merge order set by the delegating agent (1 = first); null = no order.
-  mergeOrder        Int?
+  mergeOrder            Int?
   /// When Wardby marked this run's pull request ready for review (at most once;
   /// a person moving it back to draft is final). Only set on a root coding run.
-  markedReadyAt     DateTime?
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
-  proxySession      CodingProxySession?
+  markedReadyAt         DateTime?
+  /// Fixed at dispatch from the profile's dependencyCache.
+  dependencyCache       Boolean             @default(false)
+  /// What the run's dependency cache did, written by the control plane when it collects the run:
+  /// { result, key?, sizeBytes?, restoreMs?, installMs?, reason? }. Null = not used or not reported.
+  dependencyCacheResult Json?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  proxySession          CodingProxySession?
 
   /// Revision-in-place for continuing an existing coding pull request.
   /// Points directly at the ROOT CodingRun that actually owns the branch/PR
@@ -554,6 +562,7 @@ model CodingRun {
   registryFetches          RegistryFetch[]
   registryApprovedVersions RegistryApprovedVersion[]
   registryPlanRefusals     RegistryPlanRefusal[]
+  dependencySnapshots      DependencySnapshot[]
 
   @@index([jobBackend, jobHandle])
   @@index([failureCategory])
@@ -750,35 +759,40 @@ model NativeGatewayCall {
 /// Trusted-boundary state for one coding run. Only a capability digest and an
 /// upstream credential reference are persisted; neither secret value enters the DB.
 model CodingProxySession {
-  id                String                   @id @default(cuid())
-  runId             String                   @unique
-  run               CodingRun                @relation(fields: [runId], references: [runId], onDelete: Cascade)
-  capabilityHash    String                   @unique
-  credentialRef     String
-  protocol          String                   @default("openai-responses")
-  allowedModels     Json
-  deadlineAt        DateTime
-  budgetUsd         Decimal                  @db.Decimal(18, 10)
-  status            CodingProxySessionStatus @default(active)
-  createdAt         DateTime                 @default(now())
-  updatedAt         DateTime                 @updatedAt
-  requests          CodingProxyRequest[]
+  id                        String                   @id @default(cuid())
+  runId                     String                   @unique
+  run                       CodingRun                @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  capabilityHash            String                   @unique
+  credentialRef             String
+  protocol                  String                   @default("openai-responses")
+  allowedModels             Json
+  deadlineAt                DateTime
+  budgetUsd                 Decimal                  @db.Decimal(18, 10)
+  status                    CodingProxySessionStatus @default(active)
+  createdAt                 DateTime                 @default(now())
+  updatedAt                 DateTime                 @updatedAt
+  requests                  CodingProxyRequest[]
   /// Hash of the derived registry-only token (see deriveRegistryToken); the
   /// token itself is never persisted.
-  registryTokenHash String?                  @unique
+  registryTokenHash         String?                  @unique
   /// Set the first time the proxy refuses a request of this session for
   /// budget; lets the executor report the run as out of budget.
-  budgetExhaustedAt DateTime?
+  budgetExhaustedAt         DateTime?
   /// The upstream error code (a fixed identifier, never a message) of the
   /// first provider failure the proxy relayed for this session; lets the
   /// executor say the model provider refused the run.
-  upstreamFailure   String?
+  upstreamFailure           String?
   /// The run's catalog entry, copied from Run.pricingSnapshot when the session
   /// is created; the proxy prices and shapes requests from it. Null on
   /// sessions from before the model catalog (the proxy falls back to the
   /// shipped catalog).
-  pricingVersion    String?
-  catalogEntry      Json?
+  pricingVersion            String?
+  catalogEntry              Json?
+  /// Dependency cache: every lockfile hash this session's plans approved (with
+  /// no refusals) while unsealed, at most 8. Only these may be restored or uploaded.
+  dependencyCacheLockHashes String[]                 @default([])
+  /// Set when the run's dependency step is over; after it the cache refuses this session.
+  dependencyCacheSealedAt   DateTime?
 
   @@index([deadlineAt])
 }
@@ -903,6 +917,34 @@ model RegistryPlanRefusal {
   run         CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
 
   @@id([runId, ecosystem, name, version])
+}
+
+/// A cached node_modules snapshot for one npm project of a repository, keyed
+/// server-side by the coding proxy. The archive lives in the blob store under
+/// blobKey; only trusted wardby code writes it, before a run's agent starts.
+/// Outlives the run that created it (createdByRunId is cleared when that run is
+/// deleted); evicted least-recently-used.
+model DependencySnapshot {
+  id             String     @id @default(cuid())
+  ecosystem      String
+  repository     String
+  /// The project's folder relative to the repository root; "." = the root.
+  projectPath    String     @default(".")
+  lockHash       String
+  workerImage    String
+  policyHash     String
+  blobKey        String     @unique
+  sha256         String
+  sizeBytes      BigInt
+  createdAt      DateTime   @default(now())
+  lastUsedAt     DateTime   @default(now())
+  createdByRunId String?
+  createdByRun   CodingRun? @relation(fields: [createdByRunId], references: [runId], onDelete: SetNull)
+
+  @@unique([ecosystem, repository, projectPath, lockHash, workerImage, policyHash])
+  @@index([ecosystem, repository, projectPath, workerImage, policyHash, createdAt])
+  @@index([lastUsedAt])
+  @@index([createdByRunId, projectPath])
 }
 
 /// Phase 2: single-row-per-scope lease so exactly one scheduler process

@@ -422,6 +422,15 @@ along with the database. See
 run does, its requirements (the server must run on the same machine as the
 folders) and its limits (no submodules or Git LFS).
 
+#### Faster installs: the dependency cache
+
+For an npm repository, the coding proxy can keep `node_modules` snapshots so a
+run starts with its dependencies already installed. Add
+`WARDBY_DEPENDENCY_CACHE=true` to `.wardby/.env`, restart the stack, then set
+`codingProfile.dependencyCache` to `true` on the agent with `update_agent`. This
+needs wardby 0.6.1 or later; snapshots live on a Docker volume that
+`down -v` removes. See [Dependency cache](coding-packages.md#dependency-cache).
+
 ## Your first agents
 
 [Agent recipes](agent-recipes.md) gives two complete, copyable setups: an

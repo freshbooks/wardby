@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: wardby-coding
+spec:
+  template:
+    spec:
+      containers:
+        - name: proxy
+          env:
+            - name: BLOB_STORE
+              value: local
+            - name: BLOB_STORE_LOCAL_DIR
+              value: /var/lib/wardby/blobs
+            - name: WARDBY_DEPENDENCY_CACHE
+              value: "true"
+          volumeMounts:
+            - name: dependency-cache
+              mountPath: /var/lib/wardby/blobs
+      volumes:
+        # NOT durable: an emptyDir lives and dies with the proxy pod, so every
+        # snapshot is gone when the proxy restarts. The database rows that point
+        # at them go stale, and a missing blob is treated as a cache miss.
+        # sizeLimit matches the default total cap (20 GiB).
+        - name: dependency-cache
+          emptyDir:
+            sizeLimit: 20Gi

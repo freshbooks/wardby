@@ -114,6 +114,9 @@ function service(
     deadlineAt: new Date(NOW.getTime() + DAY),
     allowlist: overrides.allowlist ?? { fake: ["app"] },
     policy: overrides.policy ?? {},
+    repository: "owner/repo",
+    cacheImage: null,
+    dependencyCache: false,
   });
   const registry = new RegistryService({
     adapters: new Map([["fake", fakeAdapter]]),
@@ -236,6 +239,9 @@ describe("RegistryService", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { fake: ["app"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const store: RegistryStore = {
       findRunByRegistryTokenHash: (hash, now) => inner.findRunByRegistryTokenHash(hash, now),
@@ -256,6 +262,8 @@ describe("RegistryService", () => {
         inner.findApprovedVersion(runId, ecosystem, name, version),
       refusePlanVersions: (runId, ecosystem, versions) => inner.refusePlanVersions(runId, ecosystem, versions),
       findPlanRefusal: (runId, ecosystem, name, version) => inner.findPlanRefusal(runId, ecosystem, name, version),
+      recordDependencyCacheLockHash: (runId, lockHash, max) =>
+        inner.recordDependencyCacheLockHash(runId, lockHash, max),
     };
     const hangingBody = new ReadableStream<Uint8Array>({
       pull: () => new Promise<void>(() => {}), // never resolves
@@ -374,6 +382,9 @@ describe("RegistryService", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { fake: ["app"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const registry = new RegistryService({
       adapters: new Map([["fake", fakeAdapter]]),
@@ -632,6 +643,9 @@ describe("RegistryService metadata fetch safety and cache", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { fake: ["app", "dep", "noint"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const registry = new RegistryService({
       adapters: new Map([["fake", adapter]]),
@@ -693,6 +707,9 @@ describe("RegistryService metadata fetch safety and cache", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { npm: ["react"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -717,6 +734,9 @@ describe("RegistryService metadata fetch safety and cache", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { npm: ["react"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -752,6 +772,9 @@ describe("RegistryService served-byte tally and per-adapter hosts", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { fake: ["noint"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const undeclared: RegistryAdapter = {
       ...fakeAdapter,
@@ -820,6 +843,9 @@ describe("RegistryService served-byte tally and per-adapter hosts", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { fake: ["app"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const elsewhere: RegistryAdapter = {
       ...fakeAdapter,
@@ -859,6 +885,9 @@ describe("RegistryService with the PyPI adapter: malformed paths", () => {
         deadlineAt: new Date(NOW.getTime() + DAY),
         allowlist: { pypi: ["demo"] },
         policy: {},
+        repository: "owner/repo",
+        cacheImage: null,
+        dependencyCache: false,
       });
       const registry = new RegistryService({
         adapters: new Map([["pypi", pypiAdapter]]),
@@ -896,6 +925,9 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { npm: allowlist },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -969,6 +1001,9 @@ describe("RegistryService with the PyPI adapter: release age applies per file", 
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { pypi: ["demo"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -1062,6 +1097,9 @@ describe("RegistryService with the PyPI adapter: allowlisted extras", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { pypi: allowlist },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const registry = new RegistryService({
       adapters: new Map([["pypi", pypiAdapter]]),
@@ -1260,6 +1298,9 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { npm: overrides.allowlist ?? ["app@^1"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     for (const [token, allowlist] of Object.entries(overrides.otherRuns ?? {})) {
       store.contexts.set(capabilityHash(token), {
@@ -1267,6 +1308,9 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
         deadlineAt: new Date(NOW.getTime() + DAY),
         allowlist: { npm: allowlist },
         policy: {},
+        repository: "owner/repo",
+        cacheImage: null,
+        dependencyCache: false,
       });
     }
     const urls: string[] = [];
@@ -1582,6 +1626,9 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { pypi: ["demo"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -1612,6 +1659,9 @@ describe("RegistryService graph walk hardening", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { npm: ["app"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const urls: string[] = [];
     const registry = new RegistryService({
@@ -1651,6 +1701,9 @@ describe("RegistryService metadata path dependency names", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { npm: ["app"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -1717,6 +1770,9 @@ describe("RegistryService memory: nothing retains a parsed packument, and run st
       deadlineAt,
       allowlist: { npm: ["app"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),

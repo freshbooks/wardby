@@ -3,6 +3,7 @@ import {
   loadAuthConfig,
   loadContainerExecutorConfig,
   loadProviderConfig,
+  loadBlobStoreConfig,
   loadMcpConfig,
   loadGitHubVcsConfig,
   loadGitHubEventConfig,
@@ -26,6 +27,46 @@ describe("provider config", () => {
 
   it("defaults VCS to GitHub", () => {
     expect(loadProviderConfig({}).vcs).toBe("github");
+  });
+
+  it("treats an unset BLOB_STORE as no blob store", () => {
+    expect(loadProviderConfig({}).storage).toBeUndefined();
+    expect(loadBlobStoreConfig({})).toBeUndefined();
+  });
+
+  it("accepts local, gcs and s3 and rejects anything else", () => {
+    expect(loadProviderConfig({ BLOB_STORE: "gcs" }).storage).toBe("gcs");
+    expect(loadProviderConfig({ BLOB_STORE: "s3" }).storage).toBe("s3");
+    expect(() => loadProviderConfig({ BLOB_STORE: "azure" })).toThrow(/BLOB_STORE must be one of/);
+  });
+
+  it("requires BLOB_STORE_LOCAL_DIR for the local blob store", () => {
+    expect(loadBlobStoreConfig({ BLOB_STORE: "local", BLOB_STORE_LOCAL_DIR: "/var/blobs" })).toEqual({
+      kind: "local",
+      localDir: "/var/blobs",
+    });
+    expect(() => loadBlobStoreConfig({ BLOB_STORE: "local" })).toThrow(/BLOB_STORE_LOCAL_DIR/);
+  });
+
+  it("requires a bucket for gcs and reads it", () => {
+    expect(loadBlobStoreConfig({ BLOB_STORE: "gcs", BLOB_STORE_GCS_BUCKET: " snapshots " })).toEqual({
+      kind: "gcs",
+      bucket: "snapshots",
+    });
+    expect(() => loadBlobStoreConfig({ BLOB_STORE: "gcs" })).toThrow(/BLOB_STORE_GCS_BUCKET/);
+  });
+
+  it("requires a bucket and region for s3 and reads the optional endpoint", () => {
+    const env = { BLOB_STORE: "s3", BLOB_STORE_S3_BUCKET: "snapshots", BLOB_STORE_S3_REGION: "eu-west-1" };
+    expect(loadBlobStoreConfig(env)).toEqual({ kind: "s3", bucket: "snapshots", region: "eu-west-1" });
+    expect(loadBlobStoreConfig({ ...env, BLOB_STORE_S3_ENDPOINT: "http://minio:9000" })).toEqual({
+      kind: "s3",
+      bucket: "snapshots",
+      region: "eu-west-1",
+      endpoint: "http://minio:9000",
+    });
+    expect(() => loadBlobStoreConfig({ ...env, BLOB_STORE_S3_BUCKET: "" })).toThrow(/BLOB_STORE_S3_BUCKET/);
+    expect(() => loadBlobStoreConfig({ ...env, BLOB_STORE_S3_REGION: undefined })).toThrow(/BLOB_STORE_S3_REGION/);
   });
 });
 

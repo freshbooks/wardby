@@ -2,7 +2,7 @@ import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
-import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
+import { DEPENDENCY_CACHE_PATH, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 
 const DEFAULT_API_BASE_URL = "https://api.github.com";
 const DEFAULT_API_VERSION = "2026-03-10";
@@ -56,6 +56,8 @@ export interface PullRequestInput {
   /** Deduplicated by the caller isn't required — pullRequestBody dedupes itself (ecosystem+name+version / +reason). */
   packages?: readonly PackageReport[];
   packageRefusals?: readonly PackageRefusal[];
+  /** Folders whose node_modules the dependency cache restored from a snapshot ("." for the root); control-plane data. */
+  restoredDependencies?: readonly string[];
   /** Lock files the run changed (repository paths); with refusals, the PR body warns they may be incomplete. */
   changedLockfiles?: readonly string[];
   /**
@@ -423,6 +425,16 @@ function cappedList(lines: readonly string[], maxChars = MAX_PR_PACKAGE_LIST_CHA
   return more > 0 ? [...shown, `- …and ${more} more — see get_run for the full list`] : shown;
 }
 
+const MAX_DEPENDENCY_CACHE_FOLDERS = 4;
+
+function dependencyCacheLine(folders: readonly string[] | undefined): string | undefined {
+  const shown = [...new Set(folders ?? [])]
+    .filter((folder) => DEPENDENCY_CACHE_PATH.test(folder))
+    .slice(0, MAX_DEPENDENCY_CACHE_FOLDERS)
+    .map((folder) => (folder === "." ? "the repo root" : `\`${folder}\``));
+  return shown.length > 0 ? `Dependency cache: restored \`node_modules\` for ${shown.join(", ")}.` : undefined;
+}
+
 function packagesSection(input: PullRequestInput): string | undefined {
   const packages = [
     ...new Map(
@@ -448,7 +460,8 @@ function packagesSection(input: PullRequestInput): string | undefined {
         .map((refusal) => [`${refusal.ecosystem}\0${refusal.name}\0${refusal.reason}`, refusal] as const),
     ).values(),
   ];
-  if (packages.length === 0 && refusals.length === 0) return undefined;
+  const restored = dependencyCacheLine(input.restoredDependencies);
+  if (packages.length === 0 && refusals.length === 0) return restored;
   // Only ids safe in a Markdown line; a package whose ids are all unsafe is
   // not listed here (it is still listed as installed).
   const waivers = packages.flatMap((pkg) => {
@@ -458,6 +471,7 @@ function packagesSection(input: PullRequestInput): string | undefined {
     return ids.length > 0 ? [`- \`${pkg.name}@${pkg.version}\`: ${ids.map((id) => `\`${id}\``).join(", ")}`] : [];
   });
   return [
+    ...(restored ? [restored, ""] : []),
     "<details>",
     `<summary>Packages installed during this run (${packages.length})</summary>`,
     "",

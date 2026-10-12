@@ -6,6 +6,22 @@ export interface RegistryRunContext {
   deadlineAt: Date;
   allowlist: PackageAllowlist;
   policy: unknown; // resolved with resolvePolicy()
+  /** The run's repository (CodingRun.repository), a cache-key input. */
+  repository: string;
+  /** The image whose environment the install runs in: CodingRun.toolImage ?? workerImage; null when neither is recorded. */
+  cacheImage: string | null;
+  /** Whether the run's agent enabled the dependency cache, fixed at dispatch (CodingRun.dependencyCache). */
+  dependencyCache: boolean;
+}
+
+/** A coding proxy session's dependency cache state (CodingProxySession). */
+export interface DependencyCacheSessionState {
+  /** Lockfile hashes this session's plans approved with no refusals, while unsealed. */
+  lockHashes: string[];
+  /** When the run's dependency step ended; after it the cache refuses the session. */
+  sealedAt: Date | null;
+  /** When the session was created: the upload window starts here. */
+  createdAt: Date;
 }
 
 export interface RegistryFetchRecord {
@@ -121,6 +137,10 @@ export interface RegistryStore {
     name: string,
     version: string,
   ): Promise<{ code: string; reason: string; publishedAt: Date | null } | null>;
+  /** Adds a lockfile hash to the run's session, atomically and only while
+   *  the session is unsealed, does not already hold it, and holds fewer
+   *  than `max`; otherwise does nothing. */
+  recordDependencyCacheLockHash(runId: string, lockHash: string, max: number): Promise<void>;
 }
 
 /** In-memory adapter for tests. `contexts` is settable directly so tests can
@@ -135,6 +155,8 @@ export class MemoryRegistryStore implements RegistryStore {
   readonly approvals = new Map<string, ApprovedVersion>();
   /** `runId\0ecosystem\0name\0version` -> plan refusal. */
   readonly planRefusals = new Map<string, PlanRefusedVersion>();
+  /** runId -> dependency cache session state (shareable with the cache's memory store). */
+  readonly cacheSessions = new Map<string, DependencyCacheSessionState>();
 
   async findRunByRegistryTokenHash(hash: string, now: Date): Promise<RegistryRunContext | null> {
     const context = this.contexts.get(hash);
@@ -240,5 +262,15 @@ export class MemoryRegistryStore implements RegistryStore {
   ): Promise<{ code: string; reason: string; publishedAt: Date | null } | null> {
     const refusal = this.planRefusals.get(`${runId}\0${ecosystem}\0${name}\0${version}`);
     return refusal ? { code: refusal.code, reason: refusal.reason, publishedAt: refusal.publishedAt ?? null } : null;
+  }
+
+  async recordDependencyCacheLockHash(runId: string, lockHash: string, max: number): Promise<void> {
+    let session = this.cacheSessions.get(runId);
+    if (!session) {
+      session = { lockHashes: [], sealedAt: null, createdAt: new Date() };
+      this.cacheSessions.set(runId, session);
+    }
+    if (session.sealedAt || session.lockHashes.includes(lockHash) || session.lockHashes.length >= max) return;
+    session.lockHashes.push(lockHash);
   }
 }

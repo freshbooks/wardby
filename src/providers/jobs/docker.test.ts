@@ -151,7 +151,7 @@ class FakeDocker implements DockerCommandRunner {
   private networkRemoved = false;
   private volumeRemoved = false;
   private proxyConnected = false;
-  private output = "";
+  output = "";
 
   constructor(
     readonly job: JobSpec,
@@ -628,6 +628,25 @@ describe("DockerJobLauncher", () => {
     await expect(created.launcher.collect(handle)).resolves.toMatchObject({ reason: "completed" });
     await created.launcher.remove(handle);
     expect(created.docker.toolRemoved).toBe(true);
+  });
+
+  it("collects the worker's dependency cache report with its result", async () => {
+    const created = await harness("docker-claude-depcache", {
+      provider: "claude-code",
+      toolImage,
+      limits: claudeLimits,
+    });
+    const handle = await created.launcher.launch(created.spec);
+    created.docker.finish();
+    const finished = JSON.parse(created.docker.output);
+    created.docker.output = JSON.stringify({
+      ...finished,
+      dependencyCache: { projects: [{ path: ".", result: "cold" }] },
+    });
+    const collected = await created.launcher.collect(handle);
+    expect(JSON.parse(collected.resultArtifact!).dependencyCache).toEqual({
+      projects: [{ path: ".", result: "cold" }],
+    });
   });
 
   it("fails the composite job when the Claude tool runner exits", async () => {

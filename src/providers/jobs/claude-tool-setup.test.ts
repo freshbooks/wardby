@@ -9,6 +9,7 @@ import {
   MAX_FILE_BYTES,
   MAX_FILES,
   MAX_SETUP_BYTES,
+  TOOL_SETUP_ENV,
   parseToolSetup,
 } from "../../claude-tool-runner/command.mjs";
 import { CLAUDE_TOOL_SETUP_LIMITS, claudeToolSetup } from "./claude-tool-setup.js";
@@ -36,6 +37,21 @@ describe("claudeToolSetup", () => {
     expect(CLAUDE_TOOL_SETUP_ENV).toBe("WARDBY_TOOL_SETUP");
   });
 
+  it("delivers the setup under the exact name the tool runner reads", () => {
+    expect(CLAUDE_TOOL_SETUP_ENV).toBe(TOOL_SETUP_ENV);
+  });
+
+  it("carries the dependency cache flag only when on, and the tool runner reads it back", () => {
+    const on = claudeToolSetup({ ...spec, dependencyCache: true, limits: { ...spec.limits, diskMb: 768 } }, CAPABILITY);
+    expect(JSON.parse(on)).toMatchObject({ dependencyCache: true, diskMb: 768 });
+    expect(parseToolSetup(on)).toMatchObject({ dependencyCache: true, diskMb: 768 });
+    const off = claudeToolSetup(spec, CAPABILITY);
+    expect(JSON.parse(off)).not.toHaveProperty("dependencyCache");
+    expect(JSON.parse(off)).not.toHaveProperty("diskMb");
+    expect(parseToolSetup(off)).not.toHaveProperty("dependencyCache");
+    expect(parseToolSetup(off)).not.toHaveProperty("diskMb");
+  });
+
   it("hands the tool runner the registry settings a Codex shell gets, under /workspace/.cache", () => {
     const expected = registryWorkerSetup({
       proxyBaseUrl: "http://wardby-proxy:8787",
@@ -58,6 +74,13 @@ describe("claudeToolSetup", () => {
   it("adds each service's test variables", () => {
     const setup = JSON.parse(claudeToolSetup({ ...spec, services: [POSTGRES] }, CAPABILITY));
     expect(setup.env).toMatchObject(POSTGRES.testEnv);
+  });
+
+  it("carries dependencyCache only when the run turned it on", () => {
+    expect(JSON.parse(claudeToolSetup(spec, CAPABILITY))).not.toHaveProperty("dependencyCache");
+    expect(JSON.parse(claudeToolSetup({ ...spec, dependencyCache: true }, CAPABILITY))).toMatchObject({
+      dependencyCache: true,
+    });
   });
 
   it("refuses a Codex spec", () => {

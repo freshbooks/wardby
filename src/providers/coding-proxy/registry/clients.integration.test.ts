@@ -144,6 +144,9 @@ async function startTestRegistry(
     deadlineAt: new Date(Date.now() + 5 * 60_000),
     allowlist,
     policy: {},
+    repository: "owner/repo",
+    cacheImage: null,
+    dependencyCache: false,
   };
   store.contexts.set(capabilityHash(token), context);
 

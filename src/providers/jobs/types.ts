@@ -25,6 +25,8 @@ export interface JobSpec {
   /** Required only for Claude's credential-free repository tool container. */
   toolImage?: string;
   inputArtifact: string;
+  /** Set only when the run's dependency cache is on (CodingRun.dependencyCache); absent otherwise, never false. */
+  dependencyCache?: true;
   timeoutSec: number;
   limits: JobResourceLimits;
   labels: Record<string, string>;

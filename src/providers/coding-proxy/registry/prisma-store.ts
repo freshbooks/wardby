@@ -26,7 +26,16 @@ export class PrismaRegistryStore implements RegistryStore {
         runId: true,
         status: true,
         deadlineAt: true,
-        run: { select: { packageAllowlist: true, packagePolicy: true } },
+        run: {
+          select: {
+            packageAllowlist: true,
+            packagePolicy: true,
+            repository: true,
+            workerImage: true,
+            toolImage: true,
+            dependencyCache: true,
+          },
+        },
       },
     });
     if (!session || session.status !== "active" || session.deadlineAt <= now) return null;
@@ -35,6 +44,9 @@ export class PrismaRegistryStore implements RegistryStore {
       deadlineAt: session.deadlineAt,
       allowlist: (session.run.packageAllowlist ?? {}) as PackageAllowlist,
       policy: session.run.packagePolicy,
+      repository: session.run.repository,
+      cacheImage: session.run.toolImage ?? session.run.workerImage,
+      dependencyCache: session.run.dependencyCache,
     };
   }
 
@@ -215,5 +227,16 @@ export class PrismaRegistryStore implements RegistryStore {
       where: { runId_ecosystem_name_version: { runId, ecosystem, name, version } },
       select: { code: true, reason: true, publishedAt: true },
     });
+  }
+
+  async recordDependencyCacheLockHash(runId: string, lockHash: string, max: number): Promise<void> {
+    // One statement, so a concurrent seal or plan can never slip past a check.
+    await this.db.$executeRaw`
+      UPDATE "CodingProxySession"
+      SET "dependencyCacheLockHashes" = array_append("dependencyCacheLockHashes", ${lockHash})
+      WHERE "runId" = ${runId}
+        AND "dependencyCacheSealedAt" IS NULL
+        AND NOT (${lockHash} = ANY("dependencyCacheLockHashes"))
+        AND cardinality("dependencyCacheLockHashes") < ${max}`;
   }
 }

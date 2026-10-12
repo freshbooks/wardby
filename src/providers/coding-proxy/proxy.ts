@@ -117,6 +117,11 @@ export interface CodingProxyOptions {
   audit?: ProxyAuditSink;
   pricing?: (model: string, protocol: ProxyProtocol) => ModelPricing;
   pricingVersion?: string;
+  /**
+   * Called with the run's id on every authenticated model request, before it is forwarded (the
+   * dependency cache's seal, ModelRequestSeal). Awaited; a failure is ignored, never the request's.
+   */
+  onModelRequest?: (runId: string) => Promise<void>;
 }
 
 interface ParsedRequest {
@@ -922,9 +927,11 @@ export class CodingProxy {
   private readonly getPricing: (model: string, protocol: ProxyProtocol) => ModelPricing;
   private readonly priceVersion: string;
   private readonly activeRequests = new Map<string, Set<AbortController>>();
+  private readonly onModelRequest?: (runId: string) => Promise<void>;
 
   constructor(options: CodingProxyOptions) {
     this.ledger = options.ledger;
+    this.onModelRequest = options.onModelRequest;
     this.credentials = options.credentials;
     this.upstreamUrls = {
       "openai-responses": options.upstreamUrl ?? "https://api.openai.com/v1/responses",
@@ -1014,6 +1021,8 @@ export class CodingProxy {
 
   async execute(input: ExecuteProxyRequest, sink: ProxyResponseSink): Promise<void> {
     const session = await this.authenticate(input.bearer);
+    // The run's agent exists from its first model request on (both protocols arrive here).
+    if (this.onModelRequest) await this.onModelRequest(session.runId).catch(() => undefined);
     if (session.protocol !== input.protocol) {
       this.audit({ type: "request.rejected", runId: session.runId, reason: "protocol_mismatch" });
       throw new CodingProxyError(403, "protocol_mismatch");

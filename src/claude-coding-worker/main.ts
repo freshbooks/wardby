@@ -4,7 +4,7 @@ import { describeError, workerDebugTracer, type DebugTracer } from "../coding-wo
 import { safeOutputIssues, safeWorkerErrorCode } from "../coding-worker/errors.js";
 import { runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
-import { assertToolRunnerReachable } from "./tool-socket.js";
+import { assertToolRunnerReachable, callPrepareDependencies } from "./tool-socket.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
 const OUTPUT_PATH = "/run/wardby/output/result.json";
@@ -34,6 +34,7 @@ try {
     capability,
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
+    prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: input.deadlineAt }),
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
     trace,
   });

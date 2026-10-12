@@ -158,11 +158,14 @@ describe.skipIf(!process.env.DATABASE_URL)("coding concurrency (PostgreSQL, glob
       tests: [],
       usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
     };
-    await store.complete(runId, "succeeded", result);
+    const dependencyCacheResult = { projects: [{ path: ".", result: "hit" as const, key: "abc", sizeBytes: 5 }] };
+    await store.complete(runId, "succeeded", result, { dependencyCacheResult });
     await store.complete(runId, "succeeded", result);
     const terminal = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
     expect(terminal.status).toBe("succeeded");
     expect(terminal.codingRun?.result).toEqual(result);
+    // The worker's dependency cache report, in its own column (get_run's dependencyCache).
+    expect(terminal.codingRun?.dependencyCacheResult).toEqual(dependencyCacheResult);
   });
 
   it("admits exactly maxConcurrent of many racing claims and queues the rest", async () => {

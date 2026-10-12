@@ -1,5 +1,20 @@
 import type { CodingAgentOutput, CodingTaskInput } from "../coding/protocol.js";
 import type { DebugTracer } from "./debug-trace.js";
+import type {
+  dependencyCacheBudget,
+  dependencyCacheTimeLimit,
+  prepareDependencies,
+  sealUploadWindow,
+} from "./dependency-cache.mjs";
+
+/** What the driver uses from the dependency cache module (dependency-cache.mjs); injectable for tests. */
+export interface DependencyCacheModule {
+  prepareDependencies: typeof prepareDependencies;
+  sealUploadWindow: typeof sealUploadWindow;
+  dependencyCacheBudget: typeof dependencyCacheBudget;
+  dependencyCacheTimeLimit: typeof dependencyCacheTimeLimit;
+  BUDGET_MEASURE_TIMEOUT_MS: number;
+}
 
 export type WorkerProgressEvent =
   | { schemaVersion: 1; runId: string; type: "turn_started" }
@@ -53,4 +68,6 @@ export interface WorkerRunOptions {
   onProgress?: (event: WorkerProgressEvent) => void;
   /** Set only for a run the operator asked to trace (CodingTaskInput.debugTrace). */
   trace?: DebugTracer;
+  /** Tests only: replaces loading the dependency cache module, which happens only when the run asks for it. */
+  loadDependencyCache?: () => Promise<DependencyCacheModule>;
 }

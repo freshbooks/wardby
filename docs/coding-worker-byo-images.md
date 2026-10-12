@@ -322,6 +322,21 @@ current driver always disables. Rebuild any `workerImageRef` image on a
 current `driver-vN` digest (see "The driver image" above) before relying on
 either behavior.
 
+## The dependency cache needs a current driver
+
+The [dependency cache](coding-packages.md#dependency-cache) adds keys to the run
+input (`dependencyCache` and the workspace size). A worker built on an older
+driver base validates its input with a strict schema, so with the cache on
+for its agent every run fails at input (`worker_input_failed`) before the
+agent starts. For a Claude Code agent, a tool runner built on an older tool
+runner image doesn't fail the run, but it has no cache: its projects report
+`tool_unavailable`. Rebuild a `workerImageRef` image `FROM` the driver image
+(Codex) or tool runner image (Claude Code) of the release that includes the
+cache before you set `dependencyCache: true` on an agent that uses it.
+`create_agent` and `update_agent` return a warning when an agent has both.
+Images built `FROM` that release carry the cache module at
+`/opt/wardby/coding-worker/dependency-cache.mjs`; keep that path.
+
 ## What this doesn't cover
 
 wardby does not re-validate the contents of your built image beyond the

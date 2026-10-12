@@ -36,7 +36,7 @@ import {
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
   MAX_DEBUG_TRACE_LINE_BYTES,
-  parseCodingAgentOutputJson,
+  parseCodingWorkerOutputJson,
 } from "../../coding/protocol.js";
 import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "./docker-isolation.js";
 import { parseWorkerDiagnosticLine, type WorkerDiagnostic } from "./docker.js";
@@ -1191,9 +1191,9 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       if (error instanceof Error && error.message === "kubernetes_result_artifact_invalid") throw error;
       throw errorWithCode("kubernetes_result_artifact_invalid", error);
     }
-    let output: ReturnType<typeof parseCodingAgentOutputJson>;
+    let output: ReturnType<typeof parseCodingWorkerOutputJson>;
     try {
-      output = parseCodingAgentOutputJson(raw);
+      output = parseCodingWorkerOutputJson(raw);
     } catch (error) {
       throw errorWithCode("kubernetes_result_artifact_invalid", error);
     }

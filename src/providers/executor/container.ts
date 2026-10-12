@@ -41,11 +41,14 @@ import {
   CodingRunResultSchema,
   CodingTaskInputSchema,
   MAX_CODING_INPUT_BYTES,
-  parseCodingAgentOutputJson,
+  parseCodingWorkerOutputJson,
   redactAndTruncate,
+  restoredDependencyFolders,
   type ClaudeContextFile,
   type CodingAgentOutput,
   type CodingRunResult,
+  type CodingWorkerOutput,
+  type DependencyCacheReport,
 } from "../../coding/protocol.js";
 import { parseStoredEntry } from "../llm/catalog-types.js";
 import { resolveCodingEntry } from "../../core/run-pricing.js";
@@ -101,12 +104,25 @@ export async function normalizeCollectedLockfiles(provider: string, workspacePat
   });
 }
 
+/** The worker's dependency cache report, as CodingRunRecord columns: nothing on a run without one. */
+function dependencyCacheRecord(output: CodingWorkerOutput): CodingRunRecord {
+  return output.dependencyCache ? { dependencyCacheResult: output.dependencyCache } : {};
+}
+
+/** The PR body's dependency cache line: the folders restored from a snapshot (hit or nearest). */
+function restoredDependenciesFor(output: CodingWorkerOutput): { restoredDependencies?: string[] } {
+  const folders = restoredDependencyFolders(output.dependencyCache);
+  return folders.length > 0 ? { restoredDependencies: folders } : {};
+}
+
 /** Columns on CodingRun recorded when a run completes, beyond its result JSON. */
 export interface CodingRunRecord {
   /** The pushed branch of a run on a local repository. */
   resultBranch?: string;
   /** The commit the run started from. */
   baseSha?: string;
+  /** The worker's dependency cache report (CodingWorkerOutput.dependencyCache), on a run that used it. */
+  dependencyCacheResult?: DependencyCacheReport;
 }
 
 export interface ContainerRunSnapshot {
@@ -158,6 +174,8 @@ export interface ContainerRunSnapshot {
   repoSkills?: boolean;
   /** Claude Code loading mode, fixed at dispatch (CodingRun.claudeBareMode); absent on older snapshots = true. */
   claudeBareMode?: boolean;
+  /** Dependency cache, fixed at dispatch (CodingRun.dependencyCache); absent on older snapshots = false. */
+  dependencyCache?: boolean;
   /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
   services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
@@ -290,6 +308,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       maxTurns: row.codingRun.maxTurns,
       repoSkills: row.codingRun.repoSkills,
       claudeBareMode: row.codingRun.claudeBareMode,
+      dependencyCache: row.codingRun.dependencyCache,
       services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
@@ -453,6 +472,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
           resultSchema: CODING_PROTOCOL_VERSION,
           ...(record.resultBranch ? { resultBranch: record.resultBranch } : {}),
           ...(record.baseSha ? { baseSha: record.baseSha } : {}),
+          ...(record.dependencyCacheResult ? { dependencyCacheResult: record.dependencyCacheResult } : {}),
         },
       });
       await tx.run.update({
@@ -1081,7 +1101,7 @@ export class ContainerExecutor implements Executor {
       const collected = await this.options.jobs.collect(handle);
       this.emit({ stage: "collected", runId: run.runId, jobId: handle.id });
       if (collected.reason !== "completed" || !collected.resultArtifact) throw new Error("coding_result_missing");
-      const output = parseCodingAgentOutputJson(collected.resultArtifact);
+      const output = parseCodingWorkerOutputJson(collected.resultArtifact);
       if (output.runId !== run.runId) throw new Error("coding_result_run_mismatch");
       let current = await this.requireCurrent(run.runId);
       if (current.costUsd > current.budgetUsd || output.outcome === "budget_exhausted") {
@@ -1090,13 +1110,19 @@ export class ContainerExecutor implements Executor {
           run.runId,
           "budget_exhausted",
           this.resultFor(output, current, "budget_exhausted"),
+          dependencyCacheRecord(output),
         );
         this.terminal(current, "budget_exhausted");
         outcome = "budget_exhausted";
         return;
       }
       if (output.outcome === "no_changes") {
-        await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current));
+        await this.options.store.complete(
+          run.runId,
+          "succeeded",
+          this.resultFor(output, current),
+          dependencyCacheRecord(output),
+        );
         this.terminal(current, "succeeded");
         outcome = "succeeded";
         finishedSummary = output.summary;
@@ -1115,6 +1141,7 @@ export class ContainerExecutor implements Executor {
           run.runId,
           "budget_exhausted",
           this.resultFor(output, current, "budget_exhausted"),
+          dependencyCacheRecord(output),
         );
         this.terminal(current, "budget_exhausted");
         outcome = "budget_exhausted";
@@ -1129,6 +1156,7 @@ export class ContainerExecutor implements Executor {
         tests: output.tests,
         tag: output.tag,
         ...report,
+        ...restoredDependenciesFor(output),
         ...this.issueFor(current),
         ...(await this.relatedFor(current)),
       });
@@ -1136,6 +1164,7 @@ export class ContainerExecutor implements Executor {
       // request; its branch is recorded on the run for the operator to merge.
       const result = this.resultFor(output, current, finalized.outcome, finalized);
       await this.options.store.complete(run.runId, "succeeded", result, {
+        ...dependencyCacheRecord(output),
         baseSha: finalized.baseCommit,
         ...(finalized.outcome === "branch_pushed" ? { resultBranch: finalized.headRef } : {}),
       });
@@ -1385,6 +1414,8 @@ export class ContainerExecutor implements Executor {
       // A run keeps the tool image it was dispatched with; rows from before CodingRun.toolImage use the default.
       ...(provider === "claude-code" ? { toolImage: run.toolImage ?? this.options.claudeToolRunnerImage } : {}),
       inputArtifact,
+      // Only when on: every other run's spec stays exactly what it was.
+      ...(run.dependencyCache ? { dependencyCache: true as const } : {}),
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },
       labels: {},
@@ -1453,6 +1484,11 @@ export class ContainerExecutor implements Executor {
         ...(run.repoSkills === false ? { repoSkills: false } : {}),
         // Only when off: every other run's input stays exactly what older workers expect.
         ...(run.claudeBareMode === false ? { claudeBareMode: false } : {}),
+        // Only when on: every other run's input stays exactly what older workers expect. The volume
+        // size (the job spec's limits.diskMb) bounds what the cache may restore.
+        ...(run.dependencyCache
+          ? { dependencyCache: true as const, diskMb: run.workspaceDiskMb ?? this.options.limits.diskMb }
+          : {}),
         // Only when there are some: every other run's input stays exactly what older workers expect.
         ...(services.length > 0 ? { services: workerServices(services) } : {}),
         // Only when there is something to load: every other run's input stays exactly what older workers expect.

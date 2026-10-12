@@ -58,7 +58,7 @@
     "build:help": "tsx src/help/build.ts",
     "sync:reviewer-prompt": "tsx src/quickstart/sync-reviewer-prompt.ts",
     "build:viewer-schemas": "tsx src/viewer/build-schemas.ts",
-    "build": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate && tsc -p tsconfig.build.json && npm run build:help",
+    "build": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate && tsc -p tsconfig.build.json && node scripts/copy-build-modules.mjs && npm run build:help",
     "prepare": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate",
     "prepack": "npm run build",
     "cli": "tsx --conditions=wardby-source src/wardby-bin.ts",
@@ -100,8 +100,12 @@
     "@anthropic-ai/bedrock-sdk": "^0.33.4",
     "@anthropic-ai/sdk": "^0.124.0",
     "@aws-crypto/sha256-js": "4.0.0",
+    "@aws-sdk/client-s3": "3.1140.0",
+    "@aws-sdk/lib-storage": "3.1140.0",
     "@aws-sdk/rds-signer": "3.1140.0",
+    "@aws-sdk/s3-request-presigner": "3.1140.0",
     "@dbos-inc/dbos-sdk": "4.27.6",
+    "@google-cloud/storage": "8.2.0",
     "@kubernetes/client-node": "^2.0.0",
     "@modelcontextprotocol/client": "^2.3.1",
     "@modelcontextprotocol/node": "^2.0.0",
@@ -152,6 +156,7 @@
   },
   "overrides": {
     "deepmerge-ts": "8.0.2",
-    "mysql2": "3.24.4"
+    "mysql2": "3.24.4",
+    "uuid": "11.1.1"
   }
 }

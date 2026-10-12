@@ -29,6 +29,7 @@ describe("CodingProfileSchema", () => {
       services: [],
       repoSkills: true,
       claudeBareMode: true,
+      dependencyCache: false,
     });
   });
 
