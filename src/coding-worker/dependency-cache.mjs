@@ -57,6 +57,7 @@ import https from "node:https";
 import { basename, join, posix, resolve, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { createGunzip } from "node:zlib";
 
 const MIB = 1024 * 1024;
@@ -75,10 +76,14 @@ const MIB = 1024 * 1024;
  *  `httpMs` bounds each small proxy call (lookup, seal); `planMs` the
  *  lockfile plan alone, which on a proxy with a cold package-fact cache
  *  checks every package of a large lockfile before it answers (still bounded
- *  by `totalMs`, like every step). */
+ *  by `totalMs`, like every step). A proxy that stops at its own plan time
+ *  bound (REGISTRY_PLAN_TIMEOUT_MS) answers 503 `wardby_plan_incomplete` and
+ *  keeps what it verified; the plan is then sent again after
+ *  `planRetryPauseMs`, resuming there, until `planMs` is used up. */
 export const DEFAULT_TIMEOUTS = Object.freeze({
   httpMs: 120_000,
   planMs: 600_000,
+  planRetryPauseMs: 2_000,
   transferMs: 300_000,
   transferMsPerMiB: 1_000,
   installMs: 600_000,
@@ -1161,6 +1166,43 @@ async function removeNpmContentCache(context, project) {
   }
 }
 
+/** The proxy's answer when it stopped at its own plan time bound, keeping
+ *  what it verified: sending the plan again resumes there. */
+const isPlanIncomplete = (plan) =>
+  plan.status === 503 && typeof plan.body?.error === "string" && plan.body.error.startsWith("wardby_plan_incomplete");
+
+/** POST -/plan, sent again after `planRetryPauseMs` while the proxy answers
+ *  that it is incomplete, all within `planMs` (and the overall deadline,
+ *  through the signal). Every other answer is returned as it is; running
+ *  out of time is `timeout`. */
+async function requestPlan(context, project) {
+  const { auth, timeouts, signal, log } = context;
+  const planMs = Math.min(timeouts.planMs ?? DEFAULT_TIMEOUTS.planMs, timeouts.totalMs ?? DEFAULT_TIMEOUTS.totalMs);
+  const pauseMs = timeouts.planRetryPauseMs ?? DEFAULT_TIMEOUTS.planRetryPauseMs;
+  const until = Date.now() + planMs;
+  for (let attempt = 1; ; attempt += 1) {
+    const plan = await callJson(
+      new URL("-/plan", auth.base),
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${auth.token}`, "content-type": "application/json" },
+        body: project.bytes,
+        signal,
+      },
+      Math.max(1, until - Date.now()),
+      "plan_failed",
+    );
+    if (!isPlanIncomplete(plan)) return plan;
+    log("plan_incomplete", { attempt });
+    if (until - Date.now() <= pauseMs) throw new Skip("timeout");
+    try {
+      await sleep(pauseMs, undefined, { signal });
+    } catch (error) {
+      throw asSkip(error, "timeout");
+    }
+  }
+}
+
 /**
  * The flow for one npm project (`projectPath` relative to the workspace, as
  * discoverProjects returns it). Never throws.
@@ -1180,17 +1222,7 @@ export async function prepareProject(options) {
     context.cacheBase = new URL("/cache/npm/", auth.base);
 
     // The plan: the shim's request, with these exact bytes.
-    const plan = await callJson(
-      new URL("-/plan", auth.base),
-      {
-        method: "POST",
-        headers: { authorization: `Bearer ${auth.token}`, "content-type": "application/json" },
-        body: project.bytes,
-        signal,
-      },
-      Math.min(timeouts.planMs ?? DEFAULT_TIMEOUTS.planMs, timeouts.totalMs ?? DEFAULT_TIMEOUTS.totalMs),
-      "plan_failed",
-    );
+    const plan = await requestPlan(context, project);
     if (plan.status !== 200 || typeof plan.body?.approved !== "number" || !Array.isArray(plan.body?.refused))
       throw new Skip("plan_failed");
     log("plan", { approved: plan.body.approved, refused: plan.body.refused.length });

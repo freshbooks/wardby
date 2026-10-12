@@ -625,11 +625,14 @@ Other bounds:
     `cold` or `nearest`; only the upload is skipped. The worker log records
     this as `snapshot_skipped` with reason `budget` (it isn't a `get_run`
     reason).
-- The worker waits up to 10 minutes for the lockfile plan (a proxy with a
-  cold package cache checks every package of a large lockfile first), and up
-  to 2 minutes for each other proxy call. The proxy's own
-  `REGISTRY_PLAN_TIMEOUT_MS` (2 minutes by default) still bounds the plan:
-  raise it if large lockfiles end `plan_failed` on a cold proxy.
+- The worker gives the lockfile plan up to 10 minutes (a proxy with a cold
+  package cache checks every package of a large lockfile first), and each
+  other proxy call up to 2 minutes. When the proxy stops at its own
+  `REGISTRY_PLAN_TIMEOUT_MS` (`503 wardby_plan_incomplete`), the worker sends
+  the plan again after 2 seconds and the proxy resumes from what it already
+  verified, until the 10 minutes are up (`timeout`). Each attempt counts
+  toward `REGISTRY_PLAN_MAX_PER_RUN`. Raising `REGISTRY_PLAN_TIMEOUT_MS` is
+  optional tuning: it means fewer, longer attempts.
 - The whole preparation, measuring the disk included, is bounded to 20
   minutes or half the time left before the run's deadline, whichever is
   sooner, so a short run keeps most of its time for the agent. A rebuild is

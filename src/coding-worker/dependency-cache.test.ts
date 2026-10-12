@@ -1454,8 +1454,8 @@ describe("disk use", () => {
   });
 
   it("skips the snapshot when the archive would not fit what is left; node_modules stays, the result stays cold", async () => {
-    env.FAKE_NPM_BIG = String(6 * MiB);
-    const result = await prepare({ budgetBytes: 7 * MiB, minInstallBytes: 0 });
+    env.FAKE_NPM_BIG = String(2 * MiB);
+    const result = await prepare({ budgetBytes: 2.4 * MiB, minInstallBytes: 0 });
     expect(result).toMatchObject({ result: "cold" });
     expect(result.reason).toBeUndefined();
     expect(result.sizeBytes).toBeUndefined();
@@ -1468,10 +1468,10 @@ describe("disk use", () => {
   });
 
   it("aborts an archive that outgrows what is left mid-write, and leaves no partial file", async () => {
-    env.FAKE_NPM_BIG = String(6 * MiB); // incompressible: the archive comes out ~3x the estimate
+    env.FAKE_NPM_BIG = String(2 * MiB); // incompressible: the archive comes out ~3x the estimate
     let partial = 0;
     const result = await prepare({
-      budgetBytes: 9 * MiB,
+      budgetBytes: 3.1 * MiB,
       minInstallBytes: 0,
       testHooks: {
         afterArchiveAborted: async (archive: string) => {
@@ -1527,6 +1527,42 @@ describe("disk use", () => {
     await rm(join(workspace, "node_modules"), { recursive: true });
     state.sealed = false;
     expect(await prepare({ timeouts: { planMs: 200 } })).toEqual({ result: "skipped", reason: "timeout" });
+  });
+
+  const incomplete = {
+    status: 503,
+    body: { error: "wardby_plan_incomplete: the lockfile was not verified within 120 s; try again" },
+  };
+
+  it("retries a plan the proxy left incomplete (it resumes where it stopped) until it is approved", async () => {
+    let answered = 0;
+    state.planAnswer = () => (++answered <= 2 ? incomplete : { status: 200, body: { approved: 3, refused: [] } });
+    expect(await prepare({ timeouts: { planRetryPauseMs: 20 } })).toMatchObject({ result: "cold" });
+    expect(state.plans).toHaveLength(3);
+    expect(new Set(state.plans).size).toBe(1); // the same lockfile bytes each time
+    expect(events.filter((entry) => entry.event === "plan_incomplete")).toHaveLength(2);
+    expect(DEFAULT_TIMEOUTS.planRetryPauseMs).toBe(2_000);
+  });
+
+  it("stops retrying an incomplete plan at planMs, skipped as timeout", async () => {
+    state.planAnswer = incomplete;
+    const started = Date.now();
+    const result = await prepare({ timeouts: { planMs: 300, planRetryPauseMs: 50 } });
+    expect(result).toEqual({ result: "skipped", reason: "timeout" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(state.plans.length).toBeGreaterThan(1);
+    expect(await npmCalls()).toEqual([]);
+    expect(state.seals).toBe(1);
+  });
+
+  it("does not retry any other plan failure", async () => {
+    state.planAnswer = { status: 429, body: { error: "wardby_plan_limit: this run has made its 20 lockfile plans" } };
+    expect(await prepare({ timeouts: { planRetryPauseMs: 20 } })).toEqual({ result: "skipped", reason: "plan_failed" });
+    expect(state.plans).toHaveLength(1);
+    state.plans = [];
+    state.planAnswer = { status: 503, body: { error: "wardby_upstream_error: busy" } };
+    expect(await prepare({ timeouts: { planRetryPauseMs: 20 } })).toEqual({ result: "skipped", reason: "plan_failed" });
+    expect(state.plans).toHaveLength(1);
   });
 });
 

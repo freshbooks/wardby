@@ -39,6 +39,8 @@ export interface DependencyCacheTimeouts {
   readonly httpMs: number;
   /** The lockfile plan request (a cold proxy checks every package first): 10 min, still bounded by `totalMs`. */
   readonly planMs: number;
+  /** Pause before sending a plan again after the proxy's 503 `wardby_plan_incomplete` (it resumes where it stopped). */
+  readonly planRetryPauseMs: number;
   readonly transferMs: number;
   readonly transferMsPerMiB: number;
   readonly installMs: number;
