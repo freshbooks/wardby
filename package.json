@@ -58,7 +58,7 @@
     "build:help": "tsx src/help/build.ts",
     "sync:reviewer-prompt": "tsx src/quickstart/sync-reviewer-prompt.ts",
     "build:viewer-schemas": "tsx src/viewer/build-schemas.ts",
-    "build": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate && tsc -p tsconfig.build.json && npm run build:help",
+    "build": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate && tsc -p tsconfig.build.json && node scripts/copy-build-modules.mjs && npm run build:help",
     "prepare": "npm run build:vendor && PRISMA_HIDE_UPDATE_MESSAGE=1 prisma generate",
     "prepack": "npm run build",
     "cli": "tsx --conditions=wardby-source src/wardby-bin.ts",

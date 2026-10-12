@@ -91,6 +91,11 @@ export interface DependencyCacheTestHooks {
   readonly beforeDiscovery?: () => Promise<void>;
 }
 
+export declare const DEADLINE_SHARE: number;
+
+/** min(DEFAULT_TIMEOUTS.totalMs, DEADLINE_SHARE × time left before `deadlineAt`), ≥ 0; the default without a usable deadline. */
+export declare function dependencyCacheTimeLimit(deadlineAt: string | Date | number | undefined, now?: number): number;
+
 export declare const MIN_BUDGET_BYTES: number;
 export declare const BUDGET_MEASURE_TIMEOUT_MS: number;
 

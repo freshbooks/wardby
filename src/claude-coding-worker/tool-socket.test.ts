@@ -9,6 +9,7 @@ import {
   callPrepareDependencies,
   PREPARE_DEPENDENCIES_TIMEOUT_MS,
   PREPARE_DEPENDENCIES_TOOL,
+  prepareDependenciesTimeoutMs,
 } from "./tool-socket.js";
 
 const roots: string[] = [];
@@ -84,6 +85,13 @@ describe("callPrepareDependencies", () => {
     expect(PREPARE_DEPENDENCIES_TOOL).toBe("wardby_prepare_dependencies");
   });
 
+  it("passes the run's deadline to the tool when it has one", async () => {
+    const { path, seen } = await fakeRunner(mcpAnswer);
+    const deadlineAt = "2026-10-12T13:00:00.000Z";
+    await expect(callPrepareDependencies({ socketPath: path, deadlineAt })).resolves.toEqual(report);
+    expect(seen[2].params).toEqual({ name: PREPARE_DEPENDENCIES_TOOL, arguments: { deadline_at: deadlineAt } });
+  });
+
   it("an older tool runner without the tool is dependency_cache_tool_unavailable", async () => {
     for (const reply of [
       { error: { code: -32602, message: "Tool wardby_prepare_dependencies not found" } },
@@ -119,6 +127,20 @@ describe("callPrepareDependencies", () => {
     const call = callPrepareDependencies({ socketPath: silent.path, signal: controller.signal });
     controller.abort();
     await expect(call).rejects.toThrow("dependency_cache_tool_failed");
+  });
+});
+
+describe("prepareDependenciesTimeoutMs", () => {
+  it("waits for the cache's deadline-capped bound plus its settle grace, never longer than the full bound", () => {
+    const now = Date.parse("2026-10-12T12:00:00Z");
+    const short = prepareDependenciesTimeoutMs("2026-10-12T12:10:00Z", now);
+    expect(short).toBeGreaterThan(5 * 60_000 + DEFAULT_TIMEOUTS.settleMs);
+    expect(short).toBeLessThan(PREPARE_DEPENDENCIES_TIMEOUT_MS);
+    // The capped bound already includes the budget walk.
+    expect(prepareDependenciesTimeoutMs("2026-10-13T12:00:00Z", now)).toBe(
+      DEFAULT_TIMEOUTS.totalMs + DEFAULT_TIMEOUTS.settleMs + 60_000,
+    );
+    expect(prepareDependenciesTimeoutMs(undefined, now)).toBe(PREPARE_DEPENDENCIES_TIMEOUT_MS);
   });
 });
 

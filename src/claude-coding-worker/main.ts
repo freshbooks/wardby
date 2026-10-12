@@ -34,7 +34,7 @@ try {
     capability,
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
-    prepareDependencies: () => callPrepareDependencies({ signal: controller.signal }),
+    prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: input.deadlineAt }),
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
     trace,
   });

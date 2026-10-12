@@ -1066,9 +1066,17 @@ export async function prepareProject(options) {
 
     if (answer.hit) {
       const started = Date.now();
-      const sizeBytes = await restore(context, project, key, answer.maxBytes, { consistency: true });
-      context.created = undefined; // a verified hit stays
-      return { result: "hit", key, sizeBytes, restoreMs: Date.now() - started };
+      try {
+        const sizeBytes = await restore(context, project, key, answer.maxBytes, { consistency: true });
+        context.created = undefined; // a verified hit stays
+        return { result: "hit", key, sizeBytes, restoreMs: Date.now() - started };
+      } catch (error) {
+        // A hit that fails to download, verify or check is only a miss: clean up and install cold.
+        // Not one that would not fit: a cold install writes the same tree.
+        const reason = await missedRestore(context, error);
+        log("hit_rejected", { reason });
+        if (reason === "over_budget") throw new Skip(reason);
+      }
     }
 
     let result = "cold";
@@ -1081,11 +1089,8 @@ export async function prepareProject(options) {
         restoreMs = Date.now() - started;
         result = "nearest";
       } catch (error) {
-        const reason = asSkip(error, "internal_error").reason;
-        if (reason === "timeout") throw error;
         // A rejected nearest is only a miss: clean up and install cold.
-        log("nearest_rejected", { reason });
-        await cleanup(context);
+        log("nearest_rejected", { reason: await missedRestore(context, error) });
       }
     }
     if (result === "nearest") {
@@ -1130,6 +1135,19 @@ export async function prepareProject(options) {
     if (!context.session.closed) for (const path of context.temps) await removeTemp(workspace, path);
   }
 }
+
+/** A restore (hit or nearest) that failed: rethrows when the work itself is
+ *  over (the deadline, the run's cancellation or the seal), otherwise cleans
+ *  up and returns the reason, so the caller installs cold instead. */
+async function missedRestore(context, error) {
+  const reason = asSkip(error, "internal_error").reason;
+  if (STOPPED.has(reason) || context.signal.aborted || context.session.closed) throw error;
+  // A .cache that is no longer a real folder: stop here rather than work through it.
+  if (!(await cacheDirIntact(context.workspace))) throw new Skip("cache_dir_unsafe");
+  await cleanup(context);
+  return reason;
+}
+const STOPPED = new Set(["timeout", "cancelled", "sealed"]);
 
 /** Removes a node_modules this run created and every temp file. */
 async function cleanup(context) {
@@ -1336,9 +1354,27 @@ async function resolveAuth(env, proxyUrl, token) {
   return auth?.token ? auth : undefined;
 }
 
-/** POST /cache/npm/seal once. Confirmed only on the proxy's one success
- *  answer (200 `{ sealed: true }`); never throws. */
+/** Pauses between seal attempts: up to three attempts in all. */
+const SEAL_RETRY_PAUSES_MS = Object.freeze([250, 1_000]);
+
+/** POST /cache/npm/seal, retried (after a network failure or a 5xx, not a
+ *  4xx) while `timeoutMs` lasts: every attempt and pause fits inside it.
+ *  Confirmed only on the proxy's one success answer (200 `{ sealed: true }`);
+ *  never throws. The proxy also seals on the run's first model request. */
 async function postSeal(auth, timeoutMs) {
+  const until = Date.now() + timeoutMs;
+  let last = { status: 0, confirmed: false };
+  for (let attempt = 0; ; attempt += 1) {
+    last = await postSealOnce(auth, until - Date.now());
+    if (last.confirmed || (last.status >= 400 && last.status < 500)) return last;
+    const pause = SEAL_RETRY_PAUSES_MS[attempt];
+    if (pause === undefined || until - Date.now() <= pause) return last;
+    await new Promise((resolve) => setTimeout(resolve, pause));
+  }
+}
+
+async function postSealOnce(auth, timeoutMs) {
+  if (timeoutMs <= 0) return { status: 0, confirmed: false };
   try {
     const sealed = await callJson(
       new URL("/cache/npm/seal", auth.base),
@@ -1368,6 +1404,28 @@ export async function sealUploadWindow({ env, proxyUrl, token, timeoutMs = DEFAU
   }
   if (!auth) return { status: 0, confirmed: false };
   return postSeal(auth, timeoutMs);
+}
+
+/** The most of a run's remaining time the cache may take, as a share. */
+export const DEADLINE_SHARE = 0.5;
+
+/**
+ * The cache's whole time bound in ms (the budget walk and prepareDependencies
+ * together, which the caller splits): DEFAULT_TIMEOUTS.totalMs, or half the
+ * time left before the run's deadline when that is sooner, so a short run
+ * keeps most of its time for the agent. `deadlineAt` is the run's deadline
+ * (an ISO string, Date or epoch ms); a missing or unreadable one leaves the
+ * default. 0 when the deadline has passed.
+ */
+export function dependencyCacheTimeLimit(deadlineAt, now = Date.now()) {
+  const at =
+    deadlineAt instanceof Date
+      ? deadlineAt.getTime()
+      : typeof deadlineAt === "string"
+        ? Date.parse(deadlineAt)
+        : deadlineAt;
+  if (typeof at !== "number" || !Number.isFinite(at)) return DEFAULT_TIMEOUTS.totalMs;
+  return Math.max(0, Math.min(DEFAULT_TIMEOUTS.totalMs, Math.floor(DEADLINE_SHARE * (at - now))));
 }
 
 /** What the budget check keeps back from the volume: max(64 MiB, 5%). */

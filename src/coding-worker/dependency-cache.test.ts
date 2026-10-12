@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   checkConsistency,
   dependencyCacheBudget,
+  dependencyCacheTimeLimit,
   DEFAULT_TIMEOUTS,
   MIN_BUDGET_BYTES,
   discoverProjects,
@@ -408,6 +409,18 @@ function hitWith(blob: Buffer, id = "a".repeat(64)) {
   state.lookupAnswer = () => ({ status: 200, body: { key: id, hit: true, maxBytes: 64 * 1024 * 1024 } });
 }
 
+const COLD_INSTALL = ["ci", "--ignore-scripts", "--no-audit", "--no-fund"];
+
+/** A hit the module refused: it installs cold instead. Returns the reason it logged for the hit. */
+async function prepareRefusedHit(options: Partial<Parameters<typeof prepareDependencies>[0]> = {}) {
+  const result = await prepare(options);
+  expect(result).toMatchObject({ result: "cold" });
+  expect(result.reason).toBeUndefined();
+  expect(await npmCalls()).toEqual([COLD_INSTALL]);
+  expect(await exists(join(workspace, "node_modules/alpha/package.json"))).toBe(true);
+  return events.find((event) => event.event === "hit_rejected")?.reason;
+}
+
 async function cacheLeftovers(): Promise<string[]> {
   return (await exists(join(workspace, ".cache"))) ? readdir(join(workspace, ".cache")) : [];
 }
@@ -614,38 +627,45 @@ const MALICIOUS: [string, RawEntry[], string][] = [
   ],
 ];
 describe("untrusted archives", () => {
-  it("rejects a sha256 mismatch and deletes the download", async () => {
+  it("rejects a sha256 mismatch, deletes the download and installs cold", async () => {
     hitWith(await realTarSnapshot(LOCKFILE));
     state.shaOverride = "0".repeat(64);
-    expect(await prepare()).toEqual({ result: "skipped", reason: "sha_mismatch" });
-    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await prepareRefusedHit()).toBe("sha_mismatch");
     expect(await cacheLeftovers()).toEqual([]);
   });
 
-  it("rejects a short download (content-length not met)", async () => {
+  it("rejects a short download (content-length not met) and installs cold", async () => {
     const blob = await realTarSnapshot(LOCKFILE);
     hitWith(blob);
     state.lengthOverride = blob.length + 100;
-    const result = await prepare();
-    expect(result.result).toBe("skipped");
-    expect(["download_failed", "size_mismatch"]).toContain(result.reason);
+    expect(["download_failed", "size_mismatch"]).toContain(await prepareRefusedHit());
     expect(await cacheLeftovers()).toEqual([]);
   });
 
-  it("rejects a download larger than the lookup's maxBytes", async () => {
+  it("installs cold when the hit's download fails (a row whose blob is gone)", async () => {
+    state.lookupAnswer = () => ({ status: 200, body: { key: "a".repeat(64), hit: true, maxBytes: 64 * 1024 * 1024 } });
+    expect(await prepareRefusedHit()).toBe("download_failed");
+    expect(state.uploads).toHaveLength(1);
+  });
+
+  it("rejects a download larger than the lookup's maxBytes and installs cold", async () => {
     const blob = await realTarSnapshot(LOCKFILE);
     state.blobs.set("a".repeat(64), blob);
     state.lookupAnswer = () => ({ status: 200, body: { key: "a".repeat(64), hit: true, maxBytes: 10 } });
-    expect(await prepare()).toEqual({ result: "skipped", reason: "too_large" });
+    expect(await prepareRefusedHit()).toBe("too_large");
   });
 
-  it.each(MALICIOUS)("rejects %s before extracting anything", async (_label, entries, reason) => {
+  it.each(MALICIOUS)("rejects %s before extracting anything, then installs cold", async (_label, entries, reason) => {
     hitWith(rawTar([{ name: "node_modules/", type: "5" }, ...entries]));
-    expect(await prepare({ budgetBytes: 1024 * 1024 * 1024 })).toEqual({ result: "skipped", reason });
-    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    if (reason === "over_budget") {
+      // A hit too big for the run's disk: a cold install would write the same tree, so none is tried.
+      expect(await prepare({ budgetBytes: 1024 * 1024 * 1024 })).toEqual({ result: "skipped", reason });
+      expect(await npmCalls()).toEqual([]);
+      expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    } else expect(await prepareRefusedHit({ budgetBytes: 1024 * 1024 * 1024 })).toBe(reason);
     expect(await exists(join(root, "outside"))).toBe(false);
+    expect(await exists(join(workspace, "node_modules/evil"))).toBe(false);
     expect(await cacheLeftovers()).toEqual([]);
-    expect(await npmCalls()).toEqual([]);
   });
 
   it.each(MALICIOUS)("scanArchive alone rejects %s", async (_label, entries, reason) => {
@@ -657,9 +677,11 @@ describe("untrusted archives", () => {
   it("rejects the case-folding link chain with nothing written outside the temp folder, on any file system", async () => {
     hitWith(rawTar([{ name: "node_modules/", type: "5" }, ...CASE_FOLD_CHAIN]));
     const before = (await readdir(workspace)).sort();
-    expect(await prepare({ budgetBytes: 1024 * 1024 * 1024 })).toEqual({ result: "skipped", reason: "unsafe_archive" });
+    expect(await prepareRefusedHit({ budgetBytes: 1024 * 1024 * 1024 })).toBe("unsafe_archive");
     expect(await allNames(root)).not.toContain("PWNED");
-    expect((await readdir(workspace)).filter((name) => name !== ".cache").sort()).toEqual(before);
+    expect((await readdir(workspace)).filter((name) => name !== ".cache" && name !== "node_modules").sort()).toEqual(
+      before,
+    );
     expect(await cacheLeftovers()).toEqual([]);
   });
 
@@ -761,10 +783,11 @@ describe("untrusted archives", () => {
 // ---------------------------------------------------------------- consistency
 
 describe("consistency", () => {
-  it("rejects a restored tree whose hidden lockfile disagrees, leaving nothing behind", async () => {
+  it("rejects a restored tree whose hidden lockfile disagrees, leaving nothing of it, and installs cold", async () => {
     hitWith(await realTarSnapshot(LOCKFILE_V2));
-    expect(await prepare()).toEqual({ result: "skipped", reason: "inconsistent" });
-    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await prepareRefusedHit()).toBe("inconsistent");
+    const alpha = JSON.parse(await readFile(join(workspace, "node_modules/alpha/package.json"), "utf8"));
+    expect(alpha.version).toBe("1.0.0");
     expect(await cacheLeftovers()).toEqual([]);
   });
 
@@ -777,8 +800,9 @@ describe("consistency", () => {
         );
       }),
     );
-    expect(await prepare()).toEqual({ result: "skipped", reason: "inconsistent" });
-    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await prepareRefusedHit()).toBe("inconsistent");
+    const alpha = JSON.parse(await readFile(join(workspace, "node_modules/alpha/package.json"), "utf8"));
+    expect(alpha.version).toBe("1.0.0");
   });
 
   it("a cold install that comes out inconsistent is kept but not snapshotted", async () => {
@@ -867,6 +891,33 @@ describe("seal and timeouts", () => {
     expect(state.authorizations.at(-1)).toBe("Bearer run-token");
     state.sealStatus = 500;
     expect(await sealUploadWindow({ env })).toEqual({ status: 500, confirmed: false });
+  });
+
+  it("retries a seal that failed with a 5xx, a few times within its timeout, but not a 4xx", async () => {
+    state.sealStatus = 503;
+    const answer = sealUploadWindow({ env, timeoutMs: 10_000 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    state.sealStatus = undefined; // the proxy recovers before the next attempt
+    expect(await answer).toEqual({ status: 200, confirmed: true });
+    expect(state.seals).toBe(2);
+
+    state.seals = 0;
+    state.sealStatus = 500;
+    expect(await sealUploadWindow({ env, timeoutMs: 10_000 })).toEqual({ status: 500, confirmed: false });
+    expect(state.seals).toBe(3);
+
+    state.seals = 0;
+    state.sealStatus = 401;
+    expect(await sealUploadWindow({ env, timeoutMs: 10_000 })).toEqual({ status: 401, confirmed: false });
+    expect(state.seals).toBe(1);
+
+    // No pause that would outlast the timeout.
+    state.seals = 0;
+    state.sealStatus = 500;
+    const started = Date.now();
+    expect(await sealUploadWindow({ env, timeoutMs: 200 })).toEqual({ status: 500, confirmed: false });
+    expect(state.seals).toBe(1);
+    expect(Date.now() - started).toBeLessThan(200);
   });
 
   it("sealUploadWindow never throws: no registry, or a proxy that hangs", async () => {
@@ -1052,10 +1103,11 @@ describe("several npm projects in one repo", () => {
     expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
       [".", "hit", undefined],
       ["app", "refused", "plan_refused"],
-      ["server", "skipped", "unsafe_archive"],
+      ["server", "cold", undefined],
       ["tools", "hit", undefined],
     ]);
-    expect(await exists(join(workspace, "server/node_modules"))).toBe(false);
+    expect(events).toContainEqual({ event: "hit_rejected", project: "server", reason: "unsafe_archive" });
+    expect(await exists(join(workspace, "server/node_modules/evil"))).toBe(false);
     expect(await exists(join(workspace, "tools/node_modules/alpha"))).toBe(true);
     expect(state.seals).toBe(1);
   });
@@ -1311,6 +1363,19 @@ describe("review fixes", () => {
 });
 
 // ---------------------------------------------------------------- budget
+
+describe("dependencyCacheTimeLimit", () => {
+  it("is the module's bound, or half the time left before the deadline when sooner, never negative", () => {
+    const now = Date.parse("2026-10-12T12:00:00Z");
+    expect(dependencyCacheTimeLimit("2026-10-12T14:00:00Z", now)).toBe(DEFAULT_TIMEOUTS.totalMs);
+    expect(dependencyCacheTimeLimit("2026-10-12T12:10:00Z", now)).toBe(5 * 60_000);
+    expect(dependencyCacheTimeLimit(new Date(now + 60_000), now)).toBe(30_000);
+    expect(dependencyCacheTimeLimit(now + 1_000, now)).toBe(500);
+    expect(dependencyCacheTimeLimit("2026-10-12T11:00:00Z", now)).toBe(0);
+    expect(dependencyCacheTimeLimit(undefined, now)).toBe(DEFAULT_TIMEOUTS.totalMs);
+    expect(dependencyCacheTimeLimit("not a date", now)).toBe(DEFAULT_TIMEOUTS.totalMs);
+  });
+});
 
 describe("dependencyCacheBudget", () => {
   const MiB = 1024 * 1024;

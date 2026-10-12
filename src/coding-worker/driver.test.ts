@@ -8,7 +8,12 @@ import { deriveRegistryToken } from "../coding/registry/token.js";
 import type { CodingTaskInput } from "../coding/protocol.js";
 import { CODING_OUTPUT_JSON_SCHEMA, runCodingWorker, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
 import type { DependencyCacheModule, WorkerClientConfig, WorkerEvent, WorkerThread } from "./types.js";
-import { dependencyCacheBudget } from "./dependency-cache.mjs";
+import {
+  BUDGET_MEASURE_TIMEOUT_MS,
+  DEFAULT_TIMEOUTS,
+  dependencyCacheBudget,
+  dependencyCacheTimeLimit,
+} from "./dependency-cache.mjs";
 import { createDebugTracer } from "./debug-trace.js";
 
 async function tempWorkspace(): Promise<string> {
@@ -409,16 +414,28 @@ describe("runCodingWorker dependency cache", () => {
     summary: "None.",
     tests: [],
   });
-  const cacheInput: CodingTaskInput = { ...input, dependencyCache: true, diskMb: 2048 };
+  const cacheInput: CodingTaskInput = {
+    ...input,
+    deadlineAt: new Date(Date.now() + 3_600_000).toISOString(),
+    dependencyCache: true,
+    diskMb: 2048,
+  };
 
   type PrepareOptions = Parameters<DependencyCacheModule["prepareDependencies"]>[0];
 
   /** A module whose budget is the real one and whose prepare/seal are recorded. */
   function fakeModule(order: string[], prepare: (options: PrepareOptions) => Promise<unknown>) {
-    const seen: { prepare?: PrepareOptions; seals: number } = { seals: 0 };
+    const seen: {
+      prepare?: PrepareOptions;
+      budget?: Parameters<DependencyCacheModule["dependencyCacheBudget"]>[0];
+      seals: number;
+    } = { seals: 0 };
     const module: DependencyCacheModule = {
+      BUDGET_MEASURE_TIMEOUT_MS,
+      dependencyCacheTimeLimit,
       dependencyCacheBudget: async (options) => {
         order.push("budget");
+        seen.budget = options;
         return dependencyCacheBudget(options);
       },
       prepareDependencies: async (options) => {
@@ -534,9 +551,38 @@ describe("runCodingWorker dependency cache", () => {
   it("no volume size (budget_unknown) is a skip too", async () => {
     const order: string[] = [];
     const { module } = fakeModule(order, async () => ({ projects: [] }));
-    const { output } = await run({ ...input, dependencyCache: true }, async () => module, {}, order);
+    const { output } = await run({ ...cacheInput, diskMb: undefined }, async () => module, {}, order);
     expect(order).toEqual(["budget", "seal", "client"]);
     expect(output.dependencyCache).toEqual({ projects: [], reason: "budget_unknown" });
+  });
+
+  it("gives the cache at most half the time left before the run's deadline, the budget walk included", async () => {
+    const { module, seen } = fakeModule([], async () => ({ projects: [] }));
+    const deadlineAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    await run({ ...cacheInput, deadlineAt }, async () => module);
+    const totalMs = seen.prepare?.timeouts?.totalMs ?? 0;
+    expect(totalMs).toBeLessThanOrEqual(5 * 60_000);
+    expect(totalMs).toBeGreaterThan(5 * 60_000 - 10_000);
+    expect(seen.budget?.timeoutMs).toBe(BUDGET_MEASURE_TIMEOUT_MS);
+
+    // A long run keeps the module's own bound.
+    const long = fakeModule([], async () => ({ projects: [] }));
+    await run(cacheInput, async () => long.module);
+    expect(long.seen.prepare?.timeouts?.totalMs).toBeLessThanOrEqual(DEFAULT_TIMEOUTS.totalMs);
+    expect(long.seen.prepare?.timeouts?.totalMs).toBeGreaterThan(DEFAULT_TIMEOUTS.totalMs - 10_000);
+
+    // A very short run bounds the budget walk too.
+    const short = fakeModule([], async () => ({ projects: [] }));
+    await run({ ...cacheInput, deadlineAt: new Date(Date.now() + 20_000).toISOString() }, async () => short.module);
+    expect(short.seen.budget?.timeoutMs).toBeLessThanOrEqual(10_000);
+  });
+
+  it("skips the cache, sealed, when the deadline has passed", async () => {
+    const order: string[] = [];
+    const { module } = fakeModule(order, async () => ({ projects: [] }));
+    const { output } = await run({ ...cacheInput, deadlineAt: input.deadlineAt }, async () => module, {}, order);
+    expect(order).toEqual(["seal", "client"]);
+    expect(output.dependencyCache).toEqual({ projects: [], reason: "timeout" });
   });
 
   it("adds no task note when nothing was installed", async () => {

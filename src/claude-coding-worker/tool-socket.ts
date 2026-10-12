@@ -1,5 +1,9 @@
 import { createConnection } from "node:net";
-import { BUDGET_MEASURE_TIMEOUT_MS, DEFAULT_TIMEOUTS } from "../coding-worker/dependency-cache.mjs";
+import {
+  BUDGET_MEASURE_TIMEOUT_MS,
+  DEFAULT_TIMEOUTS,
+  dependencyCacheTimeLimit,
+} from "../coding-worker/dependency-cache.mjs";
 
 /** Where the tool runner listens (claude-tool-runner/main.mjs) and the relay connects (tool-relay.ts). */
 export const TOOL_SOCKET_PATH = "/run/wardby/tool/runner.sock";
@@ -44,8 +48,20 @@ const MAX_RESPONSE_LINE_BYTES = 256 * 1024;
 
 export interface PrepareDependenciesCall {
   socketPath?: string;
+  /** Defaults to the cache's bound for `deadlineAt` (dependencyCacheTimeLimit) plus its settle grace and a margin. */
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** The run's deadline (CodingTaskInput.deadlineAt), passed to the tool: the cache takes at most half the time left. */
+  deadlineAt?: string;
+}
+
+/** How long the worker waits for the prepare tool on a run with this deadline. */
+export function prepareDependenciesTimeoutMs(deadlineAt?: string, now = Date.now()): number {
+  if (deadlineAt === undefined) return PREPARE_DEPENDENCIES_TIMEOUT_MS;
+  return Math.min(
+    PREPARE_DEPENDENCIES_TIMEOUT_MS,
+    dependencyCacheTimeLimit(deadlineAt, now) + DEFAULT_TIMEOUTS.settleMs + PREPARE_DEPENDENCIES_MARGIN_MS,
+  );
 }
 
 /**
@@ -57,7 +73,8 @@ export interface PrepareDependenciesCall {
  */
 export async function callPrepareDependencies({
   socketPath = TOOL_SOCKET_PATH,
-  timeoutMs = PREPARE_DEPENDENCIES_TIMEOUT_MS,
+  deadlineAt,
+  timeoutMs = prepareDependenciesTimeoutMs(deadlineAt),
   signal,
 }: PrepareDependenciesCall = {}): Promise<unknown> {
   const failed = () => new Error("dependency_cache_tool_failed");
@@ -111,7 +128,10 @@ export async function callPrepareDependencies({
     });
     if (!initialized.result) throw failed();
     socket.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
-    const called = await request("tools/call", { name: PREPARE_DEPENDENCIES_TOOL, arguments: {} });
+    const called = await request("tools/call", {
+      name: PREPARE_DEPENDENCIES_TOOL,
+      arguments: deadlineAt === undefined ? {} : { deadline_at: deadlineAt },
+    });
     const result = called.result as
       { isError?: boolean; content?: Array<{ type?: string; text?: unknown }> } | undefined;
     if (called.error || !result || result.isError) throw new Error("dependency_cache_tool_unavailable");

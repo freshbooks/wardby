@@ -52,21 +52,40 @@ function dependencyGate(setup, workspacePath, loadDependencyCache) {
       }
     })());
   return {
-    prepare() {
+    /**
+     * `deadlineAt`: the run's deadline (ISO), which the worker passes; the cache then takes at most
+     * half the time left before it (dependencyCacheTimeLimit), the budget walk included. `signal`:
+     * the call's own (aborted when the worker's connection closes): the work stops and settles.
+     */
+    prepare({ deadlineAt, signal } = {}) {
       if (preparing) return preparing;
       if (commandStarted) return Promise.resolve({ projects: [], reason: "already_started" });
       preparing = (async () => {
+        if (deadlineAt !== undefined && !Number.isFinite(Date.parse(deadlineAt)))
+          return { projects: [], reason: "invalid_deadline" };
         try {
+          const started = Date.now();
           await prepareCommandWorkspace(setup, workspacePath);
           const module = await loadDependencyCache();
+          const limitMs = module.dependencyCacheTimeLimit(deadlineAt, started);
+          if (limitMs <= 0) return { projects: [], reason: "timeout" };
           // The run's volume (setup.diskMb) minus what the workspace already uses: statfs can't
           // see a Kubernetes emptyDir's sizeLimit. A size it can't measure skips the cache.
-          const budget = await module.dependencyCacheBudget({ workspace: workspacePath, diskMb: setup.diskMb });
+          const budget = await module.dependencyCacheBudget({
+            workspace: workspacePath,
+            diskMb: setup.diskMb,
+            signal,
+            timeoutMs: Math.min(module.BUDGET_MEASURE_TIMEOUT_MS, limitMs),
+          });
           if (budget.reason !== undefined) return { projects: [], reason: budget.reason };
+          const totalMs = limitMs - (Date.now() - started);
+          if (totalMs <= 0) return { projects: [], reason: "timeout" };
           return await module.prepareDependencies({
             workspace: workspacePath,
             env: env(),
             budgetBytes: budget.budgetBytes,
+            signal,
+            timeouts: { totalMs },
           });
         } catch {
           return { projects: [], reason: "worker_error" };
@@ -106,8 +125,15 @@ function toolServer(setup, gate, workspacePath) {
   if (setup.dependencyCache) {
     server.registerTool(
       PREPARE_DEPENDENCIES_TOOL,
-      { description: "Wardby internal: restore the run's dependencies before the agent starts.", inputSchema: {} },
-      async () => ({ content: [{ type: "text", text: JSON.stringify(await gate.prepare()) }] }),
+      {
+        description: "Wardby internal: restore the run's dependencies before the agent starts.",
+        inputSchema: { deadline_at: z.string().max(64).optional() },
+      },
+      async ({ deadline_at }, extra) => ({
+        content: [
+          { type: "text", text: JSON.stringify(await gate.prepare({ deadlineAt: deadline_at, signal: extra.signal })) },
+        ],
+      }),
     );
   }
   return server;
@@ -124,6 +150,8 @@ export async function startToolRunner(
   const gate = dependencyGate(setup, workspacePath, loadDependencyCache);
   const server = createServer((socket) => {
     const mcp = toolServer(setup, gate, workspacePath);
+    // A closed connection ends the server, which aborts its in-flight calls' signals (a prepare stops).
+    socket.once("close", () => void mcp.close().catch(() => undefined));
     void mcp.connect(new StdioServerTransport(socket, socket)).catch(() => socket.destroy());
   });
   await new Promise((resolve, reject) => server.listen(socketPath, () => resolve()).once("error", reject));

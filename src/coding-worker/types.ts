@@ -1,12 +1,19 @@
 import type { CodingAgentOutput, CodingTaskInput } from "../coding/protocol.js";
 import type { DebugTracer } from "./debug-trace.js";
-import type { dependencyCacheBudget, prepareDependencies, sealUploadWindow } from "./dependency-cache.mjs";
+import type {
+  dependencyCacheBudget,
+  dependencyCacheTimeLimit,
+  prepareDependencies,
+  sealUploadWindow,
+} from "./dependency-cache.mjs";
 
 /** What the driver uses from the dependency cache module (dependency-cache.mjs); injectable for tests. */
 export interface DependencyCacheModule {
   prepareDependencies: typeof prepareDependencies;
   sealUploadWindow: typeof sealUploadWindow;
   dependencyCacheBudget: typeof dependencyCacheBudget;
+  dependencyCacheTimeLimit: typeof dependencyCacheTimeLimit;
+  BUDGET_MEASURE_TIMEOUT_MS: number;
 }
 
 export type WorkerProgressEvent =

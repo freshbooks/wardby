@@ -150,20 +150,34 @@ async function runDependencyCache(
     }
   };
   try {
+    // At most half the run's remaining time (and the module's own bound), the budget walk included.
+    const started = Date.now();
+    const limitMs = module.dependencyCacheTimeLimit(options.input.deadlineAt, started);
+    if (limitMs <= 0) {
+      await seal();
+      return { projects: [], reason: "timeout" };
+    }
     const budget = await module.dependencyCacheBudget({
       workspace: options.workspace,
       diskMb: options.input.diskMb,
       signal: options.signal,
+      timeoutMs: Math.min(module.BUDGET_MEASURE_TIMEOUT_MS, limitMs),
     });
     if (budget.reason !== undefined) {
       await seal();
       return { projects: [], reason: budget.reason };
+    }
+    const totalMs = limitMs - (Date.now() - started);
+    if (totalMs <= 0) {
+      await seal();
+      return { projects: [], reason: "timeout" };
     }
     const result = await module.prepareDependencies({
       workspace: options.workspace,
       env,
       budgetBytes: budget.budgetBytes,
       signal: options.signal,
+      timeouts: { totalMs },
       log: (event, fields) => options.trace?.record("dependency_cache", { event, ...fields }),
     });
     return sanitizeDependencyCacheReport(result);

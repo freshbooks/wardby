@@ -6,7 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { parseToolSetup, toolEnvironment } from "./command.mjs";
-import { dependencyCacheBudget } from "../coding-worker/dependency-cache.mjs";
+import {
+  BUDGET_MEASURE_TIMEOUT_MS,
+  DEFAULT_TIMEOUTS,
+  dependencyCacheBudget,
+  dependencyCacheTimeLimit,
+} from "../coding-worker/dependency-cache.mjs";
 import { PREPARE_DEPENDENCIES_TOOL, startToolRunner, TOOL_RUNNER_READY_MESSAGE } from "./main.mjs";
 
 test("exposes a fixed lifecycle readiness marker", () => {
@@ -148,8 +153,11 @@ function fakeModule(order = []) {
   const calls = { prepare: [], seal: [] };
   return {
     calls,
+    BUDGET_MEASURE_TIMEOUT_MS,
+    dependencyCacheTimeLimit,
     dependencyCacheBudget: (options) => {
       order.push("budget");
+      calls.budget = options;
       return dependencyCacheBudget(options);
     },
     prepareDependencies: async (options) => {
@@ -342,5 +350,61 @@ test("loads the real module from ../coding-worker, where the image puts it", asy
     assert.deepEqual(toolJson(await callTool(client, PREPARE_DEPENDENCIES_TOOL)), {
       projects: [{ path: ".", result: "skipped", reason: "no_lockfile" }],
     });
+  });
+});
+
+test("caps the cache at half the time left before the deadline the worker passes, the budget walk included", async () => {
+  const module = fakeModule();
+  await withRunner({ module }, async ({ connect }) => {
+    const client = await connect();
+    const deadlineAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    await callTool(client, PREPARE_DEPENDENCIES_TOOL, { deadline_at: deadlineAt });
+    const totalMs = module.calls.prepare[0].timeouts.totalMs;
+    assert.ok(totalMs <= 5 * 60_000 && totalMs > 5 * 60_000 - 10_000, String(totalMs));
+    assert.equal(module.calls.budget.timeoutMs, BUDGET_MEASURE_TIMEOUT_MS);
+  });
+  const unbounded = fakeModule();
+  await withRunner({ module: unbounded }, async ({ connect }) => {
+    // An older worker sends no deadline: the module's own bound.
+    await callTool(await connect(), PREPARE_DEPENDENCIES_TOOL);
+    const totalMs = unbounded.calls.prepare[0].timeouts.totalMs;
+    assert.ok(totalMs <= DEFAULT_TIMEOUTS.totalMs && totalMs > DEFAULT_TIMEOUTS.totalMs - 10_000, String(totalMs));
+  });
+});
+
+test("refuses an unreadable deadline and skips a passed one, never preparing", async () => {
+  for (const [deadline, reason] of [
+    ["not a date", "invalid_deadline"],
+    [new Date(Date.now() - 1_000).toISOString(), "timeout"],
+  ]) {
+    const order = [];
+    const module = fakeModule(order);
+    await withRunner({ module }, async ({ connect }) => {
+      const client = await connect();
+      const result = toolJson(await callTool(client, PREPARE_DEPENDENCIES_TOOL, { deadline_at: deadline }));
+      assert.deepEqual(result, { projects: [], reason });
+      await callTool(client, "run_command", { command: "true" });
+      assert.deepEqual(order, ["seal"]);
+    });
+  }
+});
+
+test("a worker that hangs up stops the prepare (its signal aborts)", async () => {
+  const module = fakeModule();
+  let aborted;
+  module.prepareDependencies = (options) =>
+    new Promise((resolve) => {
+      aborted = new Promise((done) => options.signal.addEventListener("abort", done, { once: true }));
+      void aborted.then(() => resolve({ projects: [], reason: "cancelled" }));
+    });
+  await withRunner({ module }, async ({ connect }) => {
+    const client = await connect();
+    void callTool(client, PREPARE_DEPENDENCIES_TOOL).catch(() => undefined);
+    while (!aborted) await new Promise((resolve) => setTimeout(resolve, 5));
+    client.socket.destroy();
+    await aborted;
+    const other = await connect();
+    const ran = await callTool(other, "run_command", { command: "true" });
+    assert.equal(ran.result.isError, false);
   });
 });
