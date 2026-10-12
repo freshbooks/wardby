@@ -1,0 +1,5 @@
+# The kind overlay plus the run dependency cache (local blob store on the proxy).
+resources:
+  - ../kind
+components:
+  - ../../components/dependency-cache-local

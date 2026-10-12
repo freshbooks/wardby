@@ -32,3 +32,11 @@ secrets_deletion_protection = true
 # REQUIRED refuses connections that bypass the Cloud SQL Auth Proxy. Set
 # NOT_REQUIRED only while moving an older deployment off password login.
 connector_enforcement = "REQUIRED"
+
+# Run dependency cache (off by default). Creates a private bucket only the
+# coding proxy can use. Bucket names are global: pick one unique to you. Keep
+# max_age_days equal to WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS (default 14).
+# Then deploy with WARDBY_DEPENDENCY_CACHE=true to turn the feature on.
+# dependency_cache_enabled      = true
+# dependency_cache_bucket_name  = "your-unique-dependency-cache-bucket"
+# dependency_cache_max_age_days = 14

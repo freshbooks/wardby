@@ -7,6 +7,7 @@
 #   WARDBY_LOW_POWER=1 WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh   # low-power mode
 #   WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme,acme-labs   # optional: accounts the GitHub App serves besides its owner
 #   WARDBY_MOBILE_ENABLED=true   # optional: allow the wardby mobile app to sign in (default false)
+#   WARDBY_DEPENDENCY_CACHE=true   # optional: run dependency cache on the coding proxy (default false; needs dependency_cache_enabled in terraform.tfvars)
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
 # re-pushed (digests change only if the source did), values already in Secret
@@ -99,6 +100,51 @@ else
 fi
 # --- end WARDBY_MOBILE_ENABLED check ---
 
+# --- WARDBY_DEPENDENCY_CACHE check ---
+# Optional: true turns on the run dependency cache. It needs the bucket from
+# deploy/gke/dependency-cache.tf (dependency_cache_enabled = true in
+# terraform.tfvars). Empty = false, and then no blob-store env reaches the proxy.
+WARDBY_DEPENDENCY_CACHE="${WARDBY_DEPENDENCY_CACHE:-false}"
+case "$WARDBY_DEPENDENCY_CACHE" in
+  true | false) ;;
+  *)
+    echo "up.sh: WARDBY_DEPENDENCY_CACHE must be true or false (got \"$WARDBY_DEPENDENCY_CACHE\")." >&2
+    exit 1
+    ;;
+esac
+if [[ "$WARDBY_DEPENDENCY_CACHE" = true ]]; then
+  echo "up.sh: dependency cache is on."
+else
+  echo "up.sh: dependency cache is off."
+fi
+# --- end WARDBY_DEPENDENCY_CACHE check ---
+
+# --- WARDBY_DEPENDENCY_CACHE proxy env ---
+# Adds the blob-store env to the coding proxy's container, right after its
+# DATABASE_URL entry (the one place that placeholder appears), in the proxy's
+# own indentation. Does nothing unless the cache is on. The bucket comes from
+# terraform (DEPENDENCY_CACHE_BUCKET, read after the apply); only the proxy
+# gets it, because only the proxy's service account can reach the bucket.
+inject_dependency_cache_env() {
+  if [[ "$WARDBY_DEPENDENCY_CACHE" != true ]]; then
+    cat
+    return
+  fi
+  if ! [[ "${DEPENDENCY_CACHE_BUCKET:-}" =~ ^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$ ]]; then
+    echo "up.sh: WARDBY_DEPENDENCY_CACHE=true but terraform has no dependency cache bucket (got \"${DEPENDENCY_CACHE_BUCKET:-}\"); set dependency_cache_enabled and dependency_cache_bucket_name in ${TF_DIR:-deploy/gke}/terraform.tfvars and re-run." >&2
+    exit 1
+  fi
+  awk -v bucket="$DEPENDENCY_CACHE_BUCKET" '
+    { print }
+    /^ *value: wardby-proxy-database-url$/ {
+      match($0, /^ */); value_indent = substr($0, 1, RLENGTH); item_indent = substr(value_indent, 3)
+      print item_indent "- name: BLOB_STORE";                  print value_indent "value: \"gcs\""
+      print item_indent "- name: BLOB_STORE_GCS_BUCKET";       print value_indent "value: \"" bucket "\""
+      print item_indent "- name: WARDBY_DEPENDENCY_CACHE";     print value_indent "value: \"true\""
+    }'
+}
+# --- end WARDBY_DEPENDENCY_CACHE proxy env ---
+
 echo "==> 1/${TOTAL_STEPS} terraform: cluster, image registry, database"
 terraform -chdir="$TF_DIR" init -input=false >/dev/null
 terraform -chdir="$TF_DIR" apply -input=false -auto-approve
@@ -123,6 +169,8 @@ MIGRATOR_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw migrator_databa
 PROXY_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw proxy_database_user)"
 GATEWAY_SERVICE_ACCOUNT="$(terraform -chdir="$TF_DIR" output -raw gateway_service_account)"
 GATEWAY_DATABASE_USER="$(terraform -chdir="$TF_DIR" output -raw gateway_database_user)"
+# Empty unless dependency_cache_enabled; only consulted when WARDBY_DEPENDENCY_CACHE=true.
+DEPENDENCY_CACHE_BUCKET="$(terraform -chdir="$TF_DIR" output -raw dependency_cache_bucket 2>/dev/null || true)"
 for var in CONNECTION DB_NAME APP_SERVICE_ACCOUNT MIGRATOR_SERVICE_ACCOUNT \
            PROXY_SERVICE_ACCOUNT APP_DATABASE_USER MIGRATOR_DATABASE_USER PROXY_DATABASE_USER \
            GATEWAY_SERVICE_ACCOUNT GATEWAY_DATABASE_USER; do
@@ -460,6 +508,7 @@ PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardb
 # a deploy of new code does not replay old checkpoints against it (those runs
 # end lost, as they would without the durable executor).
 OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
+  | inject_dependency_cache_env \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \

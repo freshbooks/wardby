@@ -1,0 +1,7 @@
+# Run dependency cache on kind: the coding proxy keeps snapshots on a local
+# directory. Off unless an overlay includes this component (up.sh does when
+# WARDBY_DEPENDENCY_CACHE=true).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: proxy.yaml

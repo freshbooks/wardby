@@ -277,6 +277,9 @@ required while `endpoint_public_access` is true.
 | `lbc_iam_policy_sha256`             | the policy's checksum                                    | SHA-256 of that release's `iam_policy.json`; a mismatching download is refused.                                                                                                       |
 | `lbc_namespace`                     | `kube-system`                                            | Namespace of the load balancer controller.                                                                                                                                            |
 | `lbc_service_account`               | `aws-load-balancer-controller`                           | Service account of the load balancer controller.                                                                                                                                      |
+| `dependency_cache_enabled`          | `false`                                                  | Create the run dependency cache bucket, readable and writable by the coding proxy's role only.                                                                                        |
+| `dependency_cache_bucket_name`      | `""`                                                     | Name of that bucket (global across S3). Required when the cache is enabled.                                                                                                           |
+| `dependency_cache_max_age_days`     | `14`                                                     | Match `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS`; the bucket deletes objects older than this plus 7 days as a backstop.                                                                   |
 
 ## Outputs
 
@@ -312,6 +315,7 @@ required while `endpoint_public_access` is true.
 | `certificate_validation_records`  | DNS records that validate the certificate; create them yourself when `route53_zone_id` is unset.  |
 | `waf_web_acl_arn`                 | WAF web ACL for the load balancer.                                                                |
 | `lbc_role_arn`                    | IAM role of the AWS Load Balancer Controller.                                                     |
+| `dependency_cache_bucket`         | The run dependency cache bucket (`BLOB_STORE_S3_BUCKET`); empty when disabled.                    |
 
 ## Cost
 

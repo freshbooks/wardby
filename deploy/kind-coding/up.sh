@@ -38,6 +38,15 @@ if [ "$LOW_POWER" = 1 ]; then
   OVERLAY_DIR_NAME=kind-low-power
   LOW_POWER_LABEL=on
 fi
+# WARDBY_DEPENDENCY_CACHE=true adds the run dependency cache: BLOB_STORE=local on the
+# coding proxy, backed by an emptyDir (not durable -- snapshots vanish when the proxy
+# pod restarts). Unset or false leaves the proxy with no blob store.
+DEPENDENCY_CACHE="${WARDBY_DEPENDENCY_CACHE:-false}"
+case "$DEPENDENCY_CACHE" in true|false) ;; *) echo "up.sh: WARDBY_DEPENDENCY_CACHE must be true or false (got \"$DEPENDENCY_CACHE\")." >&2; exit 1 ;; esac
+if [ "$DEPENDENCY_CACHE" = true ]; then
+  OVERLAY_DIR_NAME="${OVERLAY_DIR_NAME}-dependency-cache"
+  echo "up.sh: dependency cache is on (local blob store, not durable)."
+fi
 OVERLAY="${MANIFEST_DIR}/manifests/overlays/${OVERLAY_DIR_NAME}"
 # end low-power mode selection
 

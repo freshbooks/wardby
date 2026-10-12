@@ -145,3 +145,26 @@ variable "connector_enforcement" {
     error_message = "connector_enforcement must be REQUIRED or NOT_REQUIRED."
   }
 }
+
+variable "dependency_cache_enabled" {
+  description = "Create the run dependency cache bucket and let the coding proxy (only) use it. Off by default. Turning the cache on in the deploy also needs WARDBY_DEPENDENCY_CACHE=true on deploy/gke/up.sh."
+  type        = bool
+  default     = false
+}
+
+variable "dependency_cache_bucket_name" {
+  description = "Name of the dependency cache bucket. Bucket names are global across Google Cloud, so include something unique to you. Required when dependency_cache_enabled is true."
+  type        = string
+  default     = ""
+}
+
+variable "dependency_cache_max_age_days" {
+  description = "Must equal the deployment's WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS (default 14). The bucket deletes any object older than this plus 7 days, as a backstop for objects the proxy never recorded."
+  type        = number
+  default     = 14
+
+  validation {
+    condition     = var.dependency_cache_max_age_days >= 1 && floor(var.dependency_cache_max_age_days) == var.dependency_cache_max_age_days
+    error_message = "dependency_cache_max_age_days must be a whole number of days, at least 1."
+  }
+}

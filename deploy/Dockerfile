@@ -83,6 +83,9 @@ RUN test -x scripts/git-askpass.sh && test ! -d node_modules/prisma && test ! -d
     && test -f node_modules/openai/index.mjs && test ! -d node_modules/openai/src \
     && test -z "$(find node_modules/openai -name '*.map' -print -quit)" \
     && node --input-type=module -e 'import OpenAI from "openai"; new OpenAI({ apiKey: "build-check" });'
+# The run dependency cache's local blob directory (BLOB_STORE=local). A named volume
+# mounted here takes this directory's ownership, so the non-root user can write it.
+RUN mkdir -p /var/lib/wardby/blobs && chown node:node /var/lib/wardby/blobs
 USER node
 ENV NODE_ENV=production
 # The complete process: MCP + scheduler + reconciler. A deployment that

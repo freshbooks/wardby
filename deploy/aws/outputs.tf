@@ -140,3 +140,8 @@ output "waf_web_acl_arn" {
 output "lbc_role_arn" {
   value = aws_iam_role.lbc.arn
 }
+
+output "dependency_cache_bucket" {
+  description = "Name of the run dependency cache bucket (BLOB_STORE_S3_BUCKET); empty when dependency_cache_enabled is false. Its region is the module's region output (BLOB_STORE_S3_REGION)."
+  value       = try(aws_s3_bucket.dependency_cache[0].bucket, "")
+}

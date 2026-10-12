@@ -84,3 +84,8 @@ output "gateway_service_account" {
 output "gateway_database_user" {
   value = google_sql_user.iam["gateway"].name
 }
+
+output "dependency_cache_bucket" {
+  description = "Name of the run dependency cache bucket; empty when dependency_cache_enabled is false."
+  value       = try(google_storage_bucket.dependency_cache[0].name, "")
+}
