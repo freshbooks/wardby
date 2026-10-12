@@ -1,6 +1,18 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  readlink,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -71,11 +83,11 @@ const LOCKFILE_V2 = {
 const FAKE_NPM = `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
-fs.appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
+fs.appendFileSync(process.env.WARDBY_NPM_TEST_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
 const mode = process.env.FAKE_NPM_MODE || "";
 if (process.argv[2] === "rebuild") {
-  // FAKE_NPM_REBUILD: fail | hang (writes node_modules/.late after 2 s unless killed)
-  const rebuild = process.env.FAKE_NPM_REBUILD || "";
+  // WARDBY_NPM_TEST_REBUILD: fail | hang (writes node_modules/.late after 2 s unless killed)
+  const rebuild = process.env.WARDBY_NPM_TEST_REBUILD || "";
   if (rebuild === "fail") process.exit(1);
   if (rebuild === "hang") {
     setTimeout(() => fs.writeFileSync("node_modules/.late", "x"), 2000);
@@ -83,6 +95,7 @@ if (process.argv[2] === "rebuild") {
     return;
   }
   fs.writeFileSync("node_modules/.rebuilt", "x");
+  fs.writeFileSync("node_modules/.rebuild-env", JSON.stringify(Object.keys(process.env)));
   process.exit(0);
 }
 if (mode === "hang") setInterval(() => {}, 1000);
@@ -123,6 +136,7 @@ interface ProxyState {
   sealed: boolean;
   hang?: string;
   seals: number;
+  sealStatus?: number;
 }
 
 let root: string;
@@ -163,8 +177,12 @@ function startProxy(): Promise<void> {
         return;
       }
       if (route === "POST /cache/npm/seal") {
-        state.sealed = true;
         state.seals += 1;
+        if (state.sealStatus && state.sealStatus !== 200) {
+          json(state.sealStatus, { error: "internal" });
+          return;
+        }
+        state.sealed = true;
         json(200, { sealed: true });
         return;
       }
@@ -253,7 +271,7 @@ beforeEach(async () => {
     npm_config_registry: registry,
     npm_config_userconfig: npmrc,
     WARDBY_NPM_PLAN_REGISTRY: registry,
-    FAKE_NPM_LOG: npmLog,
+    WARDBY_NPM_TEST_LOG: npmLog,
   };
   events = [];
   await writeRepo(LOCKFILE);
@@ -330,7 +348,7 @@ async function realTarSnapshot(lockfile: typeof LOCKFILE, extra?: (dir: string) 
   await writeFile(join(dir, "package-lock.json"), JSON.stringify(lockfile));
   const install = spawnSync(join(root, "fake-npm"), ["ci"], {
     cwd: dir,
-    env: { ...env, FAKE_NPM_MODE: "", FAKE_NPM_LOG: join(dir, "npm.log") },
+    env: { ...env, FAKE_NPM_MODE: "", WARDBY_NPM_TEST_LOG: join(dir, "npm.log") },
   });
   expect(install.status).toBe(0);
   if (extra) await extra(dir);
@@ -1101,7 +1119,7 @@ describe("npm rebuild after the seal", () => {
 
   it("a failed rebuild is recorded and changes nothing else", async () => {
     await writeRepo(SCRIPTED);
-    env.FAKE_NPM_REBUILD = "fail";
+    env.WARDBY_NPM_TEST_REBUILD = "fail";
     const { projects } = await prepareAll();
     expect(projects).toEqual([expect.objectContaining({ result: "cold", rebuild: "failed" })]);
     expect(projects[0].reason).toBeUndefined();
@@ -1110,7 +1128,7 @@ describe("npm rebuild after the seal", () => {
 
   it("a hung rebuild is killed at its timeout and never writes afterwards", async () => {
     await writeRepo(SCRIPTED);
-    env.FAKE_NPM_REBUILD = "hang";
+    env.WARDBY_NPM_TEST_REBUILD = "hang";
     const started = Date.now();
     const { projects } = await prepareAll({ timeouts: { rebuildMs: 300, killGraceMs: 100 } });
     expect(projects).toEqual([expect.objectContaining({ result: "cold", rebuild: "timeout" })]);
@@ -1119,10 +1137,58 @@ describe("npm rebuild after the seal", () => {
     expect(await exists(join(workspace, "node_modules/.late"))).toBe(false);
   });
 
+  it.each([
+    ["answers 500", () => (state.sealStatus = 500)],
+    ["hangs past its timeout", () => (state.hang = "POST /cache/npm/seal")],
+  ])("never runs install scripts when the seal %s", async (_label, setup) => {
+    await writeRepo(SCRIPTED);
+    setup();
+    const { projects } = await prepareAll({ timeouts: { httpMs: 1_000 } });
+    expect(projects).toEqual([expect.objectContaining({ result: "cold", rebuild: "unsealed" })]);
+    expect((await npmCalls()).map((argv) => argv[0])).toEqual(["ci"]);
+    expect(await exists(join(workspace, "node_modules/.rebuilt"))).toBe(false);
+    expect(events.some((entry) => entry.event === "rebuild_skipped" && entry.reason === "unsealed")).toBe(true);
+  });
+
+  it("gives the rebuild only registry settings, never the driver's other variables", async () => {
+    await writeRepo(SCRIPTED);
+    env.OPENAI_API_KEY = "sk-sentinel";
+    env.WARDBY_RUN_CAPABILITY = "cap-sentinel";
+    env.HOME = root;
+    const { projects } = await prepareAll();
+    expect(projects[0].rebuild).toBe("ok");
+    const names = JSON.parse(await readFile(join(workspace, "node_modules/.rebuild-env"), "utf8")) as string[];
+    expect(names).not.toContain("OPENAI_API_KEY");
+    expect(names).not.toContain("WARDBY_RUN_CAPABILITY");
+    expect(names).not.toContain("FAKE_NPM_MODE");
+    expect(names).toEqual(expect.arrayContaining(["PATH", "HOME", "npm_config_registry", "WARDBY_NPM_PLAN_REGISTRY"]));
+  });
+
+  it("decides on the rebuild from the committed lockfile, before an install could rewrite it", async () => {
+    await writeRepo(SCRIPTED);
+    env.FAKE_NPM_MODE = "rewrite-lock"; // npm ci leaves package-lock.json as "{}"
+    const { projects } = await prepareAll();
+    expect(projects[0]).toMatchObject({ result: "cold", rebuild: "ok" });
+  });
+
+  it("counts only installed packages: an install script on the root or a link target needs no rebuild", async () => {
+    await writeRepo({
+      ...LOCKFILE,
+      packages: {
+        ...LOCKFILE.packages,
+        "": { ...LOCKFILE.packages[""], hasInstallScript: true },
+        "../linked": { version: "1.0.0", hasInstallScript: true },
+      },
+    });
+    const { projects } = await prepareAll();
+    expect(projects[0]).toMatchObject({ result: "cold", rebuild: "skipped" });
+    expect((await npmCalls()).map((argv) => argv[0])).toEqual(["ci"]);
+  });
+
   it("the overall deadline covers the rebuild: nothing changes the workspace after the module returns", async () => {
     await writeRepo(SCRIPTED);
     hitWith(await realTarSnapshot(SCRIPTED));
-    env.FAKE_NPM_REBUILD = "hang";
+    env.WARDBY_NPM_TEST_REBUILD = "hang";
     const started = Date.now();
     const { projects } = await prepareAll({ timeouts: { totalMs: 1_000, killGraceMs: 100, settleMs: 300 } });
     expect(Date.now() - started).toBeLessThan(1_300 + 500);
@@ -1130,5 +1196,78 @@ describe("npm rebuild after the seal", () => {
     expect(state.seals).toBe(1);
     await new Promise((resolve) => setTimeout(resolve, 2_500));
     expect(await exists(join(workspace, "node_modules/.late"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------- fix round 1
+
+describe("review fixes", () => {
+  it("does not start an upload once the proxy's upload window has evidently passed", async () => {
+    const { projects } = await prepareAll({ timeouts: { uploadWindowMs: 1, uploadMarginMs: 0 } });
+    expect(projects[0]).toMatchObject({ result: "cold" });
+    expect(projects[0].sizeBytes).toBeUndefined();
+    expect(state.uploads).toHaveLength(0);
+    expect(events.some((entry) => entry.event === "snapshot_skipped" && entry.reason === "upload_window_passed")).toBe(
+      true,
+    );
+  });
+
+  it("uses the upload deadline a lookup reports, when it is sooner", async () => {
+    state.lookupAnswer = () => ({
+      status: 200,
+      body: { key: "k".repeat(64), hit: false, maxBytes: 64 * 1024 * 1024, uploadExpiresInMs: 1_000 },
+    });
+    await prepareAll({ timeouts: { uploadMarginMs: 5_000 } });
+    expect(state.uploads).toHaveLength(0);
+    expect(events.some((entry) => entry.event === "snapshot_skipped" && entry.reason === "upload_window_passed")).toBe(
+      true,
+    );
+  });
+
+  it("a workspaces glob it cannot interpret covers everything under its owner", async () => {
+    await writeRepo(LOCKFILE, { name: "mono", workspaces: ["packages/{a,b}"] });
+    await writeProject("tools", LOCKFILE);
+    const { projects } = await prepareAll();
+    expect(projects.map((project) => [project.path, project.reason])).toEqual([
+      [".", "workspaces"],
+      ["tools", "workspace_member"],
+    ]);
+  });
+
+  it("never removes temps through a .cache that was swapped for a symlink", async () => {
+    hitWith(await realTarSnapshot(LOCKFILE));
+    const outside = join(root, "outside-cache");
+    await mkdir(outside);
+    const result = await prepareAll({
+      testHooks: {
+        beforeRename: async () => {
+          const cache = join(workspace, ".cache");
+          for (const name of await readdir(cache)) await mkdir(join(outside, name));
+          await rename(cache, join(workspace, ".cache-moved"));
+          await symlink(outside, cache);
+        },
+      },
+    });
+    expect(result.projects[0].result).toBe("skipped");
+    expect((await readdir(outside)).length).toBeGreaterThan(0);
+    expect((await readdir(outside)).every((name) => name.startsWith("dep-restore-"))).toBe(true);
+  });
+
+  it("a planning failure reports a top-level reason, not a made-up root project", async () => {
+    const result = await prepareAll({
+      testHooks: {
+        beforeDiscovery: () => Promise.reject(new Error("boom")),
+      },
+    });
+    expect(result).toEqual({ projects: [], reason: "internal_error" });
+    expect(state.seals).toBe(1);
+  });
+
+  it("logs which rule refused an archive (case-fold duplicate), without path contents", async () => {
+    hitWith(rawTar([{ name: "node_modules/", type: "5" }, ...CASE_FOLD_CHAIN]));
+    await prepareAll({ budgetBytes: 1024 * 1024 * 1024 });
+    const refused = events.find((entry) => entry.event === "archive_refused");
+    expect(refused).toMatchObject({ rule: "case_fold_duplicate", pathLength: expect.any(Number) });
+    expect(JSON.stringify(refused)).not.toContain("node_modules/a");
   });
 });

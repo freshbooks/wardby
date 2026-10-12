@@ -58,7 +58,14 @@ import { createGunzip } from "node:zlib";
 
 const MIB = 1024 * 1024;
 
-/** Time bounds (ms). `transferMs` is the floor for a download or upload,
+/** Time bounds (ms). `uploadWindowMs` mirrors the proxy's upload window
+ *  (WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS, 15 min by default), measured from
+ *  this module's start, which is after the proxy session began: a snapshot is
+ *  not uploaded once less than `uploadMarginMs` of it is left (a lookup's
+ *  `uploadExpiresInMs`, when a proxy reports one, is used instead when
+ *  sooner). With the default totalMs (20 min) a slow run simply stops
+ *  uploading after ~14 min while still restoring and installing.
+ *  `transferMs` is the floor for a download or upload,
  *  which also gets `transferMsPerMiB` for every MiB it moves. After
  *  `totalMs` the work is aborted and gets `settleMs` to clean up; then the
  *  workspace is closed to it (no rename, removal or install) and it is sealed. */
@@ -72,6 +79,8 @@ export const DEFAULT_TIMEOUTS = Object.freeze({
   killGraceMs: 5_000,
   settleMs: 6_000,
   rebuildMs: 300_000,
+  uploadWindowMs: 900_000,
+  uploadMarginMs: 60_000,
 });
 
 /** The workspace budget when the caller names none and CODING_DISK_MB is unset. */
@@ -95,9 +104,11 @@ const PROJECT_SEGMENT = /^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}$/;
 const OWN_TEMP = /^dep(?:-restore|-snap)?-[0-9a-f]{16}(?:\.tgz)?$/;
 
 class Skip extends Error {
-  constructor(reason) {
+  /** `detail`: log-only facts about why (a rule name and counts, never path contents). */
+  constructor(reason, detail) {
     super(reason);
     this.reason = reason;
+    this.detail = detail;
   }
 }
 
@@ -329,7 +340,12 @@ class EntryRules {
   claim(path, kind) {
     const key = foldPath(path);
     const owner = this.folded.get(key);
-    if (owner !== undefined && owner !== path) throw new Skip("unsafe_archive");
+    if (owner !== undefined && owner !== path)
+      throw new Skip("unsafe_archive", {
+        rule: "case_fold_duplicate",
+        pathLength: path.length,
+        entry: this.entries + 1,
+      });
     this.folded.set(key, path);
     this.kinds.set(path, kind);
   }
@@ -822,14 +838,15 @@ async function restore(context, project, id, maxBytes, { consistency }) {
   track(context, archive, temp);
   const sizeBytes = await download(context, id, archive, maxBytes);
   const limit = Math.max(0, budget.remaining - sizeBytes);
-  const scan = await scanArchive(archive, { budgetBytes: limit, signal }).catch((error) => {
-    throw asSkip(error, "unsafe_archive");
-  });
+  const refused = (error) => {
+    const skip = asSkip(error, "unsafe_archive");
+    if (skip.detail) context.log("archive_refused", skip.detail);
+    throw skip;
+  };
+  const scan = await scanArchive(archive, { budgetBytes: limit, signal }).catch(refused);
   await mkdir(temp, { mode: 0o700 });
-  await extractArchive(archive, temp, { budgetBytes: limit, signal }).catch((error) => {
-    throw asSkip(error, "unsafe_archive");
-  });
-  await rm(archive, { force: true });
+  await extractArchive(archive, temp, { budgetBytes: limit, signal }).catch(refused);
+  await removeTemp(context.workspace, archive);
   await verifyTree(temp, signal);
   // A sanity check that this is the tree for this lockfile, not an
   // integrity control: integrity is the sha256 the proxy recorded in its
@@ -848,7 +865,7 @@ async function restore(context, project, id, maxBytes, { consistency }) {
   if (signal.aborted || context.session.closed) throw asSkip(signal.reason, "timeout");
   context.created = target;
   await rename(join(temp, ROOT), target);
-  await rm(temp, { recursive: true, force: true });
+  await removeTemp(context.workspace, temp);
   // npm trusts its hidden lockfile only when it is newer than the folders.
   const now = new Date();
   await utimes(join(target, ".package-lock.json"), now, now).catch(() => undefined);
@@ -947,6 +964,9 @@ async function snapshot(context, project, maxBytes) {
       return skip(asSkip(error, "unsafe_archive").reason);
     }
     if (session.sealed || signal.aborted) return skip("sealed");
+    // The proxy refuses an upload after its window; don't start one that can't land.
+    if (context.uploadDeadline !== undefined && Date.now() >= context.uploadDeadline)
+      return skip("upload_window_passed");
     const timeoutMs = timeouts.transferMs + Math.ceil(size / MIB) * timeouts.transferMsPerMiB;
     const result = await callJson(
       new URL(`blob?${query}`, cacheBase),
@@ -974,7 +994,7 @@ async function snapshot(context, project, maxBytes) {
   } catch (error) {
     return skip(asSkip(error, "upload_failed").reason);
   } finally {
-    await rm(archive, { force: true }).catch(() => undefined);
+    await removeTemp(context.workspace, archive);
   }
 }
 
@@ -988,6 +1008,8 @@ export async function prepareProject(options) {
   const context = { ...options, temps: [], created: undefined };
   try {
     Object.assign(project, await readProject(project.dir));
+    // Decided now, from the committed bytes, before any third-party code runs.
+    if (options.facts) options.facts.needsRebuild = listsInstallScripts(project.lockfile);
     context.cacheDir = await cacheDirectory(workspace);
     if (!context.auth) throw new Skip("no_registry");
     const { auth, timeouts, signal } = context;
@@ -1036,6 +1058,10 @@ export async function prepareProject(options) {
         ? answer.nearest.id
         : undefined;
     log("lookup", { hit: answer.hit, nearest: Boolean(nearestId) });
+    if (Number.isSafeInteger(answer.uploadExpiresInMs) && answer.uploadExpiresInMs >= 0) {
+      const reported = Date.now() + answer.uploadExpiresInMs - timeouts.uploadMarginMs;
+      context.uploadDeadline = Math.min(context.uploadDeadline ?? Infinity, reported);
+    }
     const key = answer.key;
 
     if (answer.hit) {
@@ -1101,8 +1127,7 @@ export async function prepareProject(options) {
     await cleanup(context);
     return { result: "skipped", reason };
   } finally {
-    if (!context.session.closed)
-      for (const path of context.temps) await rm(path, { recursive: true, force: true }).catch(() => undefined);
+    if (!context.session.closed) for (const path of context.temps) await removeTemp(workspace, path);
   }
 }
 
@@ -1114,7 +1139,23 @@ async function cleanup(context) {
     await rm(context.created, { recursive: true, force: true }).catch(() => undefined);
     context.created = undefined;
   }
-  for (const path of context.temps.splice(0)) await rm(path, { recursive: true, force: true }).catch(() => undefined);
+  for (const path of context.temps.splice(0)) await removeTemp(context.workspace, path);
+}
+
+/** Removes one of this module's temp paths, only while <workspace>/.cache is
+ *  still a real folder (never through a .cache swapped for a symlink). */
+async function removeTemp(workspace, path) {
+  if (!(await cacheDirIntact(workspace))) return;
+  await rm(path, { recursive: true, force: true }).catch(() => undefined);
+}
+
+async function cacheDirIntact(workspace) {
+  try {
+    const info = await lstat(join(workspace, ".cache"));
+    return info.isDirectory() && !info.isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------- discovery
@@ -1184,6 +1225,8 @@ function globCovers(glob, segments) {
     .split("/")
     .filter((part) => part !== "" && part !== ".");
   if (!parts.length || parts.some((part) => part.startsWith("!") || part === "..")) return false;
+  // Braces, classes and extglobs are not interpreted: fail toward skipping.
+  if (/[{}()[\]]/.test(glob)) return true;
   const match = (p, s) => {
     if (p === parts.length) return true; // the glob matched a folder at or above this one
     if (parts[p] === "**") {
@@ -1234,12 +1277,28 @@ async function planProjects(workspace, signal) {
 
 // ---------------------------------------------------------------- install scripts
 
-/** Whether the committed lockfile lists a package with an install script. */
-async function hasInstallScripts(projectDir) {
-  const lockfile = JSON.parse(await readFile(join(projectDir, "package-lock.json"), "utf8"));
-  return Object.values(lockfile?.packages ?? {}).some(
-    (entry) => entry && typeof entry === "object" && entry.hasInstallScript === true,
+/** Whether the committed lockfile lists an installed package (a key under
+ *  node_modules/, not a link) with an install script. */
+function listsInstallScripts(lockfile) {
+  return Object.entries(lockfile?.packages ?? {}).some(
+    ([key, entry]) =>
+      key.startsWith(`${ROOT}/`) &&
+      entry &&
+      typeof entry === "object" &&
+      !entry.link &&
+      entry.hasInstallScript === true,
   );
+}
+
+/** The only variables a rebuild sees: what npm needs to reach the registry
+ *  through the shim, never the driver's secrets. */
+const REBUILD_ENV_NAMES = new Set(["PATH", "HOME", "LANG", "TMPDIR"]);
+const REBUILD_ENV_PREFIX = /^(?:npm_config_|NPM_CONFIG_|WARDBY_NPM_)/;
+function rebuildEnv(env) {
+  const out = {};
+  for (const [name, value] of Object.entries(env))
+    if (typeof value === "string" && (REBUILD_ENV_NAMES.has(name) || REBUILD_ENV_PREFIX.test(name))) out[name] = value;
+  return out;
 }
 
 /**
@@ -1249,19 +1308,12 @@ async function hasInstallScripts(projectDir) {
  */
 async function rebuild({ workspace, path, env, npmPath, timeouts, signal, session, log }) {
   const dir = path === "." ? workspace : join(workspace, ...path.split("/"));
-  let needed;
-  try {
-    needed = await hasInstallScripts(dir);
-  } catch {
-    needed = false;
-  }
-  if (!needed) return "skipped";
   const started = Date.now();
   let outcome;
   try {
     const code = await run(npmPath, ["rebuild"], {
       cwd: dir,
-      env,
+      env: rebuildEnv(env),
       timeoutMs: timeouts.rebuildMs,
       killGraceMs: timeouts.killGraceMs,
       signal,
@@ -1289,7 +1341,7 @@ const KEPT = new Set(["hit", "nearest", "cold"]);
  */
 export async function prepareDependencies({
   workspace,
-  env = process.env,
+  env: givenEnv,
   proxyUrl,
   token,
   npmPath = "/opt/wardby/bin/npm",
@@ -1299,6 +1351,10 @@ export async function prepareDependencies({
   testHooks,
 }) {
   const timeouts = { ...DEFAULT_TIMEOUTS, ...overrides };
+  // Required: the agent-equivalent shell env. No process.env fallback, so a
+  // caller can't hand the driver's secrets to npm by omission.
+  const env = givenEnv ?? {};
+  const uploadDeadline = Date.now() + timeouts.uploadWindowMs - timeouts.uploadMarginMs;
   const say = (event, fields = {}) => {
     try {
       log(event, fields);
@@ -1314,9 +1370,11 @@ export async function prepareDependencies({
   const deadlineTimer = setTimeout(() => deadline.abort(new Skip("timeout")), timeouts.totalMs);
   const workSignal = AbortSignal.any([deadline.signal, sealing.signal]);
   let auth;
-  let planned = ["."];
+  let planned; // set once planning succeeded
   const done = new Map(); // path -> result, filled as projects finish
+  const facts = new Map(); // path -> { needsRebuild }, from the committed lockfile
   let failure;
+  let sealConfirmed = false;
 
   let sealing$;
   const seal = () =>
@@ -1333,10 +1391,11 @@ export async function prepareDependencies({
           "seal_failed",
         );
         status = sealed.status;
+        sealConfirmed = sealed.status === 200 && sealed.body?.sealed === true;
       } catch {
         // an unsealed session expires with its upload window
       }
-      say("seal", { status });
+      say("seal", { status, confirmed: sealConfirmed });
     })());
 
   const phases = (async () => {
@@ -1347,12 +1406,15 @@ export async function prepareDependencies({
       if (auth && token) auth = { ...auth, token };
       if (!auth?.token) auth = undefined;
       const budget = await workspaceBudget(workspace, env, budgetBytes);
+      await testHooks?.beforeDiscovery?.();
       const { run: toRun, skipped } = await planProjects(workspace, workSignal);
-      planned = toRun.length || skipped.length ? [...toRun, ...skipped.map((entry) => entry.path)] : ["."];
       for (const entry of skipped) done.set(entry.path, { result: entry.result, reason: entry.reason });
       if (!toRun.length && !skipped.length) done.set(".", { result: "skipped", reason: "no_lockfile" });
+      planned = toRun.length || skipped.length ? [...toRun, ...skipped.map((entry) => entry.path)] : ["."];
       for (const path of toRun) {
         if (workSignal.aborted) break;
+        const projectFacts = {};
+        facts.set(path, projectFacts);
         const result = await prepareProject({
           workspace,
           projectPath: path,
@@ -1365,6 +1427,8 @@ export async function prepareDependencies({
           signal: workSignal,
           session,
           testHooks,
+          facts: projectFacts,
+          uploadDeadline,
         });
         if (!session.closed) done.set(path, result);
       }
@@ -1373,10 +1437,21 @@ export async function prepareDependencies({
     } finally {
       await seal();
     }
-    // After the seal: nothing below can be uploaded. Still bounded by the deadline.
-    for (const path of planned) {
+    // After the seal: nothing below can be uploaded. Still bounded by the
+    // deadline. Install scripts are third-party code holding the run token:
+    // they run only once the proxy confirmed the upload window is shut.
+    if (!sealConfirmed && auth) say("rebuild_skipped", { reason: "unsealed" });
+    for (const path of planned ?? []) {
       const result = done.get(path);
       if (!result || !KEPT.has(result.result) || session.closed) continue;
+      if (!facts.get(path)?.needsRebuild) {
+        done.set(path, { ...result, rebuild: "skipped" });
+        continue;
+      }
+      if (!sealConfirmed) {
+        done.set(path, { ...result, rebuild: "unsealed" });
+        continue;
+      }
       const outcome = await rebuild({
         workspace,
         path,
@@ -1414,11 +1489,19 @@ export async function prepareDependencies({
   await seal();
   await removeOwnTemps(workspace, session.temps);
 
+  if (!planned) {
+    const reason = failure ?? "timeout";
+    say("result", { reason });
+    return { projects: [], reason };
+  }
   const projects = planned
     .map((path) => {
       const result = done.get(path) ?? { result: "skipped", reason: failure ?? "timeout" };
       // A kept tree whose rebuild never got its turn before the deadline.
-      const rebuilt = KEPT.has(result.result) && !result.rebuild ? { rebuild: "timeout" } : {};
+      const rebuilt =
+        KEPT.has(result.result) && !result.rebuild
+          ? { rebuild: facts.get(path)?.needsRebuild ? "timeout" : "skipped" }
+          : {};
       return { path, ...result, ...rebuilt };
     })
     .sort((a, b) => byProjectOrder(a.path, b.path));
@@ -1437,6 +1520,7 @@ export async function prepareDependencies({
  *  settled does not leave its download or extraction folder behind. */
 async function removeOwnTemps(workspace, temps) {
   const cacheDir = join(workspace, ".cache");
+  if (!(await cacheDirIntact(workspace))) return;
   for (const path of temps) {
     if (!path.startsWith(cacheDir + sep) || path.slice(cacheDir.length + 1) !== basename(path)) continue;
     if (!OWN_TEMP.test(basename(path))) continue;

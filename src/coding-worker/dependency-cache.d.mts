@@ -14,8 +14,10 @@ export interface PrepareResult {
   readonly reason?: string;
 }
 
-/** `npm rebuild` after the seal (hit, nearest and cold only): `skipped` when the lockfile lists no install script. */
-export type RebuildOutcome = "ok" | "failed" | "timeout" | "skipped";
+/** `npm rebuild` after the seal (hit, nearest and cold only): `skipped` when the lockfile lists no install
+ *  script under node_modules/; `unsealed` when the proxy did not confirm the seal, so no third-party
+ *  script ran while the upload window might still be open. */
+export type RebuildOutcome = "ok" | "failed" | "timeout" | "skipped" | "unsealed";
 
 export interface ProjectResult extends PrepareResult {
   /** The project folder relative to the workspace: "." for the root, else e.g. "app" or "web/client". */
@@ -28,6 +30,8 @@ export interface ProjectResult extends PrepareResult {
  *  Skipped up front: `workspace_member`, `too_many_projects`. */
 export interface PrepareDependenciesResult {
   readonly projects: readonly ProjectResult[];
+  /** Set (with `projects: []`) only when the projects could not be planned at all: `internal_error` or `timeout`. */
+  readonly reason?: string;
 }
 
 export interface DependencyCacheTimeouts {
@@ -41,6 +45,12 @@ export interface DependencyCacheTimeouts {
   readonly settleMs: number;
   /** Each `npm rebuild` after the seal. */
   readonly rebuildMs: number;
+  /** The proxy's upload window (WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS), measured from this module's start;
+   *  a snapshot is not uploaded once less than `uploadMarginMs` of it is left (`upload_window_passed`,
+   *  log only). Independent of `totalMs`: past the window a run still restores and installs, it only
+   *  stops uploading. A lookup's `uploadExpiresInMs`, if a proxy reports one, wins when sooner. */
+  readonly uploadWindowMs: number;
+  readonly uploadMarginMs: number;
 }
 
 export type DependencyCacheLog = (event: string, fields: Record<string, unknown>) => void;
@@ -57,7 +67,10 @@ export declare const MAX_PROJECTS: number;
 
 export interface PrepareDependenciesOptions {
   readonly workspace: string;
-  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Required: the agent-equivalent shell env (registry settings: npm_config_registry, npm_config_userconfig,
+   *  WARDBY_NPM_PLAN_REGISTRY, PATH), never the driver's secrets. `npm rebuild` gets only PATH, HOME, LANG,
+   *  TMPDIR and npm_config_* / NPM_CONFIG_* / WARDBY_NPM_* from it. */
+  readonly env: Readonly<Record<string, string | undefined>>;
   /** The proxy origin; defaults to the one npm_config_registry / WARDBY_NPM_PLAN_REGISTRY names. */
   readonly proxyUrl?: string;
   /** The registry token; defaults to the npmrc's _authToken for that registry. */
@@ -73,6 +86,7 @@ export interface PrepareDependenciesOptions {
 
 export interface DependencyCacheTestHooks {
   readonly beforeRename?: () => Promise<void>;
+  readonly beforeDiscovery?: () => Promise<void>;
 }
 
 export declare function prepareDependencies(options: PrepareDependenciesOptions): Promise<PrepareDependenciesResult>;
@@ -95,6 +109,10 @@ export interface PrepareProjectOptions {
    *  `closed` once the caller stops waiting (no workspace change after it). */
   readonly session: { sealed: boolean; closed: boolean; children: Set<number>; temps?: Set<string> };
   readonly testHooks?: DependencyCacheTestHooks;
+  /** Filled from the committed lockfile before anything runs: whether `npm rebuild` is needed. */
+  readonly facts?: { needsRebuild?: boolean };
+  /** Epoch ms after which no snapshot upload starts. */
+  readonly uploadDeadline?: number;
 }
 
 export declare function prepareProject(options: PrepareProjectOptions): Promise<PrepareResult>;
