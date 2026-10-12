@@ -8,6 +8,7 @@
 #   WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme,acme-labs   # optional: accounts the GitHub App serves besides its owner
 #   WARDBY_MOBILE_ENABLED=true   # optional: allow the wardby mobile app to sign in (default false)
 #   WARDBY_DEPENDENCY_CACHE=true   # optional: run dependency cache on the coding proxy (default false; needs dependency_cache_enabled in terraform.tfvars)
+#   CODING_MAX_DISK_MB=8192   # optional: largest per-agent workspaceDiskMb the control plane accepts (default 2048)
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
 # re-pushed (digests change only if the source did), values already in Secret
@@ -102,6 +103,39 @@ else
   echo "up.sh: mobile sign-in is off."
 fi
 # --- end WARDBY_MOBILE_ENABLED check ---
+
+# --- CODING_MAX_DISK_MB check ---
+# Optional: the largest workspace (MiB) an agent's workspaceDiskMb may ask for.
+# Empty = the server default (CODING_DISK_MB, 2048). The server itself refuses a
+# value over the platform's ephemeral-storage ceiling at startup.
+CODING_MAX_DISK_MB="${CODING_MAX_DISK_MB:-}"
+if [[ -n "$CODING_MAX_DISK_MB" ]]; then
+  if ! [[ "$CODING_MAX_DISK_MB" =~ ^[1-9][0-9]{1,4}$ ]] || ((CODING_MAX_DISK_MB < 2048 || CODING_MAX_DISK_MB > 32768)); then
+    echo "up.sh: CODING_MAX_DISK_MB must be an integer between 2048 and 32768 (got \"$CODING_MAX_DISK_MB\")." >&2
+    exit 1
+  fi
+  echo "up.sh: coding workspaces may be up to ${CODING_MAX_DISK_MB} MiB."
+fi
+# --- end CODING_MAX_DISK_MB check ---
+
+# --- CODING_MAX_DISK_MB control-plane env ---
+# Adds CODING_MAX_DISK_MB to the control plane's container, right after its
+# WARDBY_MOBILE_ENABLED entry (the one place that placeholder appears), in the
+# same indentation. Does nothing when unset. The control plane launches coding
+# runs, so it is the only container that reads it.
+inject_coding_max_disk_env() {
+  if [[ -z "$CODING_MAX_DISK_MB" ]]; then
+    cat
+    return
+  fi
+  awk -v mib="$CODING_MAX_DISK_MB" '
+    { print }
+    /^ *value: wardby_mobile_enabled$/ {
+      match($0, /^ */); value_indent = substr($0, 1, RLENGTH); item_indent = substr(value_indent, 3)
+      print item_indent "- name: CODING_MAX_DISK_MB"; print value_indent "value: \"" mib "\""
+    }'
+}
+# --- end CODING_MAX_DISK_MB control-plane env ---
 
 # --- WARDBY_DEPENDENCY_CACHE check ---
 # Optional: true turns on the run dependency cache. It needs the bucket from
@@ -527,6 +561,7 @@ PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardb
 # end lost, as they would without the durable executor).
 OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | inject_dependency_cache_env \
+  | inject_coding_max_disk_env \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
