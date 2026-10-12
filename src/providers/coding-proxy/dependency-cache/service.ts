@@ -8,7 +8,9 @@
  *   only its project folder, which is validated, and which lockfile (one of
  *   the session's approved hashes) it is asking about.
  * - Only trusted wardby code runs before the run's seal; the agent runs after
- *   it with the same token. After the seal every route except the (idempotent)
+ *   it with the same token. The worker seals before it starts the agent, and
+ *   the proxy seals on the run's first model request whatever the worker did
+ *   (ModelRequestSeal). After the seal every route except the (idempotent)
  *   seal answers 409 `sealed`, and an upload still streaming when the seal
  *   lands is discarded.
  * - A run uploads at most once per project, only within its upload window,
@@ -116,12 +118,26 @@ export class DependencyCacheService {
     const url = new URL(request.url ?? "/", "http://proxy");
     const matched = matchRoute(request.method, url.pathname);
     const isUpload = typeof matched === "object" && matched.route === "upload";
+    // Filled in once the token is known to belong to a run, for the refusal log.
+    const known: { runId?: string } = {};
     try {
       if (matched === 404) throw new CacheRefusal(404, "not_found");
       if (matched === 405) throw new CacheRefusal(405, "method_not_allowed");
-      await this.route(matched.route, matched.id, url.searchParams, token, request, response, releaseBodyTimer);
+      await this.route(matched.route, matched.id, url.searchParams, token, request, response, releaseBodyTimer, known);
     } catch (error) {
       if (error instanceof CacheRefusal) {
+        // One line per refusal: a fixed route name and code, and the run when the token named one
+        // (never the token, the query or the URL).
+        cacheLog.info(
+          {
+            event: "dependency_cache.refused",
+            ...(known.runId ? { runId: known.runId } : {}),
+            route: typeof matched === "object" ? matched.route : "unknown",
+            status: error.status,
+            code: error.code,
+          },
+          "dependency cache request refused",
+        );
         // An upload refused before its body was read: close rather than read it.
         send(response, error.status, { error: error.code }, isUpload);
         return;
@@ -140,9 +156,11 @@ export class DependencyCacheService {
     request: IncomingMessage,
     response: ServerResponse,
     releaseBodyTimer: () => void,
+    known: { runId?: string },
   ): Promise<void> {
     const context = await this.options.registry.findRunByRegistryTokenHash(capabilityHash(token), this.now());
     if (!context) throw new CacheRefusal(401, "invalid_capability");
+    known.runId = context.runId;
     // The feature is off for this run: indistinguishable from a proxy without it.
     if (!context.dependencyCache || !context.cacheImage) throw new CacheRefusal(404, "not_found");
     const session = await this.options.store.session(context.runId);
@@ -209,6 +227,10 @@ export class DependencyCacheService {
       if (!(error instanceof BlobStoreError && error.code === "not_found")) throw error;
       // A row without its blob would answer hits forever: drop it.
       await this.options.store.delete(row.id);
+      cacheLog.info(
+        { event: "dependency_cache.blob_missing", runId, snapshotId: row.id },
+        "dependency cache snapshot had no blob and was removed",
+      );
       throw new CacheRefusal(404, "not_found");
     }
     try {
@@ -224,19 +246,26 @@ export class DependencyCacheService {
     });
     // Hash and count while streaming. The flush runs only once the blob was
     // read to its end (a client abort destroys the pipeline before it), so only
-    // a complete read that disagrees with the row condemns the snapshot.
+    // a complete read that disagrees with the row (or a blob longer than it)
+    // condemns the snapshot. The response then fails at once (the pipeline
+    // destroys it) instead of ending, or leaving the client waiting for the
+    // rest of its content-length.
     const hash = createHash("sha256");
     let bytes = 0;
+    const corrupt = () => {
+      void this.dropCorrupt(runId, row, bytes);
+      return new Error("snapshot_corrupt");
+    };
     const verify = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
-        hash.update(chunk);
         bytes += chunk.length;
+        if (bytes > row.sizeBytes) return callback(corrupt());
+        hash.update(chunk);
         callback(null, chunk);
       },
       flush: (callback) => {
-        callback();
-        if (bytes === row.sizeBytes && hash.digest("hex") === row.sha256) return;
-        void this.dropCorrupt(runId, row, bytes);
+        if (bytes === row.sizeBytes && hash.digest("hex") === row.sha256) callback();
+        else callback(corrupt());
       },
     });
     pipeline(stream as Readable, verify, response, (error) => {
@@ -332,14 +361,8 @@ export class DependencyCacheService {
         maxBytes: this.options.maxSnapshotBytes,
       });
     } catch (error) {
-      if (error instanceof BlobStoreError && error.code === "blob_too_large") {
-        this.refused(context, "too_large");
-        throw new CacheRefusal(413, "too_large");
-      }
-      if (expired) {
-        this.refused(context, "upload_expired");
-        throw new CacheRefusal(409, "upload_expired");
-      }
+      if (error instanceof BlobStoreError && error.code === "blob_too_large") throw new CacheRefusal(413, "too_large");
+      if (expired) throw new CacheRefusal(409, "upload_expired");
       // The client went away mid-upload: nothing to answer.
       if (request.destroyed || response.destroyed) return;
       throw error;
@@ -353,7 +376,6 @@ export class DependencyCacheService {
       !session || session.sealedAt ? "sealed" : this.now().getTime() >= deadline ? "upload_expired" : null;
     if (refusal) {
       await this.discard(blobKey);
-      this.refused(context, refusal);
       throw new CacheRefusal(409, refusal);
     }
     let outcome: "inserted" | "exists";
@@ -394,12 +416,5 @@ export class DependencyCacheService {
     } catch (error) {
       cacheLog.warn({ event: "dependency_cache.discard_failed", err: error }, "dependency cache: blob not removed");
     }
-  }
-
-  private refused(context: RegistryRunContext, code: string): void {
-    cacheLog.info(
-      { event: "dependency_cache.upload_refused", runId: context.runId, code },
-      "dependency cache upload refused",
-    );
   }
 }

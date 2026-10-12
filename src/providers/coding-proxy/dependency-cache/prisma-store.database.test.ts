@@ -29,7 +29,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
     await db.$disconnect();
   });
 
-  async function seedRun(suffix: string = randomUUID()) {
+  async function seedRun(suffix: string = randomUUID(), dependencyCache = true) {
     const agentId = `cache-agent-${suffix}`;
     const runId = `cache-run-${suffix}`;
     const repository = `owner/cache-${suffix}`;
@@ -53,7 +53,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
         protectedPaths: [],
         budgetReservedUsd: 0.0002,
         workerImage: "worker:1",
-        dependencyCache: true,
+        dependencyCache,
       },
     });
     await db.codingProxySession.create({
@@ -117,6 +117,18 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
     await registry.recordDependencyCacheLockHash(other, hex("a"), 8);
     expect((await cache.session(other))?.lockHashes).toEqual([]);
     expect(await cache.session("no-such-run")).toBeNull();
+  });
+
+  it("seals on a model request only a run with the cache on, once", async () => {
+    const cache = new PrismaDependencyCacheStore(db);
+    const { runId } = await seedRun();
+    const first = new Date("2026-10-12T01:00:00Z");
+    await cache.sealForModelRequest(runId, first);
+    await cache.sealForModelRequest(runId, new Date("2026-10-12T02:00:00Z"));
+    expect((await cache.session(runId))?.sealedAt).toEqual(first);
+    const { runId: off } = await seedRun(randomUUID(), false);
+    await cache.sealForModelRequest(off, first);
+    expect((await cache.session(off))?.sealedAt).toBeNull();
   });
 
   it("inserts a snapshot once, answering a concurrent duplicate as exists", async () => {

@@ -174,6 +174,8 @@ export async function startCodingProxyServer(
           if (!request.complete) request.socket.destroy();
         }, requestMs).unref()
       : undefined;
+    // Done with once the response is over (finished or closed early).
+    if (bodyTimer) response.once("close", () => clearTimeout(bodyTimer));
     const protocol = routeProtocol(request.method, request.url) ?? "other";
     response.once("finish", () => {
       try {

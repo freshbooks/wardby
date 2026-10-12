@@ -165,6 +165,15 @@ async function storedFiles(dir: string): Promise<string[]> {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 
+/** Polls until `ready` holds (or fails the test after `timeoutMs`). */
+async function waitFor(ready: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  while (!(await ready())) {
+    if (Date.now() > until) throw new Error("waitFor: condition not met");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 describe("dependency cache routes: switches and authentication", () => {
   it("answers 404 for every route when the cache is not configured", async () => {
     const { base } = await setup({ configured: false });
@@ -389,7 +398,6 @@ describe("dependency cache upload and download", () => {
   });
 
   describe("a blob that fails its row's checksum", () => {
-    const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
     const broken = async (replacement: Uint8Array | null) => {
       const env = await setup();
       await env.upload(archive);
@@ -397,41 +405,47 @@ describe("dependency cache upload and download", () => {
       if (replacement) await env.blobs.put(row.blobKey, Buffer.from(replacement));
       return { ...env, row };
     };
-
-    it.each([
-      ["tampered (same size)", new TextEncoder().encode("GZIP TAR BYTES OF NODE_MODULES")],
-      ["truncated", archive.subarray(0, 10)],
-    ])("drops the row and the blob after one download of a %s blob", async (_name, bytes) => {
-      const { base, lookup, store, blobs, derived, row } = await broken(bytes);
-      expect(bytes.byteLength === archive.byteLength || bytes.byteLength < archive.byteLength).toBe(true);
-      // A truncated body leaves the client waiting for its content-length: give up after a moment.
-      await fetch(`${base}/cache/npm/blob/${derived().keyId}?lock=${LOCK}`, {
+    const fetchBlob = (base: string, id: string) =>
+      fetch(`${base}/cache/npm/blob/${id}?lock=${LOCK}`, {
         headers: { authorization: `Bearer ${TOKEN}` },
-        signal: AbortSignal.timeout(300),
+        signal: AbortSignal.timeout(5_000),
       })
         .then((response) => response.arrayBuffer())
-        .catch(() => undefined);
-      await settle();
-      expect(store.rows).toEqual([]);
-      expect(await blobs.head(row.blobKey)).toBeNull();
+        .then(
+          () => "complete",
+          (error: Error) => (error.name === "TimeoutError" ? "timed out" : "failed"),
+        );
+
+    it.each([
+      // Every byte was already sent: the client's own sha256 check refuses it.
+      ["tampered (same size)", new TextEncoder().encode("GZIP TAR BYTES OF NODE_MODULES"), undefined],
+      // Fewer or more bytes than the row: the response fails at once, not at the client's timeout.
+      ["truncated", archive.subarray(0, 10), "failed"],
+      ["longer", new TextEncoder().encode("gzip tar bytes of node_modules and then some"), "failed"],
+    ])("drops the row and the blob after one download of a %s blob", async (_name, bytes, outcome) => {
+      const { base, lookup, store, blobs, derived, row } = await broken(bytes);
+      const result = await fetchBlob(base, derived().keyId);
+      if (outcome) expect(result).toBe(outcome);
+      await waitFor(() => store.rows.length === 0);
+      await waitFor(async () => (await blobs.head(row.blobKey)) === null);
       expect((await lookup()).body).toMatchObject({ hit: false });
     });
 
     it("keeps the row when the client aborts mid-stream", async () => {
       const { base, store, blobs, derived, row } = await broken(null);
-      const spy = vi.spyOn(blobs, "getStream").mockImplementation(async () => {
-        const stalled = new Readable({ read() {} });
-        stalled.push(archive.subarray(0, 5));
-        return stalled;
-      });
+      const stalled = new Readable({ read() {} });
+      stalled.push(archive.subarray(0, 5));
+      const spy = vi.spyOn(blobs, "getStream").mockImplementation(async () => stalled);
       const controller = new AbortController();
       const response = await fetch(`${base}/cache/npm/blob/${derived().keyId}?lock=${LOCK}`, {
         signal: controller.signal,
         headers: { authorization: `Bearer ${TOKEN}` },
       });
       expect(response.status).toBe(200);
+      const closed = new Promise<void>((resolve) => stalled.on("close", () => resolve()));
       controller.abort();
-      await settle();
+      // The proxy saw the abort once it destroyed the blob stream.
+      await closed;
       spy.mockRestore();
       expect(store.rows).toHaveLength(1);
       expect(await blobs.head(row.blobKey)).not.toBeNull();

@@ -39,6 +39,8 @@ export interface DependencyCacheStore {
   session(runId: string): Promise<DependencyCacheSessionState | null>;
   /** Sets the session's sealedAt unless it is already set. */
   seal(runId: string, now: Date): Promise<void>;
+  /** Like `seal`, but only for a run whose agent has the cache on (a model request's seal, ModelRequestSeal). */
+  sealForModelRequest(runId: string, now: Date): Promise<void>;
   findByIdentity(identity: SnapshotIdentity): Promise<SnapshotRow | null>;
   /** The most recent snapshot in the scope whose lockHash differs (ties broken by id), or null. */
   findNearest(scope: SnapshotScope, excludeLockHash: string): Promise<SnapshotRow | null>;
@@ -67,6 +69,9 @@ export class MemoryDependencyCacheStore implements DependencyCacheStore {
   readonly rows: SnapshotRow[] = [];
   private evicting = false;
 
+  /** Runs whose agent has the cache off (sealForModelRequest leaves them alone). */
+  readonly cacheOff = new Set<string>();
+
   constructor(readonly sessions = new Map<string, DependencyCacheSessionState>()) {}
 
   async session(runId: string): Promise<DependencyCacheSessionState | null> {
@@ -77,6 +82,10 @@ export class MemoryDependencyCacheStore implements DependencyCacheStore {
   async seal(runId: string, now: Date): Promise<void> {
     const session = this.sessions.get(runId);
     if (session && !session.sealedAt) session.sealedAt = now;
+  }
+
+  async sealForModelRequest(runId: string, now: Date): Promise<void> {
+    if (!this.cacheOff.has(runId)) await this.seal(runId, now);
   }
 
   async findByIdentity(identity: SnapshotIdentity): Promise<SnapshotRow | null> {

@@ -105,11 +105,16 @@ describe("configured coding proxy runtime", () => {
       const startServer = vi.fn(async () => handle);
       const started = await startConfiguredCodingProxy({ db: {} as PrismaClient, env, startServer, startDenyPort });
       await started.close();
-      return (startServer.mock.calls[0] as unknown[])[1] as { dependencyCache?: unknown };
+      const [proxy, config] = startServer.mock.calls[0] as unknown[];
+      return {
+        ...(config as { dependencyCache?: unknown }),
+        sealsOnModelRequest: (proxy as { onModelRequest?: unknown }).onModelRequest !== undefined,
+      };
     };
     const base = { OPENAI_API_KEY: "test-secret" };
     const blob = { BLOB_STORE: "local", BLOB_STORE_LOCAL_DIR: "/tmp/wardby-cache-test" };
-    expect((await cacheOf(base)).dependencyCache).toBeUndefined();
+    const off = await cacheOf(base);
+    expect([off.dependencyCache, off.sealsOnModelRequest]).toEqual([undefined, false]);
     expect((await cacheOf({ ...base, ...blob })).dependencyCache).toBeUndefined();
     const warn = vi.spyOn(logger, "warn");
     expect((await cacheOf({ ...base, WARDBY_DEPENDENCY_CACHE: "true" })).dependencyCache).toBeUndefined();
@@ -120,6 +125,7 @@ describe("configured coding proxy runtime", () => {
     warn.mockRestore();
     const on = await cacheOf({ ...base, ...blob, WARDBY_DEPENDENCY_CACHE: "true" });
     expect(on.dependencyCache).toBeInstanceOf(DependencyCacheService);
+    expect(on.sealsOnModelRequest).toBe(true);
     expect((on.dependencyCache as DependencyCacheService).uploadMs).toBe(900_000);
   });
 

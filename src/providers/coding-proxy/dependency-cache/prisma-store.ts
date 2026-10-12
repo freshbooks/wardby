@@ -49,6 +49,13 @@ export class PrismaDependencyCacheStore implements DependencyCacheStore {
     });
   }
 
+  async sealForModelRequest(runId: string, now: Date): Promise<void> {
+    await this.db.codingProxySession.updateMany({
+      where: { runId, dependencyCacheSealedAt: null, run: { dependencyCache: true } },
+      data: { dependencyCacheSealedAt: now },
+    });
+  }
+
   async findByIdentity(identity: SnapshotIdentity): Promise<SnapshotRow | null> {
     const row = await this.db.dependencySnapshot.findUnique({
       where: {

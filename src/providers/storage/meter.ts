@@ -18,8 +18,14 @@ export function createByteMeter(maxBytes: number | undefined): ByteMeter {
   let sizeBytes = 0;
   let tooLarge: BlobStoreError | undefined;
   const stream = new Transform({
-    transform(chunk: Buffer | string, encoding, callback) {
-      const bytes = typeof chunk === "string" ? Buffer.from(chunk, encoding) : Buffer.from(chunk);
+    transform(chunk: Buffer | Uint8Array | string, encoding, callback) {
+      // Only a string is converted; a Buffer (or any byte view) passes through without a copy.
+      const bytes =
+        typeof chunk === "string"
+          ? Buffer.from(chunk, encoding)
+          : Buffer.isBuffer(chunk)
+            ? chunk
+            : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
       sizeBytes += bytes.length;
       if (maxBytes !== undefined && sizeBytes > maxBytes) {
         tooLarge = new BlobStoreError("blob_too_large", `blob_too_large: more than ${maxBytes} bytes`);

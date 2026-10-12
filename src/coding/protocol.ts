@@ -588,7 +588,7 @@ export const DEPENDENCY_CACHE_OUTCOMES = ["hit", "nearest", "cold", "skipped", "
 export const DEPENDENCY_CACHE_REBUILD_OUTCOMES = ["ok", "failed", "timeout", "skipped", "unsealed"] as const;
 const DEPENDENCY_CACHE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 /** "." or up to three folder segments: the proxy's project-path rule (dependency-cache/key.ts). */
-const DEPENDENCY_CACHE_PATH =
+export const DEPENDENCY_CACHE_PATH =
   /^(?:\.|[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}(?:\/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}){0,2})$/;
 const MAX_DEPENDENCY_CACHE_NUMBER = Number.MAX_SAFE_INTEGER;
 const dependencyCacheCount = z.number().int().min(0).max(MAX_DEPENDENCY_CACHE_NUMBER);

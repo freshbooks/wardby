@@ -2,7 +2,7 @@ import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
-import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
+import { DEPENDENCY_CACHE_PATH, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 
 const DEFAULT_API_BASE_URL = "https://api.github.com";
 const DEFAULT_API_VERSION = "2026-03-10";
@@ -425,14 +425,11 @@ function cappedList(lines: readonly string[], maxChars = MAX_PR_PACKAGE_LIST_CHA
   return more > 0 ? [...shown, `- …and ${more} more — see get_run for the full list`] : shown;
 }
 
-/** A dependency cache folder: "." or up to three plain segments (the proxy's project-path rule). */
-const DEPENDENCY_CACHE_FOLDER =
-  /^(?:\.|[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}(?:\/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}){0,2})$/;
 const MAX_DEPENDENCY_CACHE_FOLDERS = 4;
 
 function dependencyCacheLine(folders: readonly string[] | undefined): string | undefined {
   const shown = [...new Set(folders ?? [])]
-    .filter((folder) => DEPENDENCY_CACHE_FOLDER.test(folder))
+    .filter((folder) => DEPENDENCY_CACHE_PATH.test(folder))
     .slice(0, MAX_DEPENDENCY_CACHE_FOLDERS)
     .map((folder) => (folder === "." ? "the repo root" : `\`${folder}\``));
   return shown.length > 0 ? `Dependency cache: restored \`node_modules\` for ${shown.join(", ")}.` : undefined;

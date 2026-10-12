@@ -8,6 +8,7 @@ import { createBlobStore, type BlobStoreConfig } from "../storage/index.js";
 import type { BlobStore } from "../storage/types.js";
 import { startEviction } from "./dependency-cache/eviction.js";
 import { PrismaDependencyCacheStore } from "./dependency-cache/prisma-store.js";
+import { ModelRequestSeal } from "./dependency-cache/model-request-seal.js";
 import { DependencyCacheService } from "./dependency-cache/service.js";
 import { startDenyPortListener, type DenyPortListenerHandle } from "./deny-port.js";
 import { EnvironmentCredentialResolver } from "./environment-credentials.js";
@@ -94,12 +95,6 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   const audit: ProxyAuditSink | undefined = mock
     ? (event) => options.audit?.({ ...event, mockUpstream: true })
     : options.audit;
-  const proxy = new CodingProxy({
-    ledger: new PrismaProxyLedger(options.db),
-    credentials: new EnvironmentCredentialResolver(env),
-    audit,
-    ...(mock ? { fetch: createMockUpstream(mock) } : {}),
-  });
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
   const upstreamHosts = [...new Set([...REGISTRY_ADAPTERS.values()].flatMap((adapter) => adapter.upstreamHosts))];
   const pinned = buildPinnedFetch({ allowedHosts: [...upstreamHosts, "api.osv.dev"] });
@@ -134,10 +129,12 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   });
 
   let dependencyCache: DependencyCacheService | undefined;
+  let modelRequestSeal: ModelRequestSeal | undefined;
   let eviction: { stop(): void } | undefined;
   if (cacheConfig.enabled) {
     const blobs = (options.createBlobStore ?? createBlobStore)(cacheConfig.blobStore);
     const cacheStore = new PrismaDependencyCacheStore(options.registryDb ?? options.db);
+    modelRequestSeal = new ModelRequestSeal(cacheStore);
     dependencyCache = new DependencyCacheService({
       registry: registryStore,
       store: cacheStore,
@@ -161,6 +158,15 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     );
   }
 
+  const seal = modelRequestSeal;
+  const proxy = new CodingProxy({
+    ledger: new PrismaProxyLedger(options.db),
+    credentials: new EnvironmentCredentialResolver(env),
+    audit,
+    ...(mock ? { fetch: createMockUpstream(mock) } : {}),
+    // The run's first model request closes its dependency cache (no-op for a run with it off).
+    ...(seal ? { onModelRequest: (runId: string) => seal.onModelRequest(runId) } : {}),
+  });
   const startServer = options.startServer ?? startCodingProxyServer;
   let server: CodingProxyServerHandle;
   try {
