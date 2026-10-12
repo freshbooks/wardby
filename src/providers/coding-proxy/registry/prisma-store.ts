@@ -228,4 +228,15 @@ export class PrismaRegistryStore implements RegistryStore {
       select: { code: true, reason: true, publishedAt: true },
     });
   }
+
+  async recordDependencyCacheLockHash(runId: string, lockHash: string, max: number): Promise<void> {
+    // One statement, so a concurrent seal or plan can never slip past a check.
+    await this.db.$executeRaw`
+      UPDATE "CodingProxySession"
+      SET "dependencyCacheLockHashes" = array_append("dependencyCacheLockHashes", ${lockHash})
+      WHERE "runId" = ${runId}
+        AND "dependencyCacheSealedAt" IS NULL
+        AND NOT (${lockHash} = ANY("dependencyCacheLockHashes"))
+        AND cardinality("dependencyCacheLockHashes") < ${max}`;
+  }
 }

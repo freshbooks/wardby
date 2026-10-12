@@ -1,0 +1,342 @@
+/**
+ * The coding proxy's dependency cache: `/cache/npm/*`, authenticated by the
+ * run's registry-only token.
+ *
+ * Trust rules (the whole point of this file):
+ * - Every key is derived here, from the run's records and a lockfile hash the
+ *   proxy computed while approving a plan for this session. A worker names
+ *   only its project folder, which is validated, and which lockfile (one of
+ *   the session's approved hashes) it is asking about.
+ * - Only trusted wardby code runs before the run's seal; the agent runs after
+ *   it with the same token. After the seal every route except the (idempotent)
+ *   seal answers 409 `sealed`, and an upload still streaming when the seal
+ *   lands is discarded.
+ * - A run uploads at most once per project, only within its upload window,
+ *   and only for its derived key. An existing key is never overwritten.
+ * - The sha256 is computed while the upload streams and stored in Postgres;
+ *   downloads carry it so the worker verifies before extracting.
+ */
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { pipeline, type Readable } from "node:stream";
+import { logger } from "../../../core/logger.js";
+import { BlobStoreError, type BlobStore } from "../../storage/types.js";
+import { capabilityHash } from "../proxy.js";
+import type { RegistryRunContext, RegistryStore } from "../registry/store.js";
+import {
+  computePolicyHash,
+  DEPENDENCY_CACHE_ECOSYSTEM,
+  deriveSnapshotKey,
+  isLockHash,
+  parseProjectPath,
+  type SnapshotKey,
+} from "./key.js";
+import type { DependencyCacheStore, SnapshotRow } from "./store.js";
+
+const cacheLog = logger.child({ module: "dependency-cache" });
+
+/** Uploads streaming at once across every run. */
+export const DEFAULT_MAX_CONCURRENT_UPLOADS = 4;
+const SNAPSHOT_ID = /^[a-z0-9]{1,64}$/;
+
+type Route = "lookup" | "upload" | "download" | "seal";
+
+/** Matches a `/cache/...` path; a number is the refusal's status code. */
+function matchRoute(method: string | undefined, pathname: string): { route: Route; id?: string } | 404 | 405 {
+  const prefix = `/cache/${DEPENDENCY_CACHE_ECOSYSTEM}/`;
+  if (!pathname.startsWith(prefix)) return 404;
+  const rest = pathname.slice(prefix.length);
+  const expect = (wanted: string, route: Route, id?: string) => (method === wanted ? { route, id } : 405);
+  if (rest === "lookup") return expect("GET", "lookup");
+  if (rest === "seal") return expect("POST", "seal");
+  if (rest === "blob") return expect("PUT", "upload");
+  if (rest.startsWith("blob/")) {
+    const id = rest.slice("blob/".length);
+    return SNAPSHOT_ID.test(id) ? expect("GET", "download", id) : 404;
+  }
+  return 404;
+}
+
+class CacheRefusal extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+  ) {
+    super(code);
+  }
+}
+
+function send(response: ServerResponse, status: number, body: unknown, close = false): void {
+  if (response.headersSent || response.destroyed) return;
+  response.writeHead(status, {
+    "content-type": "application/json",
+    "cache-control": "no-store",
+    ...(close ? { connection: "close" } : {}),
+  });
+  response.end(JSON.stringify(body));
+}
+
+export interface DependencyCacheServiceOptions {
+  registry: Pick<RegistryStore, "findRunByRegistryTokenHash">;
+  store: DependencyCacheStore;
+  blobs: BlobStore;
+  maxSnapshotBytes: number;
+  uploadMs: number;
+  now?: () => Date;
+  maxConcurrentUploads?: number;
+}
+
+export class DependencyCacheService {
+  readonly uploadMs: number;
+  private readonly now: () => Date;
+  /** `runId\0projectPath` and blob keys of uploads streaming right now (per replica). */
+  private readonly uploading = new Set<string>();
+  private activeUploads = 0;
+
+  constructor(private readonly options: DependencyCacheServiceOptions) {
+    this.uploadMs = options.uploadMs;
+    this.now = options.now ?? (() => new Date());
+  }
+
+  /** Answers one `/cache/...` request. `token` is the registry token the request carried. */
+  async handle(request: IncomingMessage, response: ServerResponse, token: string): Promise<void> {
+    const url = new URL(request.url ?? "/", "http://proxy");
+    const matched = matchRoute(request.method, url.pathname);
+    const isUpload = typeof matched === "object" && matched.route === "upload";
+    try {
+      if (matched === 404) throw new CacheRefusal(404, "not_found");
+      if (matched === 405) throw new CacheRefusal(405, "method_not_allowed");
+      await this.route(matched.route, matched.id, url.searchParams, token, request, response);
+    } catch (error) {
+      if (error instanceof CacheRefusal) {
+        // An upload refused before its body was read: close rather than read it.
+        send(response, error.status, { error: error.code }, isUpload);
+        return;
+      }
+      cacheLog.error({ event: "dependency_cache.failed", err: error }, "dependency cache request failed");
+      if (!response.headersSent) send(response, 500, { error: "internal_error" }, isUpload);
+      else if (!response.destroyed) response.destroy();
+    }
+  }
+
+  private async route(
+    route: Route,
+    id: string | undefined,
+    params: URLSearchParams,
+    token: string,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const context = await this.options.registry.findRunByRegistryTokenHash(capabilityHash(token), this.now());
+    if (!context) throw new CacheRefusal(401, "invalid_capability");
+    // The feature is off for this run: indistinguishable from a proxy without it.
+    if (!context.dependencyCache || !context.cacheImage) throw new CacheRefusal(404, "not_found");
+    const session = await this.options.store.session(context.runId);
+    if (!session) throw new CacheRefusal(401, "invalid_capability");
+    if (route === "seal") {
+      await this.options.store.seal(context.runId, this.now());
+      send(response, 200, { sealed: true });
+      return;
+    }
+    if (session.sealedAt) throw new CacheRefusal(409, "sealed");
+    for (const name of new Set(params.keys()))
+      if (params.getAll(name).length > 1) throw new CacheRefusal(400, "bad_request");
+    const projectPath = parseProjectPath(params.get("project"));
+    if (projectPath === null) throw new CacheRefusal(400, "invalid_project");
+    const lockHash = params.get("lock") ?? "";
+    if (!isLockHash(lockHash) || !session.lockHashes.includes(lockHash)) throw new CacheRefusal(409, "plan_required");
+    const key = deriveSnapshotKey({
+      repository: context.repository,
+      projectPath,
+      lockHash,
+      workerImage: context.cacheImage,
+      policyHash: computePolicyHash(context.allowlist, context.policy),
+    });
+    if (route === "lookup") await this.lookup(key, response);
+    else if (route === "download") await this.download(key, id ?? "", response);
+    else await this.upload(context, session.createdAt, key, request, response);
+  }
+
+  private async lookup(key: SnapshotKey, response: ServerResponse): Promise<void> {
+    const row = await this.options.store.findByIdentity(key);
+    const nearest = row ? null : await this.options.store.findNearest(key, key.lockHash);
+    send(response, 200, {
+      key: key.keyId,
+      hit: row !== null,
+      ...(nearest ? { nearest: { id: nearest.id } } : {}),
+      maxBytes: this.options.maxSnapshotBytes,
+    });
+  }
+
+  /**
+   * Serves the run's derived key (by its keyId) or the snapshot a lookup
+   * offers as nearest for the same project and lockfile, recomputed now with
+   * the same query: nothing is remembered between requests, and no other id
+   * is ever served.
+   */
+  private async download(key: SnapshotKey, id: string, response: ServerResponse): Promise<void> {
+    let row: SnapshotRow | null = null;
+    if (id === key.keyId) row = await this.options.store.findByIdentity(key);
+    else {
+      const nearest = await this.options.store.findNearest(key, key.lockHash);
+      if (nearest?.id === id) row = nearest;
+    }
+    if (!row) throw new CacheRefusal(404, "not_found");
+    let stream: NodeJS.ReadableStream;
+    try {
+      stream = await this.options.blobs.getStream(row.blobKey);
+    } catch (error) {
+      if (!(error instanceof BlobStoreError && error.code === "not_found")) throw error;
+      // A row without its blob would answer hits forever: drop it.
+      await this.options.store.delete(row.id);
+      throw new CacheRefusal(404, "not_found");
+    }
+    try {
+      await this.options.store.touch(row.id, this.now());
+    } catch (error) {
+      cacheLog.warn({ event: "dependency_cache.touch_failed", err: error }, "dependency cache: lastUsedAt not updated");
+    }
+    response.writeHead(200, {
+      "content-type": "application/gzip",
+      "content-length": String(row.sizeBytes),
+      "x-wardby-sha256": row.sha256,
+      "cache-control": "no-store",
+    });
+    pipeline(stream as Readable, response, (error) => {
+      if (error && !response.destroyed) response.destroy();
+    });
+  }
+
+  private async upload(
+    context: RegistryRunContext,
+    sessionCreatedAt: Date,
+    key: SnapshotKey,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const deadline = sessionCreatedAt.getTime() + this.uploadMs;
+    if (this.now().getTime() >= deadline) throw new CacheRefusal(409, "upload_expired");
+    const encoding = request.headers["content-encoding"];
+    if (encoding && encoding !== "identity") throw new CacheRefusal(400, "bad_request");
+    const length = request.headers["content-length"];
+    if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > this.options.maxSnapshotBytes))
+      throw new CacheRefusal(413, "too_large");
+    const projectSlot = `${context.runId}\0${key.projectPath}`;
+    if (this.uploading.has(projectSlot) || this.uploading.has(key.blobKey))
+      throw new CacheRefusal(409, "upload_in_progress");
+    if (await this.options.store.hasUploaded(context.runId, key.ecosystem, key.projectPath))
+      throw new CacheRefusal(409, "already_uploaded");
+    if (await this.options.store.findByIdentity(key)) {
+      send(response, 200, { stored: false, reason: "exists" }, true);
+      return;
+    }
+    if (this.activeUploads >= (this.options.maxConcurrentUploads ?? DEFAULT_MAX_CONCURRENT_UPLOADS))
+      throw new CacheRefusal(503, "busy");
+    // Re-checked after the awaits above: the slot is taken synchronously.
+    if (this.uploading.has(projectSlot) || this.uploading.has(key.blobKey))
+      throw new CacheRefusal(409, "upload_in_progress");
+    this.uploading.add(projectSlot);
+    this.uploading.add(key.blobKey);
+    this.activeUploads += 1;
+    try {
+      await this.storeUpload(context, deadline, key, request, response);
+    } finally {
+      this.uploading.delete(projectSlot);
+      this.uploading.delete(key.blobKey);
+      this.activeUploads -= 1;
+    }
+  }
+
+  private async storeUpload(
+    context: RegistryRunContext,
+    deadline: number,
+    key: SnapshotKey,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    let expired = false;
+    const timer = setTimeout(
+      () => {
+        expired = true;
+        request.destroy();
+      },
+      Math.max(0, deadline - this.now().getTime()),
+    );
+    let stored: { sizeBytes: number; sha256: string };
+    try {
+      stored = await this.options.blobs.putStream(key.blobKey, request, {
+        contentType: "application/gzip",
+        maxBytes: this.options.maxSnapshotBytes,
+      });
+    } catch (error) {
+      if (error instanceof BlobStoreError && error.code === "blob_too_large") {
+        this.refused(context, "too_large");
+        throw new CacheRefusal(413, "too_large");
+      }
+      if (expired) {
+        this.refused(context, "upload_expired");
+        throw new CacheRefusal(409, "upload_expired");
+      }
+      // The client went away mid-upload: nothing to answer.
+      if (request.destroyed || response.destroyed) return;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    // Checked only now, after the last byte arrived: every byte of an
+    // accepted upload was sent before the seal (so before the agent ran).
+    const session = await this.options.store.session(context.runId);
+    const refusal =
+      !session || session.sealedAt ? "sealed" : this.now().getTime() >= deadline ? "upload_expired" : null;
+    if (refusal) {
+      await this.discard(key);
+      this.refused(context, refusal);
+      throw new CacheRefusal(409, refusal);
+    }
+    let outcome: "inserted" | "exists";
+    try {
+      outcome = await this.options.store.insert({
+        ecosystem: key.ecosystem,
+        repository: key.repository,
+        projectPath: key.projectPath,
+        lockHash: key.lockHash,
+        workerImage: key.workerImage,
+        policyHash: key.policyHash,
+        blobKey: key.blobKey,
+        sha256: stored.sha256,
+        sizeBytes: stored.sizeBytes,
+        createdByRunId: context.runId,
+      });
+    } catch (error) {
+      await this.discard(key);
+      throw error;
+    }
+    if (outcome === "exists") {
+      // Another writer stored this key while this upload streamed (the blob
+      // is theirs now, so it stays; a digest mismatch fails the worker's check).
+      send(response, 200, { stored: false, reason: "exists" });
+      return;
+    }
+    cacheLog.info(
+      { event: "dependency_cache.stored", runId: context.runId, sizeBytes: stored.sizeBytes },
+      "dependency cache snapshot stored",
+    );
+    send(response, 201, { stored: true, sha256: stored.sha256, sizeBytes: stored.sizeBytes });
+  }
+
+  /** Removes an upload's blob unless a row now refers to it. */
+  private async discard(key: SnapshotKey): Promise<void> {
+    try {
+      if (await this.options.store.findByIdentity(key)) return;
+      await this.options.blobs.delete(key.blobKey);
+    } catch (error) {
+      cacheLog.warn({ event: "dependency_cache.discard_failed", err: error }, "dependency cache: blob not removed");
+    }
+  }
+
+  private refused(context: RegistryRunContext, code: string): void {
+    cacheLog.info(
+      { event: "dependency_cache.upload_refused", runId: context.runId, code },
+      "dependency cache upload refused",
+    );
+  }
+}

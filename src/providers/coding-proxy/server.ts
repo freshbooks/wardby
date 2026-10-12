@@ -8,6 +8,7 @@ import type { ProxyAuditEvent } from "./types.js";
 import { CodingProxyError, PROXY_MAX_BODY_BYTES, type CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import { RegistryError } from "../../coding/registry/types.js";
 import { MAX_PLAN_BODY_BYTES, type RegistryResponse, type RegistryService } from "./registry/service.js";
+import type { DependencyCacheService } from "./dependency-cache/service.js";
 import type { ProxyProtocol } from "./types.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
@@ -27,6 +28,10 @@ export interface CodingProxyServerConfig {
   port: number;
   expectedHost?: string;
   registry?: Pick<RegistryService, "handle"> & Partial<Pick<RegistryService, "plan">>;
+  /** The dependency cache (`/cache/...`); absent when the deployment has it off. */
+  dependencyCache?: Pick<DependencyCacheService, "handle" | "uploadMs">;
+  /** Time to receive a whole request (default HTTP_LIMITS.requestMs); a cache upload gets its upload window instead. */
+  requestMs?: number;
   onRequest?: (event: { protocol: ProxyProtocol | "other"; status: number; durationMs: number }) => void;
 }
 
@@ -117,6 +122,11 @@ function readPlanBody(request: IncomingMessage, signal: AbortSignal): Promise<st
   });
 }
 
+/** A dependency cache upload, the one request whose body may take longer than `requestMs`. */
+function isCacheUpload(request: IncomingMessage): boolean {
+  return request.method === "PUT" && request.url?.split("?", 1)[0] === "/cache/npm/blob";
+}
+
 function routeProtocol(method: string | undefined, url: string | undefined): ProxyProtocol | undefined {
   if (method !== "POST") return undefined;
   if (url === "/v1/responses") return "openai-responses";
@@ -148,8 +158,20 @@ export async function startCodingProxyServer(
   proxy: CodingProxy,
   config: CodingProxyServerConfig,
 ): Promise<CodingProxyServerHandle> {
+  const requestMs = config.requestMs ?? HTTP_LIMITS.requestMs;
+  // A snapshot upload (up to WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB) cannot
+  // arrive within requestMs, and Node's requestTimeout is server-wide: with
+  // the cache on it is widened to cover the upload window (which the cache
+  // enforces on the upload itself), and every other request keeps requestMs
+  // through its own timer.
+  const extendedRequests = config.dependencyCache !== undefined;
   const server = createServer({ maxHeaderSize: 16 * 1024, requireHostHeader: true }, (request, response) => {
     const startedAt = performance.now();
+    if (extendedRequests && !isCacheUpload(request)) {
+      setTimeout(() => {
+        if (!request.complete) request.socket.destroy();
+      }, requestMs).unref();
+    }
     const protocol = routeProtocol(request.method, request.url) ?? "other";
     response.once("finish", () => {
       try {
@@ -161,6 +183,15 @@ export async function startCodingProxyServer(
     void (async () => {
       if (config.expectedHost && request.headers.host !== config.expectedHost) {
         sendError(response, 403, "invalid_host");
+        return;
+      }
+      if (request.url?.startsWith("/cache/")) {
+        if (!config.dependencyCache) {
+          if (isCacheUpload(request)) response.setHeader("connection", "close");
+          sendError(response, 404, "not_found");
+          return;
+        }
+        await config.dependencyCache.handle(request, response, registryToken(request.headers.authorization));
         return;
       }
       if (request.url?.startsWith("/registry/")) {
@@ -301,7 +332,7 @@ export async function startCodingProxyServer(
       sendError(response, 500, "internal_error");
     });
   });
-  server.requestTimeout = HTTP_LIMITS.requestMs;
+  server.requestTimeout = extendedRequests ? requestMs + config.dependencyCache!.uploadMs : requestMs;
   server.headersTimeout = HTTP_LIMITS.headersMs;
   server.keepAliveTimeout = 5_000;
   server.maxRequestsPerSocket = 100;

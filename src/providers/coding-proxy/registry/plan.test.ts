@@ -108,6 +108,7 @@ function setup(
     /** Blocking advisories per name@version, with malware flags and aliases. */
     advisories?: Record<string, WithheldAdvisory[]>;
     policy?: unknown;
+    dependencyCache?: boolean;
   } = {},
 ) {
   const npm = fakeNpm(registry);
@@ -119,7 +120,7 @@ function setup(
     policy: options.policy ?? {},
     repository: "owner/repo",
     cacheImage: null,
-    dependencyCache: false,
+    dependencyCache: options.dependencyCache ?? false,
   });
   const audited: AuditedVersion[][] = [];
   const service = new RegistryService({
@@ -762,5 +763,46 @@ describe("lockfile plans and accepted advisories (packagePolicy.acceptedAdvisori
     const { json } = await plan(chainLock);
     expect(json).toEqual({ approved: 3, refused: [] });
     expect(approvedOf(store)).toEqual(["a@1.0.0", "b@1.1.0", "c@2.0.3"]);
+  });
+});
+
+describe("lockfile plans and the dependency cache", () => {
+  const lockHashOf = (body: string) => createHash("sha256").update(body).digest("hex");
+  const hashesOf = (store: MemoryRegistryStore) => store.cacheSessions.get("run-1")?.lockHashes ?? [];
+
+  it("records the planned lockfile's sha256 when the plan approves it with no refusals", async () => {
+    const { plan, store } = setup(chain, { dependencyCache: true });
+    expect((await plan(chainLock)).json).toEqual({ approved: 3, refused: [] });
+    expect(hashesOf(store)).toEqual([lockHashOf(chainLock)]);
+    // Planned again: recorded once.
+    await plan(chainLock);
+    expect(hashesOf(store)).toEqual([lockHashOf(chainLock)]);
+  });
+
+  it("records nothing for a plan with any refusal", async () => {
+    const lock = JSON.parse(chainLock);
+    lock.packages["node_modules/b"].integrity = sriOf(new TextEncoder().encode("evil bytes"));
+    const { plan, store } = setup(chain, { dependencyCache: true });
+    expect((await plan(JSON.stringify(lock))).json.refused).not.toEqual([]);
+    expect(hashesOf(store)).toEqual([]);
+  });
+
+  it("records nothing when the run's agent has not enabled the cache", async () => {
+    const { plan, store } = setup(chain);
+    await plan(chainLock);
+    expect(hashesOf(store)).toEqual([]);
+  });
+
+  it("records nothing once the session is sealed, or past the cap", async () => {
+    const sealed = new MemoryRegistryStore();
+    sealed.cacheSessions.set("run-1", { lockHashes: [], sealedAt: NOW, createdAt: NOW });
+    await setup(chain, { dependencyCache: true, store: sealed }).plan(chainLock);
+    expect(hashesOf(sealed)).toEqual([]);
+
+    const full = new MemoryRegistryStore();
+    const eight = Array.from({ length: 8 }, (_, index) => lockHashOf(`lock ${index}`));
+    full.cacheSessions.set("run-1", { lockHashes: [...eight], sealedAt: null, createdAt: NOW });
+    await setup(chain, { dependencyCache: true, store: full }).plan(chainLock);
+    expect(hashesOf(full)).toEqual(eight);
   });
 });

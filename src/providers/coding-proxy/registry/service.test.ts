@@ -262,6 +262,8 @@ describe("RegistryService", () => {
         inner.findApprovedVersion(runId, ecosystem, name, version),
       refusePlanVersions: (runId, ecosystem, versions) => inner.refusePlanVersions(runId, ecosystem, versions),
       findPlanRefusal: (runId, ecosystem, name, version) => inner.findPlanRefusal(runId, ecosystem, name, version),
+      recordDependencyCacheLockHash: (runId, lockHash, max) =>
+        inner.recordDependencyCacheLockHash(runId, lockHash, max),
     };
     const hangingBody = new ReadableStream<Uint8Array>({
       pull: () => new Promise<void>(() => {}), // never resolves
