@@ -602,10 +602,34 @@ Docker quickstart stores are local and have no such rule.
 
 Other bounds:
 
-- A restore is limited by the run's workspace disk (`workspaceDiskMb`) less
-  what the workspace already uses and a safety margin. If that can't be
-  measured, or leaves under 64 MiB, the cache is skipped (`budget_unknown`,
-  `budget_too_small`).
+- Everything the cache writes is limited by the run's workspace disk
+  (`workspaceDiskMb`) less what the workspace already uses and a safety
+  margin. If that can't be measured, or leaves under 64 MiB, the cache is
+  skipped (`budget_unknown`, `budget_too_small`).
+  - A restore must fit: the downloaded archive plus its unpacked tree. A
+    `nearest` snapshot is restored only when one and a half times its
+    unpacked size fits, leaving room for the update and the new archive.
+  - An install (`cold`) starts only when at least 1 GiB is left, or twice
+    the project's tree size when a snapshot of it was already seen. Otherwise
+    the project is skipped `budget_too_small` and the workspace is left as it
+    was, so the agent installs for itself.
+  - After its own install, the worker deletes npm's download cache (the
+    `_cacache` folder under the npm cache folder in the workspace's `.cache`;
+    the registry settings beside it stay). It is about as large as
+    `node_modules` again, and the agent's npm downloads what it needs.
+  - Before archiving a tree for upload, the worker measures the workspace
+    again. It doesn't write the archive when the estimated size (the tree
+    at its last snapshot's compression, or a third of the tree) doesn't fit
+    what is left, and stops and deletes an archive that outgrows it while
+    being written. The installed tree stays and the project is still
+    `cold` or `nearest`; only the upload is skipped. The worker log records
+    this as `snapshot_skipped` with reason `budget` (it isn't a `get_run`
+    reason).
+- The worker waits up to 10 minutes for the lockfile plan (a proxy with a
+  cold package cache checks every package of a large lockfile first), and up
+  to 2 minutes for each other proxy call. The proxy's own
+  `REGISTRY_PLAN_TIMEOUT_MS` (2 minutes by default) still bounds the plan:
+  raise it if large lockfiles end `plan_failed` on a cold proxy.
 - The whole preparation, measuring the disk included, is bounded to 20
   minutes or half the time left before the run's deadline, whichever is
   sooner, so a short run keeps most of its time for the agent. A rebuild is
@@ -684,7 +708,7 @@ Codex run's worker log records the code as `hit_rejected` or
 | `over_budget`                                                 | The unpacked snapshot is larger than the disk budget. Raise the agent's `workspaceDiskMb`.                                                                                                                       |
 | `inconsistent`                                                | The tree doesn't match the committed lockfile. A restored one is discarded and the project installs `cold`; a `cold` one is kept for the agent but not stored.                                                   |
 | `install_failed`                                              | `npm ci`, or the `npm install` that updates a nearest snapshot, exited non-zero. The agent installs for itself and sees the real error.                                                                          |
-| `budget_unknown`, `budget_too_small`                          | The run's workspace disk couldn't be measured, or under 64 MiB would remain. Raise `workspaceDiskMb`.                                                                                                            |
+| `budget_unknown`, `budget_too_small`                          | The run's workspace disk couldn't be measured, under 64 MiB would remain, or too little is left for an install (see "Other bounds" above). The workspace is unchanged. Raise `workspaceDiskMb`.                  |
 | `timeout`, `cancelled`                                        | A step or the preparation's bound (20 minutes, or half the time left before the run's deadline) ran out, or the run was cancelled.                                                                               |
 | `internal_error`, `worker_error`                              | Something unexpected in the worker, including a full disk or inode table. The run continues without the cache; check the worker's log.                                                                           |
 | `tool_unavailable`                                            | Claude Code only: the tool-runner image predates the cache or is a custom image without it. Rebuild it `FROM` the current tool-runner image. The proxy still seals the window on the run's first model request.  |

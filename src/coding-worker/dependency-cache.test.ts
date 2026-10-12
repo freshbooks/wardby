@@ -24,6 +24,7 @@ import {
   dependencyCacheTimeLimit,
   DEFAULT_TIMEOUTS,
   MIN_BUDGET_BYTES,
+  MIN_INSTALL_BUDGET_BYTES,
   discoverProjects,
   extractArchive,
   prepareDependencies,
@@ -120,6 +121,14 @@ else {
   fs.mkdirSync("node_modules/.bin", { recursive: true });
   try { fs.symlinkSync("../beta/index.js", "node_modules/.bin/beta"); } catch {}
   fs.writeFileSync("node_modules/.package-lock.json", JSON.stringify(hidden, null, 2));
+  // npm's download cache, the way a real install fills it.
+  if (process.env.npm_config_cache) {
+    const content = path.join(process.env.npm_config_cache, "_cacache", "content-v2");
+    fs.mkdirSync(content, { recursive: true });
+    fs.writeFileSync(path.join(content, "tarball"), "cached tarball bytes");
+  }
+  // FAKE_NPM_BIG: bytes of incompressible data in one package (a large tree).
+  if (process.env.FAKE_NPM_BIG) fs.writeFileSync("node_modules/beta/big.bin", require("node:crypto").randomBytes(Number(process.env.FAKE_NPM_BIG)));
   if (mode === "rewrite-lock") fs.writeFileSync("package-lock.json", "{}");
 }
 `;
@@ -140,6 +149,8 @@ interface ProxyState {
   uploads: { body: Buffer; contentLength: string | undefined }[];
   sealed: boolean;
   hang?: string;
+  /** Delays the plan answer (a slow proxy with a cold package-fact cache). */
+  planDelayMs?: number;
   seals: number;
   sealStatus?: number;
 }
@@ -177,6 +188,7 @@ function startProxy(): Promise<void> {
       if (route === "POST /registry/npm/-/plan") {
         const plan = (await readBody(request)).toString("utf8");
         state.plans.push(plan);
+        if (state.planDelayMs) await new Promise((resolve) => setTimeout(resolve, state.planDelayMs));
         const answer = typeof state.planAnswer === "function" ? state.planAnswer(plan) : state.planAnswer;
         json(answer.status, answer.body);
         return;
@@ -1139,7 +1151,10 @@ describe("several npm projects in one repo", () => {
       status: 200,
       body: { key: "a".repeat(64), hit: project === "app", maxBytes: 64 * 1024 * 1024 },
     });
-    const { projects } = await prepareAll({ budgetBytes: blob.length + Math.floor(unpackedBytes * 1.5) });
+    const { projects } = await prepareAll({
+      budgetBytes: blob.length + Math.floor(unpackedBytes * 1.5),
+      minInstallBytes: 0,
+    });
     expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
       [".", "cold", undefined],
       ["app", "skipped", "over_budget"],
@@ -1360,6 +1375,158 @@ describe("review fixes", () => {
     const refused = events.find((entry) => entry.event === "archive_refused");
     expect(refused).toMatchObject({ rule: "case_fold_duplicate", pathLength: expect.any(Number) });
     expect(JSON.stringify(refused)).not.toContain("node_modules/a");
+  });
+});
+
+// ---------------------------------------------------------------- disk use
+
+describe("disk use", () => {
+  const MiB = 1024 * 1024;
+  const npmCacheDir = () => join(workspace, ".cache", "npm");
+  const contentCache = () => join(npmCacheDir(), "_cacache");
+
+  /** The npm cache folder the registry setup writes (npmrc inside it), with something else of npm's. */
+  async function npmCacheLikeTheDriver() {
+    await mkdir(npmCacheDir(), { recursive: true });
+    await writeFile(join(npmCacheDir(), "npmrc"), "registry config\n");
+    await mkdir(join(npmCacheDir(), "_logs"));
+    await writeFile(join(npmCacheDir(), "_logs", "debug.log"), "x");
+    env.npm_config_cache = npmCacheDir();
+  }
+
+  const nearestLookup = () =>
+    (state.lookupAnswer = () => ({
+      status: 200,
+      body: { key: "c".repeat(64), hit: false, nearest: { id: "b".repeat(64) }, maxBytes: 64 * MiB },
+    }));
+
+  it("removes npm's content cache after a cold install, keeping the npmrc and the rest of npm's folder", async () => {
+    await npmCacheLikeTheDriver();
+    const result = await prepare();
+    expect(result).toMatchObject({ result: "cold" });
+    expect(await exists(contentCache())).toBe(false);
+    expect(await readFile(join(npmCacheDir(), "npmrc"), "utf8")).toBe("registry config\n");
+    expect(await exists(join(npmCacheDir(), "_logs", "debug.log"))).toBe(true);
+    expect(state.uploads).toHaveLength(1);
+    // Gone before the archive was built.
+    const order = events.map((entry) => entry.event);
+    expect(order.indexOf("npm_cache_cleared")).toBeGreaterThan(-1);
+    expect(order.indexOf("npm_cache_cleared")).toBeLessThan(order.indexOf("snapshot"));
+    expect(events).toContainEqual(expect.objectContaining({ event: "npm_cache_cleared", status: "removed" }));
+  });
+
+  it("removes npm's content cache after a nearest delta install too", async () => {
+    await npmCacheLikeTheDriver();
+    state.blobs.set("b".repeat(64), await realTarSnapshot(LOCKFILE));
+    await writeRepo(LOCKFILE_V2);
+    nearestLookup();
+    expect(await prepare()).toMatchObject({ result: "nearest" });
+    expect(await exists(contentCache())).toBe(false);
+    expect(await exists(join(npmCacheDir(), "npmrc"))).toBe(true);
+  });
+
+  it("removes nothing on a hit (npm never ran)", async () => {
+    await npmCacheLikeTheDriver();
+    await mkdir(contentCache());
+    await writeFile(join(contentCache(), "keep"), "x");
+    hitWith(await realTarSnapshot(LOCKFILE));
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(await exists(join(contentCache(), "keep"))).toBe(true);
+    expect(events.some((entry) => entry.event === "npm_cache_cleared")).toBe(false);
+  });
+
+  it("never removes a content cache outside <workspace>/.cache, or one reached through a symlink", async () => {
+    const outside = join(root, "npm-cache-outside");
+    env.npm_config_cache = outside;
+    expect(await prepare()).toMatchObject({ result: "cold" });
+    expect(await exists(join(outside, "_cacache", "content-v2", "tarball"))).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ event: "npm_cache_cleared", status: "outside_workspace" }));
+
+    await rm(join(workspace, "node_modules"), { recursive: true });
+    state.sealed = false;
+    events = [];
+    await mkdir(join(workspace, ".cache"), { recursive: true });
+    await symlink(outside, join(workspace, ".cache", "npm"));
+    env.npm_config_cache = join(workspace, ".cache", "npm");
+    expect(await prepare()).toMatchObject({ result: "cold" });
+    expect(await exists(join(outside, "_cacache", "content-v2", "tarball"))).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ event: "npm_cache_cleared", status: "unsafe" }));
+  });
+
+  it("skips the snapshot when the archive would not fit what is left; node_modules stays, the result stays cold", async () => {
+    env.FAKE_NPM_BIG = String(6 * MiB);
+    const result = await prepare({ budgetBytes: 7 * MiB, minInstallBytes: 0 });
+    expect(result).toMatchObject({ result: "cold" });
+    expect(result.reason).toBeUndefined();
+    expect(result.sizeBytes).toBeUndefined();
+    expect(state.uploads).toHaveLength(0);
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "snapshot_skipped", reason: "budget", stage: "estimate" }),
+    );
+    expect(await exists(join(workspace, "node_modules/beta/big.bin"))).toBe(true);
+    expect(await cacheLeftovers()).toEqual([]);
+  });
+
+  it("aborts an archive that outgrows what is left mid-write, and leaves no partial file", async () => {
+    env.FAKE_NPM_BIG = String(6 * MiB); // incompressible: the archive comes out ~3x the estimate
+    let partial = 0;
+    const result = await prepare({
+      budgetBytes: 9 * MiB,
+      minInstallBytes: 0,
+      testHooks: {
+        afterArchiveAborted: async (archive: string) => {
+          partial = (await exists(archive)) ? 1 : 0;
+        },
+      },
+    });
+    expect(result).toMatchObject({ result: "cold" });
+    expect(result.reason).toBeUndefined();
+    expect(state.uploads).toHaveLength(0);
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "snapshot_skipped", reason: "budget", stage: "archive" }),
+    );
+    expect(partial).toBe(0);
+    expect(await cacheLeftovers()).toEqual([]);
+    expect(await exists(join(workspace, "node_modules/beta/big.bin"))).toBe(true);
+  });
+
+  it("refuses a cold install below the floor: budget_too_small, no node_modules, still sealed", async () => {
+    expect(MIN_INSTALL_BUDGET_BYTES).toBe(1024 * MiB);
+    expect(await prepare({ budgetBytes: 512 * MiB })).toEqual({ result: "skipped", reason: "budget_too_small" });
+    expect(await npmCalls()).toEqual([]);
+    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await cacheLeftovers()).toEqual([]);
+    expect(state.seals).toBe(1);
+  });
+
+  it("refuses a nearest too big to leave room for the delta, then a cold install of a tree that size", async () => {
+    // A tree that compresses like a real one (the archive a fraction of the unpacked bytes).
+    const blob = await realTarSnapshot(LOCKFILE, (dir) =>
+      writeFile(join(dir, "node_modules/beta/pad.bin"), Buffer.alloc(2 * MiB, 7)),
+    );
+    const archive = join(root, "measure.tgz");
+    await writeFile(archive, blob);
+    const { unpackedBytes } = await scanArchive(archive, { budgetBytes: 1024 * MiB });
+    state.blobs.set("b".repeat(64), blob);
+    await writeRepo(LOCKFILE_V2);
+    nearestLookup();
+    const result = await prepare({ budgetBytes: blob.length + Math.floor(unpackedBytes * 1.2), minInstallBytes: 0 });
+    expect(result).toEqual({ result: "skipped", reason: "budget_too_small" });
+    expect(events).toContainEqual(expect.objectContaining({ event: "nearest_rejected", reason: "budget_too_small" }));
+    expect(await npmCalls()).toEqual([]);
+    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await cacheLeftovers()).toEqual([]);
+  });
+
+  it("gives the plan request its own, longer timeout than the other calls", async () => {
+    expect(DEFAULT_TIMEOUTS.planMs).toBe(600_000);
+    expect(DEFAULT_TIMEOUTS.httpMs).toBe(120_000);
+    state.planDelayMs = 400; // slower than every other call may take
+    expect(await prepare({ timeouts: { httpMs: 200 } })).toMatchObject({ result: "cold" });
+
+    await rm(join(workspace, "node_modules"), { recursive: true });
+    state.sealed = false;
+    expect(await prepare({ timeouts: { planMs: 200 } })).toEqual({ result: "skipped", reason: "timeout" });
   });
 });
 

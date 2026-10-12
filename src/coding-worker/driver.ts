@@ -176,6 +176,7 @@ async function runDependencyCache(
       workspace: options.workspace,
       env,
       budgetBytes: budget.budgetBytes,
+      usedBytes: budget.usedBytes,
       signal: options.signal,
       timeouts: { totalMs },
       log: (event, fields) => options.trace?.record("dependency_cache", { event, ...fields }),
