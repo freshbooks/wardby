@@ -452,6 +452,8 @@ model CodingAgentProfile {
   /// Admin-requested debug trace: while now < debugTraceUntil, every coding
   /// run of this agent is dispatched with CodingRun.debugTrace set. Null = off.
   debugTraceUntil          DateTime?
+  /// Admin-set cap on one traced run's trace output, in MiB; null = the worker default (2).
+  debugTraceMaxMb          Int?
   /// Coding-run services (docs/coding-services.md): the catalog names
   /// (CodingService.name) this agent's runs may start, any version the catalog
   /// has. Empty = none. Owner-set through update_agent.
@@ -510,6 +512,8 @@ model CodingRun {
   /// Fixed at dispatch from the profile's debugTraceUntil: the worker writes a
   /// full stream trace to its own pod log (never to the database).
   debugTrace        Boolean             @default(false)
+  /// Fixed at dispatch from the profile's debugTraceMaxMb, only on a traced run. Null = the worker default.
+  debugTraceMaxMb   Int?
   /// Fixed at dispatch from the profile's maxTurns: the Claude Code worker's turn limit. Null = the worker default.
   maxTurns          Int?
   /// Fixed at dispatch from the profile's repoSkills.

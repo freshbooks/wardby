@@ -41,6 +41,8 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     permissionMode: "dontAsk",
     persistSession: false,
     env: config.environment,
+    // Only on a traced run; otherwise the SDK's default handling is unchanged.
+    ...(config.stderr ? { stderr: config.stderr } : {}),
   };
 }
 

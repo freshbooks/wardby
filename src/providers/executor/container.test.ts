@@ -896,6 +896,24 @@ describe("ContainerExecutor", () => {
     expect(tracedRest).toEqual(plainRest);
   });
 
+  it("hands the worker debugTraceMaxMb only on a traced run that sets one", async () => {
+    const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return input!;
+    };
+    expect(await launchedInput({ debugTrace: true, debugTraceMaxMb: 20 })).toMatchObject({
+      debugTrace: true,
+      debugTraceMaxMb: 20,
+    });
+    expect(await launchedInput({ debugTrace: true, debugTraceMaxMb: null })).not.toHaveProperty("debugTraceMaxMb");
+    expect(await launchedInput({ debugTrace: false, debugTraceMaxMb: 20 })).not.toHaveProperty("debugTraceMaxMb");
+  });
+
   it("falls back to the deployment's default disk size", async () => {
     const created = await harness();
     await created.executor.start("run-1");

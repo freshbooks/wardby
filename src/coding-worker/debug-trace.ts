@@ -1,10 +1,15 @@
-import { MAX_DEBUG_TRACE_LINE_BYTES, MAX_REDACTED_SPAN, redactTokenShapedValues } from "../coding/protocol.js";
+import {
+  DEFAULT_DEBUG_TRACE_MAX_MB,
+  MAX_DEBUG_TRACE_LINE_BYTES,
+  MAX_REDACTED_SPAN,
+  redactTokenShapedValues,
+} from "../coding/protocol.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 
 /**
  * Admin-requested debug trace (CodingTaskInput.debugTrace). When a run is
- * traced, the worker writes every Codex stream event and the full text of any
- * stream failure to its own stdout, one JSON line each, so an operator can read
+ * traced, the worker writes every agent stream event (Codex events, Claude Agent
+ * SDK messages) and the full text of any stream failure to its own stdout, one JSON line each, so an operator can read
  * why a run failed from the run pod's log. Nothing here reaches the control
  * plane: the launchers only ever parse `{"error": "<code>"}` lines, and a trace
  * line's single top-level key is `debugTrace`.
@@ -14,7 +19,8 @@ import { deriveRegistryToken } from "../coding/registry/token.js";
  * stream cannot flood the log.
  */
 export { MAX_DEBUG_TRACE_LINE_BYTES };
-export const MAX_DEBUG_TRACE_TOTAL_BYTES = 2 * 1024 * 1024;
+/** The per-run total when the input sets no cap (CodingTaskInput.debugTraceMaxMb). */
+export const MAX_DEBUG_TRACE_TOTAL_BYTES = DEFAULT_DEBUG_TRACE_MAX_MB * 1024 * 1024;
 
 const MAX_DEPTH = 32;
 const MAX_CAUSE_DEPTH = 8;
@@ -124,10 +130,15 @@ export function createDebugTracer(options: DebugTracerOptions): DebugTracer {
 
 /** The worker's tracer for this input, or undefined when the run is not traced. */
 export function workerDebugTracer(
-  input: { runId: string; debugTrace?: boolean },
+  input: { runId: string; debugTrace?: boolean; debugTraceMaxMb?: number },
   capability: string,
   write: (line: string) => void,
 ): DebugTracer | undefined {
   if (input.debugTrace !== true) return undefined;
-  return createDebugTracer({ runId: input.runId, secrets: [capability, deriveRegistryToken(capability)], write });
+  return createDebugTracer({
+    runId: input.runId,
+    secrets: [capability, deriveRegistryToken(capability)],
+    write,
+    ...(input.debugTraceMaxMb ? { maxTotalBytes: input.debugTraceMaxMb * 1024 * 1024 } : {}),
+  });
 }

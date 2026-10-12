@@ -641,6 +641,42 @@ describe("dispatchRun", () => {
   });
 
   it.each([
+    ["a traced run with a cap", new Date("2026-09-26T12:30:00Z"), 20, 20],
+    ["a traced run without one", new Date("2026-09-26T12:30:00Z"), null, null],
+    ["an untraced run, whatever the cap", null, 20, null],
+  ] as const)(
+    "fixes debugTraceMaxMb on the run at dispatch for %s",
+    async (_label, debugTraceUntil, maxMb, expected) => {
+      const agent = {
+        ...nativeAgent(),
+        kind: "coding",
+        budgetUsd: 1.25,
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/wardby",
+          baseRef: "main",
+          defaultTask: "Fix the failing tests",
+          timeoutSec: 900,
+          protectedPaths: [],
+          debugTraceUntil,
+          debugTraceMaxMb: maxMb,
+        },
+      };
+      const state = fakeDb(agent);
+      const executor: Executor = { async start() {}, async stop() {} };
+
+      const result = await dispatchRun({
+        db: state.db,
+        executor,
+        agentId: agent.id,
+        now: new Date("2026-09-26T12:00:00Z"),
+      });
+
+      expect(state.codingRuns).toEqual([expect.objectContaining({ runId: result?.run.id, debugTraceMaxMb: expected })]);
+    },
+  );
+
+  it.each([
     ["the profile's turn limit", 120, 120],
     ["no turn limit", null, null],
   ] as const)("fixes maxTurns on the run at dispatch from %s", async (_label, maxTurns, expected) => {

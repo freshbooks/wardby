@@ -240,21 +240,52 @@ expires on its own: each coding run dispatched before the expiry is traced for
 its whole life, and `get_run` shows `debugTrace: true` for it. Runs dispatched
 afterwards are not.
 
-A traced run's Codex worker writes every Codex stream event, and the full text
-of a stream failure (including the agent process's own error output and cause
-chain), to its **own log**, one JSON line each under a `debugTrace` key. On
+A traced run's worker writes its whole agent stream, and the full text of a
+stream failure (including the agent process's own error output and cause
+chain), to its **own log**, one JSON line each under a `debugTrace` key
+(`{ runId, at, kind, data }`, with `truncated: true` on a cut line). On
 Kubernetes that is the run pod's `worker` container log; on GKE, Cloud Logging
 keeps it after the pod is deleted. With the Docker launcher it is the worker
 container's log (`docker logs`), for as long as the container exists. Nothing from the trace goes to the database,
 GitHub, the run's error, or the control-plane log. Token-shaped values (the run
-capability, bearer tokens, API keys, GitHub tokens) are redacted, each line is
-capped at 16 KiB and each run at 2 MiB.
+capability, the package-registry token derived from it, bearer tokens, API
+keys, GitHub tokens) are redacted, and each line is capped at 16 KiB.
 
-The trace can contain prompts, model output and repository content. Turn it on
-only while diagnosing a failure, for as short a time as you can, and treat the
-pod logs of traced runs as sensitive. Tracing needs a worker driver image that
-supports it; a worker that predates it rejects a traced run's input as
-invalid.
+- **Codex** runs trace every Codex stream event (`event`), turn and error
+  events (`turn_failed`, `error_event`), and stream failures (`stream_error`).
+- **Claude Code** runs (Wardby 0.7.0 or later) trace every Claude Agent SDK
+  message (`message`): the session's `system`/`init` message, each `assistant`
+  message, whose `tool_use` blocks carry the command given to `run_command`,
+  each `user` message, whose `tool_result` blocks carry that command's output
+  and error flag, and the final `result` message with its usage, cost and
+  duration. They also trace Claude Code's own error output (`sdk_stderr`) and
+  stream failures (`stream_error`). A command's duration is the difference
+  between the `at` of its `tool_use` message and that of its `tool_result`.
+- Both write `worker_error` when the worker itself fails.
+
+Each traced run's total is capped at 2 MiB by default. Once the cap is reached
+the worker writes one `limit_reached` line and stops tracing that run. An admin
+can raise or lower the cap for an agent, from 1 to 64 MiB, together with the
+trace or separately (Wardby 0.7.0 or later):
+
+```
+update_agent { "id": "<agent id>", "codingProfile": { "debugTraceMinutes": 30, "debugTraceMaxMb": 20 } }
+```
+
+`debugTraceMaxMb` needs `agents:admin` too, and `null` restores the default.
+Changes are written to the same `coding.debug_trace.set` audit line. It is
+fixed on each traced run at dispatch, and `get_run` shows it as
+`debugTraceMaxMb` when it is not the default. A long trace can outgrow what
+your log pipeline keeps: Kubernetes rotates container logs (often at about
+10 MiB per file), so `kubectl logs` may show only the newest part of a large
+trace, while a log collector such as Cloud Logging on GKE keeps every line.
+
+The trace can contain prompts, model output, commands, their output and
+repository content. Turn it on only while diagnosing a failure, for as short a
+time as you can, and treat the pod logs of traced runs as sensitive. Tracing
+needs a worker image from a release that supports it (for Claude Code, 0.7.0
+or later). A Codex worker that predates it rejects a traced run's input as
+invalid; a Claude Code worker from 0.6.x runs the task but writes no trace.
 
 ## Container Policy
 

@@ -156,6 +156,31 @@ describe("workerDebugTracer", () => {
     expect(workerDebugTracer({ runId: "run_123", debugTrace: true }, CAPABILITY, write)).toBeDefined();
   });
 
+  it("caps the run at the input's debugTraceMaxMb, or the default without one", () => {
+    const big = "x".repeat(15_000);
+    const run = (debugTraceMaxMb?: number) => {
+      const lines: string[] = [];
+      const tracer = workerDebugTracer(
+        { runId: "run_123", debugTrace: true, ...(debugTraceMaxMb ? { debugTraceMaxMb } : {}) },
+        CAPABILITY,
+        (line) => lines.push(line),
+      );
+      for (let i = 0; i < 400; i++) tracer!.record("event", { big });
+      return lines;
+    };
+    const total = (lines: string[]) => lines.reduce((sum, line) => sum + Buffer.byteLength(line), 0);
+    const oneMb = run(1);
+    expect(JSON.parse(oneMb.at(-1)!)).toMatchObject({
+      debugTrace: { kind: "limit_reached", data: { maxTotalBytes: 1024 * 1024 } },
+    });
+    expect(total(oneMb.slice(0, -1))).toBeLessThanOrEqual(1024 * 1024);
+    const byDefault = run();
+    expect(JSON.parse(byDefault.at(-1)!)).toMatchObject({
+      debugTrace: { kind: "limit_reached", data: { maxTotalBytes: MAX_DEBUG_TRACE_TOTAL_BYTES } },
+    });
+    expect(run(8).some((line) => line.includes("limit_reached"))).toBe(false);
+  });
+
   it("redacts the capability and the registry token derived from it", () => {
     const lines: string[] = [];
     const tracer = workerDebugTracer({ runId: "run_123", debugTrace: true }, CAPABILITY, (line) => lines.push(line));

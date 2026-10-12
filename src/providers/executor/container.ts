@@ -150,6 +150,8 @@ export interface ContainerRunSnapshot {
   workspaceDiskMb: number | null;
   /** Admin-requested debug trace, fixed at dispatch (CodingRun.debugTrace). */
   debugTrace?: boolean;
+  /** The traced run's trace cap in MiB, fixed at dispatch (CodingRun.debugTraceMaxMb); null = the worker default. */
+  debugTraceMaxMb?: number | null;
   /** Claude Code turn limit, fixed at dispatch (CodingRun.maxTurns); null = the worker default. */
   maxTurns?: number | null;
   /** Load the repo's agent skills, fixed at dispatch (CodingRun.repoSkills); absent on older snapshots = true. */
@@ -284,6 +286,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       toolImage: row.codingRun.toolImage,
       workspaceDiskMb: row.codingRun.workspaceDiskMb,
       debugTrace: row.codingRun.debugTrace,
+      debugTraceMaxMb: row.codingRun.debugTraceMaxMb,
       maxTurns: row.codingRun.maxTurns,
       repoSkills: row.codingRun.repoSkills,
       claudeBareMode: row.codingRun.claudeBareMode,
@@ -1442,6 +1445,8 @@ export class ContainerExecutor implements Executor {
         continuationOf: run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined,
         // Only when true: an untraced run's input stays exactly what older workers expect.
         ...(run.debugTrace ? { debugTrace: true } : {}),
+        // Only on a traced run whose agent sets a cap: every other run's input stays exactly what older workers expect.
+        ...(run.debugTrace && run.debugTraceMaxMb ? { debugTraceMaxMb: run.debugTraceMaxMb } : {}),
         // Only when the agent sets one: every other run's input stays exactly what older workers expect.
         ...(run.maxTurns ? { maxTurns: run.maxTurns } : {}),
         // Only when off: every other run's input stays exactly what older workers expect.

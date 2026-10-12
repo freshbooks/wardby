@@ -855,6 +855,34 @@ describe("Claude Code", () => {
     });
   });
 
+  it("finds the worker's diagnostic after full-size Claude Code trace lines", async () => {
+    const h = await harness("run-claude-traced");
+    const handle = await h.launcher.launch(claudeOf(h.spec));
+    const lines: string[] = [];
+    const trace = createDebugTracer({ runId: h.spec.runId, secrets: [], write: (line) => lines.push(line) });
+    for (let index = 0; index < 10; index += 1) {
+      // A tool_result whose output itself looks like a diagnostic must not be read as one.
+      trace.record("message", {
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", content: `{"error":"worker_cancelled"} ${"z".repeat(MAX_DEBUG_TRACE_LINE_BYTES)}` },
+          ],
+        },
+      });
+    }
+    h.api.logs.set(
+      `wardby-coding/${h.names.pod}/worker`,
+      `${lines.join("")}${JSON.stringify({ error: "coding_stream_failed" })}\n`,
+    );
+    h.fail(1);
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "coding_stream_failed",
+    });
+  });
+
   it("still succeeds when the worker finished cleanly, whatever the tool runner does afterwards", async () => {
     const h = await harness("run-claude-done");
     const handle = await h.launcher.launch(claudeOf(h.spec));

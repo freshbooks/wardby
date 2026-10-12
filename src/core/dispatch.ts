@@ -783,6 +783,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           // Claude Code's commands run in its tool runner, so the toolchain picks that image too; fixed
           // here with the worker image so the run keeps both however the deployment changes later.
           const toolImage = options.executor.resolveCodingToolImage?.(imageSelector) ?? null;
+          const traced =
+            agent.codingProfile.debugTraceUntil != null &&
+            now.getTime() < agent.codingProfile.debugTraceUntil.getTime();
           await tx.codingRun.create({
             data: {
               runId: run.id,
@@ -809,9 +812,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               repoSkills: agent.codingProfile.repoSkills,
               claudeBareMode: agent.codingProfile.claudeBareMode,
               // Fixed here so a run's tracing never changes mid-run.
-              debugTrace:
-                agent.codingProfile.debugTraceUntil != null &&
-                now.getTime() < agent.codingProfile.debugTraceUntil.getTime(),
+              debugTrace: traced,
+              debugTraceMaxMb: traced ? agent.codingProfile.debugTraceMaxMb : null,
               services,
             },
           });

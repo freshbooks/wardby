@@ -83,6 +83,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           failureCategory: true,
           diagnosticId: true,
           debugTrace: true,
+          debugTraceMaxMb: true,
           services: true,
           resultBranch: true,
           baseSha: true,
@@ -127,6 +128,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ...(codingQueuedAt ? { codingQueuedAt } : {}),
         // An admin turned on the debug trace: the worker's full trace is in its pod log.
         ...(codingRun?.debugTrace ? { debugTrace: true } : {}),
+        ...(codingRun?.debugTrace && codingRun.debugTraceMaxMb ? { debugTraceMaxMb: codingRun.debugTraceMaxMb } : {}),
         ...(services.length > 0 ? { services } : {}),
         ...(codingRun?.resultBranch ? { resultBranch: codingRun.resultBranch } : {}),
         ...(codingRun?.baseSha ? { baseSha: codingRun.baseSha } : {}),
