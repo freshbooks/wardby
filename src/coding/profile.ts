@@ -159,6 +159,8 @@ const codingProfileFields = {
   services: AllowedServiceNamesSchema,
   repoSkills: z.boolean(),
   claudeBareMode: z.boolean(),
+  /** Restore npm node_modules from a snapshot the proxy re-approves (docs: dependency cache). */
+  dependencyCache: z.boolean(),
 };
 
 export const CodingProfileSchema = z
@@ -181,6 +183,7 @@ export const CodingProfileSchema = z
     services: codingProfileFields.services.default([]),
     repoSkills: codingProfileFields.repoSkills.default(true),
     claudeBareMode: codingProfileFields.claudeBareMode.default(true),
+    dependencyCache: codingProfileFields.dependencyCache.default(false),
   })
   .strict();
 
@@ -204,6 +207,7 @@ export const CodingProfilePatchSchema = z
     services: codingProfileFields.services.optional(),
     repoSkills: codingProfileFields.repoSkills.optional(),
     claudeBareMode: codingProfileFields.claudeBareMode.optional(),
+    dependencyCache: codingProfileFields.dependencyCache.optional(),
   })
   .strict();
 

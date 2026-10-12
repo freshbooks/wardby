@@ -313,6 +313,11 @@ const profileJsonSchema = {
       description:
         "Claude Code runs only. Default true: Claude Code runs in bare mode and wardby adds the repository's CLAUDE.md and its skill list to the system prompt; the model reads a skill's SKILL.md with run_command. False: bare mode is off and Claude Code loads CLAUDE.md and skills itself (native Skill tool). Repository settings, hooks, and MCP config are never loaded either way.",
     },
+    dependencyCache: {
+      type: "boolean",
+      description:
+        "Restore npm node_modules from a snapshot the proxy re-approves; needs package approval (packages:approve or agents:admin). Default false.",
+    },
     packageAllowlist: {
       type: "object",
       description:
@@ -455,6 +460,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     services: profile.services,
     repoSkills: profile.repoSkills,
     claudeBareMode: profile.claudeBareMode,
+    dependencyCache: profile.dependencyCache,
   });
 }
 
@@ -530,7 +536,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       if (
         packages &&
         (Object.keys(packages.packageAllowlist ?? {}).length > 0 ||
-          Object.keys(packages.packagePolicy ?? {}).length > 0)
+          Object.keys(packages.packagePolicy ?? {}).length > 0 ||
+          packages.dependencyCache === true)
       )
         requirePackageApproval(ctx);
       validateSchedule(args.schedule, args.timezone ?? "UTC");
@@ -651,7 +658,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       const debugTraceMinutes = args.codingProfile?.debugTraceMinutes;
       const debugTraceMaxMb = args.codingProfile?.debugTraceMaxMb;
       if (debugTraceMinutes !== undefined || debugTraceMaxMb !== undefined) requireDebugTraceScope(ctx);
-      if (args.codingProfile?.packageAllowlist !== undefined || args.codingProfile?.packagePolicy !== undefined)
+      if (
+        args.codingProfile?.packageAllowlist !== undefined ||
+        args.codingProfile?.packagePolicy !== undefined ||
+        args.codingProfile?.dependencyCache !== undefined
+      )
         requirePackageApproval(ctx);
 
       // Repository authorization calls GitHub, so it runs before (outside) the

@@ -30,6 +30,8 @@ export interface ClaudeToolSetup {
   schemaVersion: 1;
   env: Record<string, string>;
   files: { path: string; content: string; mode: number }[];
+  /** Present only when the run's dependency cache is on, so older tool runners see an unchanged setup. */
+  dependencyCache?: true;
 }
 
 export function claudeToolSetup(spec: JobSpec, capability: string): string {
@@ -44,6 +46,7 @@ export function claudeToolSetup(spec: JobSpec, capability: string): string {
     // Same precedence as the Codex driver: the registry's own settings win over a service's.
     env: { ...serviceEnvironment(spec.services), ...registry.env },
     files: registry.files,
+    ...(spec.dependencyCache ? { dependencyCache: true } : {}),
   };
   const raw = JSON.stringify(setup);
   const limits = CLAUDE_TOOL_SETUP_LIMITS;

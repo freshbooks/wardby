@@ -117,6 +117,9 @@ function setup(
     deadlineAt: new Date(NOW.getTime() + 10 * DAY),
     allowlist: { npm: options.allowlist ?? ["a"] },
     policy: options.policy ?? {},
+    repository: "owner/repo",
+    cacheImage: null,
+    dependencyCache: false,
   });
   const audited: AuditedVersion[][] = [];
   const service = new RegistryService({
@@ -443,6 +446,9 @@ describe("lockfile plan verification", () => {
       deadlineAt: new Date(NOW.getTime() + DAY),
       allowlist: { npm: ["a"] },
       policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
     });
     const reads: string[] = [];
     const planFor = (token: string) =>

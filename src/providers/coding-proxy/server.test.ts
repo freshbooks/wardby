@@ -402,6 +402,9 @@ describe("coding proxy registry routing", () => {
         deadlineAt: new Date(NOW.getTime() + 86_400_000),
         allowlist: { npm: ["react"] },
         policy: {},
+        repository: "owner/repo",
+        cacheImage: null,
+        dependencyCache: false,
       });
       let upstreamCalls = 0;
       let cancelled: () => void = () => {};

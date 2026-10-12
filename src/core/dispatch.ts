@@ -811,6 +811,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               maxTurns: agent.codingProfile.maxTurns,
               repoSkills: agent.codingProfile.repoSkills,
               claudeBareMode: agent.codingProfile.claudeBareMode,
+              dependencyCache: agent.codingProfile.dependencyCache,
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace: traced,
               debugTraceMaxMb: traced ? agent.codingProfile.debugTraceMaxMb : null,

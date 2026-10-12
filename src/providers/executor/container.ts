@@ -158,6 +158,8 @@ export interface ContainerRunSnapshot {
   repoSkills?: boolean;
   /** Claude Code loading mode, fixed at dispatch (CodingRun.claudeBareMode); absent on older snapshots = true. */
   claudeBareMode?: boolean;
+  /** Dependency cache, fixed at dispatch (CodingRun.dependencyCache); absent on older snapshots = false. */
+  dependencyCache?: boolean;
   /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
   services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
@@ -290,6 +292,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       maxTurns: row.codingRun.maxTurns,
       repoSkills: row.codingRun.repoSkills,
       claudeBareMode: row.codingRun.claudeBareMode,
+      dependencyCache: row.codingRun.dependencyCache,
       services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
@@ -1385,6 +1388,8 @@ export class ContainerExecutor implements Executor {
       // A run keeps the tool image it was dispatched with; rows from before CodingRun.toolImage use the default.
       ...(provider === "claude-code" ? { toolImage: run.toolImage ?? this.options.claudeToolRunnerImage } : {}),
       inputArtifact,
+      // Only when on: every other run's spec stays exactly what it was.
+      ...(run.dependencyCache ? { dependencyCache: true as const } : {}),
       timeoutSec: run.timeoutSec,
       limits: { ...this.options.limits, ...(run.workspaceDiskMb ? { diskMb: run.workspaceDiskMb } : {}) },
       labels: {},
@@ -1453,6 +1458,8 @@ export class ContainerExecutor implements Executor {
         ...(run.repoSkills === false ? { repoSkills: false } : {}),
         // Only when off: every other run's input stays exactly what older workers expect.
         ...(run.claudeBareMode === false ? { claudeBareMode: false } : {}),
+        // Only when on: every other run's input stays exactly what older workers expect.
+        ...(run.dependencyCache ? { dependencyCache: true as const } : {}),
         // Only when there are some: every other run's input stays exactly what older workers expect.
         ...(services.length > 0 ? { services: workerServices(services) } : {}),
         // Only when there is something to load: every other run's input stays exactly what older workers expect.

@@ -26,7 +26,16 @@ export class PrismaRegistryStore implements RegistryStore {
         runId: true,
         status: true,
         deadlineAt: true,
-        run: { select: { packageAllowlist: true, packagePolicy: true } },
+        run: {
+          select: {
+            packageAllowlist: true,
+            packagePolicy: true,
+            repository: true,
+            workerImage: true,
+            toolImage: true,
+            dependencyCache: true,
+          },
+        },
       },
     });
     if (!session || session.status !== "active" || session.deadlineAt <= now) return null;
@@ -35,6 +44,9 @@ export class PrismaRegistryStore implements RegistryStore {
       deadlineAt: session.deadlineAt,
       allowlist: (session.run.packageAllowlist ?? {}) as PackageAllowlist,
       policy: session.run.packagePolicy,
+      repository: session.run.repository,
+      cacheImage: session.run.toolImage ?? session.run.workerImage,
+      dependencyCache: session.run.dependencyCache,
     };
   }
 

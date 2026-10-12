@@ -896,6 +896,26 @@ describe("ContainerExecutor", () => {
     expect(tracedRest).toEqual(plainRest);
   });
 
+  it("hands the worker dependencyCache (and the launcher spec) only when the run has it on", async () => {
+    const launched = async (overrides: Partial<ContainerRunSnapshot>) => {
+      const created = await harness(overrides);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { input: input!, spec: created.jobs.lastSpec! };
+    };
+    const on = await launched({ dependencyCache: true });
+    expect(on.input).toMatchObject({ dependencyCache: true });
+    expect(on.spec.dependencyCache).toBe(true);
+    for (const overrides of [{ dependencyCache: false }, {}]) {
+      const off = await launched(overrides);
+      expect(off.input).not.toHaveProperty("dependencyCache");
+      expect(off.spec).not.toHaveProperty("dependencyCache");
+    }
+  });
+
   it("hands the worker debugTraceMaxMb only on a traced run that sets one", async () => {
     const launchedInput = async (overrides: Partial<ContainerRunSnapshot>) => {
       const created = await harness(overrides);

@@ -64,7 +64,13 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
 
     const store = new PrismaRegistryStore(db);
     const context = await store.findRunByRegistryTokenHash("h1", new Date());
-    expect(context).toMatchObject({ runId, allowlist: { npm: ["react"] } });
+    expect(context).toMatchObject({
+      runId,
+      allowlist: { npm: ["react"] },
+      repository: "openai/example",
+      cacheImage: null,
+      dependencyCache: false,
+    });
 
     expect(await store.isAllowedDependency(runId, "npm", "loose-envify")).toBe(false);
     await store.addAllowances(runId, "npm", ["loose-envify", "loose-envify"]);

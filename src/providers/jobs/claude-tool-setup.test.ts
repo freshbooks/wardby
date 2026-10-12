@@ -60,6 +60,13 @@ describe("claudeToolSetup", () => {
     expect(setup.env).toMatchObject(POSTGRES.testEnv);
   });
 
+  it("carries dependencyCache only when the run turned it on", () => {
+    expect(JSON.parse(claudeToolSetup(spec, CAPABILITY))).not.toHaveProperty("dependencyCache");
+    expect(JSON.parse(claudeToolSetup({ ...spec, dependencyCache: true }, CAPABILITY))).toMatchObject({
+      dependencyCache: true,
+    });
+  });
+
   it("refuses a Codex spec", () => {
     expect(() => claudeToolSetup({ ...spec, provider: "codex", toolImage: undefined }, CAPABILITY)).toThrow(
       "claude_tool_setup_provider",

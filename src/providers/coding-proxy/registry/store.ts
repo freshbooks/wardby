@@ -6,6 +6,12 @@ export interface RegistryRunContext {
   deadlineAt: Date;
   allowlist: PackageAllowlist;
   policy: unknown; // resolved with resolvePolicy()
+  /** The run's repository (CodingRun.repository), a cache-key input. */
+  repository: string;
+  /** The image whose environment the install runs in: CodingRun.toolImage ?? workerImage; null when neither is recorded. */
+  cacheImage: string | null;
+  /** Whether the run's agent enabled the dependency cache, fixed at dispatch (CodingRun.dependencyCache). */
+  dependencyCache: boolean;
 }
 
 export interface RegistryFetchRecord {

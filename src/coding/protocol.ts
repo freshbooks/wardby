@@ -464,6 +464,13 @@ export const CodingTaskInputSchema = z
      */
     debugTrace: z.boolean().optional(),
     /**
+     * Dependency cache (CodingAgentProfile.dependencyCache, fixed on the run at
+     * dispatch). The control plane writes the key only when true, so an input
+     * for any other run is unchanged for workers that predate it (their strict
+     * schema would refuse the key).
+     */
+    dependencyCache: z.literal(true).optional(),
+    /**
      * Cap on a traced run's total trace output, in MiB (CodingRun.debugTraceMaxMb).
      * Written only on a traced run whose agent sets one; absent means the
      * worker default (DEFAULT_DEBUG_TRACE_MAX_MB).
