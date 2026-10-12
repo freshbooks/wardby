@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runBlobStoreContract } from "./blob-store-contract.js";
 import { S3BlobStore, type S3ClientLike } from "./s3.js";
 
@@ -8,7 +8,6 @@ interface StoredObject {
   data: Buffer;
   updated: Date;
   contentType?: string;
-  metadata: Record<string, string>;
 }
 
 class FakeS3Error extends Error {
@@ -58,7 +57,6 @@ export class FakeS3 implements S3ClientLike {
           data: await collect(input.Body),
           updated: new Date(),
           contentType: input.ContentType as string | undefined,
-          metadata: { ...(input.Metadata as Record<string, string> | undefined) },
         });
         return { ETag: '"etag"' };
       case "CreateMultipartUploadCommand": {
@@ -84,7 +82,6 @@ export class FakeS3 implements S3ClientLike {
           data: Buffer.concat(ordered),
           updated: new Date(),
           contentType: upload.contentType,
-          metadata: {},
         });
         this.multiparts.delete(input.UploadId as string);
         return { ETag: '"final"', Location: `https://s3.test/${key}` };
@@ -93,19 +90,6 @@ export class FakeS3 implements S3ClientLike {
         this.aborted.push(input.UploadId as string);
         this.multiparts.delete(input.UploadId as string);
         return {};
-      case "CopyObjectCommand": {
-        const found = this.objects.get(key);
-        if (!found) throw new FakeS3Error("NoSuchKey", 404);
-        const source = String(input.CopySource);
-        if (source !== `${String(input.Bucket)}/${key}`) throw new Error(`unexpected copy source ${source}`);
-        this.objects.set(key, {
-          ...found,
-          updated: new Date(),
-          contentType: (input.ContentType as string | undefined) ?? found.contentType,
-          metadata: { ...(input.Metadata as Record<string, string> | undefined) },
-        });
-        return {};
-      }
       case "GetObjectCommand": {
         const found = this.objects.get(key);
         if (!found) throw new FakeS3Error("NoSuchKey", 404);
@@ -114,7 +98,7 @@ export class FakeS3 implements S3ClientLike {
       case "HeadObjectCommand": {
         const found = this.objects.get(key);
         if (!found) throw new FakeS3Error("NotFound", 404);
-        return { ContentLength: found.data.length, LastModified: found.updated, Metadata: found.metadata };
+        return { ContentLength: found.data.length, LastModified: found.updated };
       }
       case "DeleteObjectCommand":
         this.objects.delete(key);
@@ -128,22 +112,16 @@ export class FakeS3 implements S3ClientLike {
 runBlobStoreContract("s3", async () => ({ store: new S3BlobStore(new FakeS3(), "bucket") }));
 
 describe("S3BlobStore specifics", () => {
-  it("records the sha256 as object metadata after a stream upload", async () => {
+  it("returns the streamed sha256 but records none, so head reports it unknown", async () => {
     const client = new FakeS3();
     const store = new S3BlobStore(client, "bucket");
-    const { sha256 } = await store.putStream("snap/a.tar", Readable.from([Buffer.from("abc")]), {
+    const result = await store.putStream("snap/a.tar", Readable.from([Buffer.from("abc")]), {
       contentType: "application/x-tar",
     });
-    expect(client.objects.get("snap/a.tar")?.metadata["x-wardby-sha256"]).toBe(sha256);
+    expect(result.sha256).toBe(createHash("sha256").update("abc").digest("hex"));
     expect(client.objects.get("snap/a.tar")?.contentType).toBe("application/x-tar");
-    expect((await store.head("snap/a.tar"))?.sha256).toBe(sha256);
-  });
-
-  it("put records the sha256 too", async () => {
-    const client = new FakeS3();
-    const store = new S3BlobStore(client, "bucket");
-    await store.put("snap/b.bin", Buffer.from("abc"));
-    expect((await store.head("snap/b.bin"))?.sha256).toBe(createHash("sha256").update("abc").digest("hex"));
+    expect(client.commands).not.toContain("CopyObjectCommand");
+    expect((await store.head("snap/a.tar"))?.sha256).toBeUndefined();
   });
 
   it("aborts a multipart upload past maxBytes and leaves the previous object intact", async () => {
@@ -171,7 +149,6 @@ describe("S3BlobStore specifics", () => {
     expect(result.sizeBytes).toBe(data.length);
     expect(result.sha256).toBe(createHash("sha256").update(data).digest("hex"));
     expect((await store.get("snap/multi.tar")).equals(data)).toBe(true);
-    expect((await store.head("snap/multi.tar"))?.sha256).toBe(result.sha256);
   });
 
   it("signedUrl returns a presigned URL for the key", async () => {
@@ -187,15 +164,40 @@ describe("S3BlobStore specifics", () => {
   });
 
   it("surfaces non-404 errors unchanged", async () => {
-    const store = new S3BlobStore(
-      {
-        ...new FakeS3(),
-        send: async () => {
-          throw new FakeS3Error("InternalError", 500);
-        },
+    const failing: S3ClientLike = {
+      config: {},
+      send: async () => {
+        throw new FakeS3Error("InternalError", 500);
       },
-      "bucket",
-    );
-    await expect(store.head("snap/a.tar")).rejects.toThrow("InternalError");
+    };
+    await expect(new S3BlobStore(failing, "bucket").head("snap/a.tar")).rejects.toThrow("InternalError");
+  });
+
+  it("surfaces NoSuchBucket instead of treating it as a missing key", async () => {
+    const noBucket: S3ClientLike = {
+      config: {},
+      send: async () => {
+        throw new FakeS3Error("NoSuchBucket", 404);
+      },
+    };
+    const store = new S3BlobStore(noBucket, "bucket");
+    await expect(store.head("snap/a.tar")).rejects.toThrow("NoSuchBucket");
+    await expect(store.getStream("snap/a.tar")).rejects.toThrow("NoSuchBucket");
+  });
+
+  it("presigned PUT URLs from the configured client carry no checksum parameters", async () => {
+    vi.stubEnv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE");
+    vi.stubEnv("AWS_SECRET_ACCESS_KEY", "secret");
+    try {
+      for (const endpoint of [undefined, "http://minio:9000"]) {
+        const store = S3BlobStore.forBucket({ bucket: "bucket", region: "us-east-1", endpoint });
+        const url = new URL(await store.signedUrl("snap/a.tar", { expiresSec: 60, method: "PUT" }));
+        const names = [...url.searchParams.keys()].map((name) => name.toLowerCase());
+        expect(names.filter((name) => name.startsWith("x-amz-checksum"))).toEqual([]);
+        expect(names).toContain("x-amz-signature");
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

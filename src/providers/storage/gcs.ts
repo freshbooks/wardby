@@ -1,26 +1,17 @@
-import { createHash } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { Storage } from "@google-cloud/storage";
-import { collectStream, createByteMeter, SHA256_METADATA_KEY } from "./meter.js";
+import { collectStream, createByteMeter } from "./meter.js";
 import { assertValidBlobKey, BlobStoreError, type BlobInfo, type BlobStore } from "./types.js";
 
 /** The slice of a GCS File the adapter uses (the real `File` satisfies it; tests supply an in-memory fake). */
 export interface GcsFileLike {
-  createWriteStream(options?: {
-    resumable?: boolean;
-    contentType?: string;
-    metadata?: { metadata?: Record<string, string> };
-  }): Writable;
+  createWriteStream(options?: { resumable?: boolean; contentType?: string }): Writable;
   createReadStream(): Readable;
   getMetadata(): Promise<
     [{ size?: string | number; updated?: string; metadata?: Record<string, unknown> }, ...unknown[]]
   >;
-  setMetadata(metadata: { metadata: Record<string, string> }): Promise<unknown>;
-  save(
-    data: Buffer,
-    options?: { resumable?: boolean; contentType?: string; metadata?: { metadata?: Record<string, string> } },
-  ): Promise<unknown>;
+  save(data: Buffer, options?: { resumable?: boolean; contentType?: string }): Promise<unknown>;
   delete(options?: { ignoreNotFound?: boolean }): Promise<unknown>;
   getSignedUrl(config: { version: "v4"; action: "read" | "write"; expires: number }): Promise<[string]>;
 }
@@ -52,12 +43,7 @@ export class GcsBlobStore implements BlobStore {
   }
 
   async put(key: string, body: Buffer, opts?: { contentType?: string }): Promise<void> {
-    const sha256 = createHash("sha256").update(body).digest("hex");
-    await this.file(key).save(body, {
-      resumable: false,
-      contentType: opts?.contentType,
-      metadata: { metadata: { [SHA256_METADATA_KEY]: sha256 } },
-    });
+    await this.file(key).save(body, { resumable: false, contentType: opts?.contentType });
   }
 
   async get(key: string): Promise<Buffer> {
@@ -87,9 +73,7 @@ export class GcsBlobStore implements BlobStore {
     // pipeline destroys every stream (including the GCS write stream) on failure, which aborts the HTTP request
     // before the object is finalized.
     await pipeline(body, meter.stream, file.createWriteStream({ resumable: false, contentType: opts?.contentType }));
-    const sha256 = meter.digest();
-    await file.setMetadata({ metadata: { [SHA256_METADATA_KEY]: sha256 } });
-    return { sizeBytes: meter.size(), sha256 };
+    return { sizeBytes: meter.size(), sha256: meter.digest() };
   }
 
   async getStream(key: string): Promise<NodeJS.ReadableStream> {
@@ -102,12 +86,7 @@ export class GcsBlobStore implements BlobStore {
   async head(key: string): Promise<BlobInfo | null> {
     try {
       const [metadata] = await this.file(key).getMetadata();
-      const sha256 = metadata.metadata?.[SHA256_METADATA_KEY];
-      return {
-        sizeBytes: Number(metadata.size ?? 0),
-        updatedAt: new Date(metadata.updated ?? 0),
-        ...(typeof sha256 === "string" ? { sha256 } : {}),
-      };
+      return { sizeBytes: Number(metadata.size ?? 0), updatedAt: new Date(metadata.updated ?? 0) };
     } catch (error) {
       if (isNotFound(error)) return null;
       throw error;

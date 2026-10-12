@@ -1,7 +1,5 @@
-import { createHash } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import {
-  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   type GetObjectCommandOutput,
@@ -12,7 +10,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { collectStream, createByteMeter, SHA256_METADATA_KEY } from "./meter.js";
+import { collectStream, createByteMeter } from "./meter.js";
 import { assertValidBlobKey, BlobStoreError, type BlobInfo, type BlobStore } from "./types.js";
 
 /** The slice of S3Client the adapter uses (the real client satisfies it; tests supply an in-memory fake). */
@@ -25,9 +23,12 @@ function statusOf(error: unknown): number | undefined {
   return (error as { $metadata?: { httpStatusCode?: number } } | undefined)?.$metadata?.httpStatusCode;
 }
 
+/** A missing key only: NoSuchBucket and other 404-class failures must surface, not look like an empty store. */
 function isNotFound(error: unknown): boolean {
   const name = (error as { name?: string } | undefined)?.name;
-  return name === "NoSuchKey" || name === "NotFound" || statusOf(error) === 404;
+  if (name === "NoSuchKey") return true;
+  // HeadObject has no body, so a missing key arrives as a bare NotFound.
+  return name === "NotFound" && statusOf(error) === 404;
 }
 
 /**
@@ -45,6 +46,9 @@ export class S3BlobStore implements BlobStore {
   static forBucket(settings: { bucket: string; region: string; endpoint?: string }): S3BlobStore {
     const client = new S3Client({
       region: settings.region,
+      // Default CRC32 checksums break presigned PUTs (empty-body checksum in the URL) and many S3-compatible endpoints.
+      requestChecksumCalculation: "WHEN_REQUIRED",
+      responseChecksumValidation: "WHEN_REQUIRED",
       ...(settings.endpoint ? { endpoint: settings.endpoint, forcePathStyle: true } : {}),
     });
     return new S3BlobStore(client, settings.bucket);
@@ -61,7 +65,6 @@ export class S3BlobStore implements BlobStore {
         ...this.keyed(key),
         Body: body,
         ContentType: opts?.contentType,
-        Metadata: { [SHA256_METADATA_KEY]: createHash("sha256").update(body).digest("hex") },
       }),
     );
   }
@@ -103,18 +106,7 @@ export class S3BlobStore implements BlobStore {
       await uploading.catch(() => undefined);
       throw meter.limitError() ?? error;
     }
-    const sha256 = meter.digest();
-    // The digest is only known after the body has streamed, so it is attached with an in-place server-side copy.
-    await this.client.send(
-      new CopyObjectCommand({
-        ...target,
-        CopySource: `${this.bucket}/${key}`,
-        MetadataDirective: "REPLACE",
-        ContentType: opts?.contentType,
-        Metadata: { [SHA256_METADATA_KEY]: sha256 },
-      }),
-    );
-    return { sizeBytes: meter.size(), sha256 };
+    return { sizeBytes: meter.size(), sha256: meter.digest() };
   }
 
   async getStream(key: string): Promise<NodeJS.ReadableStream> {
@@ -130,12 +122,7 @@ export class S3BlobStore implements BlobStore {
   async head(key: string): Promise<BlobInfo | null> {
     try {
       const result = (await this.client.send(new HeadObjectCommand(this.keyed(key)))) as HeadObjectCommandOutput;
-      const sha256 = result.Metadata?.[SHA256_METADATA_KEY];
-      return {
-        sizeBytes: Number(result.ContentLength ?? 0),
-        updatedAt: result.LastModified ?? new Date(0),
-        ...(typeof sha256 === "string" ? { sha256 } : {}),
-      };
+      return { sizeBytes: Number(result.ContentLength ?? 0), updatedAt: result.LastModified ?? new Date(0) };
     } catch (error) {
       if (isNotFound(error)) return null;
       throw error;

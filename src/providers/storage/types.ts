@@ -7,7 +7,10 @@
 
 export interface BlobInfo {
   sizeBytes: number;
-  /** Present when the store can report it without re-reading the object. */
+  /**
+   * Present only when an adapter records it atomically with the content. Absence means "unknown", never
+   * "verified": callers keep the authoritative digest themselves.
+   */
   sha256?: string;
   updatedAt: Date;
 }

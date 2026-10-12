@@ -7,7 +7,6 @@ interface StoredObject {
   data: Buffer;
   updated: Date;
   contentType?: string;
-  metadata: Record<string, string>;
 }
 
 class NotFound extends Error {
@@ -41,7 +40,6 @@ export class FakeGcsBucket implements GcsBucketLike {
               data: Buffer.concat(chunks),
               updated: new Date(),
               contentType: options?.contentType,
-              metadata: { ...options?.metadata?.metadata },
             });
             callback();
           },
@@ -56,19 +54,13 @@ export class FakeGcsBucket implements GcsBucketLike {
       },
       async getMetadata() {
         const found = need();
-        return [{ size: String(found.data.length), updated: found.updated.toISOString(), metadata: found.metadata }];
-      },
-      async setMetadata(update) {
-        const found = need();
-        found.metadata = { ...found.metadata, ...update.metadata };
-        return [{}];
+        return [{ size: String(found.data.length), updated: found.updated.toISOString() }];
       },
       async save(data, options) {
         objects.set(name, {
           data: Buffer.from(data),
           updated: new Date(),
           contentType: options?.contentType,
-          metadata: { ...options?.metadata?.metadata },
         });
       },
       async delete() {
@@ -85,24 +77,15 @@ export class FakeGcsBucket implements GcsBucketLike {
 runBlobStoreContract("gcs", async () => ({ store: new GcsBlobStore(new FakeGcsBucket()) }));
 
 describe("GcsBlobStore specifics", () => {
-  it("writes non-resumable uploads and records the sha256 as object metadata", async () => {
+  it("writes non-resumable uploads, returns the streamed sha256 and records no metadata", async () => {
     const bucket = new FakeGcsBucket();
     const store = new GcsBlobStore(bucket);
-    const { sha256 } = await store.putStream("snap/a.tar", Readable.from([Buffer.from("abc")]), {
+    const result = await store.putStream("snap/a.tar", Readable.from([Buffer.from("abc")]), {
       contentType: "application/x-tar",
     });
+    expect(result.sha256).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     expect(bucket.writeOptions[0]).toMatchObject({ resumable: false, contentType: "application/x-tar" });
-    expect(bucket.objects.get("snap/a.tar")?.metadata["x-wardby-sha256"]).toBe(sha256);
-    expect((await store.head("snap/a.tar"))?.sha256).toBe(sha256);
-  });
-
-  it("put records the sha256 too", async () => {
-    const bucket = new FakeGcsBucket();
-    const store = new GcsBlobStore(bucket);
-    await store.put("snap/b.bin", Buffer.from("abc"));
-    expect((await store.head("snap/b.bin"))?.sha256).toBe(
-      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-    );
+    expect((await store.head("snap/a.tar"))?.sha256).toBeUndefined();
   });
 
   it("destroys the write stream so an over-limit upload is never finalized", async () => {

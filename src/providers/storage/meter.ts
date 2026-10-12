@@ -2,8 +2,6 @@ import { createHash } from "node:crypto";
 import { Transform } from "node:stream";
 import { BlobStoreError } from "./types.js";
 
-export const SHA256_METADATA_KEY = "x-wardby-sha256";
-
 export interface ByteMeter {
   stream: Transform;
   /** Bytes seen so far. */
