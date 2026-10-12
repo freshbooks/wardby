@@ -22,6 +22,7 @@ export interface DependencyCacheTimeouts {
   readonly tarMs: number;
   readonly totalMs: number;
   readonly killGraceMs: number;
+  readonly settleMs: number;
 }
 
 export type DependencyCacheLog = (event: string, fields: Record<string, unknown>) => void;
@@ -47,6 +48,12 @@ export interface PrepareDependenciesOptions {
   /** Workspace disk budget in bytes; defaults to CODING_DISK_MB, else DEFAULT_BUDGET_MB. */
   readonly budgetBytes?: number;
   readonly timeouts?: Partial<DependencyCacheTimeouts>;
+  /** Tests only: hooks into the flow. */
+  readonly testHooks?: DependencyCacheTestHooks;
+}
+
+export interface DependencyCacheTestHooks {
+  readonly beforeRename?: () => Promise<void>;
 }
 
 export declare function prepareDependencies(options: PrepareDependenciesOptions): Promise<PrepareResult>;
@@ -62,8 +69,10 @@ export interface PrepareProjectOptions {
   readonly budget: { remaining: number };
   readonly timeouts: DependencyCacheTimeouts;
   readonly signal: AbortSignal;
-  /** Set to sealed before the seal is sent; no upload starts after that. */
-  readonly session: { sealed: boolean };
+  /** `sealed` is set before the seal is sent (no upload starts after it);
+   *  `closed` once the caller stops waiting (no workspace change after it). */
+  readonly session: { sealed: boolean; closed: boolean; children: Set<number> };
+  readonly testHooks?: DependencyCacheTestHooks;
 }
 
 export declare function prepareProject(options: PrepareProjectOptions): Promise<PrepareResult>;
@@ -78,4 +87,5 @@ export declare function verifyTree(root: string, signal?: AbortSignal): Promise<
 export declare function checkConsistency(
   projectRoot: string,
   lockfile: { packages: Record<string, unknown> },
+  signal?: AbortSignal,
 ): Promise<{ ok: true } | { ok: false; detail: string }>;

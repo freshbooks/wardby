@@ -35,6 +35,7 @@ import {
   readdir,
   readFile,
   readlink,
+  realpath,
   rename,
   rm,
   stat,
@@ -45,7 +46,7 @@ import {
 } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
-import { dirname, join, posix } from "node:path";
+import { dirname, join, posix, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
@@ -53,7 +54,9 @@ import { createGunzip } from "node:zlib";
 const MIB = 1024 * 1024;
 
 /** Time bounds (ms). `transferMs` is the floor for a download or upload,
- *  which also gets `transferMsPerMiB` for every MiB it moves. */
+ *  which also gets `transferMsPerMiB` for every MiB it moves. After
+ *  `totalMs` the work is aborted and gets `settleMs` to clean up; then the
+ *  workspace is closed to it (no rename, removal or install) and it is sealed. */
 export const DEFAULT_TIMEOUTS = Object.freeze({
   httpMs: 120_000,
   transferMs: 300_000,
@@ -62,6 +65,7 @@ export const DEFAULT_TIMEOUTS = Object.freeze({
   tarMs: 300_000,
   totalMs: 1_200_000,
   killGraceMs: 5_000,
+  settleMs: 6_000,
 });
 
 /** The workspace budget when the caller names none and CODING_DISK_MB is unset. */
@@ -290,8 +294,7 @@ class EntryRules {
     this.kinds.set(path, kind);
     if (kind === "link") {
       const target = entry.linkname;
-      if (!target || target.includes("\0") || target.startsWith("/")) throw new Skip("unsafe_archive");
-      if (!insideRoot(posix.normalize(posix.join(posix.dirname(path), target)))) throw new Skip("unsafe_archive");
+      if (!plainLinkTarget(path, target)) throw new Skip("unsafe_archive");
     }
     this.entries += 1;
     if (this.entries > this.maxEntries) throw new Skip("over_budget");
@@ -306,6 +309,25 @@ class EntryRules {
 function safeRelative(path) {
   if (!path || path.startsWith("/") || path.includes("\0") || path.includes("\\")) return false;
   return path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+/**
+ * A symlink target this module accepts: relative, `..` only as leading
+ * segments, and inside node_modules when resolved from the link's folder.
+ * The kernel applies `..` after following each link in the path, so a `..`
+ * after a named segment (`a/s/../..`) can leave the folder that a lexical
+ * normalize says it stays in when `a/s` is itself a link. npm's own links
+ * (`.bin` entries, `file:` packages) only ever climb first, then descend.
+ */
+function plainLinkTarget(linkPath, target) {
+  if (!target || target.includes("\0") || target.startsWith("/")) return false;
+  let descended = false;
+  for (const segment of target.split("/")) {
+    if (segment === "..") {
+      if (descended) return false;
+    } else if (segment !== "" && segment !== ".") descended = true;
+  }
+  return insideRoot(posix.normalize(posix.join(posix.dirname(linkPath), target)));
 }
 
 function insideRoot(normalized) {
@@ -368,10 +390,22 @@ async function extractArchive(file, destination, { budgetBytes, maxEntries = MAX
   }
 }
 
-/** After extraction: only files, folders and symlinks that resolve inside
- *  `<root>/node_modules` (each link from its own folder, on the real tree). */
+/**
+ * After extraction: only files, folders and symlinks that resolve inside
+ * `<root>/node_modules`. Each link must pass the same target rule as the
+ * scan, and its native realpath (the kernel's resolution, following every
+ * link on the way) must be inside the real node_modules folder.
+ *
+ * A dangling link (no realpath) is accepted only on the target rule: its
+ * folder is a real folder (the walk never descends through links), its
+ * leading `..` segments are therefore resolved exactly as written, and every
+ * later segment only descends, through real folders or through links that
+ * are themselves checked here. So whatever later fills the gap is inside.
+ * npm leaves such links for optional packages it skipped.
+ */
 export async function verifyTree(root, signal) {
   const top = join(root, ROOT);
+  const realTop = await realpath(top);
   const stack = [top];
   while (stack.length) {
     signal?.throwIfAborted();
@@ -382,9 +416,15 @@ export async function verifyTree(root, signal) {
       if (info.isDirectory()) stack.push(path);
       else if (info.isSymbolicLink()) {
         const target = await readlink(path);
-        if (target.startsWith("/")) throw new Skip("unsafe_archive");
-        const relative = posix.normalize(posix.join(toPosix(dirname(path).slice(root.length + 1)), target));
-        if (!insideRoot(relative)) throw new Skip("unsafe_archive");
+        if (!plainLinkTarget(toPosix(path.slice(root.length + 1)), target)) throw new Skip("unsafe_archive");
+        let real;
+        try {
+          real = await realpath(path); // native: resolves `..` after each link, like open() will
+        } catch (error) {
+          if (error?.code === "ENOENT") continue;
+          throw new Skip("unsafe_archive"); // ELOOP and the like
+        }
+        if (real !== realTop && !real.startsWith(realTop + sep)) throw new Skip("unsafe_archive");
       } else if (!info.isFile() || info.nlink > 1) throw new Skip("unsafe_archive");
     }
   }
@@ -406,7 +446,7 @@ const toPosix = (path) => path.split("\\").join("/");
  * An `optional`/`devOptional` entry may be missing (npm skips optional
  * packages for another platform) but then must not be on disk either.
  */
-export async function checkConsistency(projectRoot, lockfile) {
+export async function checkConsistency(projectRoot, lockfile, signal) {
   const fail = (detail) => ({ ok: false, detail });
   let hidden;
   try {
@@ -423,6 +463,7 @@ export async function checkConsistency(projectRoot, lockfile) {
     if (!Object.hasOwn(wanted, key)) return fail("extraneous");
   }
   for (const [key, entry] of Object.entries(wanted)) {
+    signal?.throwIfAborted();
     if (!inTree(key) || !entry || typeof entry !== "object") continue;
     if (!safeRelative(key)) return fail("bad_key");
     const have = Object.hasOwn(installed, key) ? installed[key] : undefined;
@@ -516,8 +557,12 @@ async function callJson(url, options, timeoutMs, failure) {
 
 /** Runs a command with no output captured (npm output is never logged),
  *  in its own process group so a timeout kills everything it started. */
-function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal }) {
+function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal, session }) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted || session?.closed) {
+      reject(asSkip(signal?.reason, "timeout"));
+      return;
+    }
     let child;
     try {
       child = spawn(command, args, { cwd, env, stdio: "ignore", detached: true });
@@ -525,6 +570,7 @@ function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal }) {
       reject(new Skip("install_failed"));
       return;
     }
+    session?.children.add(child.pid);
     let reason;
     const kill = (why) => {
       if (reason) return;
@@ -543,11 +589,13 @@ function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal }) {
     const onAbort = () => kill(asSkip(signal.reason, "timeout"));
     signal?.addEventListener("abort", onAbort, { once: true });
     child.on("error", () => {
+      session?.children.delete(child.pid);
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       reject(new Skip("install_failed"));
     });
     child.on("exit", (code) => {
+      session?.children.delete(child.pid);
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       if (reason) reject(reason);
@@ -712,8 +760,11 @@ async function restore(context, project, id, maxBytes, { consistency }) {
   });
   await rm(archive, { force: true });
   await verifyTree(temp, signal);
+  // A sanity check that this is the tree for this lockfile, not an
+  // integrity control: integrity is the sha256 the proxy recorded in its
+  // database at upload time, verified above against the bytes received.
   if (consistency) {
-    const check = await checkConsistency(temp, project.lockfile);
+    const check = await checkConsistency(temp, project.lockfile, signal);
     if (!check.ok) {
       context.log("inconsistent", { detail: check.detail });
       throw new Skip("inconsistent");
@@ -721,6 +772,9 @@ async function restore(context, project, id, maxBytes, { consistency }) {
   }
   const target = join(project.dir, ROOT);
   if (await present(target)) throw new Skip("node_modules_present");
+  await context.testHooks?.beforeRename?.();
+  // Past the deadline nothing new is put in place (checked right before the rename).
+  if (signal.aborted || context.session.closed) throw asSkip(signal.reason, "timeout");
   context.created = target;
   await rename(join(temp, ROOT), target);
   await rm(temp, { recursive: true, force: true });
@@ -741,6 +795,7 @@ async function install(context, project, args) {
     timeoutMs: timeouts.installMs,
     killGraceMs: timeouts.killGraceMs,
     signal,
+    session: context.session,
   });
   const installMs = Date.now() - started;
   context.log("install", { command: args[0], code, ms: installMs });
@@ -750,7 +805,8 @@ async function install(context, project, args) {
 
 /** Puts back package.json and package-lock.json if an install rewrote them:
  *  the agent's working tree must look exactly as it was committed. */
-async function restoreCommitted(project) {
+async function restoreCommitted(context, project) {
+  if (context.session.closed) return;
   for (const [name, bytes] of [
     ["package-lock.json", project.bytes],
     ["package.json", project.manifestBytes],
@@ -778,6 +834,7 @@ async function snapshot(context, project, maxBytes) {
       timeoutMs: timeouts.tarMs,
       killGraceMs: timeouts.killGraceMs,
       signal,
+      session,
     }).catch((error) => asSkip(error, "tar_failed").reason);
     if (code !== 0) return skip(typeof code === "string" ? code : "tar_failed");
     const { size } = await stat(archive);
@@ -914,11 +971,11 @@ export async function prepareProject(options) {
           "--no-fund",
         ]);
       } finally {
-        await restoreCommitted(project);
+        await restoreCommitted(context, project);
       }
     } else installMs = await install(context, project, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
 
-    const check = await checkConsistency(project.dir, project.lockfile);
+    const check = await checkConsistency(project.dir, project.lockfile, signal);
     if (!check.ok) {
       log("inconsistent", { detail: check.detail });
       // A tree npm ci built from the committed lockfile is what the agent
@@ -942,12 +999,15 @@ export async function prepareProject(options) {
     await cleanup(context);
     return { result: "skipped", reason };
   } finally {
-    for (const path of context.temps) await rm(path, { recursive: true, force: true }).catch(() => undefined);
+    if (!context.session.closed)
+      for (const path of context.temps) await rm(path, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
 /** Removes a node_modules this run created and every temp file. */
 async function cleanup(context) {
+  // Once the caller stopped waiting, the workspace is the agent's: touch nothing.
+  if (context.session.closed) return;
   if (context.created) {
     await rm(context.created, { recursive: true, force: true }).catch(() => undefined);
     context.created = undefined;
@@ -972,6 +1032,7 @@ export async function prepareDependencies({
   log = () => {},
   budgetBytes,
   timeouts: overrides = {},
+  testHooks,
 }) {
   const timeouts = { ...DEFAULT_TIMEOUTS, ...overrides };
   const say = (event, fields = {}) => {
@@ -981,7 +1042,7 @@ export async function prepareDependencies({
       // a logger never fails the cache
     }
   };
-  const session = { sealed: false };
+  const session = { sealed: false, closed: false, children: new Set() };
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(new Skip("timeout")), timeouts.totalMs);
   let auth;
@@ -1004,15 +1065,14 @@ export async function prepareDependencies({
       timeouts,
       signal: controller.signal,
       session,
+      testHooks,
     });
-    // The deadline aborts the work; if it still has not settled after the
-    // kill grace, seal anyway (the session flag stops any later upload).
+    // The deadline aborts the work, which then has settleMs to clean up.
+    // If it still has not settled, the session is closed (below) so it can
+    // no longer rename, remove or install anything, nor upload.
     let grace;
     const late = new Promise((resolve) => {
-      grace = setTimeout(
-        () => resolve({ result: "skipped", reason: "timeout" }),
-        timeouts.totalMs + timeouts.killGraceMs + 1_000,
-      );
+      grace = setTimeout(() => resolve({ result: "skipped", reason: "timeout" }), timeouts.totalMs + timeouts.settleMs);
     });
     result = await Promise.race([work, late]);
     clearTimeout(grace);
@@ -1021,15 +1081,29 @@ export async function prepareDependencies({
   } finally {
     clearTimeout(deadline);
     session.sealed = true;
+    session.closed = true;
     controller.abort(new Skip("sealed"));
+    for (const pid of session.children) {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
     if (auth) {
-      const sealed = await callJson(
-        new URL("/cache/npm/seal", auth.base),
-        { method: "POST", headers: { authorization: `Bearer ${auth.token}` } },
-        timeouts.httpMs,
-        "seal_failed",
-      ).catch((error) => ({ status: 0, reason: error.reason }));
-      say("seal", { status: sealed.status });
+      let status = 0;
+      try {
+        const sealed = await callJson(
+          new URL("/cache/npm/seal", auth.base),
+          { method: "POST", headers: { authorization: `Bearer ${auth.token}` } },
+          timeouts.httpMs,
+          "seal_failed",
+        );
+        status = sealed.status;
+      } catch {
+        // an unsealed session expires with its upload window
+      }
+      say("seal", { status });
     }
   }
   say("result", { result: result.result, ...(result.reason ? { reason: result.reason } : {}) });

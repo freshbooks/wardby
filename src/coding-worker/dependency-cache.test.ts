@@ -498,6 +498,15 @@ const MALICIOUS: [string, RawEntry[], string][] = [
     ],
     "unsafe_archive",
   ],
+  [
+    "a link whose target climbs back out after following another link",
+    [
+      { name: "node_modules/a/b/s", type: "2", link: "../.." },
+      { name: "node_modules/t", type: "2", link: "a/b/s/../.." },
+      { name: "node_modules/u", type: "2", link: "t/etc" },
+    ],
+    "unsafe_archive",
+  ],
 ];
 describe("untrusted archives", () => {
   it("rejects a sha256 mismatch and deletes the download", async () => {
@@ -549,6 +558,24 @@ describe("untrusted archives", () => {
     await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
     await rm(join(tree, "node_modules/r"));
     await symlink("/etc", join(tree, "node_modules/abs"));
+    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+  });
+
+  it("verifyTree rejects a written link that escapes once the kernel follows the links before it", async () => {
+    const tree = join(root, "tree");
+    await mkdir(join(tree, "node_modules/a/b"), { recursive: true });
+    await symlink("../..", join(tree, "node_modules/a/b/s")); // -> node_modules: inside
+    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    await symlink("a/b/s/../..", join(tree, "node_modules/t")); // lexically node_modules/a; really tree's parent
+    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+  });
+
+  it("verifyTree allows a dangling link only when its target is plainly inside", async () => {
+    const tree = join(root, "tree");
+    await mkdir(join(tree, "node_modules/.bin"), { recursive: true });
+    await symlink("../missing/cli.js", join(tree, "node_modules/.bin/tool"));
+    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    await symlink("nothere/../.bin", join(tree, "node_modules/odd"));
     await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
   });
 
@@ -657,7 +684,7 @@ describe("seal and timeouts", () => {
       budget: { remaining: 1024 * 1024 * 1024 },
       timeouts: { ...DEFAULT_TIMEOUTS },
       signal: new AbortController().signal,
-      session: { sealed: true },
+      session: { sealed: true, closed: false, children: new Set<number>() },
     });
     expect(result.result).toBe("cold");
     expect(state.calls.filter((call) => call.startsWith("PUT"))).toEqual([]);
@@ -689,6 +716,31 @@ describe("seal and timeouts", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(state.calls.filter((call) => call.startsWith("PUT"))).toEqual([]);
     expect(state.calls.at(-1)).toBe("POST /cache/npm/seal");
+  });
+
+  it("never throws when the registry base is not a URL, and still answers skipped", async () => {
+    const npmrc = join(root, "npmrc-bad");
+    await writeFile(npmrc, "not a url/:_authToken=run-token\n");
+    env.npm_config_registry = "not a url/";
+    env.WARDBY_NPM_PLAN_REGISTRY = "not a url/";
+    env.npm_config_userconfig = npmrc;
+    await expect(prepare()).resolves.toMatchObject({ result: "skipped" });
+  });
+
+  it("after a deadline, a step that ignored it never puts node_modules in place", async () => {
+    hitWith(await realTarSnapshot(LOCKFILE));
+    const started = Date.now();
+    const result = await prepare({
+      timeouts: { totalMs: 400, killGraceMs: 100, settleMs: 200 },
+      testHooks: {
+        beforeRename: () => new Promise((resolve) => setTimeout(resolve, Math.max(0, 1_500 - (Date.now() - started)))),
+      },
+    });
+    expect(result).toEqual({ result: "skipped", reason: "timeout" });
+    expect(Date.now() - started).toBeLessThan(1_400);
+    expect(state.seals).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(await exists(join(workspace, "node_modules"))).toBe(false);
   });
 
   it("seals even when the workspace .cache is not a directory", async () => {
