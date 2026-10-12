@@ -113,7 +113,7 @@ async function setup(options: { sealOnModel?: boolean; cacheOff?: boolean } = {}
     upload: () =>
       fetch(`${base}/blob?lock=${LOCK}`, { method: "PUT", headers, body: "bytes" }).then(async (response) => ({
         status: response.status,
-        body: (await response.json()),
+        body: await response.json(),
       })),
   };
 }
