@@ -895,6 +895,31 @@ describe("pullRequestBody refusal warning", () => {
   });
 });
 
+describe("pullRequestBody dependency cache line", () => {
+  const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
+
+  it("names the restored folders in the packages section, the root as the repo root", () => {
+    const body = pullRequestBody({
+      ...base,
+      packages: [{ ecosystem: "npm", name: "left-pad", version: "1.3.0" }],
+      restoredDependencies: [".", "web/client"],
+    });
+    expect(body).toContain("Dependency cache: restored `node_modules` for the repo root, `web/client`.");
+    expect(body.indexOf("Dependency cache:")).toBeLessThan(body.indexOf("<details>"));
+  });
+
+  it("shows the line on its own when no packages were installed", () => {
+    expect(pullRequestBody({ ...base, restoredDependencies: ["."] })).toContain(
+      "Dependency cache: restored `node_modules` for the repo root.",
+    );
+  });
+
+  it("has no line without restored folders, and drops a folder that isn't a plain path", () => {
+    expect(pullRequestBody({ ...base })).not.toContain("Dependency cache");
+    expect(pullRequestBody({ ...base, restoredDependencies: ["a`b", "x\ny"] })).not.toContain("Dependency cache");
+  });
+});
+
 describe("pullRequestBody packages section", () => {
   const base = { runId: "run-1", repository: "openai/example", baseRef: "main", headRef: "wardby/run-run-1" };
 

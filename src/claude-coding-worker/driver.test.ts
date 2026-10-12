@@ -374,3 +374,113 @@ describe("runClaudeCodingWorker", () => {
     });
   });
 });
+
+describe("runClaudeCodingWorker dependency cache", () => {
+  const success = JSON.stringify({
+    schemaVersion: 1,
+    runId: input.runId,
+    outcome: "no_changes",
+    summary: "Nothing to do.",
+    tests: [],
+  });
+
+  async function run(
+    runInput: CodingTaskInput,
+    prepareDependencies: () => Promise<unknown>,
+    order: string[] = [],
+    final: { type: string; subtype?: string; result?: string } = {
+      type: "result",
+      subtype: "success",
+      result: success,
+    },
+  ) {
+    let prompt: string | undefined;
+    const output = await runClaudeCodingWorker({
+      input: runInput,
+      proxyBaseUrl: "http://proxy",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createQuery: (options) => {
+        order.push("query");
+        prompt = options.prompt;
+        return (async function* () {
+          yield final;
+        })();
+      },
+      prepareDependencies: async () => {
+        order.push("prepare");
+        return prepareDependencies();
+      },
+    });
+    return { output, prompt };
+  }
+
+  it("asks the tool runner once, before the agent's query exists, and reports and notes the result", async () => {
+    const order: string[] = [];
+    const { output, prompt } = await run(
+      { ...input, dependencyCache: true },
+      async () => ({
+        projects: [
+          { path: ".", result: "nearest", key: "abc", installMs: 3, rebuild: "ok" },
+          { path: "web", result: "refused", reason: "unsafe_archive" },
+        ],
+      }),
+      order,
+    );
+    expect(order).toEqual(["prepare", "query"]);
+    expect(output.dependencyCache).toEqual({
+      projects: [
+        { path: ".", result: "nearest", key: "abc", installMs: 3, rebuild: "ok" },
+        { path: "web", result: "refused", reason: "unsafe_archive" },
+      ],
+    });
+    expect(prompt).toContain(
+      "Dependencies are pre-installed from the committed lockfile in: the repo root. Don't run `npm ci` there; add packages with a single install command.",
+    );
+  });
+
+  it("never asks when the run's flag is off", async () => {
+    const order: string[] = [];
+    const { output, prompt } = await run(input, async () => ({ projects: [] }), order);
+    expect(order).toEqual(["query"]);
+    expect("dependencyCache" in output).toBe(false);
+    expect(prompt).not.toContain("pre-installed");
+  });
+
+  it("adds no note when nothing was installed", async () => {
+    const { prompt } = await run({ ...input, dependencyCache: true }, async () => ({
+      projects: [{ path: ".", result: "skipped", reason: "no_lockfile" }],
+    }));
+    expect(prompt).not.toContain("pre-installed");
+  });
+
+  it("never fails the run: a failed call is a stable code and the agent still runs", async () => {
+    for (const [error, reason] of [
+      [new Error("dependency_cache_tool_unavailable"), "tool_unavailable"],
+      [new Error("dependency_cache_tool_failed"), "worker_error"],
+      [new Error("SECRET raw text"), "worker_error"],
+    ] as const) {
+      const order: string[] = [];
+      const { output, prompt } = await run(
+        { ...input, dependencyCache: true },
+        async () => {
+          throw error;
+        },
+        order,
+      );
+      expect(order).toEqual(["prepare", "query"]);
+      expect(output.dependencyCache).toEqual({ projects: [], reason });
+      expect(prompt).not.toContain("pre-installed");
+    }
+  });
+
+  it("keeps the report on a budget-exhausted run", async () => {
+    const { output } = await run(
+      { ...input, dependencyCache: true },
+      async () => ({ projects: [{ path: ".", result: "hit" }] }),
+      [],
+      { type: "result", subtype: "error_max_budget_usd" },
+    );
+    expect(output).toMatchObject({ outcome: "budget_exhausted", dependencyCache: { projects: [{ result: "hit" }] } });
+  });
+});

@@ -49,6 +49,17 @@ describe("Claude SDK configuration", () => {
     });
   });
 
+  it("never lets the agent call the worker's own dependency-cache tool, in any mode", () => {
+    for (const options of [
+      buildClaudeSdkOptions(config()),
+      buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context", skills: true }),
+    ]) {
+      expect(options.disallowedTools).toEqual(["mcp__wardby_tools__wardby_prepare_dependencies"]);
+      expect(options.allowedTools).not.toContain("mcp__wardby_tools__wardby_prepare_dependencies");
+      expect(options.allowedTools).not.toContain("mcp__wardby_tools");
+    }
+  });
+
   it("keeps today's isolation when there is no native context", () => {
     expect(buildClaudeSdkOptions(config())).toMatchObject({
       cwd: "/opt/wardby/empty-workspace",

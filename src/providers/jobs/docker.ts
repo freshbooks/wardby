@@ -21,7 +21,7 @@ import { logger } from "../../core/logger.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { readBoundedRegularFile } from "../../coding-worker/artifact.js";
 import {
-  parseCodingAgentOutputJson,
+  parseCodingWorkerOutputJson,
   redactAndTruncate,
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
@@ -1266,7 +1266,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     try {
       await this.run(["container", "cp", `${this.keeperName(record)}:/run/wardby/storage/output/result.json`, target]);
       const raw = await readBoundedRegularFile(target, MAX_CODING_ARTIFACT_BYTES, "docker_result_artifact_invalid");
-      const output = parseCodingAgentOutputJson(raw);
+      const output = parseCodingWorkerOutputJson(raw);
       if (output.runId !== record.runId) throw new Error("docker_result_run_mismatch");
       return JSON.stringify(output);
     } catch (error) {

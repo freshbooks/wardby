@@ -10,6 +10,7 @@ import {
   MAX_OUTPUT_BYTES,
   MAX_SETUP_BYTES,
   SHIM_DIRECTORY,
+  commandEnvironment,
   parseToolSetup,
   runCommand,
   toolEnvironment,
@@ -96,6 +97,35 @@ test("parses the launcher's setup and refuses anything else", () => {
     JSON.stringify({ schemaVersion: 1, env: {}, files: [{ path: "/workspace/.cache/a", content: "x", mode: 0o777 }] }),
   ];
   for (const raw of bad) assert.throws(() => parseToolSetup(raw), /tool_setup_invalid/, raw);
+});
+
+test("parses the dependency cache flag: true only when set, anything but a boolean refused", () => {
+  const withFlag = (value) => JSON.stringify({ ...JSON.parse(setupFor("/workspace")), dependencyCache: value });
+  assert.equal(parseToolSetup(withFlag(true)).dependencyCache, true);
+  assert.equal(parseToolSetup(withFlag(false)).dependencyCache, undefined);
+  assert.equal(parseToolSetup(setupFor("/workspace")).dependencyCache, undefined);
+  for (const value of ["true", 1, null, {}]) {
+    assert.throws(() => parseToolSetup(withFlag(value)), /tool_setup_invalid/, JSON.stringify(value));
+  }
+});
+
+test("commandEnvironment is exactly what a command's shell gets", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-tools-env-"));
+  try {
+    const setup = parseToolSetup(setupFor(workspace), workspace);
+    const env = commandEnvironment(setup, workspace);
+    assert.deepEqual(env, { ...setup.env, ...toolEnvironment(workspace) });
+    const result = await runCommand("env", 1_000, workspace, setup);
+    const shellNames = new Set(
+      result.output
+        .trim()
+        .split("\n")
+        .map((line) => line.split("=")[0]),
+    );
+    for (const name of Object.keys(env)) assert.ok(shellNames.has(name), name);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("gives each command the setup's variables and files, the shim first on PATH, and never the raw setup", async () => {

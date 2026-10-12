@@ -397,6 +397,128 @@ describe("runCodingWorker", () => {
   });
 });
 
+describe("runCodingWorker dependency cache", () => {
+  const agentOutput = JSON.stringify({
+    schemaVersion: 1,
+    runId: input.runId,
+    outcome: "no_changes",
+    summary: "None.",
+    tests: [],
+  });
+
+  async function run(
+    runInput: CodingTaskInput,
+    prepare: (options: { workspace: string; env: Record<string, string | undefined> }) => Promise<unknown>,
+    capture: { config?: WorkerClientConfig; thread?: unknown; prompt?: string } = {},
+    order: string[] = [],
+  ) {
+    const workspace = await tempWorkspace();
+    const createClient = clientFor(
+      [{ type: "item.completed", item: { type: "agent_message", text: agentOutput } }],
+      capture,
+    );
+    const output = await runCodingWorker({
+      input: runInput,
+      workspace,
+      proxyBaseUrl: "http://proxy:8080",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createClient: (config) => {
+        order.push("client");
+        return createClient(config);
+      },
+      prepareDependencies: async (options) => {
+        order.push("prepare");
+        return (await prepare(options)) as never;
+      },
+    });
+    return { output, workspace };
+  }
+
+  it("never calls the module when the run's flag is off, and reports nothing", async () => {
+    const prepare = vi.fn(async () => ({ projects: [] }));
+    const capture: { prompt?: string } = {};
+    const { output } = await run(input, prepare, capture);
+    expect(prepare).not.toHaveBeenCalled();
+    expect("dependencyCache" in output).toBe(false);
+    expect(capture.prompt).not.toContain("pre-installed");
+  });
+
+  it("runs it before the agent starts, with exactly the agent's shell env and none of the driver's", async () => {
+    process.env.WARDBY_RUN_CAPABILITY = "rrp_driver_secret_sentinel";
+    try {
+      const capture: { config?: WorkerClientConfig; prompt?: string } = {};
+      const order: string[] = [];
+      let seen: { workspace: string; env: Record<string, string | undefined> } | undefined;
+      const { output, workspace } = await run(
+        {
+          ...input,
+          dependencyCache: true,
+          services: [{ name: "postgres", version: "16", testEnv: { DATABASE_URL: "postgres://db" } }],
+        },
+        async (options) => {
+          seen = options;
+          // The registry's npmrc is already written when the module runs.
+          await stat(options.env.npm_config_userconfig as string);
+          return {
+            projects: [{ path: ".", result: "hit", key: "abc", sizeBytes: 10, restoreMs: 5, rebuild: "skipped" }],
+          };
+        },
+        capture,
+        order,
+      );
+      expect(order).toEqual(["prepare", "client"]);
+      expect(seen?.workspace).toBe(workspace);
+      expect(seen?.env).toEqual(capture.config?.environment);
+      expect(seen?.env.HOME).toBe("/home/wardby");
+      expect(seen?.env.DATABASE_URL).toBe("postgres://db");
+      expect(JSON.stringify(seen?.env)).not.toContain("rrp_driver_secret_sentinel");
+      expect(JSON.stringify(seen?.env)).not.toContain("rrp_worker_capability");
+      expect(seen?.env.WARDBY_RUN_CAPABILITY).toBeUndefined();
+      expect(output.dependencyCache).toEqual({
+        projects: [{ path: ".", result: "hit", key: "abc", sizeBytes: 10, restoreMs: 5, rebuild: "skipped" }],
+      });
+      expect(capture.prompt).toContain(
+        "Dependencies are pre-installed from the committed lockfile in: the repo root. Don't run `npm ci` there; add packages with a single install command.",
+      );
+    } finally {
+      delete process.env.WARDBY_RUN_CAPABILITY;
+    }
+  });
+
+  it("adds no task note when nothing was installed", async () => {
+    const capture: { prompt?: string } = {};
+    const { output } = await run(
+      { ...input, dependencyCache: true },
+      async () => ({ projects: [{ path: ".", result: "skipped", reason: "no_lockfile" }] }),
+      capture,
+    );
+    expect(output.dependencyCache).toEqual({ projects: [{ path: ".", result: "skipped", reason: "no_lockfile" }] });
+    expect(capture.prompt).not.toContain("pre-installed");
+  });
+
+  it("never fails the run: a module that throws is a worker_error and the agent still runs", async () => {
+    const capture: { prompt?: string } = {};
+    const { output } = await run(
+      { ...input, dependencyCache: true },
+      async () => {
+        throw new Error("boom SECRET");
+      },
+      capture,
+    );
+    expect(output.outcome).toBe("no_changes");
+    expect(output.dependencyCache).toEqual({ projects: [], reason: "worker_error" });
+    expect(capture.prompt).toContain(input.task);
+  });
+
+  it("bounds what the module returned", async () => {
+    const { output } = await run({ ...input, dependencyCache: true }, async () => ({
+      projects: [{ path: ".", result: "refused", reason: "npm said: ERR! raw output" }],
+    }));
+    expect(output.dependencyCache).toEqual({ projects: [], omitted: 1 });
+  });
+});
+
 describe("runCodingWorker debug trace", () => {
   const capability = `rrp_${"C".repeat(43)}`;
   const throwingClient = (message: string) => () => ({

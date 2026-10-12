@@ -1327,6 +1327,49 @@ async function rebuild({ workspace, path, env, npmPath, timeouts, signal, sessio
   return outcome;
 }
 
+/** The registry auth `prepareDependencies` and `sealUploadWindow` use: the
+ *  environment's (registryAuth), with `proxyUrl` / `token` overriding it. */
+async function resolveAuth(env, proxyUrl, token) {
+  let auth = await registryAuth(env);
+  if (proxyUrl && (auth || token)) auth = { token: auth?.token, base: new URL("/registry/npm/", proxyUrl).toString() };
+  if (auth && token) auth = { ...auth, token };
+  return auth?.token ? auth : undefined;
+}
+
+/** POST /cache/npm/seal once. Confirmed only on the proxy's one success
+ *  answer (200 `{ sealed: true }`); never throws. */
+async function postSeal(auth, timeoutMs) {
+  try {
+    const sealed = await callJson(
+      new URL("/cache/npm/seal", auth.base),
+      { method: "POST", headers: { authorization: `Bearer ${auth.token}` } },
+      timeoutMs,
+      "seal_failed",
+    );
+    return { status: sealed.status, confirmed: sealed.status === 200 && sealed.body?.sealed === true };
+  } catch {
+    // an unsealed session expires with its upload window
+    return { status: 0, confirmed: false };
+  }
+}
+
+/**
+ * Seals the run's upload window without preparing anything: for a caller
+ * that is about to hand the workspace to the agent before (or instead of)
+ * `prepareDependencies` (the Claude Code tool runner's first command). The
+ * proxy's seal is idempotent. Same auth as `prepareDependencies`; never throws.
+ */
+export async function sealUploadWindow({ env, proxyUrl, token, timeoutMs = DEFAULT_TIMEOUTS.httpMs } = {}) {
+  let auth;
+  try {
+    auth = await resolveAuth(env ?? {}, proxyUrl, token);
+  } catch {
+    return { status: 0, confirmed: false };
+  }
+  if (!auth) return { status: 0, confirmed: false };
+  return postSeal(auth, timeoutMs);
+}
+
 // ---------------------------------------------------------------- entry point
 
 const KEPT = new Set(["hit", "nearest", "cold"]);
@@ -1382,29 +1425,14 @@ export async function prepareDependencies({
       session.sealed = true;
       sealing.abort(new Skip("sealed"));
       if (!auth) return;
-      let status = 0;
-      try {
-        const sealed = await callJson(
-          new URL("/cache/npm/seal", auth.base),
-          { method: "POST", headers: { authorization: `Bearer ${auth.token}` } },
-          timeouts.httpMs,
-          "seal_failed",
-        );
-        status = sealed.status;
-        sealConfirmed = sealed.status === 200 && sealed.body?.sealed === true;
-      } catch {
-        // an unsealed session expires with its upload window
-      }
+      const { status, confirmed } = await postSeal(auth, timeouts.httpMs);
+      sealConfirmed = confirmed;
       say("seal", { status, confirmed: sealConfirmed });
     })());
 
   const phases = (async () => {
     try {
-      auth = await registryAuth(env);
-      if (proxyUrl && (auth || token))
-        auth = { token: auth?.token, base: new URL("/registry/npm/", proxyUrl).toString() };
-      if (auth && token) auth = { ...auth, token };
-      if (!auth?.token) auth = undefined;
+      auth = await resolveAuth(env, proxyUrl, token);
       const budget = await workspaceBudget(workspace, env, budgetBytes);
       await testHooks?.beforeDiscovery?.();
       const { run: toRun, skipped } = await planProjects(workspace, workSignal);

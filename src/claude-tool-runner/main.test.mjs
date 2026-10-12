@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { once } from "node:events";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { startToolRunner, TOOL_RUNNER_READY_MESSAGE } from "./main.mjs";
+import { parseToolSetup, toolEnvironment } from "./command.mjs";
+import { PREPARE_DEPENDENCIES_TOOL, startToolRunner, TOOL_RUNNER_READY_MESSAGE } from "./main.mjs";
 
 test("exposes a fixed lifecycle readiness marker", () => {
   assert.equal(TOOL_RUNNER_READY_MESSAGE, "wardby_tool_runner_ready");
@@ -68,4 +69,223 @@ test("serves only the bounded run_command MCP tool over its private socket", asy
     await new Promise((resolve) => server.close(resolve));
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------- dependency cache
+
+/** A minimal MCP client over the tool runner's socket, like the relay. */
+async function connect(socketPath) {
+  const socket = net.createConnection(socketPath);
+  await once(socket, "connect");
+  let id = 0;
+  const request = async (method, params = {}) => {
+    id += 1;
+    const response = waitForResponse(socket, id);
+    socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    return response;
+  };
+  await request("initialize", {
+    protocolVersion: "2025-03-26",
+    capabilities: {},
+    clientInfo: { name: "test", version: "1.0.0" },
+  });
+  socket.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+  return { socket, request };
+}
+
+const callTool = (client, name, args = {}) => client.request("tools/call", { name, arguments: args });
+const toolJson = (response) => JSON.parse(response.result.content[0].text);
+
+async function withRunner({ dependencyCache = true, module } = {}, body) {
+  const directory = await mkdtemp(join(tmpdir(), "wardby-claude-depcache-"));
+  const workspace = join(directory, "workspace");
+  const socketPath = join(directory, "runner.sock");
+  const setup = parseToolSetup(
+    JSON.stringify({
+      schemaVersion: 1,
+      env: {
+        npm_config_registry: "http://wardby-proxy:8787/registry/npm/",
+        npm_config_userconfig: `${workspace}/.cache/npm/npmrc`,
+        WARDBY_NPM_PLAN_REGISTRY: "http://wardby-proxy:8787/registry/npm/",
+        DATABASE_URL: "postgres://db",
+      },
+      files: [
+        {
+          path: `${workspace}/.cache/npm/npmrc`,
+          content: "//wardby-proxy:8787/registry/npm/:_authToken=rgt_x\n",
+          mode: 0o600,
+        },
+      ],
+      ...(dependencyCache ? { dependencyCache: true } : {}),
+    }),
+    workspace,
+  );
+  await import("node:fs/promises").then(({ mkdir }) => mkdir(workspace));
+  const server = await startToolRunner(socketPath, setup, {
+    workspacePath: workspace,
+    ...(module === "real" ? {} : { loadDependencyCache: async () => module }),
+  });
+  const clients = [];
+  try {
+    await body({
+      workspace,
+      setup,
+      connect: async () => {
+        const client = await connect(socketPath);
+        clients.push(client);
+        return client;
+      },
+    });
+  } finally {
+    for (const client of clients) client.socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function fakeModule(order = []) {
+  const calls = { prepare: [], seal: [] };
+  return {
+    calls,
+    prepareDependencies: async (options) => {
+      order.push("prepare");
+      calls.prepare.push(options);
+      return { projects: [{ path: ".", result: "hit", key: "abc", sizeBytes: 1, restoreMs: 1, rebuild: "skipped" }] };
+    },
+    sealUploadWindow: async (options) => {
+      order.push("seal");
+      calls.seal.push(options);
+      return { status: 200, confirmed: true };
+    },
+  };
+}
+
+test("offers the prepare tool only on a dependency-cache run", async () => {
+  for (const dependencyCache of [false, true]) {
+    await withRunner({ dependencyCache, module: fakeModule() }, async ({ connect }) => {
+      const client = await connect();
+      const listed = await client.request("tools/list");
+      assert.deepEqual(
+        listed.result.tools.map((tool) => tool.name),
+        dependencyCache ? ["run_command", PREPARE_DEPENDENCIES_TOOL] : ["run_command"],
+      );
+    });
+  }
+});
+
+test("prepares once per tool runner, with the commands' env and setup files, and returns the same result", async () => {
+  const module = fakeModule();
+  await withRunner({ module }, async ({ connect, workspace, setup }) => {
+    process.env.WARDBY_RUN_CAPABILITY = "rrp_tool_runner_sentinel";
+    try {
+      const first = await connect();
+      const result = toolJson(await callTool(first, PREPARE_DEPENDENCIES_TOOL));
+      const second = await connect();
+      assert.deepEqual(toolJson(await callTool(second, PREPARE_DEPENDENCIES_TOOL)), result);
+      assert.equal(result.projects[0].result, "hit");
+      assert.equal(module.calls.prepare.length, 1);
+      const [options] = module.calls.prepare;
+      assert.equal(options.workspace, workspace);
+      assert.deepEqual(options.env, { ...setup.env, ...toolEnvironment(workspace) });
+      assert.ok(!JSON.stringify(options.env).includes("rrp_tool_runner_sentinel"));
+      // The registry's npmrc is written before the module reads it.
+      assert.match(await readFile(`${workspace}/.cache/npm/npmrc`, "utf8"), /_authToken=rgt_x/);
+      assert.ok((await stat(`${workspace}/.cache/tmp`)).isDirectory());
+      assert.equal(module.calls.seal.length, 0);
+    } finally {
+      delete process.env.WARDBY_RUN_CAPABILITY;
+    }
+  });
+});
+
+test("refuses to prepare once a command has run (already_started)", async () => {
+  const module = fakeModule();
+  await withRunner({ module }, async ({ connect }) => {
+    const client = await connect();
+    await callTool(client, "run_command", { command: "true" });
+    assert.deepEqual(toolJson(await callTool(client, PREPARE_DEPENDENCIES_TOOL)), {
+      projects: [],
+      reason: "already_started",
+    });
+    assert.equal(module.calls.prepare.length, 0);
+  });
+});
+
+test("seals before the first command when prepare never ran, once", async () => {
+  const order = [];
+  const module = fakeModule(order);
+  const sealed = module.sealUploadWindow;
+  module.sealUploadWindow = async (options) => {
+    // The command has not run yet when the seal goes out.
+    await assert.rejects(stat(join(options.env.TMPDIR, "..", "..", "marker")));
+    return sealed(options);
+  };
+  await withRunner({ module }, async ({ connect, workspace, setup }) => {
+    const client = await connect();
+    await callTool(client, "run_command", { command: "touch marker" });
+    await callTool(client, "run_command", { command: "true" });
+    assert.deepEqual(order, ["seal"]);
+    assert.deepEqual(module.calls.seal[0].env, { ...setup.env, ...toolEnvironment(workspace) });
+    await stat(join(workspace, "marker"));
+  });
+});
+
+test("a command after prepare neither seals again nor waits on anything", async () => {
+  const order = [];
+  const module = fakeModule(order);
+  await withRunner({ module }, async ({ connect }) => {
+    const client = await connect();
+    await callTool(client, PREPARE_DEPENDENCIES_TOOL);
+    await callTool(client, "run_command", { command: "true" });
+    assert.deepEqual(order, ["prepare"]);
+  });
+});
+
+test("a command arriving while prepare runs waits for it to finish", async () => {
+  const order = [];
+  let release;
+  const module = fakeModule(order);
+  module.prepareDependencies = async () => {
+    order.push("prepare:start");
+    await new Promise((resolve) => (release = resolve));
+    order.push("prepare:end");
+    return { projects: [] };
+  };
+  await withRunner({ module }, async ({ connect, workspace }) => {
+    const client = await connect();
+    const preparing = callTool(client, PREPARE_DEPENDENCIES_TOOL);
+    while (!release) await new Promise((resolve) => setTimeout(resolve, 5));
+    const other = await connect();
+    const command = callTool(other, "run_command", { command: "echo ran > ran.txt" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await assert.rejects(stat(join(workspace, "ran.txt")));
+    release();
+    await preparing;
+    await command;
+    assert.deepEqual(order, ["prepare:start", "prepare:end"]);
+    await stat(join(workspace, "ran.txt"));
+  });
+});
+
+test("a module that fails to load or throws is a stable worker_error, and commands still run", async () => {
+  await withRunner({ module: undefined }, async ({ connect, workspace }) => {
+    const client = await connect();
+    assert.deepEqual(toolJson(await callTool(client, PREPARE_DEPENDENCIES_TOOL)), {
+      projects: [],
+      reason: "worker_error",
+    });
+    const ran = await callTool(client, "run_command", { command: "echo ok > ok.txt" });
+    assert.equal(ran.result.isError, false);
+    await writeFile(join(workspace, "noop"), "");
+  });
+});
+
+test("loads the real module from ../coding-worker, where the image puts it", async () => {
+  await withRunner({ module: "real" }, async ({ connect }) => {
+    const client = await connect();
+    // No lockfile in the workspace: the real module answers without touching the network.
+    assert.deepEqual(toolJson(await callTool(client, PREPARE_DEPENDENCIES_TOOL)), {
+      projects: [{ path: ".", result: "skipped", reason: "no_lockfile" }],
+    });
+  });
 });

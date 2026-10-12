@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { assertToolRunnerReachable } from "./tool-socket.js";
+import { assertToolRunnerReachable, callPrepareDependencies, PREPARE_DEPENDENCIES_TOOL } from "./tool-socket.js";
 
 const roots: string[] = [];
 const servers: Server[] = [];
@@ -30,5 +30,88 @@ describe("assertToolRunnerReachable", () => {
   it("fails by name when the socket is absent", async () => {
     const path = join(await socketDir(), "runner.sock");
     await expect(assertToolRunnerReachable(path)).rejects.toThrow("worker_tool_runner_unreachable");
+  });
+});
+
+/** A newline-delimited JSON-RPC server, framed like the tool runner's MCP stdio transport. */
+async function fakeRunner(answer: (message: { id?: number; method: string; params?: unknown }) => unknown) {
+  const path = join(await socketDir(), "runner.sock");
+  const seen: { method: string; params?: unknown }[] = [];
+  const server = createServer((socket) => {
+    socket.on("error", () => undefined);
+    let pending = "";
+    socket.on("data", (chunk) => {
+      pending += chunk.toString("utf8");
+      let end;
+      while ((end = pending.indexOf("\n")) >= 0) {
+        const message = JSON.parse(pending.slice(0, end));
+        pending = pending.slice(end + 1);
+        seen.push({ method: message.method, params: message.params });
+        if (message.id === undefined) continue;
+        const reply = answer(message);
+        if (reply === undefined) continue;
+        socket.write(
+          typeof reply === "string" ? reply : `${JSON.stringify({ jsonrpc: "2.0", id: message.id, ...reply })}\n`,
+        );
+      }
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((done) => server.listen(path, done));
+  return { path, seen };
+}
+
+const report = { projects: [{ path: ".", result: "hit" }] };
+const mcpAnswer = (message: { method: string }) =>
+  message.method === "initialize"
+    ? {
+        result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "wardby_tools", version: "1" } },
+      }
+    : { result: { content: [{ type: "text", text: JSON.stringify(report) }] } };
+
+describe("callPrepareDependencies", () => {
+  it("initializes, then calls the prepare tool once with no arguments, and returns its JSON", async () => {
+    const { path, seen } = await fakeRunner(mcpAnswer);
+    await expect(callPrepareDependencies({ socketPath: path })).resolves.toEqual(report);
+    expect(seen.map((entry) => entry.method)).toEqual(["initialize", "notifications/initialized", "tools/call"]);
+    expect(seen[2].params).toEqual({ name: PREPARE_DEPENDENCIES_TOOL, arguments: {} });
+    expect(PREPARE_DEPENDENCIES_TOOL).toBe("wardby_prepare_dependencies");
+  });
+
+  it("an older tool runner without the tool is dependency_cache_tool_unavailable", async () => {
+    for (const reply of [
+      { error: { code: -32602, message: "Tool wardby_prepare_dependencies not found" } },
+      { result: { isError: true, content: [{ type: "text", text: "not found" }] } },
+    ]) {
+      const { path } = await fakeRunner((message) => (message.method === "initialize" ? mcpAnswer(message) : reply));
+      await expect(callPrepareDependencies({ socketPath: path })).rejects.toThrow("dependency_cache_tool_unavailable");
+    }
+  });
+
+  it("fails by name on a timeout, an oversized answer, or text that is not JSON", async () => {
+    const silent = await fakeRunner((message) => (message.method === "initialize" ? mcpAnswer(message) : undefined));
+    await expect(callPrepareDependencies({ socketPath: silent.path, timeoutMs: 200 })).rejects.toThrow(
+      "dependency_cache_tool_failed",
+    );
+    const huge = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : `${"x".repeat(300 * 1024)}`,
+    );
+    await expect(callPrepareDependencies({ socketPath: huge.path, timeoutMs: 2_000 })).rejects.toThrow(
+      "dependency_cache_tool_failed",
+    );
+    const text = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : { result: { content: [{ type: "text", text: "nope" }] } },
+    );
+    await expect(callPrepareDependencies({ socketPath: text.path })).rejects.toThrow("dependency_cache_tool_failed");
+  });
+
+  it("fails by name when the socket is absent, and when the caller aborts", async () => {
+    const path = join(await socketDir(), "runner.sock");
+    await expect(callPrepareDependencies({ socketPath: path })).rejects.toThrow("dependency_cache_tool_failed");
+    const silent = await fakeRunner((message) => (message.method === "initialize" ? mcpAnswer(message) : undefined));
+    const controller = new AbortController();
+    const call = callPrepareDependencies({ socketPath: silent.path, signal: controller.signal });
+    controller.abort();
+    await expect(call).rejects.toThrow("dependency_cache_tool_failed");
   });
 });

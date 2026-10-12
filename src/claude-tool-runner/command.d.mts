@@ -14,9 +14,13 @@ export declare const MAX_SETUP_BYTES: number;
 export interface ToolSetup {
   readonly env: Readonly<Record<string, string>>;
   readonly files: ReadonlyArray<{ path: string; content: string; mode: number }>;
+  /** Present (true) only on a dependency-cache run. */
+  readonly dependencyCache?: true;
 }
 
-export declare function toolEnvironment(): Record<string, string>;
+export declare function toolEnvironment(workspacePath?: string): Record<string, string>;
+export declare function commandEnvironment(setup?: ToolSetup, workspacePath?: string): Record<string, string>;
+export declare function prepareCommandWorkspace(setup?: ToolSetup, workspacePath?: string): Promise<void>;
 export declare function parseToolSetup(raw: string | undefined, workspacePath?: string): ToolSetup;
 export declare function runCommand(
   command: string,

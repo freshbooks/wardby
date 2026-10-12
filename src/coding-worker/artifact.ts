@@ -5,7 +5,7 @@ import {
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
   parseCodingTaskInputJson,
-  type CodingAgentOutput,
+  type CodingWorkerOutput,
 } from "../coding/protocol.js";
 
 /**
@@ -53,7 +53,7 @@ export async function readCodingInput(path: string) {
   );
 }
 
-export async function writeCodingOutputAtomic(path: string, output: CodingAgentOutput): Promise<void> {
+export async function writeCodingOutputAtomic(path: string, output: CodingWorkerOutput): Promise<void> {
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const temporary = join(directory, `.result-${process.pid}-${Date.now()}.tmp`);

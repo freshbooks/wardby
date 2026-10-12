@@ -541,22 +541,154 @@ export const CodingTaskInputSchema = z
     }
   });
 
-export const CodingAgentOutputSchema = z
-  .object({
-    schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
-    runId: runIdSchema,
-    outcome: z.enum(["changes_ready", "no_changes", "budget_exhausted"]),
-    summary: boundedText(MAX_CODING_SUMMARY_BYTES),
-    tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
-    // Model-written, so normalized rather than rejected; see normalizeCodingTag.
-    tag: z.preprocess(normalizeCodingTag, tagSchema),
-  })
-  .strict()
-  .transform((value) => ({
+const agentOutputFields = {
+  schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
+  runId: runIdSchema,
+  outcome: z.enum(["changes_ready", "no_changes", "budget_exhausted"]),
+  summary: boundedText(MAX_CODING_SUMMARY_BYTES),
+  tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
+  // Model-written, so normalized rather than rejected; see normalizeCodingTag.
+  tag: z.preprocess(normalizeCodingTag, tagSchema),
+};
+
+function redactAgentOutput<T extends { summary: string; tests: { command: string }[]; tag?: string }>(value: T): T {
+  return {
     ...value,
     summary: redactTokenShapedValues(value.summary),
     tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
     ...(value.tag !== undefined ? { tag: redactTokenShapedValues(value.tag) } : {}),
+  };
+}
+
+/** What the model returns. Strict: it can never carry a worker-written field such as dependencyCache. */
+export const CodingAgentOutputSchema = z.object(agentOutputFields).strict().transform(redactAgentOutput);
+
+// ------------------------------------------------------------ dependency cache report
+
+/**
+ * The run's dependency cache (src/coding-worker/dependency-cache.mjs), as the worker reports it in
+ * result.json and the control plane stores it (CodingRun.dependencyCacheResult, get_run). Worker-
+ * written, never model-written: the model's output schema above refuses the key. Only stable codes,
+ * repository folder names and bounded numbers; never npm output.
+ */
+export const MAX_DEPENDENCY_CACHE_PROJECTS = 4;
+export const DEPENDENCY_CACHE_OUTCOMES = ["hit", "nearest", "cold", "skipped", "refused"] as const;
+export const DEPENDENCY_CACHE_REBUILD_OUTCOMES = ["ok", "failed", "timeout", "skipped", "unsealed"] as const;
+const DEPENDENCY_CACHE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+/** "." or up to three folder segments: the proxy's project-path rule (dependency-cache/key.ts). */
+const DEPENDENCY_CACHE_PATH =
+  /^(?:\.|[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}(?:\/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}){0,2})$/;
+const MAX_DEPENDENCY_CACHE_NUMBER = Number.MAX_SAFE_INTEGER;
+const dependencyCacheCount = z.number().int().min(0).max(MAX_DEPENDENCY_CACHE_NUMBER);
+
+const dependencyCacheProjectSchema = z
+  .object({
+    path: z
+      .string()
+      .regex(DEPENDENCY_CACHE_PATH)
+      .refine((path) => !path.split("/").includes("node_modules")),
+    result: z.enum(DEPENDENCY_CACHE_OUTCOMES),
+    key: z
+      .string()
+      .regex(/^[a-z0-9]{1,64}$/)
+      .optional(),
+    sizeBytes: dependencyCacheCount.optional(),
+    restoreMs: dependencyCacheCount.optional(),
+    installMs: dependencyCacheCount.optional(),
+    reason: z.string().regex(DEPENDENCY_CACHE_CODE).optional(),
+    rebuild: z.enum(DEPENDENCY_CACHE_REBUILD_OUTCOMES).optional(),
+  })
+  .strict();
+
+export const DependencyCacheReportSchema = z
+  .object({
+    projects: z.array(dependencyCacheProjectSchema).max(MAX_DEPENDENCY_CACHE_PROJECTS),
+    /** Projects left out of `projects` (over the cap, or not reportable). */
+    omitted: z.number().int().min(1).max(MAX_DEPENDENCY_CACHE_NUMBER).optional(),
+    /** Set when no project could be reported at all: a stable code (timeout, internal_error, worker_error, ...). */
+    reason: z.string().regex(DEPENDENCY_CACHE_CODE).optional(),
+  })
+  .strict();
+
+export type DependencyCacheProject = z.infer<typeof dependencyCacheProjectSchema>;
+export type DependencyCacheReport = z.infer<typeof DependencyCacheReportSchema>;
+
+const INSTALLED_OUTCOMES: ReadonlySet<string> = new Set(["hit", "nearest", "cold"]);
+const RESTORED_OUTCOMES: ReadonlySet<string> = new Set(["hit", "nearest"]);
+const MAX_RAW_DEPENDENCY_CACHE_PROJECTS = 1024;
+
+/**
+ * Bounds whatever the module (or a tool runner over its socket) returned into a report: projects
+ * that don't fit the schema are dropped and counted in `omitted`; past the cap, installed and
+ * refused projects are kept ahead of skipped ones, in their original order. A value that isn't a
+ * report at all becomes `{ projects: [], reason: "report_invalid" }`. Never throws.
+ */
+export function sanitizeDependencyCacheReport(value: unknown): DependencyCacheReport {
+  const invalid = (): DependencyCacheReport => ({ projects: [], reason: "report_invalid" });
+  if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
+  const raw = value as Record<string, unknown>;
+  if (!Array.isArray(raw.projects) || raw.projects.length > MAX_RAW_DEPENDENCY_CACHE_PROJECTS) return invalid();
+  if (Object.keys(raw).some((key) => key !== "projects" && key !== "reason" && key !== "omitted")) return invalid();
+  const valid: DependencyCacheProject[] = [];
+  for (const project of raw.projects) {
+    const parsed = dependencyCacheProjectSchema.safeParse(project);
+    if (parsed.success) valid.push(parsed.data);
+  }
+  const kept = valid
+    .map((project, index) => ({ project, index, rank: project.result === "skipped" ? 1 : 0 }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .slice(0, MAX_DEPENDENCY_CACHE_PROJECTS)
+    .sort((a, b) => a.index - b.index)
+    .map((entry) => entry.project);
+  const earlier = typeof raw.omitted === "number" && Number.isSafeInteger(raw.omitted) && raw.omitted > 0;
+  const omitted = Math.min(
+    MAX_DEPENDENCY_CACHE_NUMBER,
+    raw.projects.length - kept.length + (earlier ? (raw.omitted as number) : 0),
+  );
+  const reason = typeof raw.reason === "string" && DEPENDENCY_CACHE_CODE.test(raw.reason) ? raw.reason : undefined;
+  return {
+    projects: kept,
+    ...(omitted > 0 ? { omitted } : {}),
+    ...(reason ? { reason } : {}),
+  };
+}
+
+/** Folders the dependency cache installed (hit, nearest or cold), "." for the repository root. */
+export function installedDependencyFolders(report: DependencyCacheReport | undefined): string[] {
+  return (report?.projects ?? []).filter((project) => INSTALLED_OUTCOMES.has(project.result)).map((p) => p.path);
+}
+
+/** Folders whose node_modules came from a cached snapshot (hit or nearest): the PR body's line. */
+export function restoredDependencyFolders(report: DependencyCacheReport | undefined): string[] {
+  return (report?.projects ?? []).filter((project) => RESTORED_OUTCOMES.has(project.result)).map((p) => p.path);
+}
+
+/** The one line both workers add to the agent's prompt when dependencies were installed; else undefined. */
+export function dependencyCacheTaskNote(report: DependencyCacheReport | undefined): string | undefined {
+  const folders = installedDependencyFolders(report);
+  if (folders.length === 0) return undefined;
+  const named = folders.map((path) => (path === "." ? "the repo root" : path)).join(", ");
+  return `Dependencies are pre-installed from the committed lockfile in: ${named}. Don't run \`npm ci\` there; add packages with a single install command.`;
+}
+
+/**
+ * What a worker writes to result.json and the control plane reads back: the model's output plus
+ * worker-written fields. `dependencyCache` is written only on a run whose input asked for it, so an
+ * older control plane never sees the key; a malformed one is bounded (sanitizeDependencyCacheReport)
+ * rather than failing the run.
+ */
+export const CodingWorkerOutputSchema = z
+  .object({
+    ...agentOutputFields,
+    dependencyCache: z
+      .unknown()
+      .optional()
+      .transform((value) => (value === undefined ? undefined : sanitizeDependencyCacheReport(value))),
+  })
+  .strict()
+  .transform(({ dependencyCache, ...value }) => ({
+    ...redactAgentOutput(value),
+    ...(dependencyCache !== undefined ? { dependencyCache } : {}),
   }));
 
 const pullRequestUrlSchema = z
@@ -638,6 +770,7 @@ export const CodingRunResultSchema = z
 
 export type CodingTaskInput = z.infer<typeof CodingTaskInputSchema>;
 export type CodingAgentOutput = z.infer<typeof CodingAgentOutputSchema>;
+export type CodingWorkerOutput = z.infer<typeof CodingWorkerOutputSchema>;
 export type CodingRunResult = z.infer<typeof CodingRunResultSchema>;
 
 /** Parses stored worker output into the only coding result shape callers may receive. */
@@ -827,6 +960,11 @@ export function parseCodingTaskInputJson(text: string): CodingTaskInput {
 
 export function parseCodingAgentOutputJson(text: string): CodingAgentOutput {
   return CodingAgentOutputSchema.parse(parseJsonWithoutDuplicateKeys(text));
+}
+
+/** The control plane's read of a worker's result.json (see CodingWorkerOutputSchema). */
+export function parseCodingWorkerOutputJson(text: string): CodingWorkerOutput {
+  return CodingWorkerOutputSchema.parse(parseJsonWithoutDuplicateKeys(text));
 }
 
 export function parseCodingRunResultJson(text: string): CodingRunResult {

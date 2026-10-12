@@ -1,5 +1,9 @@
 import type { CodingAgentOutput, CodingTaskInput } from "../coding/protocol.js";
 import type { DebugTracer } from "./debug-trace.js";
+import type { PrepareDependenciesOptions, PrepareDependenciesResult } from "./dependency-cache.mjs";
+
+/** The dependency cache module's entry point (dependency-cache.mjs), injectable for tests. */
+export type PrepareDependenciesFn = (options: PrepareDependenciesOptions) => Promise<PrepareDependenciesResult>;
 
 export type WorkerProgressEvent =
   | { schemaVersion: 1; runId: string; type: "turn_started" }
@@ -53,4 +57,6 @@ export interface WorkerRunOptions {
   onProgress?: (event: WorkerProgressEvent) => void;
   /** Set only for a run the operator asked to trace (CodingTaskInput.debugTrace). */
   trace?: DebugTracer;
+  /** Tests only: replaces the dependency cache module, which is otherwise loaded when the run asks for it. */
+  prepareDependencies?: PrepareDependenciesFn;
 }

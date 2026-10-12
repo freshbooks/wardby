@@ -1,8 +1,12 @@
 import {
   CODING_PROTOCOL_VERSION,
+  dependencyCacheTaskNote,
   parseCodingAgentOutputJson,
+  sanitizeDependencyCacheReport,
   type CodingAgentOutput,
   type CodingTaskInput,
+  type CodingWorkerOutput,
+  type DependencyCacheReport,
   DEFAULT_CLAUDE_MAX_TURNS,
 } from "../coding/protocol.js";
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
@@ -109,10 +113,28 @@ export interface ClaudeWorkerRunOptions {
   contextRoot?: string;
   /** Set only for a run the operator asked to trace (CodingTaskInput.debugTrace). */
   trace?: DebugTracer;
+  /**
+   * On a dependency-cache run (CodingTaskInput.dependencyCache): asks the tool runner to restore the
+   * run's dependencies (callPrepareDependencies, tool-socket.ts) and resolves with its unchecked JSON.
+   * Called once, before the agent's query exists.
+   */
+  prepareDependencies?: () => Promise<unknown>;
 }
 
-function boundedPrompt(task: string, runId: string): string {
-  return `Complete this software-engineering task using the wardby_tools MCP tool.\n\nTask:\n${task}\n\nThe final JSON runId must be ${runId}.`;
+function boundedPrompt(task: string, runId: string, note?: string): string {
+  return `Complete this software-engineering task using the wardby_tools MCP tool.\n\nTask:\n${task}\n\n${note ? `${note}\n\n` : ""}The final JSON runId must be ${runId}.`;
+}
+
+/** Never fails the run: a tool runner without the tool, or any other failure, is a stable code. */
+async function runDependencyCache(options: ClaudeWorkerRunOptions): Promise<DependencyCacheReport> {
+  try {
+    if (!options.prepareDependencies) return { projects: [], reason: "worker_error" };
+    return sanitizeDependencyCacheReport(await options.prepareDependencies());
+  } catch (error) {
+    options.trace?.record("dependency_cache_error", describeError(error));
+    const unavailable = error instanceof Error && error.message === "dependency_cache_tool_unavailable";
+    return { projects: [], reason: unavailable ? "tool_unavailable" : "worker_error" };
+  }
 }
 
 function agentEnvironment(proxyBaseUrl: string, capability: string, bareMode: boolean): Record<string, string> {
@@ -160,7 +182,12 @@ function budgetExhausted(input: CodingTaskInput): CodingAgentOutput {
   };
 }
 
-export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Promise<CodingAgentOutput> {
+export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Promise<CodingWorkerOutput> {
+  // The workspace is seeded before this container starts (the launcher's input gate); the agent
+  // does not exist yet, so the tool runner has run no command.
+  const dependencyCache = options.input.dependencyCache ? await runDependencyCache(options) : undefined;
+  const withCache = <T extends CodingAgentOutput>(output: T): T & Pick<CodingWorkerOutput, "dependencyCache"> =>
+    dependencyCache ? { ...output, dependencyCache } : output;
   const files = options.input.claudeContext?.files ?? [];
   let bareMode = options.input.claudeBareMode !== false;
   // Bare mode puts the repository context in the system prompt; native mode writes it to disk for
@@ -181,7 +208,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     ? `${CLAUDE_WORKER_SECURITY_INSTRUCTIONS}\n\n${injected}`
     : CLAUDE_WORKER_SECURITY_INSTRUCTIONS;
   const stream = options.createQuery({
-    prompt: boundedPrompt(options.input.task, options.input.runId),
+    prompt: boundedPrompt(options.input.task, options.input.runId, dependencyCacheTaskNote(dependencyCache)),
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
     maxTurns: options.input.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,
@@ -221,7 +248,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         });
       } else if (message.type === "result") {
         if (message.subtype === "success" && typeof message.result === "string") finalJson = message.result;
-        else if (message.subtype === "error_max_budget_usd") return budgetExhausted(options.input);
+        else if (message.subtype === "error_max_budget_usd") return withCache(budgetExhausted(options.input));
         else if (message.subtype === "error_max_turns") turnLimit = true;
         else failed = true;
       }
@@ -247,5 +274,5 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   }
   if (output.runId !== options.input.runId) throw new Error("coding_output_run_mismatch");
   options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "completed", outcome: output.outcome });
-  return output;
+  return withCache(output);
 }

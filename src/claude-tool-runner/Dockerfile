@@ -25,6 +25,11 @@ RUN chmod 0755 /opt/wardby/bin/npm-shim.mjs \
     && printf '%s\n' 'case ":$PATH:" in *:/opt/wardby/bin:*) ;; *) PATH="/opt/wardby/bin:$PATH" ;; esac' > /etc/profile.d/wardby-shims.sh \
     && PATH="/opt/wardby/bin:$PATH" npm --version \
     && test "$(sh -lc 'command -v npm')" = /opt/wardby/bin/npm
+# The dependency cache (src/coding-worker/dependency-cache.mjs): on a dependency-cache run the worker
+# asks this tool runner, before the agent starts, to restore the run's npm dependencies with the same
+# npm and environment its commands use. main.mjs imports it as ../coding-worker/dependency-cache.mjs.
+COPY src/coding-worker/dependency-cache.mjs /opt/wardby/coding-worker/dependency-cache.mjs
+RUN node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/dependency-cache.mjs"); if (typeof m.prepareDependencies !== "function" || typeof m.sealUploadWindow !== "function") process.exit(1)'
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \

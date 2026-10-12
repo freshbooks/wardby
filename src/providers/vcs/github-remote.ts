@@ -126,6 +126,7 @@ export class GitHubRemote implements GitRemote {
       tag: details?.tag,
       packages: details?.packages,
       packageRefusals: details?.packageRefusals,
+      ...(details?.restoredDependencies?.length ? { restoredDependencies: details.restoredDependencies } : {}),
       changedLockfiles: changedPaths.filter(isLockfilePath),
       ...(details?.issue ? { issue: details.issue } : {}),
       ...(details?.related ? { related: details.related } : {}),

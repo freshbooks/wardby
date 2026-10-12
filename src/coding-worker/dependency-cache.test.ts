@@ -26,6 +26,7 @@ import {
   prepareDependencies,
   prepareProject,
   scanArchive,
+  sealUploadWindow,
   verifyTree,
   type DependencyCacheEvent,
   type PrepareDependenciesResult,
@@ -837,6 +838,22 @@ describe("seal and timeouts", () => {
     expect(result.result).toBe("cold");
     expect(state.calls.filter((call) => call.startsWith("PUT"))).toEqual([]);
     expect(events.some((entry) => entry.event === "snapshot_skipped" && entry.reason === "sealed")).toBe(true);
+  });
+
+  it("sealUploadWindow seals on its own with the registry's token (a tool runner's first command)", async () => {
+    expect(await sealUploadWindow({ env })).toEqual({ status: 200, confirmed: true });
+    expect(state.calls).toEqual(["POST /cache/npm/seal"]);
+    expect(state.authorizations.at(-1)).toBe("Bearer run-token");
+    state.sealStatus = 500;
+    expect(await sealUploadWindow({ env })).toEqual({ status: 500, confirmed: false });
+  });
+
+  it("sealUploadWindow never throws: no registry, or a proxy that hangs", async () => {
+    expect(await sealUploadWindow({ env: {} })).toEqual({ status: 0, confirmed: false });
+    state.hang = "POST /cache/npm/seal";
+    const started = Date.now();
+    expect(await sealUploadWindow({ env, timeoutMs: 300 })).toEqual({ status: 0, confirmed: false });
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 
   it("seals when a call hangs, bounded by the HTTP timeout", async () => {

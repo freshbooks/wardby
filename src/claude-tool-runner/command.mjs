@@ -77,6 +77,9 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
       throw invalid();
     env[name] = text;
   }
+  // Set by the launcher only on a dependency-cache run (claude-tool-setup.ts); main.mjs then offers
+  // the worker its one prepare call. An older tool runner ignores the key.
+  if (value.dependencyCache !== undefined && typeof value.dependencyCache !== "boolean") throw invalid();
   if (!Array.isArray(value.files) || value.files.length > MAX_FILES) throw invalid();
   const cacheRoot = `${cacheRootFor(workspacePath)}/`;
   const files = value.files.map((file) => {
@@ -85,7 +88,22 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
     if (!FILE_MODES.has(file.mode) || Buffer.byteLength(file.content) > MAX_FILE_BYTES) throw invalid();
     return { path: file.path, content: file.content, mode: file.mode };
   });
-  return Object.freeze({ env: Object.freeze(env), files: Object.freeze(files) });
+  return Object.freeze({
+    env: Object.freeze(env),
+    files: Object.freeze(files),
+    ...(value.dependencyCache === true ? { dependencyCache: true } : {}),
+  });
+}
+
+/** Exactly what a command's shell gets (runCommand); the dependency cache's npm runs with it too. */
+export function commandEnvironment(setup = EMPTY_SETUP, workspacePath = "/workspace") {
+  return { ...setup.env, ...toolEnvironment(workspacePath) };
+}
+
+/** What runCommand does to the workspace before each command: the setup files and TMPDIR. */
+export async function prepareCommandWorkspace(setup = EMPTY_SETUP, workspacePath = "/workspace") {
+  await applySetupFiles(setup);
+  await ensureTmpDir(workspacePath);
 }
 
 /**
@@ -120,12 +138,11 @@ async function ensureTmpDir(workspacePath) {
 export async function runCommand(command, timeoutMs, workspacePath = "/workspace", setup = EMPTY_SETUP) {
   if (Buffer.byteLength(command) > MAX_COMMAND_BYTES) throw new Error("tool_command_too_large");
   const timeout = Math.max(1_000, Math.min(MAX_TIMEOUT_MS, timeoutMs));
-  await applySetupFiles(setup);
-  await ensureTmpDir(workspacePath);
+  await prepareCommandWorkspace(setup, workspacePath);
   return new Promise((resolve) => {
     const child = spawn("/bin/sh", ["-lc", command], {
       cwd: workspacePath,
-      env: { ...setup.env, ...toolEnvironment(workspacePath) },
+      env: commandEnvironment(setup, workspacePath),
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, so a timeout reaches grandchildren that still hold the pipes.
       detached: true,

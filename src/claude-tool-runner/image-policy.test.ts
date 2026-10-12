@@ -16,6 +16,10 @@ describe("Claude tool runner image policy", () => {
     expect(dockerfile).toContain("USER 10001:10001");
     expect(dockerfile).toContain("COPY src/coding-worker/npm-shim.mjs /opt/wardby/bin/npm-shim.mjs");
     expect(dockerfile).toContain("/etc/profile.d/wardby-shims.sh");
+    // main.mjs imports ../coding-worker/dependency-cache.mjs on a dependency-cache run.
+    expect(dockerfile).toContain(
+      "COPY src/coding-worker/dependency-cache.mjs /opt/wardby/coding-worker/dependency-cache.mjs",
+    );
     expect(dockerfile.match(/AS runtime/g)).toHaveLength(1);
   });
 

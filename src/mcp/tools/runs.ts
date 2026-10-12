@@ -2,7 +2,7 @@ import type { NativeExecutionMode } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { agentAccess, requireAgentAccess } from "../auth/access.js";
-import { publicCodingRunResult } from "../../coding/protocol.js";
+import { publicCodingRunResult, sanitizeDependencyCacheReport } from "../../coding/protocol.js";
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
 import { storedServiceLabels } from "../../coding/services/catalog.js";
 import { textResult } from "./text-result.js";
@@ -87,6 +87,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
           services: true,
           resultBranch: true,
           baseSha: true,
+          dependencyCacheResult: true,
         },
       });
       const localPr = await ctx.db.localPullRequest.findUnique({
@@ -120,6 +121,11 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       const diagnosticId = codingRun?.diagnosticId ?? undefined;
       // Which services the run started with ("postgres 16"); never their images or environments.
       const services = codingRun ? storedServiceLabels(codingRun.services) : [];
+      // The worker's dependency cache report (stable codes, folder names and numbers only), re-bounded on read.
+      const dependencyCache =
+        codingRun?.dependencyCacheResult !== null && codingRun?.dependencyCacheResult !== undefined
+          ? sanitizeDependencyCacheReport(codingRun.dependencyCacheResult)
+          : undefined;
       return textResult({
         ...withOperatorMode(run),
         ...(codingResult ? { codingResult } : {}),
@@ -132,6 +138,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ...(services.length > 0 ? { services } : {}),
         ...(codingRun?.resultBranch ? { resultBranch: codingRun.resultBranch } : {}),
         ...(codingRun?.baseSha ? { baseSha: codingRun.baseSha } : {}),
+        ...(dependencyCache ? { dependencyCache } : {}),
         ...(localPr
           ? {
               review: {

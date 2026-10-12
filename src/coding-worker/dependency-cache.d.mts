@@ -89,6 +89,20 @@ export interface DependencyCacheTestHooks {
   readonly beforeDiscovery?: () => Promise<void>;
 }
 
+export interface SealUploadWindowOptions {
+  /** The same agent-equivalent env `prepareDependencies` takes (registry settings and the npmrc). */
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly proxyUrl?: string;
+  readonly token?: string;
+  /** Defaults to DEFAULT_TIMEOUTS.httpMs. */
+  readonly timeoutMs?: number;
+}
+
+/** POST /cache/npm/seal on its own (idempotent on the proxy). `status` 0: no registry, or no answer. Never throws. */
+export declare function sealUploadWindow(
+  options: SealUploadWindowOptions,
+): Promise<{ readonly status: number; readonly confirmed: boolean }>;
+
 export declare function prepareDependencies(options: PrepareDependenciesOptions): Promise<PrepareDependenciesResult>;
 
 /** Project folders with a committed package-lock.json, root first then by path (no cap applied). */

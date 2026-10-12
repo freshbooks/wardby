@@ -9,6 +9,7 @@ import {
   MAX_FILE_BYTES,
   MAX_FILES,
   MAX_SETUP_BYTES,
+  TOOL_SETUP_ENV,
   parseToolSetup,
 } from "../../claude-tool-runner/command.mjs";
 import { CLAUDE_TOOL_SETUP_LIMITS, claudeToolSetup } from "./claude-tool-setup.js";
@@ -34,6 +35,19 @@ const POSTGRES = resolvedFromDefinition(
 describe("claudeToolSetup", () => {
   it("names its environment variable", () => {
     expect(CLAUDE_TOOL_SETUP_ENV).toBe("WARDBY_TOOL_SETUP");
+  });
+
+  it("delivers the setup under the exact name the tool runner reads", () => {
+    expect(CLAUDE_TOOL_SETUP_ENV).toBe(TOOL_SETUP_ENV);
+  });
+
+  it("carries the dependency cache flag only when on, and the tool runner reads it back", () => {
+    const on = claudeToolSetup({ ...spec, dependencyCache: true }, CAPABILITY);
+    expect(JSON.parse(on).dependencyCache).toBe(true);
+    expect(parseToolSetup(on).dependencyCache).toBe(true);
+    const off = claudeToolSetup(spec, CAPABILITY);
+    expect(JSON.parse(off)).not.toHaveProperty("dependencyCache");
+    expect(parseToolSetup(off)).not.toHaveProperty("dependencyCache");
   });
 
   it("hands the tool runner the registry settings a Codex shell gets, under /workspace/.cache", () => {
