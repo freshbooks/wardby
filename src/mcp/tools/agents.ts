@@ -103,6 +103,22 @@ function withOperatorMode<T extends { kind: string; nativeExecutionMode?: Native
   };
 }
 
+/** The warning create_agent / update_agent return (not a refusal): wardby can't tell how old a custom image is. */
+export const DEPENDENCY_CACHE_IMAGE_WARNING =
+  "dependencyCache is on and this agent runs its own worker image (workerImageRef): rebuild that image FROM the wardby release that includes the dependency cache before its next run, or the run fails at input (worker_input_failed). See the dependency-cache help article.";
+
+/** Non-blocking warnings about an agent's coding profile as stored. */
+function profileWarnings(profile: { dependencyCache: boolean; workerImageRef: string | null } | null): string[] {
+  return profile?.dependencyCache && profile.workerImageRef ? [DEPENDENCY_CACHE_IMAGE_WARNING] : [];
+}
+
+function withProfileWarnings<
+  T extends { codingProfile: { dependencyCache: boolean; workerImageRef: string | null } | null },
+>(agent: T): T & { warnings?: string[] } {
+  const warnings = profileWarnings(agent.codingProfile);
+  return warnings.length ? { ...agent, warnings } : agent;
+}
+
 const agentFields = {
   name: z.string().trim().min(1).max(MAX_AGENT_NAME_CHARS),
   systemPrompt: z.string().min(1).max(MAX_SYSTEM_PROMPT_CHARS),
@@ -316,7 +332,7 @@ const profileJsonSchema = {
     dependencyCache: {
       type: "boolean",
       description:
-        "Restore npm node_modules from a snapshot the proxy re-approves; needs package approval (packages:approve or agents:admin). Default false.",
+        "Restore npm node_modules from a snapshot the proxy re-approves; needs package approval (packages:approve or agents:admin). Default false. The worker images must be a release that includes the cache; with a workerImageRef the result carries a warning to rebuild that image from it.",
     },
     packageAllowlist: {
       type: "object",
@@ -576,7 +592,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         },
         include: { codingProfile: true },
       });
-      return textResult(withOperatorMode(agent));
+      return textResult(withProfileWarnings(withOperatorMode(agent)));
     },
   });
 
@@ -872,7 +888,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           "coding debug trace set",
         );
       }
-      return textResult(withOperatorMode(agent));
+      return textResult(withProfileWarnings(withOperatorMode(agent)));
     },
   });
 

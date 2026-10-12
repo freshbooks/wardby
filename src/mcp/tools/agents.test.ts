@@ -9,7 +9,7 @@ import { Prisma } from "#prisma";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
-import { registerAgentTools } from "./agents.js";
+import { DEPENDENCY_CACHE_IMAGE_WARNING, registerAgentTools } from "./agents.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../../providers/llm/catalog-store.js";
@@ -1331,6 +1331,50 @@ describe("agent CRUD tools", () => {
     const fetched = await adminClient.callTool({ name: "get_agent", arguments: { id: "a1" } });
     expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.dependencyCache).toBe(true);
     await adminClient.close();
+  });
+
+  it("warns (never refuses) when dependencyCache is on for an agent with its own worker image", async () => {
+    const db = fakeDb([codingAgentSeed()]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:admin", "packages:approve"], ["admin"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const body = (result: { content: unknown }) =>
+      JSON.parse((result.content as { text: string }[])[0].text) as { id: string; warnings?: string[] };
+
+    const created = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        name: "byo-cache",
+        systemPrompt: "Make the requested change.",
+        model: "gpt-5.6-luna",
+        budgetUsd: 0.25,
+        kind: "coding",
+        codingProfile: { repository: "openai/example", workerImageRef: VALID_WORKER_IMAGE_REF, dependencyCache: true },
+      },
+    });
+    expect(created.isError).toBeFalsy();
+    expect(body(created).warnings).toEqual([DEPENDENCY_CACHE_IMAGE_WARNING]);
+    expect(DEPENDENCY_CACHE_IMAGE_WARNING).toContain("worker_input_failed");
+
+    // Either order of turning them on warns; the shipped image alone, or the cache off, does not.
+    const cacheOnly = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { dependencyCache: true } },
+    });
+    expect(body(cacheOnly).warnings).toBeUndefined();
+    const withImage = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { workerImageRef: VALID_WORKER_IMAGE_REF } },
+    });
+    expect(withImage.isError).toBeFalsy();
+    expect(body(withImage).warnings).toEqual([DEPENDENCY_CACHE_IMAGE_WARNING]);
+    const cacheOff = await client.callTool({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { dependencyCache: false } },
+    });
+    expect(body(cacheOff).warnings).toBeUndefined();
+    await client.close();
   });
 
   it("acceptedAdvisories needs packages:approve on create_agent and update_agent, and round-trips via get_agent", async () => {
