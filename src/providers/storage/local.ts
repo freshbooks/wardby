@@ -1,9 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { createByteMeter } from "./meter.js";
 import { assertValidBlobKey, BlobStoreError, type BlobInfo, type BlobStore } from "./types.js";
 
 function isNotFound(error: unknown): boolean {
@@ -62,28 +62,15 @@ export class LocalBlobStore implements BlobStore {
     const path = this.pathFor(key);
     await mkdir(dirname(path), { recursive: true });
     const temp = this.tempPathFor(path);
-    const hash = createHash("sha256");
-    let sizeBytes = 0;
-    const maxBytes = opts?.maxBytes;
-    const meter = new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
-        sizeBytes += chunk.length;
-        if (maxBytes !== undefined && sizeBytes > maxBytes) {
-          callback(new BlobStoreError("blob_too_large", `blob_too_large: more than ${maxBytes} bytes`));
-          return;
-        }
-        hash.update(chunk);
-        callback(null, chunk);
-      },
-    });
+    const meter = createByteMeter(opts?.maxBytes);
     try {
-      await pipeline(body, meter, createWriteStream(temp));
+      await pipeline(body, meter.stream, createWriteStream(temp));
       await rename(temp, path);
     } catch (error) {
       await rm(temp, { force: true });
       throw error;
     }
-    return { sizeBytes, sha256: hash.digest("hex") };
+    return { sizeBytes: meter.size(), sha256: meter.digest() };
   }
 
   async getStream(key: string): Promise<NodeJS.ReadableStream> {

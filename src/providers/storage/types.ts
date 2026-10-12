@@ -49,9 +49,13 @@ export interface BlobStore {
 
 const KEY_PATTERN = /^[a-z0-9][a-z0-9/_.-]{0,500}$/;
 
-/** Throws invalid_key unless the key matches the allowed pattern and has no `..` segment. */
+/** Throws invalid_key unless the key matches the allowed pattern and has no empty, `.` or `..` segment (so no `//` or trailing `/`). */
 export function assertValidBlobKey(key: string): void {
-  if (typeof key !== "string" || !KEY_PATTERN.test(key) || key.split("/").some((segment) => segment === "..")) {
+  if (
+    typeof key !== "string" ||
+    !KEY_PATTERN.test(key) ||
+    key.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
     throw new BlobStoreError("invalid_key");
   }
 }

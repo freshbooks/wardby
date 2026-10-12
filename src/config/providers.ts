@@ -57,7 +57,17 @@ export function loadBlobStoreConfig(env: NodeJS.ProcessEnv = process.env): BlobS
     if (!localDir) throw new Error("BLOB_STORE_LOCAL_DIR is required when BLOB_STORE=local.");
     return { kind, localDir };
   }
-  return { kind };
+  if (kind === "gcs") {
+    const bucket = env.BLOB_STORE_GCS_BUCKET?.trim();
+    if (!bucket) throw new Error("BLOB_STORE_GCS_BUCKET is required when BLOB_STORE=gcs.");
+    return { kind, bucket };
+  }
+  const bucket = env.BLOB_STORE_S3_BUCKET?.trim();
+  if (!bucket) throw new Error("BLOB_STORE_S3_BUCKET is required when BLOB_STORE=s3.");
+  const region = env.BLOB_STORE_S3_REGION?.trim();
+  if (!region) throw new Error("BLOB_STORE_S3_REGION is required when BLOB_STORE=s3.");
+  const endpoint = env.BLOB_STORE_S3_ENDPOINT?.trim();
+  return { kind, bucket, region, ...(endpoint ? { endpoint } : {}) };
 }
 
 /** Read provider selection from environment variables, defaulting to portable. */

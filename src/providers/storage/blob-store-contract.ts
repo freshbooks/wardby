@@ -61,12 +61,48 @@ export function runBlobStoreContract(
 
     it("rejects invalid keys with invalid_key", async () => {
       const store = await fresh();
-      for (const key of ["", "../x", "a/../b", "/abs", "Upper", "a b", "-lead", "a/..", `a${"b".repeat(501)}`]) {
+      for (const key of [
+        "",
+        "../x",
+        "a/../b",
+        "/abs",
+        "Upper",
+        "a b",
+        "-lead",
+        "a/..",
+        "a/./b",
+        "./a",
+        "a//b",
+        "a/",
+        "snap/",
+        `a${"b".repeat(501)}`,
+      ]) {
         await expect(store.head(key), key).rejects.toMatchObject({ code: "invalid_key" });
         await expect(store.putStream(key, chunked([Buffer.from("x")])), key).rejects.toBeInstanceOf(BlobStoreError);
       }
       await expect(store.get("../x")).rejects.toMatchObject({ code: "invalid_key" });
       await expect(store.delete("../x")).rejects.toMatchObject({ code: "invalid_key" });
+    });
+
+    it("counts string chunks by bytes and hashes them", async () => {
+      const store = await fresh();
+      const text = "héllo wörld ".repeat(50);
+      const result = await store.putStream("snap/str.tar", Readable.from([text.slice(0, 100), text.slice(100)]));
+      expect(result.sizeBytes).toBe(Buffer.byteLength(text));
+      expect(result.sha256).toBe(createHash("sha256").update(text).digest("hex"));
+      await expect(
+        store.putStream("snap/str-big.tar", Readable.from([text]), { maxBytes: Buffer.byteLength(text) - 1 }),
+      ).rejects.toMatchObject({ code: "blob_too_large" });
+    });
+
+    it("an aborted overwrite leaves the previous object intact", async () => {
+      const store = await fresh();
+      await store.putStream("snap/keep.tar", chunked([Buffer.from("previous contents")]));
+      await expect(
+        store.putStream("snap/keep.tar", chunked([Buffer.alloc(600), Buffer.alloc(600)]), { maxBytes: 1000 }),
+      ).rejects.toMatchObject({ code: "blob_too_large" });
+      expect((await store.get("snap/keep.tar")).toString()).toBe("previous contents");
+      expect((await store.head("snap/keep.tar"))?.sizeBytes).toBe("previous contents".length);
     });
 
     it("head of a missing key is null", async () => {

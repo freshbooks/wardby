@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { createBlobStore } from "./index.js";
+import { GcsBlobStore } from "./gcs.js";
 import { LocalBlobStore } from "./local.js";
+import { S3BlobStore } from "./s3.js";
 import { runBlobStoreContract } from "./blob-store-contract.js";
 
 async function makeLocal() {
@@ -37,7 +39,11 @@ describe("createBlobStore", () => {
   it("builds a local store", () => {
     expect(createBlobStore({ kind: "local", localDir: "/tmp/x" })).toBeInstanceOf(LocalBlobStore);
   });
-  it("reports gcs and s3 as not available yet", () => {
-    expect(() => createBlobStore({ kind: "gcs" })).toThrow(/not available yet/);
+  it("builds gcs and s3 stores from config", () => {
+    expect(createBlobStore({ kind: "gcs", bucket: "snapshots" })).toBeInstanceOf(GcsBlobStore);
+    expect(createBlobStore({ kind: "s3", bucket: "snapshots", region: "us-east-1" })).toBeInstanceOf(S3BlobStore);
+    expect(
+      createBlobStore({ kind: "s3", bucket: "snapshots", region: "us-east-1", endpoint: "http://minio:9000" }),
+    ).toBeInstanceOf(S3BlobStore);
   });
 });
