@@ -1256,13 +1256,34 @@ function globCovers(glob, segments) {
   return match(0, 0);
 }
 
+/** Reads a regular file of at most `maxBytes` through one no-follow handle, so
+ *  the file checked is the file read (no check-then-read race, no symlink
+ *  followed). Throws when it is a symlink, not a regular file, or too large. */
+export async function readRegularFile(path, maxBytes, encoding) {
+  const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > maxBytes) throw new Error("not_readable_file");
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > maxBytes) throw new Error("not_readable_file");
+    const bytes = buffer.subarray(0, length);
+    return encoding ? bytes.toString(encoding) : bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
 /** The `workspaces` globs a project's package.json declares (array or { packages }). */
 async function workspaceGlobs(workspace, projectPath) {
   const file = join(workspace, ...(projectPath === "." ? [] : projectPath.split("/")), "package.json");
   try {
-    const info = await lstat(file);
-    if (!info.isFile() || info.size > MAX_JSON_BYTES) return [];
-    const manifest = JSON.parse(await readFile(file, "utf8"));
+    const manifest = JSON.parse(await readRegularFile(file, MAX_JSON_BYTES, "utf8"));
     const declared = manifest?.workspaces;
     const list = Array.isArray(declared) ? declared : Array.isArray(declared?.packages) ? declared.packages : [];
     return list.filter((glob) => typeof glob === "string");

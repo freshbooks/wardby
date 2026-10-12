@@ -179,3 +179,6 @@ export declare function checkConsistency(
   lockfile: { packages: Record<string, unknown> },
   signal?: AbortSignal,
 ): Promise<{ ok: true } | { ok: false; detail: string }>;
+
+export declare function readRegularFile(path: string, maxBytes: number): Promise<Buffer>;
+export declare function readRegularFile(path: string, maxBytes: number, encoding: BufferEncoding): Promise<string>;

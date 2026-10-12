@@ -28,6 +28,7 @@ import {
   extractArchive,
   prepareDependencies,
   prepareProject,
+  readRegularFile,
   scanArchive,
   sealUploadWindow,
   verifyTree,
@@ -1418,5 +1419,37 @@ describe("dependencyCacheBudget", () => {
     await symlink(join(root, "outside.bin"), join(workspace, "link"));
     const budget = await dependencyCacheBudget({ workspace, diskMb: 2048 });
     expect(budget.usedBytes).toBeLessThan(1 * MiB);
+  });
+});
+
+describe("readRegularFile", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "readregular-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("reads a regular file as bytes or text", async () => {
+    await writeFile(join(dir, "a.json"), '{"a":1}');
+    expect((await readRegularFile(join(dir, "a.json"), 100)).toString()).toBe('{"a":1}');
+    expect(await readRegularFile(join(dir, "a.json"), 7, "utf8")).toBe('{"a":1}');
+  });
+
+  it("refuses a symlink", async () => {
+    await writeFile(join(dir, "real.json"), "{}");
+    await symlink(join(dir, "real.json"), join(dir, "link.json"));
+    await expect(readRegularFile(join(dir, "link.json"), 100)).rejects.toThrow();
+  });
+
+  it("refuses a file over the size cap", async () => {
+    await writeFile(join(dir, "big.json"), "x".repeat(101));
+    await expect(readRegularFile(join(dir, "big.json"), 100)).rejects.toThrow();
+  });
+
+  it("refuses a directory", async () => {
+    await mkdir(join(dir, "sub"));
+    await expect(readRegularFile(join(dir, "sub"), 100)).rejects.toThrow();
   });
 });
