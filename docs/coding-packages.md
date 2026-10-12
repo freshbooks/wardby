@@ -444,10 +444,14 @@ these ways, reported per project in [`get_run`](#what-get_run-reports):
 - **`skipped`** or **`refused`**: nothing was prepared and the agent installs
   for itself as it always did. A skip never fails the run.
 
-Snapshots are keyed by repository, project folder, lockfile hash, worker image
-(the Claude Code tool-runner image for Claude Code runs) and the agent's
-package policy, all derived on the server. Changing the allowlist, the policy
-or the image starts a new key.
+Snapshots are keyed by repository, project folder, lockfile hash and worker
+image (the Claude Code tool-runner image for Claude Code runs), all derived on
+the server. Changing the image starts a new key; changing the lockfile falls
+back to `nearest`. The agent's package policy is not part of the key: a
+snapshot holds exactly the lockfile's integrity-checked packages, so agents on
+the same repository share snapshots, and each restore is still gated by the
+restoring agent's own current policy (see
+[A restore needs the plan first](#the-trust-model)).
 
 ### The trust model
 
@@ -476,7 +480,7 @@ does.
   and serves a snapshot only for a recorded hash. If the policy now refuses
   something, the project is `refused` and no snapshot is used.
 - **Keys are server-derived.** The worker supplies only the project folder and
-  the lockfile hash. The repository, image and policy come from the run's own
+  the lockfile hash. The repository and image come from the run's own
   record, and an id that is neither the run's own key nor the recomputed
   nearest snapshot for the same scope is answered 404.
 - **Integrity is checked on download.** The proxy stores each snapshot's

@@ -1,29 +1,36 @@
 import { Prisma, type PrismaClient } from "#prisma";
 import type { DependencyCacheSessionState } from "../registry/store.js";
-import type {
-  DependencyCacheStore,
-  EvictionRow,
-  NewSnapshot,
-  SnapshotIdentity,
-  SnapshotRow,
-  SnapshotScope,
+import {
+  POLICY_ANY,
+  type DependencyCacheStore,
+  type EvictionRow,
+  type NewSnapshot,
+  type SnapshotIdentity,
+  type SnapshotRow,
+  type SnapshotScope,
 } from "./store.js";
 
 /** How long one eviction pass may hold the lock (its transaction) before Postgres releases it. */
 const EVICTION_LOCK_MS = 15 * 60_000;
 
-type Row = Omit<SnapshotRow, "sizeBytes"> & { sizeBytes: bigint };
+type Row = Omit<SnapshotRow, "sizeBytes"> & { sizeBytes: bigint; policyHash: string };
 
-/** Only the scope's own fields (callers may pass a wider object, such as a derived key). */
-const scopeOf = ({ ecosystem, repository, projectPath, workerImage, policyHash }: SnapshotScope): SnapshotScope => ({
+/**
+ * Only the scope's own fields (callers may pass a wider object, such as a
+ * derived key), plus the fixed POLICY_ANY every row is written and matched with.
+ */
+const scopeOf = ({ ecosystem, repository, projectPath, workerImage }: SnapshotScope) => ({
   ecosystem,
   repository,
   projectPath,
   workerImage,
-  policyHash,
+  policyHash: POLICY_ANY,
 });
 
-const toSnapshot = (row: Row): SnapshotRow => ({ ...row, sizeBytes: Number(row.sizeBytes) });
+const toSnapshot = ({ policyHash: _policyHash, ...row }: Row): SnapshotRow => ({
+  ...row,
+  sizeBytes: Number(row.sizeBytes),
+});
 
 export class PrismaDependencyCacheStore implements DependencyCacheStore {
   constructor(private readonly db: PrismaClient) {}
