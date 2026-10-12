@@ -84,6 +84,7 @@ function dependencyGate(setup, workspacePath, loadDependencyCache) {
             workspace: workspacePath,
             env: env(),
             budgetBytes: budget.budgetBytes,
+            usedBytes: budget.usedBytes,
             signal,
             timeouts: { totalMs },
           });

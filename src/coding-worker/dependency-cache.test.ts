@@ -24,6 +24,9 @@ import {
   dependencyCacheTimeLimit,
   DEFAULT_TIMEOUTS,
   MIN_BUDGET_BYTES,
+  MIN_INSTALL_BUDGET_BYTES,
+  MAX_PLAN_ATTEMPTS,
+  MAX_PLAN_REQUESTS_PER_RUN,
   discoverProjects,
   extractArchive,
   prepareDependencies,
@@ -120,7 +123,16 @@ else {
   fs.mkdirSync("node_modules/.bin", { recursive: true });
   try { fs.symlinkSync("../beta/index.js", "node_modules/.bin/beta"); } catch {}
   fs.writeFileSync("node_modules/.package-lock.json", JSON.stringify(hidden, null, 2));
+  // npm's download cache, the way a real install fills it.
+  if (process.env.npm_config_cache) {
+    const content = path.join(process.env.npm_config_cache, "_cacache", "content-v2");
+    fs.mkdirSync(content, { recursive: true });
+    fs.writeFileSync(path.join(content, "tarball"), "cached tarball bytes");
+  }
+  // FAKE_NPM_BIG: bytes of incompressible data in one package (a large tree).
+  if (process.env.FAKE_NPM_BIG) fs.writeFileSync("node_modules/beta/big.bin", require("node:crypto").randomBytes(Number(process.env.FAKE_NPM_BIG)));
   if (mode === "rewrite-lock") fs.writeFileSync("package-lock.json", "{}");
+  if (mode === "lock-cache") fs.chmodSync(".cache", 0o500); // the archive can't be created there
 }
 `;
 
@@ -140,6 +152,8 @@ interface ProxyState {
   uploads: { body: Buffer; contentLength: string | undefined }[];
   sealed: boolean;
   hang?: string;
+  /** Delays the plan answer (a slow proxy with a cold package-fact cache). */
+  planDelayMs?: number;
   seals: number;
   sealStatus?: number;
 }
@@ -177,6 +191,7 @@ function startProxy(): Promise<void> {
       if (route === "POST /registry/npm/-/plan") {
         const plan = (await readBody(request)).toString("utf8");
         state.plans.push(plan);
+        if (state.planDelayMs) await new Promise((resolve) => setTimeout(resolve, state.planDelayMs));
         const answer = typeof state.planAnswer === "function" ? state.planAnswer(plan) : state.planAnswer;
         json(answer.status, answer.body);
         return;
@@ -723,6 +738,64 @@ describe("untrusted archives", () => {
     expect(await readdir(outside)).toEqual([]);
   });
 
+  it("restores files over 1 MiB (streamed) and up to 1 MiB (buffered) byte for byte", async () => {
+    const { randomBytes } = await import("node:crypto");
+    const large = randomBytes(1024 * 1024 + 4097);
+    const exact = randomBytes(1024 * 1024);
+    hitWith(
+      await realTarSnapshot(LOCKFILE, async (dir) => {
+        await writeFile(join(dir, "node_modules/beta/large.bin"), large);
+        await writeFile(join(dir, "node_modules/alpha/exact.bin"), exact);
+        await writeFile(join(dir, "node_modules/alpha/empty.txt"), "");
+      }),
+    );
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect((await readFile(join(workspace, "node_modules/beta/large.bin"))).equals(large)).toBe(true);
+    expect((await readFile(join(workspace, "node_modules/alpha/exact.bin"))).equals(exact)).toBe(true);
+    expect(await readFile(join(workspace, "node_modules/alpha/empty.txt"), "utf8")).toBe("");
+    expect(await readlink(join(workspace, "node_modules/.bin/beta"))).toBe("../beta/index.js");
+  });
+
+  it("extraction refuses a pre-existing symlink (live or dangling) where a folder entry goes", async () => {
+    const destination = join(root, "dest-dir");
+    const outside = join(root, "elsewhere-dir");
+    await mkdir(join(destination, "node_modules"), { recursive: true });
+    await mkdir(outside);
+    const archive = join(root, "dir.tgz");
+    await writeFile(
+      archive,
+      rawTar([
+        { name: "node_modules/", type: "5" },
+        { name: "node_modules/p/", type: "5" },
+        { name: "node_modules/p/x", body: "x" },
+      ]),
+    );
+    await symlink(outside, join(destination, "node_modules/p"));
+    await expect(extractArchive(archive, destination, { budgetBytes: 1024 * 1024 })).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+    expect(await readdir(outside)).toEqual([]);
+    await rm(join(destination, "node_modules/p"));
+    await symlink(join(outside, "missing"), join(destination, "node_modules/p"));
+    await expect(extractArchive(archive, destination, { budgetBytes: 1024 * 1024 })).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("verifyTree still refuses a hard link and a fifo in the written tree", async () => {
+    const tree = join(root, "tree-types");
+    await mkdir(join(tree, "node_modules/a"), { recursive: true });
+    await writeFile(join(tree, "node_modules/a/f"), "x");
+    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    const { link } = await import("node:fs/promises");
+    await link(join(tree, "node_modules/a/f"), join(tree, "node_modules/a/g"));
+    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+    await rm(join(tree, "node_modules/a/g"));
+    expect(spawnSync("mkfifo", [join(tree, "node_modules/a/pipe")]).status).toBe(0);
+    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+  });
+
   it("verifyTree rejects a written tree with a link out of node_modules, even through a linked folder", async () => {
     const tree = join(root, "tree");
     await mkdir(join(tree, "node_modules/p"), { recursive: true });
@@ -1139,7 +1212,10 @@ describe("several npm projects in one repo", () => {
       status: 200,
       body: { key: "a".repeat(64), hit: project === "app", maxBytes: 64 * 1024 * 1024 },
     });
-    const { projects } = await prepareAll({ budgetBytes: blob.length + Math.floor(unpackedBytes * 1.5) });
+    const { projects } = await prepareAll({
+      budgetBytes: blob.length + Math.floor(unpackedBytes * 1.5),
+      minInstallBytes: 0,
+    });
     expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
       [".", "cold", undefined],
       ["app", "skipped", "over_budget"],
@@ -1360,6 +1436,269 @@ describe("review fixes", () => {
     const refused = events.find((entry) => entry.event === "archive_refused");
     expect(refused).toMatchObject({ rule: "case_fold_duplicate", pathLength: expect.any(Number) });
     expect(JSON.stringify(refused)).not.toContain("node_modules/a");
+  });
+});
+
+// ---------------------------------------------------------------- disk use
+
+describe("disk use", () => {
+  const MiB = 1024 * 1024;
+  const npmCacheDir = () => join(workspace, ".cache", "npm");
+  const contentCache = () => join(npmCacheDir(), "_cacache");
+
+  /** The npm cache folder the registry setup writes (npmrc inside it), with something else of npm's. */
+  async function npmCacheLikeTheDriver() {
+    await mkdir(npmCacheDir(), { recursive: true });
+    await writeFile(join(npmCacheDir(), "npmrc"), "registry config\n");
+    await mkdir(join(npmCacheDir(), "_logs"));
+    await writeFile(join(npmCacheDir(), "_logs", "debug.log"), "x");
+    env.npm_config_cache = npmCacheDir();
+  }
+
+  const nearestLookup = () =>
+    (state.lookupAnswer = () => ({
+      status: 200,
+      body: { key: "c".repeat(64), hit: false, nearest: { id: "b".repeat(64) }, maxBytes: 64 * MiB },
+    }));
+
+  it("removes npm's content cache after a cold install, keeping the npmrc and the rest of npm's folder", async () => {
+    await npmCacheLikeTheDriver();
+    const result = await prepare();
+    expect(result).toMatchObject({ result: "cold" });
+    expect(await exists(contentCache())).toBe(false);
+    expect(await readFile(join(npmCacheDir(), "npmrc"), "utf8")).toBe("registry config\n");
+    expect(await exists(join(npmCacheDir(), "_logs", "debug.log"))).toBe(true);
+    expect(state.uploads).toHaveLength(1);
+    // Gone before the archive was built.
+    const order = events.map((entry) => entry.event);
+    expect(order.indexOf("npm_cache_cleared")).toBeGreaterThan(-1);
+    expect(order.indexOf("npm_cache_cleared")).toBeLessThan(order.indexOf("snapshot"));
+    expect(events).toContainEqual(expect.objectContaining({ event: "npm_cache_cleared", status: "removed" }));
+  });
+
+  it("removes npm's content cache after a nearest delta install too", async () => {
+    await npmCacheLikeTheDriver();
+    state.blobs.set("b".repeat(64), await realTarSnapshot(LOCKFILE));
+    await writeRepo(LOCKFILE_V2);
+    nearestLookup();
+    expect(await prepare()).toMatchObject({ result: "nearest" });
+    expect(await exists(contentCache())).toBe(false);
+    expect(await exists(join(npmCacheDir(), "npmrc"))).toBe(true);
+  });
+
+  it("a cancel during the removal never deletes a _cacache after the module returned", async () => {
+    await npmCacheLikeTheDriver();
+    const controller = new AbortController();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let hookRan = false;
+    await prepareAll({
+      signal: controller.signal,
+      timeouts: { settleMs: 200 },
+      testHooks: {
+        beforeNpmCacheRemove: async () => {
+          hookRan = true;
+          controller.abort();
+          await gate;
+        },
+      },
+    });
+    expect(hookRan).toBe(true);
+    // Moved away in one step before the removal began.
+    expect(await exists(contentCache())).toBe(false);
+    // The agent's npm starts a new cache; the late removal must not touch it.
+    await mkdir(join(contentCache(), "content-v2"), { recursive: true });
+    await writeFile(join(contentCache(), "content-v2", "agent"), "x");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await exists(join(contentCache(), "content-v2", "agent"))).toBe(true);
+    expect(await exists(join(npmCacheDir(), "npmrc"))).toBe(true);
+    expect(await cacheLeftovers()).toEqual(["npm"]); // the module's own temp is gone
+
+    // A cancel just before the move: _cacache is left alone.
+    await rm(join(workspace, "node_modules"), { recursive: true });
+    await rm(contentCache(), { recursive: true });
+    state.sealed = false;
+    events = [];
+    const late = new AbortController();
+    await prepareAll({
+      signal: late.signal,
+      timeouts: { settleMs: 200 },
+      testHooks: { beforeNpmCacheMove: async () => late.abort() },
+    });
+    expect(await exists(join(contentCache(), "content-v2", "tarball"))).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ event: "npm_cache_cleared", status: "stopped" }));
+  });
+
+  it("removes nothing on a hit (npm never ran)", async () => {
+    await npmCacheLikeTheDriver();
+    await mkdir(contentCache());
+    await writeFile(join(contentCache(), "keep"), "x");
+    hitWith(await realTarSnapshot(LOCKFILE));
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(await exists(join(contentCache(), "keep"))).toBe(true);
+    expect(events.some((entry) => entry.event === "npm_cache_cleared")).toBe(false);
+  });
+
+  it("never removes a content cache outside <workspace>/.cache, or one reached through a symlink", async () => {
+    const outside = join(root, "npm-cache-outside");
+    env.npm_config_cache = outside;
+    expect(await prepare()).toMatchObject({ result: "cold" });
+    expect(await exists(join(outside, "_cacache", "content-v2", "tarball"))).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ event: "npm_cache_cleared", status: "outside_workspace" }));
+
+    await rm(join(workspace, "node_modules"), { recursive: true });
+    state.sealed = false;
+    events = [];
+    await mkdir(join(workspace, ".cache"), { recursive: true });
+    await symlink(outside, join(workspace, ".cache", "npm"));
+    env.npm_config_cache = join(workspace, ".cache", "npm");
+    expect(await prepare()).toMatchObject({ result: "cold" });
+    expect(await exists(join(outside, "_cacache", "content-v2", "tarball"))).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ event: "npm_cache_cleared", status: "unsafe" }));
+  });
+
+  it("skips the snapshot when the archive would not fit what is left; node_modules stays, the result stays cold", async () => {
+    env.FAKE_NPM_BIG = String(2 * MiB);
+    const result = await prepare({ budgetBytes: 2.4 * MiB, minInstallBytes: 0 });
+    expect(result).toMatchObject({ result: "cold" });
+    expect(result.reason).toBeUndefined();
+    expect(result.sizeBytes).toBeUndefined();
+    expect(state.uploads).toHaveLength(0);
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "snapshot_skipped", reason: "budget", stage: "estimate" }),
+    );
+    expect(await exists(join(workspace, "node_modules/beta/big.bin"))).toBe(true);
+    expect(await cacheLeftovers()).toEqual([]);
+  });
+
+  it("aborts an archive that outgrows what is left mid-write, and leaves no partial file", async () => {
+    env.FAKE_NPM_BIG = String(2 * MiB); // incompressible: the archive comes out ~3x the estimate
+    let partial = 0;
+    const result = await prepare({
+      budgetBytes: 3.1 * MiB,
+      minInstallBytes: 0,
+      testHooks: {
+        afterArchiveAborted: async (archive: string) => {
+          partial = (await exists(archive)) ? 1 : 0;
+        },
+      },
+    });
+    expect(result).toMatchObject({ result: "cold" });
+    expect(result.reason).toBeUndefined();
+    expect(state.uploads).toHaveLength(0);
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "snapshot_skipped", reason: "budget", stage: "archive" }),
+    );
+    expect(partial).toBe(0);
+    expect(await cacheLeftovers()).toEqual([]);
+    expect(await exists(join(workspace, "node_modules/beta/big.bin"))).toBe(true);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("an archive that can't be written is snapshot_skipped tar_failed", async () => {
+    env.FAKE_NPM_MODE = "lock-cache";
+    try {
+      const result = await prepare();
+      expect(result).toMatchObject({ result: "cold" });
+      expect(result.reason).toBeUndefined();
+      expect(state.uploads).toHaveLength(0);
+      expect(events).toContainEqual(expect.objectContaining({ event: "snapshot_skipped", reason: "tar_failed" }));
+      expect(await exists(join(workspace, "node_modules/alpha/package.json"))).toBe(true);
+    } finally {
+      await chmod(join(workspace, ".cache"), 0o700);
+    }
+  });
+
+  it("refuses a cold install below the floor: budget_too_small, no node_modules, still sealed", async () => {
+    expect(MIN_INSTALL_BUDGET_BYTES).toBe(1024 * MiB);
+    expect(await prepare({ budgetBytes: 512 * MiB })).toEqual({ result: "skipped", reason: "budget_too_small" });
+    expect(await npmCalls()).toEqual([]);
+    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await cacheLeftovers()).toEqual([]);
+    expect(state.seals).toBe(1);
+  });
+
+  it("refuses a nearest too big to leave room for the delta, then a cold install of a tree that size", async () => {
+    // A tree that compresses like a real one (the archive a fraction of the unpacked bytes).
+    const blob = await realTarSnapshot(LOCKFILE, (dir) =>
+      writeFile(join(dir, "node_modules/beta/pad.bin"), Buffer.alloc(2 * MiB, 7)),
+    );
+    const archive = join(root, "measure.tgz");
+    await writeFile(archive, blob);
+    const { unpackedBytes } = await scanArchive(archive, { budgetBytes: 1024 * MiB });
+    state.blobs.set("b".repeat(64), blob);
+    await writeRepo(LOCKFILE_V2);
+    nearestLookup();
+    const result = await prepare({ budgetBytes: blob.length + Math.floor(unpackedBytes * 1.2), minInstallBytes: 0 });
+    expect(result).toEqual({ result: "skipped", reason: "budget_too_small" });
+    expect(events).toContainEqual(expect.objectContaining({ event: "nearest_rejected", reason: "budget_too_small" }));
+    expect(await npmCalls()).toEqual([]);
+    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await cacheLeftovers()).toEqual([]);
+  });
+
+  it("gives the plan request its own, longer timeout than the other calls", async () => {
+    expect(DEFAULT_TIMEOUTS.planMs).toBe(600_000);
+    expect(DEFAULT_TIMEOUTS.httpMs).toBe(120_000);
+    state.planDelayMs = 400; // slower than every other call may take
+    expect(await prepare({ timeouts: { httpMs: 200 } })).toMatchObject({ result: "cold" });
+
+    await rm(join(workspace, "node_modules"), { recursive: true });
+    state.sealed = false;
+    expect(await prepare({ timeouts: { planMs: 200 } })).toEqual({ result: "skipped", reason: "timeout" });
+  });
+
+  const incomplete = {
+    status: 503,
+    body: { error: "wardby_plan_incomplete: the lockfile was not verified within 120 s; try again" },
+  };
+
+  it("retries a plan the proxy left incomplete (it resumes where it stopped) until it is approved", async () => {
+    let answered = 0;
+    state.planAnswer = () => (++answered <= 2 ? incomplete : { status: 200, body: { approved: 3, refused: [] } });
+    expect(await prepare({ timeouts: { planRetryPauseMs: 20 } })).toMatchObject({ result: "cold" });
+    expect(state.plans).toHaveLength(3);
+    expect(new Set(state.plans).size).toBe(1); // the same lockfile bytes each time
+    expect(events.filter((entry) => entry.event === "plan_incomplete")).toHaveLength(2);
+    expect(DEFAULT_TIMEOUTS.planRetryPauseMs).toBe(2_000);
+  });
+
+  it("stops retrying an incomplete plan at planMs, skipped as timeout", async () => {
+    state.planAnswer = incomplete;
+    const started = Date.now();
+    const result = await prepare({ timeouts: { planMs: 300, planRetryPauseMs: 50 } });
+    expect(result).toEqual({ result: "skipped", reason: "timeout" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(state.plans.length).toBeGreaterThan(1);
+    expect(await npmCalls()).toEqual([]);
+    expect(state.seals).toBe(1);
+  });
+
+  it("sends at most MAX_PLAN_ATTEMPTS plans per project and MAX_PLAN_REQUESTS_PER_RUN per run", async () => {
+    expect(MAX_PLAN_ATTEMPTS).toBe(5);
+    expect(MAX_PLAN_REQUESTS_PER_RUN).toBe(8);
+    await writeProject("app", { ...LOCKFILE, name: "app" });
+    await writeProject("server", { ...LOCKFILE, name: "server" });
+    state.planAnswer = incomplete;
+    const { projects } = await prepareAll({ timeouts: { planRetryPauseMs: 5 } });
+    expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
+      [".", "skipped", "timeout"],
+      ["app", "skipped", "plan_failed"],
+      ["server", "skipped", "plan_failed"],
+    ]);
+    expect(state.plans).toHaveLength(8); // 5 for the root, 3 for app, none for server
+    expect(events.filter((entry) => entry.event === "plan_limit_reached")).toHaveLength(2);
+    expect(state.seals).toBe(1);
+  });
+
+  it("does not retry any other plan failure", async () => {
+    state.planAnswer = { status: 429, body: { error: "wardby_plan_limit: this run has made its 20 lockfile plans" } };
+    expect(await prepare({ timeouts: { planRetryPauseMs: 20 } })).toEqual({ result: "skipped", reason: "plan_failed" });
+    expect(state.plans).toHaveLength(1);
+    state.plans = [];
+    state.planAnswer = { status: 503, body: { error: "wardby_upstream_error: busy" } };
+    expect(await prepare({ timeouts: { planRetryPauseMs: 20 } })).toEqual({ result: "skipped", reason: "plan_failed" });
+    expect(state.plans).toHaveLength(1);
   });
 });
 

@@ -35,7 +35,12 @@ export interface PrepareDependenciesResult {
 }
 
 export interface DependencyCacheTimeouts {
+  /** Each small proxy call (lookup, seal): 120 s. */
   readonly httpMs: number;
+  /** The lockfile plan request (a cold proxy checks every package first): 10 min, still bounded by `totalMs`. */
+  readonly planMs: number;
+  /** Pause before sending a plan again after the proxy's 503 `wardby_plan_incomplete` (it resumes where it stopped). */
+  readonly planRetryPauseMs: number;
   readonly transferMs: number;
   readonly transferMsPerMiB: number;
   readonly installMs: number;
@@ -64,6 +69,12 @@ export declare const DEFAULT_TIMEOUTS: Readonly<DependencyCacheTimeouts>;
 export declare const DEFAULT_BUDGET_MB: number;
 export declare const MAX_ARCHIVE_ENTRIES: number;
 export declare const MAX_PROJECTS: number;
+/** The least room a cold install needs when this project's tree size is unknown (`budget_too_small` below it). */
+export declare const MIN_INSTALL_BUDGET_BYTES: number;
+/** Plan requests one project may send (retries of an incomplete plan included). */
+export declare const MAX_PLAN_ATTEMPTS: number;
+/** Plan requests the cache sends in one run, leaving the rest of REGISTRY_PLAN_MAX_PER_RUN to the agent's npm. */
+export declare const MAX_PLAN_REQUESTS_PER_RUN: number;
 
 export interface PrepareDependenciesOptions {
   readonly workspace: string;
@@ -79,6 +90,11 @@ export interface PrepareDependenciesOptions {
   readonly log?: DependencyCacheLog;
   /** Workspace disk budget in bytes; defaults to CODING_DISK_MB, else DEFAULT_BUDGET_MB. */
   readonly budgetBytes?: number;
+  /** What the workspace used when `budgetBytes` was measured (dependencyCacheBudget's `usedBytes`); the
+   *  snapshot step re-measures and counts the growth from it. Measured at the start when omitted. */
+  readonly usedBytes?: number;
+  /** Tests only: the cold-install floor; defaults to MIN_INSTALL_BUDGET_BYTES. */
+  readonly minInstallBytes?: number;
   readonly timeouts?: Partial<DependencyCacheTimeouts>;
   /** The run's cancellation: aborting it ends the work like the deadline (the module still seals and settles). */
   readonly signal?: AbortSignal;
@@ -89,6 +105,12 @@ export interface PrepareDependenciesOptions {
 export interface DependencyCacheTestHooks {
   readonly beforeRename?: () => Promise<void>;
   readonly beforeDiscovery?: () => Promise<void>;
+  /** After npm's `_cacache` was found and checked, before it is moved. */
+  readonly beforeNpmCacheMove?: () => Promise<void>;
+  /** After npm's `_cacache` was moved to the module's own temp, before it is removed. */
+  readonly beforeNpmCacheRemove?: () => Promise<void>;
+  /** After an archive that outgrew the budget was stopped and removed. */
+  readonly afterArchiveAborted?: (archive: string) => Promise<void>;
 }
 
 export declare const DEADLINE_SHARE: number;
@@ -146,17 +168,28 @@ export interface PrepareProjectOptions {
   readonly log: DependencyCacheLog;
   readonly auth: { readonly base: string; readonly token: string } | undefined;
   /** Shared across projects: decremented by what each restore unpacks. */
-  readonly budget: { remaining: number };
+  /** Shared across projects: decremented by what each restore unpacks and each install writes, and re-measured
+   *  before each snapshot from `limit` (the starting budget) and `baseUsed` (the workspace's usage then). */
+  readonly budget: { remaining: number; limit?: number; baseUsed?: number };
   readonly timeouts: DependencyCacheTimeouts;
   readonly signal: AbortSignal;
   /** `sealed` is set before the seal is sent (no upload starts after it);
    *  `closed` once the caller stops waiting (no workspace change after it). */
-  readonly session: { sealed: boolean; closed: boolean; children: Set<number>; temps?: Set<string> };
+  readonly session: {
+    sealed: boolean;
+    closed: boolean;
+    children: Set<number>;
+    temps?: Set<string>;
+    /** Plan requests sent so far in this run (at most MAX_PLAN_REQUESTS_PER_RUN). */
+    planRequests?: number;
+  };
   readonly testHooks?: DependencyCacheTestHooks;
   /** Filled from the committed lockfile before anything runs: whether `npm rebuild` is needed. */
   readonly facts?: { needsRebuild?: boolean };
   /** Epoch ms after which no snapshot upload starts. */
   readonly uploadDeadline?: number;
+  /** Tests only: the cold-install floor; defaults to MIN_INSTALL_BUDGET_BYTES. */
+  readonly minInstallBytes?: number;
 }
 
 export declare function prepareProject(options: PrepareProjectOptions): Promise<PrepareResult>;

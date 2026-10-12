@@ -3,7 +3,7 @@ id: dependency-cache
 title: Dependency cache for coding runs
 summary: Restore npm node_modules from a verified snapshot before a coding agent starts, so runs skip the install.
 audience: operator
-tags: [coding-agents, packages, npm, node_modules, dependency-cache, cache, npm-ci, lockfile, snapshot, restore, blob-store, workspaces, tool_unavailable, sha_mismatch, unsafe_archive, dependencyCache, worker_input_failed, workerImageRef]
+tags: [coding-agents, packages, npm, node_modules, dependency-cache, cache, npm-ci, lockfile, snapshot, restore, blob-store, workspaces, tool_unavailable, budget_too_small, snapshot_skipped, disk, sha_mismatch, unsafe_archive, dependencyCache, worker_input_failed, workerImageRef]
 appliesTo: >=0.6.1
 ---
 
@@ -23,7 +23,7 @@ For each eligible project the run reports one result in `get_run`
   project installs `cold` instead.
 - `nearest`: a snapshot for an older lockfile of the same repository and folder
   was restored, then updated to the committed lockfile.
-- `cold`: no snapshot, so `npm ci` ran and the result was stored.
+- `cold`: no snapshot, so `npm ci` ran and the result was stored (when it fit the disk).
 - `skipped` or `refused`: nothing was prepared and the agent installs for
   itself. A skip never fails the run; its `reason` says why.
 
@@ -81,6 +81,20 @@ for folders restored from a snapshot.
    `codingProfile.dependencyCache: true`. This needs `packages:approve` or
    `agents:admin`.
 
+## Disk use
+
+The cache works within a budget: the run's workspace disk
+(`workspaceDiskMb`) less what the checkout uses and a margin. Restores and the
+snapshot archive are held to it while they are written. An install is checked
+only before it starts: at least 1 GiB must be left (or twice the project's
+tree when a snapshot of it was seen), otherwise the project is
+`budget_too_small` and the agent installs for itself. npm's writes during the
+install itself aren't bounded. After its own install the worker deletes npm's
+download cache (`_cacache`), then archives the tree for upload only if the
+archive fits what is left. A snapshot skipped for space keeps the installed
+tree and the `cold` or `nearest` result; the worker log says
+`snapshot_skipped` (reason `budget`), not `get_run`.
+
 Tuning, on the proxy: `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` (1024),
 `_REPO_CAP_MB` (4096), `_TOTAL_CAP_MB` (20480), `_MAX_AGE_DAYS` (14, counted
 from creation, so snapshots are rebuilt periodically) and `_UPLOAD_SECONDS`
@@ -92,21 +106,21 @@ to `_MAX_AGE_DAYS`; the bucket also deletes objects older than that plus 7 days.
 Read `dependencyCache` in `get_run`; then match the `reason`. A rejected `hit`
 or `nearest` snapshot is not a reason: the project shows `cold`.
 
-| Reason                                                                                       | What to do                                                                                                                                                                                                                 |
-| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `no_lockfile`, `lockfile_unreadable`, `no_package_json`, `no_dependencies`                   | Nothing to cache in that folder.                                                                                                                                                                                           |
-| `lockfile_version`                                                                           | Regenerate the lockfile with npm 7 or later.                                                                                                                                                                               |
-| `workspaces`, `workspace_member`, `shrinkwrap_present`                                       | Not supported; the agent installs itself.                                                                                                                                                                                  |
-| `node_modules_present`, `cache_dir_unsafe`                                                   | Remove the committed `node_modules` or `.cache` (symlink) from the repository.                                                                                                                                             |
-| `too_many_projects`                                                                          | Only 4 projects per run are prepared.                                                                                                                                                                                      |
-| `no_registry`, `plan_failed`, `plan_refused`                                                 | Give the agent a package allowlist and fix refused packages; see [Approve packages for coding agents](help://coding-packages).                                                                                             |
-| `cache_unavailable`, `plan_required`, `sealed`, `lookup_failed`, `download_failed`           | Check `WARDBY_DEPENDENCY_CACHE` and `BLOB_STORE` on the proxy, the store's permissions and the proxy log.                                                                                                                  |
-| `size_mismatch`, `sha_mismatch`, `unsafe_archive`, `inconsistent`                            | The snapshot was not trusted; the project installed `cold` instead. It is rebuilt when it ages out or is deleted. Repeats point at the blob store.                                                                         |
-| `too_large`, `over_budget`, `budget_unknown`, `budget_too_small`                             | Raise `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` or the agent's `workspaceDiskMb`.                                                                                                                                          |
-| `install_failed`, `timeout`, `cancelled`, `internal_error`, `worker_error`, `report_invalid` | The agent installs for itself; check the worker log. The preparation gets at most 20 minutes or half the time left before the run's deadline. On Docker a huge restore can exhaust the tmpfs inode limit before its bytes. |
-| `tool_unavailable`                                                                           | Claude Code tool-runner image predates the cache or is custom; rebuild it from the current tool-runner image. The proxy still seals on the run's first model request.                                                      |
-| `already_started`, `invalid_deadline`                                                        | Not expected: a command ran before preparation, or the worker and tool runner images are from different releases.                                                                                                          |
-| `worker_input_failed` (the run fails)                                                        | A Codex or Claude Code worker image, or a `workerImageRef` image, older than the cache. Update the images, or rebuild the custom image `FROM` the current release, before turning the cache on.                            |
+| Reason                                                                                       | What to do                                                                                                                                                                                                                                         |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `no_lockfile`, `lockfile_unreadable`, `no_package_json`, `no_dependencies`                   | Nothing to cache in that folder.                                                                                                                                                                                                                   |
+| `lockfile_version`                                                                           | Regenerate the lockfile with npm 7 or later.                                                                                                                                                                                                       |
+| `workspaces`, `workspace_member`, `shrinkwrap_present`                                       | Not supported; the agent installs itself.                                                                                                                                                                                                          |
+| `node_modules_present`, `cache_dir_unsafe`                                                   | Remove the committed `node_modules` or `.cache` (symlink) from the repository.                                                                                                                                                                     |
+| `too_many_projects`                                                                          | Only 4 projects per run are prepared.                                                                                                                                                                                                              |
+| `no_registry`, `plan_failed`, `plan_refused`                                                 | Give the agent a package allowlist and fix refused packages; see [Approve packages for coding agents](help://coding-packages). A plan the proxy left incomplete is retried for up to 10 minutes (at most 5 attempts per project, 8 plans per run). |
+| `cache_unavailable`, `plan_required`, `sealed`, `lookup_failed`, `download_failed`           | Check `WARDBY_DEPENDENCY_CACHE` and `BLOB_STORE` on the proxy, the store's permissions and the proxy log.                                                                                                                                          |
+| `size_mismatch`, `sha_mismatch`, `unsafe_archive`, `inconsistent`                            | The snapshot was not trusted; the project installed `cold` instead. It is rebuilt when it ages out or is deleted. Repeats point at the blob store.                                                                                                 |
+| `too_large`, `over_budget`, `budget_unknown`, `budget_too_small`                             | Raise `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` or the agent's `workspaceDiskMb` (see [Disk use](#disk-use)).                                                                                                                                      |
+| `install_failed`, `timeout`, `cancelled`, `internal_error`, `worker_error`, `report_invalid` | The agent installs for itself; check the worker log. The preparation gets at most 20 minutes or half the time left before the run's deadline. On Docker a huge restore can exhaust the tmpfs inode limit before its bytes.                         |
+| `tool_unavailable`                                                                           | Claude Code tool-runner image predates the cache or is custom; rebuild it from the current tool-runner image. The proxy still seals on the run's first model request.                                                                              |
+| `already_started`, `invalid_deadline`                                                        | Not expected: a command ran before preparation, or the worker and tool runner images are from different releases.                                                                                                                                  |
+| `worker_input_failed` (the run fails)                                                        | A Codex or Claude Code worker image, or a `workerImageRef` image, older than the cache. Update the images, or rebuild the custom image `FROM` the current release, before turning the cache on.                                                    |
 
 `rebuild` of `failed`, `timeout` or `unsealed` means native add-ons may be
 unbuilt; the agent can run `npm rebuild`.

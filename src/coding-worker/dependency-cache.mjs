@@ -13,8 +13,11 @@
 //             (minus the lockfile check), lets `npm install` bring it up to
 //             date, checks the tree, and snapshots the result;
 //   cold    - runs `npm ci`, checks the tree, and snapshots it.
-// Projects run one after another with a shared disk budget; one project's
-// failure never affects another. It always seals the run's upload window once,
+// Projects run one after another with a shared disk budget, which bounds the
+// restores, gates each install (MIN_INSTALL_BUDGET_BYTES or a known tree
+// size), and is re-measured before each snapshot archive (skipped, or stopped
+// mid-write, when it would not fit); npm's download cache is removed after the
+// module's own install. One project's failure never affects another. It always seals the run's upload window once,
 // after every project, so nothing the agent does can ever be uploaded. Only
 // then, for a project whose lockfile lists install scripts, it runs
 // `npm rebuild` (snapshots are always built with --ignore-scripts, so what the
@@ -32,7 +35,15 @@
 // Dependency-free on purpose (it runs before anything is installed).
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  createReadStream,
+  createWriteStream,
+  lstatSync,
+  openSync,
+  writeSync,
+} from "node:fs";
 import {
   lstat,
   mkdir,
@@ -51,9 +62,10 @@ import {
 } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
-import { basename, join, posix, sep } from "node:path";
+import { basename, join, posix, resolve, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { createGunzip } from "node:zlib";
 
 const MIB = 1024 * 1024;
@@ -68,9 +80,18 @@ const MIB = 1024 * 1024;
  *  `transferMs` is the floor for a download or upload,
  *  which also gets `transferMsPerMiB` for every MiB it moves. After
  *  `totalMs` the work is aborted and gets `settleMs` to clean up; then the
- *  workspace is closed to it (no rename, removal or install) and it is sealed. */
+ *  workspace is closed to it (no rename, removal or install) and it is sealed.
+ *  `httpMs` bounds each small proxy call (lookup, seal); `planMs` the
+ *  lockfile plan alone, which on a proxy with a cold package-fact cache
+ *  checks every package of a large lockfile before it answers (still bounded
+ *  by `totalMs`, like every step). A proxy that stops at its own plan time
+ *  bound (REGISTRY_PLAN_TIMEOUT_MS) answers 503 `wardby_plan_incomplete` and
+ *  keeps what it verified; the plan is then sent again after
+ *  `planRetryPauseMs`, resuming there, until `planMs` is used up. */
 export const DEFAULT_TIMEOUTS = Object.freeze({
   httpMs: 120_000,
+  planMs: 600_000,
+  planRetryPauseMs: 2_000,
   transferMs: 300_000,
   transferMsPerMiB: 1_000,
   installMs: 600_000,
@@ -85,6 +106,21 @@ export const DEFAULT_TIMEOUTS = Object.freeze({
 
 /** The workspace budget when the caller names none and CODING_DISK_MB is unset. */
 export const DEFAULT_BUDGET_MB = 2048;
+/** The least room a cold install needs when no better estimate is known
+ *  (`budget_too_small` below it): npm writes node_modules and, beside it, its
+ *  download cache (`<npm_config_cache>/_cacache`, about as large again before
+ *  this module removes it), and the snapshot archive follows. 1 GiB covers a
+ *  large tree (about 450 MiB of node_modules plus 350 MiB of npm cache). */
+export const MIN_INSTALL_BUDGET_BYTES = 1024 * MIB;
+/** A cold install's room when the size of this project's tree is known (a
+ *  hit or nearest snapshot that was scanned): node_modules plus npm's cache. */
+const INSTALL_NEED_FACTOR = 2;
+/** A nearest restore must leave room for the delta install and the archive:
+ *  its unpacked size times this, before it is extracted. */
+const NEAREST_NEED_FACTOR = 1.5;
+/** node_modules bytes per archive byte when no snapshot of this project was
+ *  seen (gzip of a typical npm tree is about 3:1). */
+const ARCHIVE_RATIO_ESTIMATE = 3;
 /** Most entries a snapshot may hold (an inode bomb is not a byte bomb). */
 export const MAX_ARCHIVE_ENTRIES = 1_000_000;
 const MAX_JSON_BYTES = 1 * MIB;
@@ -101,7 +137,7 @@ const MAX_DISCOVERY_DIRS = 10_000;
  *  leading dot, so dot-folders are never projects. */
 const PROJECT_SEGMENT = /^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}$/;
 /** This module's own temp names under <workspace>/.cache (randomName below). */
-const OWN_TEMP = /^dep(?:-restore|-snap)?-[0-9a-f]{16}(?:\.tgz)?$/;
+const OWN_TEMP = /^dep(?:-restore|-snap|-npmcache)?-[0-9a-f]{16}(?:\.tgz)?$/;
 
 class Skip extends Error {
   /** `detail`: log-only facts about why (a rule name and counts, never path contents). */
@@ -402,26 +438,47 @@ const CREATE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_
 
 /** Each folder from `destination` down through `segments`, made if missing;
  *  refused if any of them is a symlink or not a folder (defence in depth
- *  against a file system that resolves two entry names to one path). */
+ *  against a file system that resolves two entry names to one path).
+ *  mkdir first (it never follows a link at the last component): a folder it
+ *  made is a real one; only when something already exists there (EEXIST)
+ *  is it checked with lstat. Parents are checked before children, and each
+ *  folder once (`verified`). */
 async function safeDirectory(destination, segments, verified) {
   let current = destination;
   for (const segment of ["", ...segments]) {
     if (segment) current = join(current, segment);
     if (verified.has(current)) continue;
+    try {
+      await mkdir(current, { mode: 0o755 });
+      verified.add(current);
+      continue;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw new Skip("unsafe_archive");
+    }
     let info;
     try {
       info = await lstat(current);
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw new Skip("unsafe_archive");
-      try {
-        await mkdir(current, { mode: 0o755 });
-        info = await lstat(current);
-      } catch {
-        throw new Skip("unsafe_archive");
-      }
+    } catch {
+      throw new Skip("unsafe_archive");
     }
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Skip("unsafe_archive");
     verified.add(current);
+  }
+}
+
+/** Files up to this size are gathered in memory and written in one go. */
+const BUFFERED_FILE_BYTES = 1 * MIB;
+
+/** Creates `target` (never following or replacing anything) and writes
+ *  `data` to it with synchronous calls: for a small file the three async
+ *  round trips of open/write/close cost more than the work itself. */
+function writeNewFileSync(target, mode, data) {
+  const fd = openSync(target, CREATE_FLAGS, mode);
+  try {
+    let offset = 0;
+    while (offset < data.length) offset += writeSync(fd, data, offset, data.length - offset);
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -451,11 +508,28 @@ export async function extractArchive(file, destination, { budgetBytes, maxEntrie
         await symlink(entry.linkname, target);
         return undefined;
       }
-      const handle = await open(target, CREATE_FLAGS, entry.mode & 0o111 ? 0o755 : 0o644);
-      if (entry.size === 0) {
-        await handle.close();
-        return undefined;
+      const mode = entry.mode & 0o111 ? 0o755 : 0o644;
+      if (entry.size <= BUFFERED_FILE_BYTES) {
+        if (entry.size === 0) {
+          writeNewFileSync(target, mode, Buffer.alloc(0));
+          return undefined;
+        }
+        // A file that arrives in one piece is written from it directly;
+        // otherwise its pieces are copied into one buffer of its declared size.
+        let buffer;
+        let filled = 0;
+        return (chunk) => {
+          if (!buffer && chunk.length === entry.size) {
+            writeNewFileSync(target, mode, chunk);
+            return;
+          }
+          buffer ??= Buffer.allocUnsafe(entry.size);
+          chunk.copy(buffer, filled);
+          filled += chunk.length;
+          if (filled === entry.size) writeNewFileSync(target, mode, buffer);
+        };
       }
+      const handle = await open(target, CREATE_FLAGS, mode);
       openHandle = handle;
       let written = 0;
       return async (chunk) => {
@@ -490,11 +564,16 @@ export async function verifyTree(root, signal) {
   while (stack.length) {
     signal?.throwIfAborted();
     const directory = stack.pop();
-    for (const name of await readdir(directory)) {
-      const path = join(directory, name);
-      const info = await lstat(path);
-      if (info.isDirectory()) stack.push(path);
-      else if (info.isSymbolicLink()) {
+    // Types from the folder listing (no lstat per entry); a regular file is
+    // still lstat'ed, for its link count (a hard link is refused): synchronously,
+    // since one async round trip per file costs more than the call itself.
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) stack.push(path);
+      else if (entry.isFile()) {
+        const info = lstatSync(path);
+        if (!info.isFile() || info.nlink > 1) throw new Skip("unsafe_archive");
+      } else if (entry.isSymbolicLink()) {
         const target = await readlink(path);
         if (!plainLinkTarget(toPosix(path.slice(root.length + 1)), target)) throw new Skip("unsafe_archive");
         let real;
@@ -505,7 +584,7 @@ export async function verifyTree(root, signal) {
           throw new Skip("unsafe_archive"); // ELOOP and the like
         }
         if (real !== realTop && !real.startsWith(realTop + sep)) throw new Skip("unsafe_archive");
-      } else if (!info.isFile() || info.nlink > 1) throw new Skip("unsafe_archive");
+      } else throw new Skip("unsafe_archive");
     }
   }
 }
@@ -637,7 +716,7 @@ async function callJson(url, options, timeoutMs, failure) {
 
 /** Runs a command with no output captured (npm output is never logged),
  *  in its own process group so a timeout kills everything it started. */
-function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal, session }) {
+function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal, session, stdout }) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted || session?.closed) {
       reject(asSkip(signal?.reason, "timeout"));
@@ -645,16 +724,23 @@ function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal, session 
     }
     let child;
     try {
-      child = spawn(command, args, { cwd, env, stdio: "ignore", detached: true });
+      child = spawn(command, args, {
+        cwd,
+        env,
+        stdio: ["ignore", stdout ? "pipe" : "ignore", "ignore"],
+        detached: true,
+      });
     } catch {
       reject(new Skip("install_failed"));
       return;
     }
     session?.children.add(child.pid);
     let reason;
+    let exited = false;
     const kill = (why) => {
       if (reason) return;
       reason = why;
+      if (exited) return;
       const group = (sig) => {
         try {
           process.kill(-child.pid, sig);
@@ -668,6 +754,14 @@ function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal, session 
     const timer = setTimeout(() => kill(new Skip("timeout")), timeoutMs);
     const onAbort = () => kill(asSkip(signal.reason, "timeout"));
     signal?.addEventListener("abort", onAbort, { once: true });
+    // `stdout(stream)`: consumes the output (only tar's archive uses it); its
+    // failure kills the command with its reason, else `tar_failed` (e.g. EIO, ENOSPC).
+    const consumed = stdout
+      ? stdout(child.stdout).then(
+          () => undefined,
+          (error) => kill(asSkip(error, "tar_failed")),
+        )
+      : Promise.resolve();
     child.on("error", () => {
       session?.children.delete(child.pid);
       clearTimeout(timer);
@@ -675,11 +769,14 @@ function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal, session 
       reject(new Skip("install_failed"));
     });
     child.on("exit", (code) => {
+      exited = true;
       session?.children.delete(child.pid);
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      if (reason) reject(reason);
-      else resolve(code ?? 1);
+      void consumed.then(() => {
+        if (reason) reject(reason);
+        else resolve(code ?? 1);
+      });
     });
   });
 }
@@ -718,7 +815,7 @@ async function workspaceBudget(workspace, env, budgetBytes) {
   } catch {
     // unknown: the budget alone
   }
-  return { remaining: Math.max(0, budget) };
+  return { remaining: Math.max(0, budget), limit: Math.max(0, budget) };
 }
 
 /** `<workspace>/.cache`, created if missing; refused when it is anything but
@@ -844,10 +941,23 @@ async function restore(context, project, id, maxBytes, { consistency }) {
     throw skip;
   };
   const scan = await scanArchive(archive, { budgetBytes: limit, signal }).catch(refused);
+  // This project's tree size and compression, for the estimates below (a cold
+  // install after a rejected restore, the snapshot's archive size). Recorded
+  // only from a snapshot that passed every check up to the point it was
+  // judged: here, a scan that accepted every entry (refused only for room),
+  // and below, a tree extracted and verified on disk. Never from one refused
+  // as unsafe, whose sizes are untrusted.
+  const measured = { unpackedBytes: scan.unpackedBytes, archiveBytes: sizeBytes };
+  // A nearest is only worth restoring with room left for the delta install and the archive.
+  if (!consistency && scan.unpackedBytes * NEAREST_NEED_FACTOR > limit) {
+    context.known = measured;
+    throw new Skip("budget_too_small");
+  }
   await mkdir(temp, { mode: 0o700 });
   await extractArchive(archive, temp, { budgetBytes: limit, signal }).catch(refused);
   await removeTemp(context.workspace, archive);
   await verifyTree(temp, signal);
+  context.known = measured;
   // A sanity check that this is the tree for this lockfile, not an
   // integrity control: integrity is the sha256 the proxy recorded in its
   // database at upload time, verified above against the bytes received.
@@ -899,6 +1009,7 @@ async function treeBytes(dir, signal) {
 /** Charges the shared budget for what an install added beyond a restore. */
 async function chargeInstall(context, project) {
   const bytes = await treeBytes(join(project.dir, ROOT), context.signal);
+  context.installedBytes = bytes;
   const added = Math.max(0, bytes - (context.restoredBytes ?? 0));
   context.budget.remaining = Math.max(0, context.budget.remaining - added);
 }
@@ -947,14 +1058,51 @@ async function snapshot(context, project, maxBytes) {
   };
   try {
     if (!(await present(join(project.dir, ROOT, ".package-lock.json")))) return skip("no_hidden_lockfile");
-    const code = await run("tar", ["-czf", archive, "-C", project.dir, ROOT], {
+    // Only an archive that fits what is left of the disk budget, measured now
+    // (npm's own writes included), is written; the installed tree stays either way.
+    const room = await measureRemaining(context);
+    const estimate = archiveEstimate(context);
+    if (estimate > room) {
+      context.log("snapshot_skipped", {
+        reason: "budget",
+        stage: "estimate",
+        estimateBytes: estimate,
+        roomBytes: room,
+      });
+      return undefined;
+    }
+    let written = 0;
+    const code = await run("tar", ["-czf", "-", "-C", project.dir, ROOT], {
       env: { PATH: context.env.PATH ?? process.env.PATH ?? "", COPYFILE_DISABLE: "1" },
       timeoutMs: timeouts.tarMs,
       killGraceMs: timeouts.killGraceMs,
       signal,
       session,
+      // Counted before each chunk is written: the file never grows past the room or maxBytes.
+      stdout: (output) =>
+        pipeline(
+          output,
+          new Transform({
+            transform(chunk, _encoding, callback) {
+              written += chunk.length;
+              if (written > room) callback(new Skip("budget"));
+              else if (written > maxBytes) callback(new Skip("too_large"));
+              else callback(null, chunk);
+            },
+          }),
+          createWriteStream(archive, { flags: "wx", mode: 0o600 }),
+        ),
     }).catch((error) => asSkip(error, "tar_failed").reason);
-    if (code !== 0) return skip(typeof code === "string" ? code : "tar_failed");
+    if (code !== 0) {
+      const reason = typeof code === "string" ? code : "tar_failed";
+      if (reason === "budget") {
+        await removeTemp(context.workspace, archive);
+        await context.testHooks?.afterArchiveAborted?.(archive);
+        context.log("snapshot_skipped", { reason, stage: "archive", writtenBytes: written, roomBytes: room });
+        return undefined;
+      }
+      return skip(reason);
+    }
     const { size } = await stat(archive);
     if (size > maxBytes) return skip("too_large");
     // Upload only what a restore would accept.
@@ -998,6 +1146,146 @@ async function snapshot(context, project, maxBytes) {
   }
 }
 
+/** What is left of the disk budget now: the budget less what the workspace
+ *  grew by since it was measured (the same bounded walk as
+ *  dependencyCacheBudget), and never more than the file system has free.
+ *  Falls back to the running account when the walk can't finish. Updates
+ *  the shared budget, so the next project starts from what is really left. */
+async function measureRemaining(context) {
+  const { budget, workspace, signal } = context;
+  let room = budget.remaining;
+  if (budget.limit !== undefined && budget.baseUsed !== undefined) {
+    const used = await workspaceUsage(workspace, { signal });
+    if (used !== undefined) room = budget.limit - (used - budget.baseUsed);
+  }
+  try {
+    const fs = await statfs(workspace);
+    room = Math.min(room, Number(fs.bavail) * Number(fs.bsize));
+  } catch {
+    // unknown: the budget alone
+  }
+  budget.remaining = Math.max(0, room);
+  return budget.remaining;
+}
+
+/** The archive's expected size: this project's tree at the compression its
+ *  last snapshot had (a nearest or rejected hit, when one was scanned), else
+ *  ARCHIVE_RATIO_ESTIMATE. A low guess only costs a tar that is stopped. */
+function archiveEstimate(context) {
+  const installed = context.installedBytes ?? 0;
+  const known = context.known;
+  if (known && known.unpackedBytes > 0) return Math.ceil(installed * (known.archiveBytes / known.unpackedBytes));
+  return Math.ceil(installed / ARCHIVE_RATIO_ESTIMATE);
+}
+
+/** Room an install needs before it starts: twice this project's known tree
+ *  (node_modules plus npm's cache) when a snapshot of it was scanned, else
+ *  `minInstallBytes` (MIN_INSTALL_BUDGET_BYTES). */
+function installNeed(context) {
+  const known = context.known?.unpackedBytes;
+  if (known !== undefined) return Math.ceil(known * INSTALL_NEED_FACTOR);
+  return context.minInstallBytes ?? MIN_INSTALL_BUDGET_BYTES;
+}
+
+/**
+ * Removes npm's content cache (`<npm_config_cache>/_cacache`) that this
+ * module's own install filled, before the snapshot is archived: otherwise it
+ * shares the disk with node_modules and the archive. Only that folder, only
+ * when it is under <workspace>/.cache and reached through real folders; the
+ * npmrc and the rest of npm's folder stay (the agent's npm reads them). The
+ * agent's npm downloads again whatever it needs. Never throws; logs only.
+ */
+async function removeNpmContentCache(context, project) {
+  const say = (status, fields = {}) => context.log("npm_cache_cleared", { status, ...fields });
+  if (context.signal.aborted || context.session.closed) return;
+  const configured = context.env.npm_config_cache ?? context.env.NPM_CONFIG_CACHE;
+  if (typeof configured !== "string" || !configured) return say("not_configured");
+  const cacheDir = join(context.workspace, ".cache");
+  const npmCache = resolve(project.dir, configured);
+  if (npmCache !== cacheDir && !npmCache.startsWith(cacheDir + sep)) return say("outside_workspace");
+  try {
+    const target = join(npmCache, "_cacache");
+    let current = cacheDir;
+    for (const segment of ["", ...target.slice(cacheDir.length + 1).split(sep)]) {
+      if (segment) current = join(current, segment);
+      let info;
+      try {
+        info = await lstat(current);
+      } catch (error) {
+        if (error?.code === "ENOENT") return say("absent");
+        throw error;
+      }
+      if (info.isSymbolicLink() || !info.isDirectory()) return say("unsafe");
+    }
+    await context.testHooks?.beforeNpmCacheMove?.();
+    if (!(await cacheDirIntact(context.workspace))) return say("unsafe");
+    // Nothing once the work is over: the workspace may already be the agent's.
+    // Checked here, with no await before the rename.
+    if (context.signal.aborted || context.session.closed) return say("stopped");
+    // Moved out of npm's folder in one step and only then removed: a removal
+    // still running after the caller stopped waiting touches only this
+    // module's own temp (which the session's cleanup also removes), never a
+    // `_cacache` the agent's npm has started to fill.
+    const doomed = join(cacheDir, randomName("dep-npmcache"));
+    await rename(target, doomed);
+    track(context, doomed);
+    await context.testHooks?.beforeNpmCacheRemove?.();
+    await removeTemp(context.workspace, doomed);
+    say("removed");
+  } catch {
+    say("failed");
+  }
+}
+
+/** The proxy's answer when it stopped at its own plan time bound, keeping
+ *  what it verified: sending the plan again resumes there. */
+const isPlanIncomplete = (plan) =>
+  plan.status === 503 && typeof plan.body?.error === "string" && plan.body.error.startsWith("wardby_plan_incomplete");
+
+/** Most plan requests for one project, and for the whole run: the proxy
+ *  allows REGISTRY_PLAN_MAX_PER_RUN (20 by default) per run, and the agent's
+ *  own npm needs some of them. */
+export const MAX_PLAN_ATTEMPTS = 5;
+export const MAX_PLAN_REQUESTS_PER_RUN = 8;
+
+/** POST -/plan, sent again after `planRetryPauseMs` while the proxy answers
+ *  that it is incomplete, all within `planMs` (and the overall deadline,
+ *  through the signal), at most MAX_PLAN_ATTEMPTS times. Every other answer
+ *  is returned as it is; running out of time or attempts is `timeout`, and
+ *  the run's MAX_PLAN_REQUESTS_PER_RUN used up is `plan_failed`. */
+async function requestPlan(context, project) {
+  const { auth, timeouts, signal, log, session } = context;
+  const planMs = Math.min(timeouts.planMs ?? DEFAULT_TIMEOUTS.planMs, timeouts.totalMs ?? DEFAULT_TIMEOUTS.totalMs);
+  const pauseMs = timeouts.planRetryPauseMs ?? DEFAULT_TIMEOUTS.planRetryPauseMs;
+  const until = Date.now() + planMs;
+  for (let attempt = 1; ; attempt += 1) {
+    if ((session.planRequests ?? 0) >= MAX_PLAN_REQUESTS_PER_RUN) {
+      log("plan_limit_reached", { requests: session.planRequests });
+      throw new Skip("plan_failed");
+    }
+    session.planRequests = (session.planRequests ?? 0) + 1;
+    const plan = await callJson(
+      new URL("-/plan", auth.base),
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${auth.token}`, "content-type": "application/json" },
+        body: project.bytes,
+        signal,
+      },
+      Math.max(1, until - Date.now()),
+      "plan_failed",
+    );
+    if (!isPlanIncomplete(plan)) return plan;
+    log("plan_incomplete", { attempt });
+    if (attempt >= MAX_PLAN_ATTEMPTS || until - Date.now() <= pauseMs) throw new Skip("timeout");
+    try {
+      await sleep(pauseMs, undefined, { signal });
+    } catch (error) {
+      throw asSkip(error, "timeout");
+    }
+  }
+}
+
 /**
  * The flow for one npm project (`projectPath` relative to the workspace, as
  * discoverProjects returns it). Never throws.
@@ -1017,17 +1305,7 @@ export async function prepareProject(options) {
     context.cacheBase = new URL("/cache/npm/", auth.base);
 
     // The plan: the shim's request, with these exact bytes.
-    const plan = await callJson(
-      new URL("-/plan", auth.base),
-      {
-        method: "POST",
-        headers: { authorization: `Bearer ${auth.token}`, "content-type": "application/json" },
-        body: project.bytes,
-        signal,
-      },
-      timeouts.httpMs,
-      "plan_failed",
-    );
+    const plan = await requestPlan(context, project);
     if (plan.status !== 200 || typeof plan.body?.approved !== "number" || !Array.isArray(plan.body?.refused))
       throw new Skip("plan_failed");
     log("plan", { approved: plan.body.approved, refused: plan.body.refused.length });
@@ -1093,6 +1371,16 @@ export async function prepareProject(options) {
         log("nearest_rejected", { reason: await missedRestore(context, error) });
       }
     }
+    // Not enough room for an install: leave the workspace as it was; the agent installs for itself.
+    // A nearest already passed its own check (NEAREST_NEED_FACTOR) before it was extracted.
+    if (result === "cold" && context.budget.remaining < installNeed(context)) {
+      log("install_skipped", {
+        reason: "budget_too_small",
+        needBytes: installNeed(context),
+        roomBytes: context.budget.remaining,
+      });
+      throw new Skip("budget_too_small");
+    }
     if (result === "nearest") {
       try {
         installMs = await install(context, project, [
@@ -1119,6 +1407,7 @@ export async function prepareProject(options) {
       return { result, key, installMs, reason: "inconsistent" };
     }
     context.created = undefined;
+    await removeNpmContentCache(context, project);
     const sizeBytes = await snapshot(context, project, answer.maxBytes);
     return {
       result,
@@ -1477,6 +1766,22 @@ export async function dependencyCacheBudget({
   maxEntries = BUDGET_MEASURE_MAX_ENTRIES,
 }) {
   if (!Number.isSafeInteger(diskMb) || diskMb <= 0) return { reason: "budget_unknown" };
+  const used = await workspaceUsage(workspace, { signal, timeoutMs, maxEntries });
+  if (used === undefined) return { reason: "budget_unknown" };
+  const total = diskMb * MIB;
+  const margin = Math.max(BUDGET_MARGIN_MIN_BYTES, Math.floor(total * BUDGET_MARGIN_FRACTION));
+  const budgetBytes = total - used - margin;
+  if (budgetBytes < MIN_BUDGET_BYTES) return { reason: "budget_too_small", usedBytes: used };
+  return { budgetBytes, usedBytes: used };
+}
+
+/** Bytes the workspace uses: a bounded walk of all of it (allocated blocks
+ *  where the platform reports them, links not followed). undefined past the
+ *  time or entry bound, or on any error. */
+async function workspaceUsage(
+  workspace,
+  { signal, timeoutMs = BUDGET_MEASURE_TIMEOUT_MS, maxEntries = BUDGET_MEASURE_MAX_ENTRIES } = {},
+) {
   const deadlineAt = Date.now() + timeoutMs;
   let used = 0;
   let entries = 0;
@@ -1484,24 +1789,20 @@ export async function dependencyCacheBudget({
     const stack = [workspace];
     while (stack.length) {
       signal?.throwIfAborted();
-      if (Date.now() >= deadlineAt) return { reason: "budget_unknown" };
+      if (Date.now() >= deadlineAt) return undefined;
       const directory = stack.pop();
       const names = await readdir(directory);
       for (const name of names) {
-        if (++entries > maxEntries) return { reason: "budget_unknown" };
+        if (++entries > maxEntries) return undefined;
         const info = await lstat(join(directory, name));
         used += Number.isFinite(info.blocks) && info.blocks > 0 ? info.blocks * 512 : info.size;
         if (info.isDirectory()) stack.push(join(directory, name));
       }
     }
   } catch {
-    return { reason: "budget_unknown" };
+    return undefined;
   }
-  const total = diskMb * MIB;
-  const margin = Math.max(BUDGET_MARGIN_MIN_BYTES, Math.floor(total * BUDGET_MARGIN_FRACTION));
-  const budgetBytes = total - used - margin;
-  if (budgetBytes < MIN_BUDGET_BYTES) return { reason: "budget_too_small", usedBytes: used };
-  return { budgetBytes, usedBytes: used };
+  return used;
 }
 
 // ---------------------------------------------------------------- entry point
@@ -1524,6 +1825,8 @@ export async function prepareDependencies({
   npmPath = "/opt/wardby/bin/npm",
   log = () => {},
   budgetBytes,
+  usedBytes,
+  minInstallBytes = MIN_INSTALL_BUDGET_BYTES,
   timeouts: overrides = {},
   signal: cancel,
   testHooks,
@@ -1540,7 +1843,7 @@ export async function prepareDependencies({
       // a logger never fails the cache
     }
   };
-  const session = { sealed: false, closed: false, children: new Set(), temps: new Set() };
+  const session = { sealed: false, closed: false, children: new Set(), temps: new Set(), planRequests: 0 };
   // `deadline` bounds everything (projects and rebuilds); `sealing` stops the
   // project work (and any upload) at the seal.
   const deadline = new AbortController();
@@ -1569,6 +1872,11 @@ export async function prepareDependencies({
     try {
       auth = await resolveAuth(env, proxyUrl, token);
       const budget = await workspaceBudget(workspace, env, budgetBytes);
+      // What the workspace used when the budget was set: later measurements count the growth from it.
+      budget.baseUsed =
+        Number.isSafeInteger(usedBytes) && usedBytes >= 0
+          ? usedBytes
+          : await workspaceUsage(workspace, { signal: workSignal });
       await testHooks?.beforeDiscovery?.();
       const { run: toRun, skipped } = await planProjects(workspace, workSignal);
       for (const entry of skipped) done.set(entry.path, { result: entry.result, reason: entry.reason });
@@ -1592,6 +1900,7 @@ export async function prepareDependencies({
           testHooks,
           facts: projectFacts,
           uploadDeadline,
+          minInstallBytes,
         });
         if (!session.closed) done.set(path, result);
       }
