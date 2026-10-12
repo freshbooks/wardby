@@ -215,6 +215,37 @@ now runs and apply, so they catch up.
   maintenance window and the apply reports a failure deleting the old parameter
   group, which the instance still uses; apply again once the window has passed.
 
+## Run dependency cache
+
+Off by default. The coding-run dependency cache (see
+[Dependency cache](../../docs/coding-packages.md#dependency-cache)) keeps npm
+`node_modules` snapshots in a private S3 bucket. Set
+`dependency_cache_enabled = true` and a globally unique
+`dependency_cache_bucket_name`. The module then creates the bucket (public
+access blocked, AES256 encryption, TLS-only policy, no versioning) and lets
+the coding proxy's Pod Identity role, and nothing else, read, write and delete
+its objects. The control plane, gateway and worker pods get no access.
+
+A lifecycle rule deletes objects older than `dependency_cache_max_age_days + 7`
+days (and incomplete multipart uploads after a day) as a backstop for objects
+the proxy never recorded. Keep `dependency_cache_max_age_days` equal to the
+proxy's `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS` (default 14).
+
+Terraform does not configure the proxy itself. Give the coding proxy container
+these environment variables:
+
+| Variable                  | Value                                |
+| ------------------------- | ------------------------------------ |
+| `BLOB_STORE`              | `s3`                                 |
+| `BLOB_STORE_S3_BUCKET`    | the `dependency_cache_bucket` output |
+| `BLOB_STORE_S3_REGION`    | the `region` output                  |
+| `WARDBY_DEPENDENCY_CACHE` | `true`                               |
+
+The proxy's network policy already allows HTTPS to the public internet, so S3's
+public endpoint is reachable. If you add a VPC gateway endpoint for S3 (private
+addresses), add a matching egress rule for the proxy. The tuning variables are
+in [Dependency cache limits](../../docs/coding-packages.md#dependency-cache-limits).
+
 ## Inputs
 
 Only `region` and `hostname` have no default, and `public_access_cidrs` is

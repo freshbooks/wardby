@@ -327,12 +327,12 @@ through the Cloud SQL Auth Proxy, via Workload Identity from one Kubernetes
 service account. What each may do inside the database comes from a `NOLOGIN`
 group role in `deploy/gke/database-grants.sql`:
 
-| Workload       | Google service account   | Kubernetes service account | May do                                                                                                                                                                                          |
-| -------------- | ------------------------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane  | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table, including the durable executor's in schema `dbos`; never change a schema                                                                                  |
-| Coding proxy   | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: only its budget ledger — `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id` |
-| Native gateway | `<name_prefix>-gateway`  | `wardby-native-gateway`    | Member of `wardby_app`: the same data access as the control plane, under its own login (see [Native sandbox](#native-sandbox))                                                                  |
-| Migrations     | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` and `dbos schema` can alter and create tables                                                                                  |
+| Workload       | Google service account   | Kubernetes service account | May do                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------- | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Control plane  | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app`: read/write every table, including the durable executor's in schema `dbos`; never change a schema                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Coding proxy   | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy`: its budget ledger (`CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`: read, insert, update), the package registry's tables (`RegistryAllowance`, `RegistryFetch`, `RegistryVersionFact`, `RegistryApprovedVersion`, `RegistryPlanRefusal`: read and insert only), the dependency cache's `DependencySnapshot` (read, insert, update, delete), update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run` and read only its `id`, and read only the `runId`, `packageAllowlist`, `packagePolicy`, `repository`, `workerImage`, `toolImage` and `dependencyCache` columns of `CodingRun` |
+| Native gateway | `<name_prefix>-gateway`  | `wardby-native-gateway`    | Member of `wardby_app`: the same data access as the control plane, under its own login (see [Native sandbox](#native-sandbox))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Migrations     | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` and `dbos schema` can alter and create tables                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 `deploy/gke/bootstrap-database-iam.sh` applies the grants as the built-in
 owner, from a short-lived Job inside the cluster. Run it whenever
@@ -798,6 +798,18 @@ that schedules onto a fresh node — one that has never pulled the image before
 — can need more of the bound than a run on a node that already has it
 cached. Raise `KUBERNETES_READY_TIMEOUT_MS` if you see runs fail
 `service_unready` only on new nodes.
+
+### Run dependency cache
+
+Off by default. To keep npm `node_modules` snapshots for coding runs
+(see [Dependency cache](coding-packages.md#dependency-cache)), set
+`dependency_cache_enabled = true` and a unique `dependency_cache_bucket_name` in
+`terraform.tfvars`, re-run `deploy/gke/bootstrap-database-iam.sh` so the coding
+proxy's role can use the `DependencySnapshot` table, and deploy with
+`WARDBY_DEPENDENCY_CACHE=true deploy/gke/up.sh`. Keep
+`dependency_cache_max_age_days` equal to the proxy's
+`WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS` (default 14). Details:
+[`deploy/gke/README.md`](../deploy/gke/README.md#run-dependency-cache).
 
 ### Roll back
 

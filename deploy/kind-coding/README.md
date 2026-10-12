@@ -387,6 +387,8 @@ your local Postgres (`deploy/local`) or anything in `.env.local`.
 
 ## Run dependency cache on the kind harness
 
+See [Dependency cache](../../docs/coding-packages.md#dependency-cache) for what it does.
+
 `WARDBY_DEPENDENCY_CACHE=true bash deploy/kind-coding/up.sh` gives the coding
 proxy a local blob store (`BLOB_STORE=local`, `WARDBY_DEPENDENCY_CACHE=true`) on
 an `emptyDir`. It is not durable: snapshots disappear when the proxy pod

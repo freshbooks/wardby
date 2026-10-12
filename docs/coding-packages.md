@@ -422,6 +422,245 @@ why the GKE overlay gives the proxy 3Gi. A lockfile the shim verified
 avoids the walk for every version the plan approved, and for every version it
 refused for a reason about the version itself (too new, an advisory, ...).
 
+## Dependency cache
+
+Installing a large `node_modules` on every run is slow. With the dependency
+cache on, Wardby prepares an npm project's `node_modules` **before the agent
+starts**, from a snapshot kept in a blob store, and tells the agent not to
+reinstall it. It is off by default and is turned on per agent.
+
+### What it does
+
+For each eligible npm project the worker prepares `node_modules` in one of
+these ways, reported per project in [`get_run`](#what-get_run-reports):
+
+- **`hit`**: a snapshot for exactly this lockfile exists. It is downloaded,
+  verified, and put in place. Nothing is installed.
+- **`nearest`**: no exact snapshot, but one exists for the same repository,
+  folder, worker image and package policy with a different lockfile. It is
+  restored, `npm install --no-save` brings it to the committed lockfile
+  (usually a small change), the committed `package.json` and
+  `package-lock.json` are put back byte for byte, and a new snapshot is
+  stored.
+- **`cold`**: no usable snapshot. `npm ci` runs and its result is stored.
+- **`skipped`** or **`refused`**: nothing was prepared and the agent installs
+  for itself as it always did. A skip never fails the run.
+
+Snapshots are keyed by repository, project folder, lockfile hash, worker image
+(the Claude Code tool-runner image for Claude Code runs) and the agent's
+package policy, all derived on the server. Changing the allowlist, the policy
+or the image starts a new key.
+
+### The trust model
+
+The cache never lets an agent plant anything that another run will trust.
+
+- **Only Wardby builds snapshots, and only before the agent exists.** The
+  worker uploads a snapshot as part of its own preparation step, then seals the
+  run's upload window with the proxy. After the seal the proxy refuses every
+  lookup, download and upload for the run, so nothing the agent does can reach
+  the cache. A proxy-side deadline (`WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS`
+  after the run's proxy session starts) closes the window even if the worker
+  never seals, and bytes that arrive after the seal or the deadline are
+  discarded. A run uploads at most once per project.
+- **A restore needs the plan first.** The worker sends the committed lockfile
+  to the proxy's lockfile plan (see
+  [Lockfile installs: verified, then approved exactly](#lockfile-installs-verified-then-approved-exactly)).
+  The proxy records the lockfile's hash only if the plan approved every package
+  under the agent's _current_ allowlist, release-age rule and advisory policy,
+  and serves a snapshot only for a recorded hash. If the policy now refuses
+  something, the project is `refused` and no snapshot is used.
+- **Keys are server-derived.** The worker supplies only the project folder and
+  the lockfile hash. The repository, image and policy come from the run's own
+  record, and an id that is neither the run's own key nor the recomputed
+  nearest snapshot for the same scope is answered 404.
+- **Integrity is checked on download.** The proxy stores each snapshot's
+  SHA-256 and size and sends them with the download; the worker checks both
+  while streaming. A blob whose bytes no longer match its record is deleted by
+  the proxy when it is served, so the next run rebuilds it. The worker then
+  scans the archive before writing anything (regular files, folders and
+  relative links inside `node_modules` only; no absolute or `..` paths, hard
+  links, devices, duplicate paths, including by case or Unicode form, or links
+  that leave `node_modules`), extracts it into a private temporary folder,
+  re-verifies the tree on disk, compares it with the committed lockfile (each
+  installed package's version and integrity), and only then renames it into
+  place. Any failure removes the temporary tree and skips the project.
+- **Install scripts are not cached.** Every preparation step runs npm with
+  `--ignore-scripts`. After the upload window is sealed, and only for a project
+  whose committed lockfile lists a package with an install script, the worker
+  runs `npm rebuild` so native add-ons (esbuild, sharp and the like) work. It
+  runs with a minimal environment (`PATH`, `HOME`, `LANG`, `TMPDIR` and the
+  registry settings, never the run's credentials), starts only after the proxy
+  confirmed the seal, and nothing it writes can be uploaded.
+
+### When it applies
+
+- npm only: a `package.json` and a `package-lock.json` with `lockfileVersion`
+  2 or 3, at the repository root and/or in other folders up to **3 levels
+  deep**, at most **4 projects** in all (the root first, then the others in
+  path order; any further ones are skipped `too_many_projects`).
+- Folders named `node_modules`, folders whose name starts with a dot or has a
+  space or other characters outside letters, digits and `_@+-.`, and symlinked
+  folders or lockfiles are not searched or used.
+- npm workspaces monorepos are not supported. A project that declares
+  `workspaces`, and any project covered by another project's `workspaces`
+  globs, is skipped, and so is a folder with an `npm-shrinkwrap.json`.
+- A folder that already has a `node_modules` is left alone.
+- The agent needs a package allowlist (registry mode): the restore is approved
+  by the lockfile plan.
+- Codex and Claude Code runs on the `node` and `node-python` toolchains. The
+  worker image (Codex) or tool-runner image (Claude Code) must come from a
+  Wardby release that includes the cache. An older or custom image ignores it,
+  and for Claude Code the run reports `tool_unavailable`. Images built `FROM`
+  a release's driver base image or tool-runner image carry it.
+
+### Enable it
+
+1. **Deployment.** On the **coding proxy**, which is the only component that
+   touches the store, set `WARDBY_DEPENDENCY_CACHE=true` and a blob store
+   (`BLOB_STORE` plus its per-store variables: `BLOB_STORE=gcs` with
+   `BLOB_STORE_GCS_BUCKET`, `BLOB_STORE=s3` with `BLOB_STORE_S3_BUCKET` and
+   `BLOB_STORE_S3_REGION`, or `BLOB_STORE=local` with `BLOB_STORE_LOCAL_DIR`).
+   With the switch on but no blob store the cache stays off and the proxy logs
+   a warning. Per target:
+   - **GKE**: set `dependency_cache_enabled = true` and
+     `dependency_cache_bucket_name` in `terraform.tfvars`, then run
+     `deploy/gke/up.sh` with `WARDBY_DEPENDENCY_CACHE=true`. See
+     [`deploy/gke/README.md`](../deploy/gke/README.md#run-dependency-cache).
+   - **AWS (EKS)**: set the Terraform variables of the same names, and give the
+     proxy container `BLOB_STORE=s3`, `BLOB_STORE_S3_BUCKET` (the
+     `dependency_cache_bucket` output), `BLOB_STORE_S3_REGION` and
+     `WARDBY_DEPENDENCY_CACHE=true`. See
+     [`deploy/aws/README.md`](../deploy/aws/README.md#run-dependency-cache).
+   - **kind harness**:
+     `WARDBY_DEPENDENCY_CACHE=true bash deploy/kind-coding/up.sh`. The store is
+     the proxy pod's `emptyDir`, so snapshots are lost when the pod restarts.
+   - **Docker quickstart**: add `WARDBY_DEPENDENCY_CACHE=true` to
+     `.wardby/.env` and restart the stack. Snapshots live on a named volume
+     that `docker compose down -v` removes. This requires wardby 0.6.1 or
+     later (earlier runtime images can't write to the volume).
+2. **Database grants.** Where the coding proxy has its own restricted database
+   role (GKE), re-run `bootstrap-database-iam.sh` before deploying a release
+   that includes the cache: the proxy needs access to `DependencySnapshot` and
+   a few `CodingRun` columns.
+3. **Per agent.** Set `codingProfile.dependencyCache` to `true` with
+   `create_agent` or `update_agent`. Like the package allowlist, it needs
+   `packages:approve` or `agents:admin`. The setting is read when a run
+   starts.
+
+### Dependency cache limits
+
+These variables are read by the coding proxy, and only when
+`WARDBY_DEPENDENCY_CACHE=true`. Each limit must be a positive integer; the
+proxy refuses to start otherwise.
+
+| Variable                                  | Default | Meaning                                                                                                                   |
+| ----------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `WARDBY_DEPENDENCY_CACHE`                 | `false` | Master switch (`true` or `false`). Also needs `BLOB_STORE`.                                                               |
+| `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` | 1024    | Largest snapshot accepted. A bigger one is not stored.                                                                    |
+| `WARDBY_DEPENDENCY_CACHE_REPO_CAP_MB`     | 4096    | Snapshot bytes kept per repository. Least recently used go first.                                                         |
+| `WARDBY_DEPENDENCY_CACHE_TOTAL_CAP_MB`    | 20480   | Snapshot bytes kept in all. Least recently used go first.                                                                 |
+| `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS`    | 14      | A snapshot's lifetime, counted from creation rather than last use, so every snapshot is rebuilt under the current policy. |
+| `WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS`  | 900     | How long after a run's proxy session starts the proxy still accepts an upload.                                            |
+
+The proxy evicts hourly: snapshots past the maximum age, then least recently
+used ones over the per-repository cap, then over the total cap. It deletes the
+stored object before its database record. On GKE and AWS the bucket also
+deletes objects older than `dependency_cache_max_age_days + 7` days, which
+removes objects that were never recorded; keep that Terraform variable equal
+to `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS` by hand. The kind harness and
+Docker quickstart stores are local and have no such rule.
+
+Other bounds:
+
+- A restore is limited by the run's workspace disk (`workspaceDiskMb`) less
+  what the workspace already uses and a safety margin. If that can't be
+  measured, or leaves under 64 MiB, the cache is skipped (`budget_unknown`,
+  `budget_too_small`).
+- The whole preparation is bounded to 20 minutes, a rebuild to 5 minutes, and
+  the worker stops uploading once the proxy's upload window is nearly over.
+- On Docker the workspace can be a tmpfs, whose inode limit can bind before
+  its byte limit on a very large restore. The cache is then skipped
+  (`internal_error`) and the run continues.
+
+### What the agent sees
+
+When at least one project was restored or installed, the agent's task carries a
+note naming the folders: "Dependencies are pre-installed from the committed
+lockfile in: the repo root, web. Don't run `npm ci` there; add packages with a
+single install command." `npm ci` deletes `node_modules` and installs
+everything again, which throws away the prepared tree and the time saved,
+whereas `npm install <package>` works on top of it. A pull request Wardby opens
+gets a line, "Dependency cache: restored `node_modules` for the repo root,
+`web`.", naming the folders restored from a snapshot (`hit` or `nearest`).
+
+### What `get_run` reports
+
+`get_run` returns `dependencyCache` for a run that used the cache:
+
+```json
+{
+  "dependencyCache": {
+    "projects": [
+      { "path": ".", "result": "hit", "key": "9f2c…", "sizeBytes": 148000000, "restoreMs": 4100, "rebuild": "ok" },
+      { "path": "web", "result": "cold", "installMs": 61000, "sizeBytes": 91000000 },
+      { "path": "tools", "result": "skipped", "reason": "workspaces" }
+    ]
+  }
+}
+```
+
+- `result` is `hit`, `nearest`, `cold`, `skipped` or `refused`.
+- `key`, `sizeBytes`, `restoreMs` and `installMs` appear where they apply.
+- `reason` explains a `skipped` or `refused` project, or a `cold` project whose
+  tree was kept but not stored (`inconsistent`).
+- `rebuild` is `ok`, `failed`, `timeout`, `skipped` (no install scripts) or
+  `unsealed` (the proxy did not confirm the seal, so no script ran).
+- A top-level `reason` with an empty `projects` list means the whole step
+  failed or was skipped. `omitted` counts projects that couldn't be listed.
+
+The field is absent for a run that didn't use the cache, and for one that
+failed before its result was collected.
+
+### Cache reason codes
+
+A skipped project never fails the run. Look the `reason` up here.
+
+| Reason                                                  | Meaning and what to do                                                                                                                                                                                  |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `no_lockfile`, `lockfile_unreadable`, `no_package_json` | Nothing eligible in that folder. Expected for repositories without npm.                                                                                                                                 |
+| `lockfile_version`                                      | The lockfile is below `lockfileVersion` 2. Regenerate it with npm 7 or later.                                                                                                                           |
+| `workspaces`, `workspace_member`, `shrinkwrap_present`  | An npm workspaces root, a folder inside one, or an `npm-shrinkwrap.json`: not supported. The agent installs for itself.                                                                                 |
+| `node_modules_present`                                  | The checkout already has a `node_modules` there. It is left alone.                                                                                                                                      |
+| `no_dependencies`                                       | The lockfile installs nothing.                                                                                                                                                                          |
+| `too_many_projects`                                     | More than 4 projects were found. The rest are skipped.                                                                                                                                                  |
+| `cache_dir_unsafe`                                      | `.cache` in the checkout isn't a plain folder (for example a committed symlink). Remove it from the repository.                                                                                         |
+| `no_registry`                                           | The worker got no registry settings: the agent has no package allowlist. Enable registry mode first.                                                                                                    |
+| `plan_failed`                                           | The lockfile plan didn't answer properly. See [Error codes](#error-codes); retry.                                                                                                                       |
+| `plan_refused` (result `refused`)                       | The plan refused at least one package under the agent's current policy (not allowlisted, too new, advisory). Fix the allowlist or policy; no snapshot is used.                                          |
+| `cache_unavailable`                                     | The proxy has no cache for this run: the switch is off, there is no blob store, or the run's flag or image is missing. Check `WARDBY_DEPENDENCY_CACHE` and `BLOB_STORE` on the proxy.                   |
+| `plan_required`, `sealed`                               | The proxy refused a lookup because the lockfile wasn't approved by a plan, or the window was already sealed. Usually the preparation was cut short.                                                     |
+| `lookup_failed`, `download_failed`                      | The proxy or the blob store answered unexpectedly. Check the proxy log and the store's permissions.                                                                                                     |
+| `size_mismatch`, `sha_mismatch`                         | The download didn't match its recorded size or digest. It is not used, and the proxy deletes the damaged snapshot. Repeats point at the blob store.                                                     |
+| `too_large`                                             | A snapshot is larger than the maximum the proxy reported. Raise `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` if that is intended.                                                                          |
+| `unsafe_archive`                                        | The archive failed a safety rule or its extracted tree didn't verify. It is skipped on every run until it ages out and is rebuilt. A package shipping two files that differ only in case is not cached. |
+| `over_budget`                                           | The unpacked snapshot is larger than the disk budget. Raise the agent's `workspaceDiskMb`.                                                                                                              |
+| `inconsistent`                                          | The tree doesn't match the committed lockfile. A restored one is discarded; a `cold` one is kept for the agent but not stored.                                                                          |
+| `install_failed`                                        | `npm ci`, or the `npm install` that updates a nearest snapshot, exited non-zero. The agent installs for itself and sees the real error.                                                                 |
+| `budget_unknown`, `budget_too_small`                    | The run's workspace disk couldn't be measured, or under 64 MiB would remain. Raise `workspaceDiskMb`.                                                                                                   |
+| `timeout`, `cancelled`                                  | A step or the 20-minute total ran out, or the run was cancelled.                                                                                                                                        |
+| `internal_error`, `worker_error`                        | Something unexpected in the worker, including a full disk or inode table. The run continues without the cache; check the worker's log.                                                                  |
+| `tool_unavailable`                                      | Claude Code only: the tool-runner image predates the cache or is a custom image without it. Rebuild it `FROM` the current tool-runner image. The proxy's upload deadline still closes the window.       |
+| `report_invalid`                                        | The worker's report was malformed and was replaced by this code.                                                                                                                                        |
+| `already_started`                                       | A command ran before preparation finished. Not expected in normal operation.                                                                                                                            |
+
+For `rebuild`, `failed`, `timeout` and `unsealed` mean native add-ons may be
+unbuilt; the agent can run `npm rebuild` itself.
+
+The proxy answers its `/cache/npm/` routes with `{"error": "<code>"}` and a
+`404 not_found` when the cache is off; those codes show up as the reasons
+above, never to the agent.
+
 ## What the agent can then run
 
 Inside the run, `npm install <package>` and `pip install <package>` (into
@@ -478,6 +717,8 @@ collected either.
   overrode this setting could still run one. A script that ran would still be
   confined to the same sandbox — no network, no credentials, only the
   workspace writable — but this is a documented limit, not a guarantee.
+  The one exception is the [dependency cache](#dependency-cache)'s
+  `npm rebuild`, which Wardby runs itself before the agent starts.
 
 ## Operator limits
 

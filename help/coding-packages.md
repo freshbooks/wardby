@@ -100,5 +100,11 @@ with `create_agent` or `update_agent` (needs `packages:approve` or
   or `npm audit`. Accept only after judging the exposure (for example, a
   build-time-only dependency), and remove the entry once a fixed version ships.
 
+## Dependency cache
+
+From Wardby 0.6.1, a coding agent can start with `node_modules` already restored
+from a verified snapshot instead of running `npm ci`. Read the `dependency-cache` help article,
+"Dependency cache for coding runs".
+
 Read [`docs/coding-packages.md`](../docs/coding-packages.md) for allowlist
 syntax (including [PyPI extras](../docs/coding-packages.md#pypi-extras)), package-policy controls, lockfile behavior, and refusal errors.

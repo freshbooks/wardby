@@ -91,6 +91,41 @@ pods; each idle worker is billed for its 500m / 512Mi requests. See the
 gateway to zero when idle and runs fewer always-on pods; see
 [Low-power mode](../../docs/getting-started-gke.md#low-power-mode).
 
+## Run dependency cache
+
+Off by default. The coding-run dependency cache (see
+[Dependency cache](../../docs/coding-packages.md#dependency-cache)) keeps npm
+`node_modules` snapshots in a private Cloud Storage bucket that only the coding
+proxy can use. In `terraform.tfvars` set:
+
+```
+dependency_cache_enabled      = true
+dependency_cache_bucket_name  = "your-unique-dependency-cache-bucket"
+dependency_cache_max_age_days = 14
+```
+
+Bucket names are global, so pick one unique to you. Terraform creates the
+bucket (uniform access, public access prevention enforced, no versioning) and
+grants `roles/storage.objectAdmin` on that bucket to the coding proxy's Google
+service account only (the control plane, migrator, gateway and worker pods get
+none). The bucket deletes objects older than `dependency_cache_max_age_days + 7`
+days as a backstop for objects the proxy never recorded; keep
+`dependency_cache_max_age_days` equal to the proxy's
+`WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS` (default 14) by hand.
+
+Then deploy with `WARDBY_DEPENDENCY_CACHE=true deploy/gke/up.sh`. That adds
+`BLOB_STORE=gcs`, `BLOB_STORE_GCS_BUCKET` (the `dependency_cache_bucket`
+output) and `WARDBY_DEPENDENCY_CACHE=true` to the coding proxy only. The
+bucket is created from the Terraform variables alone, so a later deploy
+without the environment variable switches the cache off without touching the
+bucket. `up.sh` stops if the variable is `true` but no bucket exists. The tuning
+variables (`WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` and the others in
+[Dependency cache limits](../../docs/coding-packages.md#dependency-cache-limits))
+are not passed through `up.sh`; set them on the proxy Deployment if you need
+them. The proxy also needs `wardby_proxy` access to the `DependencySnapshot`
+table: re-run `bootstrap-database-iam.sh` first (see
+[Database login](#database-login)).
+
 ## Egress
 
 The namespace is default-deny. The control plane, the coding proxy, and the
@@ -165,12 +200,12 @@ Proxy sidecar (`--private-ip`, listening on `127.0.0.1:5432`, dialing out to
 the instance on 3307), which is what actually holds the IAM credential; the
 application code just connects to localhost.
 
-| Identity       | Google service account   | Kubernetes service account | Database role                                                                                                                                                                               |
-| -------------- | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane  | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                                                                                                                       |
-| Coding proxy   | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — only `CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`, plus update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run`, and read only its `id`                |
-| Native gateway | `<name_prefix>-gateway`  | `wardby-native-gateway`    | Member of `wardby_app` — the same data access as the control plane, under its own login: it settles sandboxed runs, dispatches their delegations, and serves memory, datastores and secrets |
-| Migrations     | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables                                                                                                                 |
+| Identity       | Google service account   | Kubernetes service account | Database role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| -------------- | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane  | `<name_prefix>-app`      | `wardby-control-plane`     | `wardby_app` — read/write every table                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Coding proxy   | `<name_prefix>-proxy`    | `wardby-coding-proxy`      | `wardby_proxy` — its budget ledger (`CodingProxySession`/`CodingProxyRequest`/`RunModelUsage`: read, insert, update), the package registry's tables (`RegistryAllowance`, `RegistryFetch`, `RegistryVersionFact`, `RegistryApprovedVersion`, `RegistryPlanRefusal`: read and insert only), the dependency cache's `DependencySnapshot` (read, insert, update, delete), update `tokensIn`, `tokensOut`, `costUsd` and `turns` on `Run` and read only its `id`, and read only the `runId`, `packageAllowlist`, `packagePolicy`, `repository`, `workerImage`, `toolImage` and `dependencyCache` columns of `CodingRun` |
+| Native gateway | `<name_prefix>-gateway`  | `wardby-native-gateway`    | Member of `wardby_app` — the same data access as the control plane, under its own login: it settles sandboxed runs, dispatches their delegations, and serves memory, datastores and secrets                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Migrations     | `<name_prefix>-migrator` | `wardby-migrator`          | `SET ROLE` to the built-in owner, so migrations can alter and create tables                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 `database-grants.sql` grants each privilege set to a `NOLOGIN` group role
 (`wardby_app`, `wardby_proxy`) rather than to the IAM users directly, then
