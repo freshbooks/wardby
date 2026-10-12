@@ -157,7 +157,7 @@ async function runQuery(baseUrl, abortController = new AbortController(), tools 
         CLAUDE_CODE_SIMPLE: "1",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
         CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "false",
-        CLAUDE_CODE_MAX_OUTPUT_TOKENS: "4096",
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000",
         CLAUDE_CODE_MAX_RETRIES: "0",
         DISABLE_UPDATES: "1",
         MCP_CONNECTION_NONBLOCKING: "true",

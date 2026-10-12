@@ -438,6 +438,8 @@ model CodingAgentProfile {
   timeoutSec               Int       @default(1800)
   /// Claude Code runs only: the most agent turns a run may take. Null = the worker default (200).
   maxTurns                 Int?
+  /// Claude Code runs only: the most output tokens per model reply (1024-128000). Null = the worker default (32000).
+  maxOutputTokens          Int?
   /// Unused; dropped after rollout (see the package-registry plan, Task 14).
   allowedEgress            Json      @default("[]")
   protectedPaths           Json
@@ -519,6 +521,8 @@ model CodingRun {
   debugTraceMaxMb       Int?
   /// Fixed at dispatch from the profile's maxTurns: the Claude Code worker's turn limit. Null = the worker default.
   maxTurns              Int?
+  /// Fixed at dispatch from the profile's maxOutputTokens: Claude Code's output tokens per reply. Null = the worker default.
+  maxOutputTokens       Int?
   /// Fixed at dispatch from the profile's repoSkills.
   repoSkills            Boolean             @default(true)
   /// Fixed at dispatch from the profile's claudeBareMode.

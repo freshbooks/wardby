@@ -170,6 +170,8 @@ export interface ContainerRunSnapshot {
   debugTraceMaxMb?: number | null;
   /** Claude Code turn limit, fixed at dispatch (CodingRun.maxTurns); null = the worker default. */
   maxTurns?: number | null;
+  /** Claude Code output tokens per reply, fixed at dispatch (CodingRun.maxOutputTokens); null = the worker default. */
+  maxOutputTokens?: number | null;
   /** Load the repo's agent skills, fixed at dispatch (CodingRun.repoSkills); absent on older snapshots = true. */
   repoSkills?: boolean;
   /** Claude Code loading mode, fixed at dispatch (CodingRun.claudeBareMode); absent on older snapshots = true. */
@@ -306,6 +308,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       debugTrace: row.codingRun.debugTrace,
       debugTraceMaxMb: row.codingRun.debugTraceMaxMb,
       maxTurns: row.codingRun.maxTurns,
+      maxOutputTokens: row.codingRun.maxOutputTokens,
       repoSkills: row.codingRun.repoSkills,
       claudeBareMode: row.codingRun.claudeBareMode,
       dependencyCache: row.codingRun.dependencyCache,
@@ -1480,6 +1483,8 @@ export class ContainerExecutor implements Executor {
         ...(run.debugTrace && run.debugTraceMaxMb ? { debugTraceMaxMb: run.debugTraceMaxMb } : {}),
         // Only when the agent sets one: every other run's input stays exactly what older workers expect.
         ...(run.maxTurns ? { maxTurns: run.maxTurns } : {}),
+        // Only when the agent sets one: every other run's input stays exactly what older workers expect.
+        ...(run.maxOutputTokens ? { maxOutputTokens: run.maxOutputTokens } : {}),
         // Only when off: every other run's input stays exactly what older workers expect.
         ...(run.repoSkills === false ? { repoSkills: false } : {}),
         // Only when off: every other run's input stays exactly what older workers expect.

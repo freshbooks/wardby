@@ -809,6 +809,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               mergeOrder,
               workspaceDiskMb: agent.codingProfile.workspaceDiskMb,
               maxTurns: agent.codingProfile.maxTurns,
+              maxOutputTokens: agent.codingProfile.maxOutputTokens,
               repoSkills: agent.codingProfile.repoSkills,
               claudeBareMode: agent.codingProfile.claudeBareMode,
               dependencyCache: agent.codingProfile.dependencyCache,

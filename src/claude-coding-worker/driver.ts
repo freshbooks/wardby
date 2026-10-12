@@ -7,6 +7,7 @@ import {
   type CodingTaskInput,
   type CodingWorkerOutput,
   type DependencyCacheReport,
+  DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
 } from "../coding/protocol.js";
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
@@ -137,7 +138,12 @@ async function runDependencyCache(options: ClaudeWorkerRunOptions): Promise<Depe
   }
 }
 
-function agentEnvironment(proxyBaseUrl: string, capability: string, bareMode: boolean): Record<string, string> {
+function agentEnvironment(
+  proxyBaseUrl: string,
+  capability: string,
+  bareMode: boolean,
+  maxOutputTokens: number,
+): Record<string, string> {
   return {
     HOME: "/home/wardby",
     LANG: "C.UTF-8",
@@ -156,7 +162,8 @@ function agentEnvironment(proxyBaseUrl: string, capability: string, bareMode: bo
     CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "false",
-    CLAUDE_CODE_MAX_OUTPUT_TOKENS: "4096",
+    // Per reply, thinking included. The proxy reserves this x the output price per request against the budget.
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(maxOutputTokens),
     // Same as the Codex worker: every retry is a new request through the proxy, checked against the budget again.
     CLAUDE_CODE_MAX_RETRIES: "3",
     DISABLE_UPDATES: "1",
@@ -215,7 +222,12 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     signal: options.signal,
     // Package-registry settings reach the tool runner from the launcher (claude-tool-setup.ts); the
     // agent never runs commands, so it gets none.
-    environment: agentEnvironment(options.proxyBaseUrl, options.capability, bareMode),
+    environment: agentEnvironment(
+      options.proxyBaseUrl,
+      options.capability,
+      bareMode,
+      options.input.maxOutputTokens ?? DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
+    ),
     relayEnvironment: relayEnvironment(),
     outputSchema: CLAUDE_OUTPUT_JSON_SCHEMA,
     developerInstructions,

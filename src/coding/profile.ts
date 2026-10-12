@@ -2,7 +2,9 @@ import { z } from "zod";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import {
   MAX_CODING_TASK_BYTES,
+  MAX_CLAUDE_MAX_OUTPUT_TOKENS,
   MAX_CODING_TURNS,
+  MIN_CLAUDE_MAX_OUTPUT_TOKENS,
   isLocalRepository,
   normalizeGitHubRepository,
   normalizeGitRef,
@@ -104,6 +106,17 @@ const workerImageRefSchema = z
 const workspaceDiskMbSchema = z.number().int().min(64).max(32_768).nullable();
 /** Claude Code runs only: the most agent turns a run may take; null = the worker default (DEFAULT_CLAUDE_MAX_TURNS). */
 const maxTurnsSchema = z.number().int().min(1).max(MAX_CODING_TURNS).nullable();
+/**
+ * Claude Code runs only: the most output tokens per model reply; null = the worker
+ * default (DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS). The proxy reserves this x the output
+ * price per request against the run budget.
+ */
+const maxOutputTokensSchema = z
+  .number()
+  .int()
+  .min(MIN_CLAUDE_MAX_OUTPUT_TOKENS)
+  .max(MAX_CLAUDE_MAX_OUTPUT_TOKENS)
+  .nullable();
 
 const packageAllowlistSchema = z
   .record(z.string(), z.array(z.string().min(1).max(256)).max(256))
@@ -143,6 +156,7 @@ const codingProfileFields = {
   workerImageRef: workerImageRefSchema,
   workspaceDiskMb: workspaceDiskMbSchema,
   maxTurns: maxTurnsSchema,
+  maxOutputTokens: maxOutputTokensSchema,
   protectedPaths: z
     .array(protectedPathSchema)
     .min(1)
@@ -178,6 +192,7 @@ export const CodingProfileSchema = z
     workerImageRef: codingProfileFields.workerImageRef.default(null),
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.default(null),
     maxTurns: codingProfileFields.maxTurns.default(null),
+    maxOutputTokens: codingProfileFields.maxOutputTokens.default(null),
     packageAllowlist: codingProfileFields.packageAllowlist.default({}),
     packagePolicy: codingProfileFields.packagePolicy.default({}),
     services: codingProfileFields.services.default([]),
@@ -185,7 +200,16 @@ export const CodingProfileSchema = z
     claudeBareMode: codingProfileFields.claudeBareMode.default(true),
     dependencyCache: codingProfileFields.dependencyCache.default(false),
   })
-  .strict();
+  .strict()
+  .superRefine((profile, ctx) => {
+    if (profile.maxOutputTokens !== null && profile.provider !== "claude-code") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["maxOutputTokens"],
+        message: "maxOutputTokens applies to Claude Code agents only (provider claude-code); set it to null",
+      });
+    }
+  });
 
 export const CodingProfilePatchSchema = z
   .object({
@@ -202,6 +226,7 @@ export const CodingProfilePatchSchema = z
     workerImageRef: codingProfileFields.workerImageRef.optional(),
     workspaceDiskMb: codingProfileFields.workspaceDiskMb.optional(),
     maxTurns: codingProfileFields.maxTurns.optional(),
+    maxOutputTokens: codingProfileFields.maxOutputTokens.optional(),
     packageAllowlist: codingProfileFields.packageAllowlist.optional(),
     packagePolicy: codingProfileFields.packagePolicy.optional(),
     services: codingProfileFields.services.optional(),

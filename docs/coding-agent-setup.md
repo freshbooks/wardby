@@ -429,6 +429,29 @@ failure. The run's `budgetUsd` and `timeoutSec` still apply and are usually the
 better limits. Codex runs have no turn limit, so `maxTurns` does not affect
 them.
 
+## Output tokens per reply (Claude Code)
+
+A Claude Code run caps each model reply at 32000 output tokens by default.
+Thinking counts toward that cap, so a model with adaptive or extended thinking
+can reach it on a long reply; Claude Code then ends with an error that the
+response exceeded the output token maximum, and the run fails as a stream
+failure. Raise the cap per agent:
+
+```json
+{ "id": "<coding agent id>", "codingProfile": { "maxOutputTokens": 64000 } }
+```
+
+`maxOutputTokens` is 1024 to 128000; `null` restores the default. Pick a value
+the agent's model supports. It is fixed on each run when the run is
+dispatched. The coding proxy reserves `maxOutputTokens` × the model's output
+price (plus the request's input estimate) against the run's budget for every
+model request, so a higher cap needs a larger `budgetUsd`: at a $25/MTok output
+price, 32000 tokens reserve $0.80 per request and 128000 reserve $3.20. A
+request whose reservation does not fit in what is left of the budget is
+refused. Only Claude Code agents take `maxOutputTokens`; `create_agent` and
+`update_agent` refuse it on a Codex agent, and changing an agent's provider to
+`codex` needs it set back to `null` first.
+
 ## Stop the setup
 
 ```sh
