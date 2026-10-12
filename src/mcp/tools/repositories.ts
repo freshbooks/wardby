@@ -122,7 +122,8 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
         markReadyWhenPassing: {
           type: "boolean",
           description:
-            "Only on a write link: mark the draft pull requests this agent opens here ready for review, once, " +
+            "Only on a write link: mark the draft pull requests this agent, or a coding agent it delegated to " +
+            "(directly or through sub-agents), opens here ready for review, once, " +
             "after every Wardby review check passed, CI is green and the wardby merge order check (if any) " +
             "is success (default false).",
         },

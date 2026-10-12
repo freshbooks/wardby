@@ -1,14 +1,19 @@
 /**
  * Marks a draft pull request Wardby's own App opened ready for review once it passes (#287):
  * every Wardby review check on the head succeeded, CI is green, and the `wardby merge order`
- * check is success or absent. Opt-in per builder link (AgentRepository.markReadyWhenPassing);
- * at most once per pull request (CodingRun.markedReadyAt on the opener's root coding run), so a
- * person moving it back to draft is final. Cheap DB checks first; no host reads unless opted in.
+ * check is success or absent. Opt-in per write link (AgentRepository.markReadyWhenPassing) of
+ * the agent the repository event triggers: the builder that opened the pull request, or a lead
+ * that delegated to it (coding agents cannot link repositories, so a lead's link carries it).
+ * At most once per pull request (CodingRun.markedReadyAt on the opener's root coding run), so
+ * a person moving it back to draft is final. Cheap DB checks first; no host reads unless some
+ * link on the repository opted in.
  *
  * The host only confirms the pull request was authored by this App. The trust boundary is
  * here: the pull request's marker must resolve (through rootCodingRunId) to a root coding run
- * in this repository, recorded as this pull request, whose agent has an authorized, opted-in
- * write link. Only authorized links (authorizedVia set) count, for opting in and for review checks.
+ * in this repository, recorded as this pull request, whose agent, or an ancestor agent in its
+ * run tree (Run.parentRunId, at most MAX_ANCESTOR_HOPS up), has an authorized, opted-in write
+ * link on this repository. An opted-in agent outside that run tree never counts. Only
+ * authorized links (authorizedVia set) count, for opting in and for review checks.
  *
  * Never approves, merges, or converts back to draft. Never throws.
  */
@@ -19,7 +24,7 @@ import type { Logger } from "./logger.js";
 import { MERGE_ORDER_CHECK_NAME } from "./merge-order-check.js";
 
 export type MarkReadyOutcome = "marked" | "off" | "not_ready" | "skipped" | "failed";
-export type MarkReadyDb = Pick<PrismaClient, "agentRepository" | "codingRun" | "runHostCheck">;
+export type MarkReadyDb = Pick<PrismaClient, "agentRepository" | "codingRun" | "run" | "runHostCheck">;
 export interface MarkReadyDeps {
   db: MarkReadyDb;
   hosts: ReviewHostRegistry | undefined;
@@ -27,6 +32,8 @@ export interface MarkReadyDeps {
 }
 
 const CI_GREEN = new Set(["passing", "none"]);
+/** How far up the run tree (Run.parentRunId) the opt-in may come from. */
+const MAX_ANCESTOR_HOPS = 10;
 
 const CODING_RUN_SELECT = {
   runId: true,
@@ -34,7 +41,7 @@ const CODING_RUN_SELECT = {
   rootCodingRunId: true,
   markedReadyAt: true,
   result: true,
-  run: { select: { agentId: true } },
+  run: { select: { agentId: true, parentRunId: true } },
 } as const;
 
 const passed = (c: { status: string; conclusion: string | null } | undefined): boolean =>
@@ -88,8 +95,8 @@ export async function maybeMarkReady(
       ? await deps.db.codingRun.findUnique({ where: { runId: marked.rootCodingRunId }, select: CODING_RUN_SELECT })
       : marked;
     if (!root || root.repository.toLowerCase() !== repository.toLowerCase()) return "not_ready";
-    if (!optedIn.has(root.run.agentId)) return "not_ready";
     if (pullRequestOutcome(root.result)?.pullRequestNumber !== prNumber) return "not_ready";
+    if (!(await optedInInRunTree(deps.db, root.run, optedIn))) return "not_ready";
     if (root.markedReadyAt) return "skipped";
 
     const checks = await host.readOwnChecks(repository, origin.headSha, [MERGE_ORDER_CHECK_NAME, ...reviewChecks]);
@@ -131,6 +138,28 @@ export async function maybeMarkReady(
     deps.log?.warn({ err, repository, prNumber }, "could not mark the pull request ready for review");
     return "failed";
   }
+}
+
+/**
+ * True when the opener's agent, or an agent up its run tree (bounded, cycle-safe), is opted in.
+ * A coding run's parentRunId is set when a lead delegated to it.
+ */
+async function optedInInRunTree(
+  db: MarkReadyDb,
+  opener: { agentId: string; parentRunId?: string | null },
+  optedIn: ReadonlySet<string>,
+): Promise<boolean> {
+  if (optedIn.has(opener.agentId)) return true;
+  const seen = new Set<string>();
+  let next = opener.parentRunId ?? null;
+  for (let hop = 0; next && hop < MAX_ANCESTOR_HOPS && !seen.has(next); hop++) {
+    seen.add(next);
+    const run = await db.run.findUnique({ where: { id: next }, select: { agentId: true, parentRunId: true } });
+    if (!run) return false;
+    if (optedIn.has(run.agentId)) return true;
+    next = run.parentRunId;
+  }
+  return false;
 }
 
 /** After a reviewer run ends: evaluate the pull request it reviewed. Null when it reviewed none. */

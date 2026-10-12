@@ -52,6 +52,7 @@ function setup(
     claimCount: number;
     mark: "marked" | "skipped" | Error;
     hostCheck: Record<string, unknown> | null;
+    runs: Record<string, { agentId: string; parentRunId: string | null }>;
   }> = {},
 ) {
   const links = over.links ?? [BUILDER, REVIEWER];
@@ -65,6 +66,9 @@ function setup(
     },
     runHostCheck: {
       findUnique: vi.fn(async (_args: unknown) => (over.hostCheck === undefined ? null : over.hostCheck)),
+    },
+    run: {
+      findUnique: vi.fn(async (args: { where: { id: string } }) => over.runs?.[args.where.id] ?? null),
     },
   };
   const host = {
@@ -320,6 +324,109 @@ describe("maybeMarkReady", () => {
     host.pullRequestOrigin.mockRejectedValueOnce(new Error("down"));
     expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("failed");
     expect(log.warn).toHaveBeenCalled();
+  });
+});
+
+describe("maybeMarkReady with a delegating lead", () => {
+  // A native lead (triggered by mention / review_fix) delegates to a coding builder sub-agent,
+  // which opens the pull request. Coding agents cannot link repositories, so the opt-in lives
+  // on the lead's write link.
+  const LEAD = {
+    agentId: "lead",
+    access: "write",
+    triggers: ["mention", "review_fix"],
+    checkName: null,
+    markReadyWhenPassing: true,
+    authorizedVia: AUTH,
+  };
+  const delegated = rootRow({ run: { agentId: "builder", parentRunId: "lead-run" } });
+  const leadRuns = { "lead-run": { agentId: "lead", parentRunId: null } };
+
+  it("marks when the builder's ancestor lead has an opted-in write link", async () => {
+    const { deps, host, db } = setup({ links: [LEAD, REVIEWER], root: delegated, runs: leadRuns });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(host.markReadyForReview).toHaveBeenCalledWith("acme/web", 7, SHA, "root");
+    expect((db.run.findUnique.mock.calls[0] as unknown[])[0]).toMatchObject({ where: { id: "lead-run" } });
+  });
+
+  it("marks through several delegation hops", async () => {
+    const { deps } = setup({
+      links: [LEAD, REVIEWER],
+      root: rootRow({ run: { agentId: "builder", parentRunId: "mid-run" } }),
+      runs: { "mid-run": { agentId: "planner", parentRunId: "lead-run" }, ...leadRuns },
+    });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+  });
+
+  it("is off with no host reads when the lead's link is not opted in", async () => {
+    const { deps, host } = setup({
+      links: [{ ...LEAD, markReadyWhenPassing: false }, REVIEWER],
+      root: delegated,
+      runs: leadRuns,
+    });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("off");
+    expect(host.pullRequestOrigin).not.toHaveBeenCalled();
+  });
+
+  it("is not ready when the lead is not opted in but an agent outside the run tree is", async () => {
+    const { deps, host } = setup({
+      links: [{ ...LEAD, markReadyWhenPassing: false }, { ...LEAD, agentId: "stranger" }, REVIEWER],
+      root: delegated,
+      runs: leadRuns,
+    });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(host.markReadyForReview).not.toHaveBeenCalled();
+  });
+
+  it("is not ready when the lead's opted-in link is unauthorized", async () => {
+    const { deps, host } = setup({
+      links: [{ ...LEAD, authorizedVia: null }, { ...LEAD, agentId: "stranger" }, REVIEWER],
+      root: delegated,
+      runs: leadRuns,
+    });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(host.markReadyForReview).not.toHaveBeenCalled();
+  });
+
+  it("does not walk the run tree when the opener itself is opted in", async () => {
+    const { deps, db } = setup({ root: rootRow({ run: { agentId: "builder", parentRunId: "lead-run" } }) });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(db.run.findUnique).not.toHaveBeenCalled();
+  });
+
+  // A chain where the lead's run is `hops` parent links above the builder's run.
+  const chainTo = (hops: number) => {
+    const runs: Record<string, { agentId: string; parentRunId: string | null }> = {};
+    for (let i = 1; i < hops; i++) runs[`run-${i}`] = { agentId: `mid-${i}`, parentRunId: `run-${i + 1}` };
+    runs[`run-${hops}`] = { agentId: "lead", parentRunId: null };
+    return setup({
+      links: [LEAD, REVIEWER],
+      root: rootRow({ run: { agentId: "builder", parentRunId: "run-1" } }),
+      runs,
+    });
+  };
+
+  it("finds an opted-in lead exactly 10 hops up the run tree", async () => {
+    const { deps, db } = chainTo(10);
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("marked");
+    expect(db.run.findUnique).toHaveBeenCalledTimes(10);
+  });
+
+  it("bounds the walk: an opted-in lead 11 hops up does not count", async () => {
+    const { deps, db, host } = chainTo(11);
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(db.run.findUnique).toHaveBeenCalledTimes(10);
+    expect(host.markReadyForReview).not.toHaveBeenCalled();
+  });
+
+  it("stops on a cycle in the run tree", async () => {
+    const { deps, db } = setup({
+      links: [LEAD, REVIEWER],
+      root: rootRow({ run: { agentId: "builder", parentRunId: "a" } }),
+      runs: { a: { agentId: "x", parentRunId: "b" }, b: { agentId: "y", parentRunId: "a" } },
+    });
+    expect(await maybeMarkReady(deps, "acme/web", 7)).toBe("not_ready");
+    expect(db.run.findUnique.mock.calls.length).toBeLessThanOrEqual(10);
   });
 });
 

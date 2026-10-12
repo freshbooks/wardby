@@ -1,8 +1,17 @@
 /**
  * Dependency cache keys, derived only on the proxy. A worker names nothing
  * in a key except its project folder (validated here); the lock hash comes
- * from a lockfile plan the proxy approved, and the repository, image and
- * policy come from the run's own records.
+ * from a lockfile plan the proxy approved, and the repository and image come
+ * from the run's own records.
+ *
+ * The agent's package policy is not part of a key. A snapshot's contents
+ * depend only on the lockfile and the image (`npm ci --ignore-scripts`
+ * installs exactly the lockfile's integrity-checked packages), and every
+ * restore already requires the proxy to have approved this run's lockfile
+ * under the restoring agent's current policy (the plan gate,
+ * `dependencyCacheLockHashes`). So a snapshot built under another policy, or
+ * by another agent on the same repository, restores only when today's policy
+ * approves the same lockfile.
  */
 import { createHash, randomUUID } from "node:crypto";
 
@@ -42,11 +51,6 @@ export function canonicalJson(value: unknown): string {
   return JSON.stringify(canonical(value)) ?? "null";
 }
 
-/** sha256 of the canonical `{ allowlist, policy }` of a run. */
-export function computePolicyHash(allowlist: unknown, policy: unknown): string {
-  return sha256Hex(canonicalJson({ allowlist: allowlist ?? null, policy: policy ?? null }));
-}
-
 export function isLockHash(value: string): boolean {
   return LOCK_HASH.test(value);
 }
@@ -71,7 +75,6 @@ export interface SnapshotKeyParts {
   projectPath: string;
   lockHash: string;
   workerImage: string;
-  policyHash: string;
 }
 
 export interface SnapshotKey extends SnapshotKeyParts {
@@ -87,7 +90,6 @@ export function deriveSnapshotKey(parts: SnapshotKeyParts): SnapshotKey {
     projectPath: parts.projectPath,
     lockHash: parts.lockHash,
     workerImage: parts.workerImage,
-    policyHash: parts.policyHash,
   };
   return { ...identity, keyId: sha256Hex(canonicalJson(identity)) };
 }
@@ -101,6 +103,6 @@ export function deriveSnapshotKey(parts: SnapshotKeyParts): SnapshotKey {
 export function newBlobKey(key: SnapshotKey): string {
   return (
     `dependency-cache/${key.ecosystem}/${sha256Hex(key.repository)}/${sha256Hex(key.projectPath).slice(0, 16)}/` +
-    `${key.lockHash}-${sha256Hex(key.workerImage).slice(0, 16)}-${key.policyHash.slice(0, 16)}-${randomUUID()}.tgz`
+    `${key.lockHash}-${sha256Hex(key.workerImage).slice(0, 16)}-${randomUUID()}.tgz`
   );
 }

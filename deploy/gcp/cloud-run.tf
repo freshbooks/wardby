@@ -219,8 +219,7 @@ resource "google_cloud_run_v2_service" "main" {
   # without depending on the *_version resources directly (not just the
   # secret container or the IAM grant), Terraform's implicit graph can
   # create this service before a secret's real version has finished
-  # propagating, failing with "Secret ... was not found" (hit for real
-  # testing this module against onit-dashboard, 2026-09-17/18).
+  # propagating, failing with "Secret ... was not found".
   depends_on = [
     google_secret_manager_secret_iam_member.db_url_access,
     google_secret_manager_secret_version.db_url,

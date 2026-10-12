@@ -197,11 +197,15 @@ step. Wardby also writes that section: see
 
 ## Mark ready when passing
 
-With Wardby 0.7.0 or later, set `markReadyWhenPassing: true` on a builder's
-own write link (`link_repository`) to have Wardby mark the draft pull
-requests it opens here ready for review on its own, once they pass, instead
-of leaving that to a person. Re-linking the repository without it clears
-it, like every other link setting.
+With Wardby 0.7.0 or later, set `markReadyWhenPassing: true` on the write
+link (`link_repository`) of the agent the repository event triggers to have
+Wardby mark the draft pull requests it opens here ready for review on its
+own, once they pass, instead of leaving that to a person. For a lead that
+delegates to a coding builder sub-agent, set it on the lead's link: the
+builder needs no repository link of its own, and pull requests its coding
+runs open count for the lead. An opted-in agent outside that run tree never
+counts. Re-linking the repository without it clears it, like every other
+link setting.
 
 Wardby marks a pull request ready once it is open and a draft, Wardby's own
 App opened it (and its head isn't in a fork), every authorized reviewer

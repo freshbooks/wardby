@@ -28,7 +28,6 @@ import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { capabilityHash } from "../proxy.js";
 import type { RegistryRunContext, RegistryStore } from "../registry/store.js";
 import {
-  computePolicyHash,
   DEPENDENCY_CACHE_ECOSYSTEM,
   deriveSnapshotKey,
   isLockHash,
@@ -182,7 +181,6 @@ export class DependencyCacheService {
       projectPath,
       lockHash,
       workerImage: context.cacheImage,
-      policyHash: computePolicyHash(context.allowlist, context.policy),
     });
     if (route === "lookup") await this.lookup(key, session.createdAt, response);
     else if (route === "download") await this.download(context.runId, key, id ?? "", response);
@@ -386,7 +384,6 @@ export class DependencyCacheService {
         projectPath: key.projectPath,
         lockHash: key.lockHash,
         workerImage: key.workerImage,
-        policyHash: key.policyHash,
         blobKey,
         sha256: stored.sha256,
         sizeBytes: stored.sizeBytes,
