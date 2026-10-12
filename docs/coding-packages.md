@@ -602,17 +602,21 @@ Docker quickstart stores are local and have no such rule.
 
 Other bounds:
 
-- Everything the cache writes is limited by the run's workspace disk
+- The cache works within a disk budget: the run's workspace disk
   (`workspaceDiskMb`) less what the workspace already uses and a safety
   margin. If that can't be measured, or leaves under 64 MiB, the cache is
-  skipped (`budget_unknown`, `budget_too_small`).
+  skipped (`budget_unknown`, `budget_too_small`). Restores and the snapshot
+  archive are held to the budget while they are written; an install is only
+  checked before it starts, since npm's own writes can't be bounded while it
+  runs.
   - A restore must fit: the downloaded archive plus its unpacked tree. A
     `nearest` snapshot is restored only when one and a half times its
     unpacked size fits, leaving room for the update and the new archive.
   - An install (`cold`) starts only when at least 1 GiB is left, or twice
     the project's tree size when a snapshot of it was already seen. Otherwise
     the project is skipped `budget_too_small` and the workspace is left as it
-    was, so the agent installs for itself.
+    was, so the agent installs for itself. A tree much larger than that can
+    still fill the disk during the install, as it would for the agent.
   - After its own install, the worker deletes npm's download cache (the
     `_cacache` folder under the npm cache folder in the workspace's `.cache`;
     the registry settings beside it stay). It is about as large as
@@ -630,9 +634,11 @@ Other bounds:
   other proxy call up to 2 minutes. When the proxy stops at its own
   `REGISTRY_PLAN_TIMEOUT_MS` (`503 wardby_plan_incomplete`), the worker sends
   the plan again after 2 seconds and the proxy resumes from what it already
-  verified, until the 10 minutes are up (`timeout`). Each attempt counts
-  toward `REGISTRY_PLAN_MAX_PER_RUN`. Raising `REGISTRY_PLAN_TIMEOUT_MS` is
-  optional tuning: it means fewer, longer attempts.
+  verified, until the 10 minutes or 5 attempts are up (`timeout`). Each
+  attempt counts toward `REGISTRY_PLAN_MAX_PER_RUN`; the cache sends at most
+  8 plans per run, leaving the rest for the agent's own installs (a project
+  past that is `plan_failed`). Raising `REGISTRY_PLAN_TIMEOUT_MS` is optional
+  tuning: it means fewer, longer attempts.
 - The whole preparation, measuring the disk included, is bounded to 20
   minutes or half the time left before the run's deadline, whichever is
   sooner, so a short run keeps most of its time for the agent. A rebuild is

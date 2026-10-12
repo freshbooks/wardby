@@ -137,7 +137,7 @@ const MAX_DISCOVERY_DIRS = 10_000;
  *  leading dot, so dot-folders are never projects. */
 const PROJECT_SEGMENT = /^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}$/;
 /** This module's own temp names under <workspace>/.cache (randomName below). */
-const OWN_TEMP = /^dep(?:-restore|-snap)?-[0-9a-f]{16}(?:\.tgz)?$/;
+const OWN_TEMP = /^dep(?:-restore|-snap|-npmcache)?-[0-9a-f]{16}(?:\.tgz)?$/;
 
 class Skip extends Error {
   /** `detail`: log-only facts about why (a rule name and counts, never path contents). */
@@ -754,11 +754,12 @@ function run(command, args, { cwd, env, timeoutMs, killGraceMs, signal, session,
     const timer = setTimeout(() => kill(new Skip("timeout")), timeoutMs);
     const onAbort = () => kill(asSkip(signal.reason, "timeout"));
     signal?.addEventListener("abort", onAbort, { once: true });
-    // `stdout(stream)`: consumes the output; its failure kills the command with its reason.
+    // `stdout(stream)`: consumes the output (only tar's archive uses it); its
+    // failure kills the command with its reason, else `tar_failed` (e.g. EIO, ENOSPC).
     const consumed = stdout
       ? stdout(child.stdout).then(
           () => undefined,
-          (error) => kill(asSkip(error, "install_failed")),
+          (error) => kill(asSkip(error, "tar_failed")),
         )
       : Promise.resolve();
     child.on("error", () => {
@@ -941,14 +942,22 @@ async function restore(context, project, id, maxBytes, { consistency }) {
   };
   const scan = await scanArchive(archive, { budgetBytes: limit, signal }).catch(refused);
   // This project's tree size and compression, for the estimates below (a cold
-  // install after a rejected restore, the snapshot's archive size).
-  context.known = { unpackedBytes: scan.unpackedBytes, archiveBytes: sizeBytes };
+  // install after a rejected restore, the snapshot's archive size). Recorded
+  // only from a snapshot that passed every check up to the point it was
+  // judged: here, a scan that accepted every entry (refused only for room),
+  // and below, a tree extracted and verified on disk. Never from one refused
+  // as unsafe, whose sizes are untrusted.
+  const measured = { unpackedBytes: scan.unpackedBytes, archiveBytes: sizeBytes };
   // A nearest is only worth restoring with room left for the delta install and the archive.
-  if (!consistency && scan.unpackedBytes * NEAREST_NEED_FACTOR > limit) throw new Skip("budget_too_small");
+  if (!consistency && scan.unpackedBytes * NEAREST_NEED_FACTOR > limit) {
+    context.known = measured;
+    throw new Skip("budget_too_small");
+  }
   await mkdir(temp, { mode: 0o700 });
   await extractArchive(archive, temp, { budgetBytes: limit, signal }).catch(refused);
   await removeTemp(context.workspace, archive);
   await verifyTree(temp, signal);
+  context.known = measured;
   // A sanity check that this is the tree for this lockfile, not an
   // integrity control: integrity is the sha256 the proxy recorded in its
   // database at upload time, verified above against the bytes received.
@@ -1208,10 +1217,19 @@ async function removeNpmContentCache(context, project) {
       }
       if (info.isSymbolicLink() || !info.isDirectory()) return say("unsafe");
     }
-    const bytes = await treeBytes(target, context.signal);
+    // Nothing once the work is over: the workspace may already be the agent's.
+    if (context.signal.aborted || context.session.closed) return say("stopped");
     if (!(await cacheDirIntact(context.workspace))) return say("unsafe");
-    await rm(target, { recursive: true, force: true });
-    say("removed", { bytes });
+    // Moved out of npm's folder in one step and only then removed: a removal
+    // still running after the caller stopped waiting touches only this
+    // module's own temp (which the session's cleanup also removes), never a
+    // `_cacache` the agent's npm has started to fill.
+    const doomed = join(cacheDir, randomName("dep-npmcache"));
+    await rename(target, doomed);
+    track(context, doomed);
+    await context.testHooks?.beforeNpmCacheRemove?.();
+    await removeTemp(context.workspace, doomed);
+    say("removed");
   } catch {
     say("failed");
   }
@@ -1222,16 +1240,28 @@ async function removeNpmContentCache(context, project) {
 const isPlanIncomplete = (plan) =>
   plan.status === 503 && typeof plan.body?.error === "string" && plan.body.error.startsWith("wardby_plan_incomplete");
 
+/** Most plan requests for one project, and for the whole run: the proxy
+ *  allows REGISTRY_PLAN_MAX_PER_RUN (20 by default) per run, and the agent's
+ *  own npm needs some of them. */
+export const MAX_PLAN_ATTEMPTS = 5;
+export const MAX_PLAN_REQUESTS_PER_RUN = 8;
+
 /** POST -/plan, sent again after `planRetryPauseMs` while the proxy answers
  *  that it is incomplete, all within `planMs` (and the overall deadline,
- *  through the signal). Every other answer is returned as it is; running
- *  out of time is `timeout`. */
+ *  through the signal), at most MAX_PLAN_ATTEMPTS times. Every other answer
+ *  is returned as it is; running out of time or attempts is `timeout`, and
+ *  the run's MAX_PLAN_REQUESTS_PER_RUN used up is `plan_failed`. */
 async function requestPlan(context, project) {
-  const { auth, timeouts, signal, log } = context;
+  const { auth, timeouts, signal, log, session } = context;
   const planMs = Math.min(timeouts.planMs ?? DEFAULT_TIMEOUTS.planMs, timeouts.totalMs ?? DEFAULT_TIMEOUTS.totalMs);
   const pauseMs = timeouts.planRetryPauseMs ?? DEFAULT_TIMEOUTS.planRetryPauseMs;
   const until = Date.now() + planMs;
   for (let attempt = 1; ; attempt += 1) {
+    if ((session.planRequests ?? 0) >= MAX_PLAN_REQUESTS_PER_RUN) {
+      log("plan_limit_reached", { requests: session.planRequests });
+      throw new Skip("plan_failed");
+    }
+    session.planRequests = (session.planRequests ?? 0) + 1;
     const plan = await callJson(
       new URL("-/plan", auth.base),
       {
@@ -1245,7 +1275,7 @@ async function requestPlan(context, project) {
     );
     if (!isPlanIncomplete(plan)) return plan;
     log("plan_incomplete", { attempt });
-    if (until - Date.now() <= pauseMs) throw new Skip("timeout");
+    if (attempt >= MAX_PLAN_ATTEMPTS || until - Date.now() <= pauseMs) throw new Skip("timeout");
     try {
       await sleep(pauseMs, undefined, { signal });
     } catch (error) {
@@ -1811,7 +1841,7 @@ export async function prepareDependencies({
       // a logger never fails the cache
     }
   };
-  const session = { sealed: false, closed: false, children: new Set(), temps: new Set() };
+  const session = { sealed: false, closed: false, children: new Set(), temps: new Set(), planRequests: 0 };
   // `deadline` bounds everything (projects and rebuilds); `sealing` stops the
   // project work (and any upload) at the seal.
   const deadline = new AbortController();

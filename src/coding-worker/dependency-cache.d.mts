@@ -71,6 +71,10 @@ export declare const MAX_ARCHIVE_ENTRIES: number;
 export declare const MAX_PROJECTS: number;
 /** The least room a cold install needs when this project's tree size is unknown (`budget_too_small` below it). */
 export declare const MIN_INSTALL_BUDGET_BYTES: number;
+/** Plan requests one project may send (retries of an incomplete plan included). */
+export declare const MAX_PLAN_ATTEMPTS: number;
+/** Plan requests the cache sends in one run, leaving the rest of REGISTRY_PLAN_MAX_PER_RUN to the agent's npm. */
+export declare const MAX_PLAN_REQUESTS_PER_RUN: number;
 
 export interface PrepareDependenciesOptions {
   readonly workspace: string;
@@ -101,6 +105,8 @@ export interface PrepareDependenciesOptions {
 export interface DependencyCacheTestHooks {
   readonly beforeRename?: () => Promise<void>;
   readonly beforeDiscovery?: () => Promise<void>;
+  /** After npm's `_cacache` was moved to the module's own temp, before it is removed. */
+  readonly beforeNpmCacheRemove?: () => Promise<void>;
   /** After an archive that outgrew the budget was stopped and removed. */
   readonly afterArchiveAborted?: (archive: string) => Promise<void>;
 }
@@ -167,7 +173,14 @@ export interface PrepareProjectOptions {
   readonly signal: AbortSignal;
   /** `sealed` is set before the seal is sent (no upload starts after it);
    *  `closed` once the caller stops waiting (no workspace change after it). */
-  readonly session: { sealed: boolean; closed: boolean; children: Set<number>; temps?: Set<string> };
+  readonly session: {
+    sealed: boolean;
+    closed: boolean;
+    children: Set<number>;
+    temps?: Set<string>;
+    /** Plan requests sent so far in this run (at most MAX_PLAN_REQUESTS_PER_RUN). */
+    planRequests?: number;
+  };
   readonly testHooks?: DependencyCacheTestHooks;
   /** Filled from the committed lockfile before anything runs: whether `npm rebuild` is needed. */
   readonly facts?: { needsRebuild?: boolean };

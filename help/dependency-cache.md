@@ -83,11 +83,13 @@ for folders restored from a snapshot.
 
 ## Disk use
 
-Everything the cache writes stays inside the run's workspace disk
-(`workspaceDiskMb`) less what the checkout uses and a margin. An install
-starts only when at least 1 GiB is left (or twice the project's tree when a
-snapshot of it was seen); otherwise the project is `budget_too_small` and the
-agent installs for itself. After its own install the worker deletes npm's
+The cache works within a budget: the run's workspace disk
+(`workspaceDiskMb`) less what the checkout uses and a margin. Restores and the
+snapshot archive are held to it while they are written. An install is checked
+only before it starts: at least 1 GiB must be left (or twice the project's
+tree when a snapshot of it was seen), otherwise the project is
+`budget_too_small` and the agent installs for itself. npm's writes during the
+install itself aren't bounded. After its own install the worker deletes npm's
 download cache (`_cacache`), then archives the tree for upload only if the
 archive fits what is left. A snapshot skipped for space keeps the installed
 tree and the `cold` or `nearest` result; the worker log says

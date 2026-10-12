@@ -25,6 +25,8 @@ import {
   DEFAULT_TIMEOUTS,
   MIN_BUDGET_BYTES,
   MIN_INSTALL_BUDGET_BYTES,
+  MAX_PLAN_ATTEMPTS,
+  MAX_PLAN_REQUESTS_PER_RUN,
   discoverProjects,
   extractArchive,
   prepareDependencies,
@@ -130,6 +132,7 @@ else {
   // FAKE_NPM_BIG: bytes of incompressible data in one package (a large tree).
   if (process.env.FAKE_NPM_BIG) fs.writeFileSync("node_modules/beta/big.bin", require("node:crypto").randomBytes(Number(process.env.FAKE_NPM_BIG)));
   if (mode === "rewrite-lock") fs.writeFileSync("package-lock.json", "{}");
+  if (mode === "lock-cache") fs.chmodSync(".cache", 0o500); // the archive can't be created there
 }
 `;
 
@@ -1483,6 +1486,36 @@ describe("disk use", () => {
     expect(await exists(join(npmCacheDir(), "npmrc"))).toBe(true);
   });
 
+  it("a cancel during the removal never deletes a _cacache after the module returned", async () => {
+    await npmCacheLikeTheDriver();
+    const controller = new AbortController();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let hookRan = false;
+    await prepareAll({
+      signal: controller.signal,
+      timeouts: { settleMs: 200 },
+      testHooks: {
+        beforeNpmCacheRemove: async () => {
+          hookRan = true;
+          controller.abort();
+          await gate;
+        },
+      },
+    });
+    expect(hookRan).toBe(true);
+    // Moved away in one step before the removal began.
+    expect(await exists(contentCache())).toBe(false);
+    // The agent's npm starts a new cache; the late removal must not touch it.
+    await mkdir(join(contentCache(), "content-v2"), { recursive: true });
+    await writeFile(join(contentCache(), "content-v2", "agent"), "x");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await exists(join(contentCache(), "content-v2", "agent"))).toBe(true);
+    expect(await exists(join(npmCacheDir(), "npmrc"))).toBe(true);
+    expect(await cacheLeftovers()).toEqual(["npm"]); // the module's own temp is gone
+  });
+
   it("removes nothing on a hit (npm never ran)", async () => {
     await npmCacheLikeTheDriver();
     await mkdir(contentCache());
@@ -1548,6 +1581,20 @@ describe("disk use", () => {
     expect(await exists(join(workspace, "node_modules/beta/big.bin"))).toBe(true);
   });
 
+  it.skipIf(process.getuid?.() === 0)("an archive that can't be written is snapshot_skipped tar_failed", async () => {
+    env.FAKE_NPM_MODE = "lock-cache";
+    try {
+      const result = await prepare();
+      expect(result).toMatchObject({ result: "cold" });
+      expect(result.reason).toBeUndefined();
+      expect(state.uploads).toHaveLength(0);
+      expect(events).toContainEqual(expect.objectContaining({ event: "snapshot_skipped", reason: "tar_failed" }));
+      expect(await exists(join(workspace, "node_modules/alpha/package.json"))).toBe(true);
+    } finally {
+      await chmod(join(workspace, ".cache"), 0o700);
+    }
+  });
+
   it("refuses a cold install below the floor: budget_too_small, no node_modules, still sealed", async () => {
     expect(MIN_INSTALL_BUDGET_BYTES).toBe(1024 * MiB);
     expect(await prepare({ budgetBytes: 512 * MiB })).toEqual({ result: "skipped", reason: "budget_too_small" });
@@ -1610,6 +1657,23 @@ describe("disk use", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(state.plans.length).toBeGreaterThan(1);
     expect(await npmCalls()).toEqual([]);
+    expect(state.seals).toBe(1);
+  });
+
+  it("sends at most MAX_PLAN_ATTEMPTS plans per project and MAX_PLAN_REQUESTS_PER_RUN per run", async () => {
+    expect(MAX_PLAN_ATTEMPTS).toBe(5);
+    expect(MAX_PLAN_REQUESTS_PER_RUN).toBe(8);
+    await writeProject("app", { ...LOCKFILE, name: "app" });
+    await writeProject("server", { ...LOCKFILE, name: "server" });
+    state.planAnswer = incomplete;
+    const { projects } = await prepareAll({ timeouts: { planRetryPauseMs: 5 } });
+    expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
+      [".", "skipped", "timeout"],
+      ["app", "skipped", "plan_failed"],
+      ["server", "skipped", "plan_failed"],
+    ]);
+    expect(state.plans).toHaveLength(8); // 5 for the root, 3 for app, none for server
+    expect(events.filter((entry) => entry.event === "plan_limit_reached")).toHaveLength(2);
     expect(state.seals).toBe(1);
   });
 
