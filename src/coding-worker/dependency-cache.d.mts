@@ -105,6 +105,8 @@ export interface PrepareDependenciesOptions {
 export interface DependencyCacheTestHooks {
   readonly beforeRename?: () => Promise<void>;
   readonly beforeDiscovery?: () => Promise<void>;
+  /** After npm's `_cacache` was found and checked, before it is moved. */
+  readonly beforeNpmCacheMove?: () => Promise<void>;
   /** After npm's `_cacache` was moved to the module's own temp, before it is removed. */
   readonly beforeNpmCacheRemove?: () => Promise<void>;
   /** After an archive that outgrew the budget was stopped and removed. */

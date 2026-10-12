@@ -1197,7 +1197,7 @@ function installNeed(context) {
  */
 async function removeNpmContentCache(context, project) {
   const say = (status, fields = {}) => context.log("npm_cache_cleared", { status, ...fields });
-  if (context.session.closed) return;
+  if (context.signal.aborted || context.session.closed) return;
   const configured = context.env.npm_config_cache ?? context.env.NPM_CONFIG_CACHE;
   if (typeof configured !== "string" || !configured) return say("not_configured");
   const cacheDir = join(context.workspace, ".cache");
@@ -1217,9 +1217,11 @@ async function removeNpmContentCache(context, project) {
       }
       if (info.isSymbolicLink() || !info.isDirectory()) return say("unsafe");
     }
-    // Nothing once the work is over: the workspace may already be the agent's.
-    if (context.signal.aborted || context.session.closed) return say("stopped");
+    await context.testHooks?.beforeNpmCacheMove?.();
     if (!(await cacheDirIntact(context.workspace))) return say("unsafe");
+    // Nothing once the work is over: the workspace may already be the agent's.
+    // Checked here, with no await before the rename.
+    if (context.signal.aborted || context.session.closed) return say("stopped");
     // Moved out of npm's folder in one step and only then removed: a removal
     // still running after the caller stopped waiting touches only this
     // module's own temp (which the session's cleanup also removes), never a

@@ -1514,6 +1514,20 @@ describe("disk use", () => {
     expect(await exists(join(contentCache(), "content-v2", "agent"))).toBe(true);
     expect(await exists(join(npmCacheDir(), "npmrc"))).toBe(true);
     expect(await cacheLeftovers()).toEqual(["npm"]); // the module's own temp is gone
+
+    // A cancel just before the move: _cacache is left alone.
+    await rm(join(workspace, "node_modules"), { recursive: true });
+    await rm(contentCache(), { recursive: true });
+    state.sealed = false;
+    events = [];
+    const late = new AbortController();
+    await prepareAll({
+      signal: late.signal,
+      timeouts: { settleMs: 200 },
+      testHooks: { beforeNpmCacheMove: async () => late.abort() },
+    });
+    expect(await exists(join(contentCache(), "content-v2", "tarball"))).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({ event: "npm_cache_cleared", status: "stopped" }));
   });
 
   it("removes nothing on a hit (npm never ran)", async () => {
