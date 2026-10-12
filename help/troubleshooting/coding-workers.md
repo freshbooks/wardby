@@ -3,7 +3,7 @@ id: troubleshooting/coding-workers
 title: Troubleshoot coding workers
 summary: Investigate coding-worker setup, isolation preflight, and safe failure handling.
 audience: operator
-tags: [coding-agents, docker, kubernetes, isolation, services]
+tags: [coding-agents, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, claude-code, codex]
 appliesTo: >=0.2.1
 ---
 
@@ -53,6 +53,23 @@ summary and debug trace (`codingProfile.debugTraceMinutes`) to tell which;
 raise `codingProfile.maxTurns` (up to 1000) with `update_agent` for the first,
 or narrow the task for the second. Codex runs have no turn limit. See
 [Coding run reached its turn limit](../errors/coding-turn-limit.md).
+
+## Debug trace
+
+When a run's fixed error code or a slow run doesn't say enough, an admin can
+trace the agent's runs for a while:
+`update_agent { "id": "<agent id>", "codingProfile": { "debugTraceMinutes": 30 } }`.
+Each run dispatched in that window writes its whole agent stream, redacted, to
+its worker container's log under a `debugTrace` key. That covers Codex events,
+or, for Claude Code (Wardby 0.7.0 or later), every Agent SDK message:
+each command the agent ran with its output, the final usage and duration, plus
+stream failures in full. For Claude Code, the time between a command's
+`tool_use` and its `tool_result` line is how long that command took. A run's
+trace stops at 2 MiB by default; set `codingProfile.debugTraceMaxMb` (1 to 64,
+admin only) for more. The trace can hold prompts and repository content, so
+keep it on briefly. See
+[the debug trace section](../../docs/coding-worker-isolation.md#debug-trace)
+for where the log lives and what is redacted.
 
 ## Runs that wait for cluster capacity
 

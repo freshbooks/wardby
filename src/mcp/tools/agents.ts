@@ -8,7 +8,13 @@
 import { Prisma, type CodingAgentProfile, type NativeExecutionMode } from "#prisma";
 import { z } from "zod";
 import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
-import { DEFAULT_CLAUDE_MAX_TURNS, MAX_CODING_TURNS, isLocalRepository } from "../../coding/protocol.js";
+import {
+  DEFAULT_CLAUDE_MAX_TURNS,
+  DEFAULT_DEBUG_TRACE_MAX_MB,
+  MAX_CODING_TURNS,
+  MAX_DEBUG_TRACE_MAX_MB,
+  isLocalRepository,
+} from "../../coding/protocol.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { ACCEPTED_ADVISORY_ID, MAX_ACCEPTED_ADVISORIES } from "../../coding/registry/allowlist.js";
 import { assertAgentModelAvailable } from "../../core/run-pricing.js";
@@ -219,6 +225,8 @@ const UpdateAgentSchema = z
     codingProfile: CodingProfilePatchSchema.extend({
       /** Not a stored profile field: sets CodingAgentProfile.debugTraceUntil = now + minutes (null clears). */
       debugTraceMinutes: z.number().int().min(1).max(MAX_DEBUG_TRACE_MINUTES).nullable().optional(),
+      /** Admin-only like debugTraceMinutes: CodingAgentProfile.debugTraceMaxMb (null = the default). */
+      debugTraceMaxMb: z.number().int().min(1).max(MAX_DEBUG_TRACE_MAX_MB).nullable().optional(),
     }).optional(),
     repositoryAdminOverride: z.boolean().optional(),
   })
@@ -625,6 +633,12 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               description:
                 "Admins only (agents:admin): trace every coding run of this agent for this many minutes from now; the worker writes its full stream trace, which can include prompts and repository content, to the run pod's log. Null turns it off.",
             },
+            debugTraceMaxMb: {
+              type: ["integer", "null"],
+              minimum: 1,
+              maximum: MAX_DEBUG_TRACE_MAX_MB,
+              description: `Admins only (agents:admin): cap on one traced run's trace output, in MiB (default ${DEFAULT_DEBUG_TRACE_MAX_MB}); the trace stops with a limit_reached line once it is reached. Null restores the default.`,
+            },
           },
         },
         repositoryAdminOverride: REPOSITORY_ADMIN_OVERRIDE,
@@ -635,7 +649,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       const args = await withCanonicalRepository(parseUpdateAgent(rawArgs));
       if (args.codingProfile?.workerImageRef !== undefined) requireWorkerImageRefScope(ctx);
       const debugTraceMinutes = args.codingProfile?.debugTraceMinutes;
-      if (debugTraceMinutes !== undefined) requireDebugTraceScope(ctx);
+      const debugTraceMaxMb = args.codingProfile?.debugTraceMaxMb;
+      if (debugTraceMinutes !== undefined || debugTraceMaxMb !== undefined) requireDebugTraceScope(ctx);
       if (args.codingProfile?.packageAllowlist !== undefined || args.codingProfile?.packagePolicy !== undefined)
         requirePackageApproval(ctx);
 
@@ -773,7 +788,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               throw new McpError(400, "Detach all native sandbox tools before changing an agent to coding.");
             }
             const currentProfile = existing.codingProfile ? storedProfile(existing.codingProfile) : undefined;
-            const { debugTraceMinutes: _minutes, ...profilePatch } = args.codingProfile ?? {};
+            const { debugTraceMinutes: _minutes, debugTraceMaxMb: _maxMb, ...profilePatch } = args.codingProfile ?? {};
             const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...profilePatch });
             if (!profileResult.success) throw invalidArguments("coding profile", profileResult.error);
             nextProfile = profileResult.data;
@@ -811,7 +826,10 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             ...(modeArg ? { nativeExecutionMode: toStoredMode(modeArg) } : {}),
           };
           const stamp = authorization ? profileStamp(authorization) : {};
-          const trace = debugTraceUntil === undefined ? {} : { debugTraceUntil };
+          const trace = {
+            ...(debugTraceUntil === undefined ? {} : { debugTraceUntil }),
+            ...(debugTraceMaxMb === undefined ? {} : { debugTraceMaxMb }),
+          };
           const profileMutation =
             nextKind === "native"
               ? existing.codingProfile
@@ -831,12 +849,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
-      if (debugTraceUntil !== undefined) {
+      if (debugTraceUntil !== undefined || debugTraceMaxMb !== undefined) {
         agentsLog.info(
           {
             event: "coding.debug_trace.set",
             agentId: agent.id,
-            until: debugTraceUntil?.toISOString() ?? null,
+            ...(debugTraceUntil !== undefined ? { until: debugTraceUntil?.toISOString() ?? null } : {}),
+            ...(debugTraceMaxMb !== undefined ? { maxMb: debugTraceMaxMb } : {}),
             by: ctx.principal.id,
           },
           "coding debug trace set",

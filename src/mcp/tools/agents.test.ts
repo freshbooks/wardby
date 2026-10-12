@@ -1463,6 +1463,49 @@ describe("agent CRUD tools", () => {
       await client.close();
     });
 
+    const setMaxMb = (debugTraceMaxMb: unknown) => ({
+      name: "update_agent",
+      arguments: { id: "a1", codingProfile: { debugTraceMaxMb } },
+    });
+
+    it.each([20, null])("setting the trace cap to %j needs agents:admin, not just agents:write", async (maxMb) => {
+      const { client } = await as(["agents:write"], ["admin"]);
+      const result = await client.callTool(setMaxMb(maxMb));
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/Insufficient scope/);
+      await client.close();
+    });
+
+    it("an admin sets the trace cap, leaves the expiry alone, and it is audited; null restores the default", async () => {
+      logged.length = 0;
+      const { db, client } = await as(["agents:read", "agents:write", "agents:admin"], ["admin"]);
+      const set = JSON.parse(text(await client.callTool(setTrace(30)))) as {
+        codingProfile: { debugTraceUntil: string };
+      };
+      const result = await client.callTool(setMaxMb(20));
+      expect(result.isError).toBeFalsy();
+      expect(JSON.parse(text(result))).toMatchObject({
+        codingProfile: { debugTraceMaxMb: 20, debugTraceUntil: set.codingProfile.debugTraceUntil },
+      });
+      const stored = (await db.agent.findUnique({ where: { id: "a1" } })) as unknown as {
+        codingProfile: { debugTraceMaxMb: number | null };
+      };
+      expect(stored.codingProfile.debugTraceMaxMb).toBe(20);
+      expect(logged.at(-1)?.payload).toEqual({ event: "coding.debug_trace.set", agentId: "a1", maxMb: 20, by: "p1" });
+
+      const cleared = await client.callTool(setMaxMb(null));
+      expect(JSON.parse(text(cleared))).toMatchObject({ codingProfile: { debugTraceMaxMb: null } });
+      expect(logged.at(-1)?.payload).toEqual({ event: "coding.debug_trace.set", agentId: "a1", maxMb: null, by: "p1" });
+      await client.close();
+    });
+
+    it.each([0, 65, 1.5, "20"])("rejects a %j MiB trace cap", async (maxMb) => {
+      const { client } = await as(["agents:write", "agents:admin"], ["admin"]);
+      const result = await client.callTool(setMaxMb(maxMb));
+      expect(result.isError).toBe(true);
+      await client.close();
+    });
+
     it("is not accepted by create_agent", async () => {
       const { client } = await as(["agents:write", "agents:admin"], ["admin"]);
       const result = await client.callTool({

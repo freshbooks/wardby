@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readCodingInput, writeCodingOutputAtomic } from "../coding-worker/artifact.js";
+import { describeError, workerDebugTracer, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "../coding-worker/errors.js";
 import { runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
@@ -18,21 +19,28 @@ const controller = new AbortController();
 for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => controller.abort());
 
 let stage: "input" | "execution" | "output" = "input";
+// Only for a run the operator asked to trace; see coding-worker/debug-trace.ts. Pod log only.
+let trace: DebugTracer | undefined;
 try {
   const input = await readCodingInput(INPUT_PATH);
   stage = "execution";
+  const proxyBaseUrl = required("WARDBY_PROXY_URL");
+  const capability = required("WARDBY_RUN_CAPABILITY");
+  trace = workerDebugTracer(input, capability, (line) => process.stdout.write(line));
   await assertToolRunnerReachable();
   const output = await runClaudeCodingWorker({
     input,
-    proxyBaseUrl: required("WARDBY_PROXY_URL"),
-    capability: required("WARDBY_RUN_CAPABILITY"),
+    proxyBaseUrl,
+    capability,
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
+    trace,
   });
   stage = "output";
   await writeCodingOutputAtomic(OUTPUT_PATH, output);
 } catch (error) {
+  trace?.record("worker_error", { stage, error: describeError(error) });
   const safeCode = safeWorkerErrorCode(error);
   const code = controller.signal.aborted
     ? "worker_cancelled"

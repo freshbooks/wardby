@@ -85,6 +85,12 @@ describe("Claude SDK configuration", () => {
     );
   });
 
+  it("hands Claude Code's stderr to the SDK only when a trace asked for it", () => {
+    expect(buildClaudeSdkOptions(config())).not.toHaveProperty("stderr");
+    const stderr = () => undefined;
+    expect(buildClaudeSdkOptions({ ...config(), stderr }).stderr).toBe(stderr);
+  });
+
   it("bridges host cancellation to the SDK abort controller", () => {
     const controller = new AbortController();
     const options = buildClaudeSdkOptions(config(controller.signal));

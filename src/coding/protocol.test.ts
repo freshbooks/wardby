@@ -124,6 +124,14 @@ describe("CodingTaskInputSchema", () => {
     expect(() => CodingTaskInputSchema.parse({ ...input, debugTrace: "yes" })).toThrow();
   });
 
+  it("accepts an optional debugTraceMaxMb between 1 and 64", () => {
+    expect(CodingTaskInputSchema.parse(input)).not.toHaveProperty("debugTraceMaxMb");
+    expect(CodingTaskInputSchema.parse({ ...input, debugTraceMaxMb: 20 })).toMatchObject({ debugTraceMaxMb: 20 });
+    for (const bad of [0, 65, 1.5, "20"]) {
+      expect(() => CodingTaskInputSchema.parse({ ...input, debugTraceMaxMb: bad })).toThrow();
+    }
+  });
+
   it("requires a deterministic head ref", () => {
     expect(() => CodingTaskInputSchema.parse({ ...input, headRef: "attacker/branch" })).toThrow(/runId/);
   });

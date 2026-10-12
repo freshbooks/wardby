@@ -38,6 +38,7 @@ interface FakeRunRow {
     failureCategory?: string | null;
     diagnosticId?: string | null;
     debugTrace?: boolean;
+    debugTraceMaxMb?: number | null;
     services?: unknown;
   } | null;
   registryFetches?: Array<{
@@ -315,7 +316,7 @@ describe("run observability tools", () => {
 
   it("get_run says a coding run was traced only when it was", async () => {
     const now = new Date();
-    const row = (id: string, debugTrace: boolean) => ({
+    const row = (id: string, debugTrace: boolean, debugTraceMaxMb: number | null = null) => ({
       id,
       agentId: "a1",
       status: "failed",
@@ -328,9 +329,9 @@ describe("run observability tools", () => {
       error: null,
       startedAt: now,
       finishedAt: now,
-      codingRun: { result: null, debugTrace },
+      codingRun: { result: null, debugTrace, debugTraceMaxMb },
     });
-    const db = fakeDb([{ id: "a1", ownerId: "p1" }], [row("r1", true), row("r2", false)]);
+    const db = fakeDb([{ id: "a1", ownerId: "p1" }], [row("r1", true), row("r2", false), row("r3", true, 20)]);
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
     mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
     registerRunTools(mcp);
@@ -340,6 +341,9 @@ describe("run observability tools", () => {
     expect(traced).toMatchObject({ debugTrace: true });
     const plain = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never);
     expect(plain).not.toHaveProperty("debugTrace");
+    expect(traced).not.toHaveProperty("debugTraceMaxMb");
+    const capped = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r3" } })) as never);
+    expect(capped).toMatchObject({ debugTrace: true, debugTraceMaxMb: 20 });
     await client.close();
   });
 

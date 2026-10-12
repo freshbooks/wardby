@@ -6,6 +6,7 @@ import {
   DEFAULT_CLAUDE_MAX_TURNS,
 } from "../coding/protocol.js";
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
+import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { safeWorkerErrorCode } from "../coding-worker/errors.js";
 import type { WorkerProgressEvent } from "../coding-worker/types.js";
 
@@ -91,6 +92,8 @@ export interface ClaudeQueryOptions {
   contextDirectory: string | null;
   /** Native mode: the context includes at least one skill, so the Skill tool is enabled. */
   skills: boolean;
+  /** Set only on a traced run: receives Claude Code's own stderr output. */
+  stderr?: (data: string) => void;
 }
 
 export type ClaudeQueryFactory = (options: ClaudeQueryOptions) => AsyncIterable<ClaudeSdkMessage>;
@@ -104,6 +107,8 @@ export interface ClaudeWorkerRunOptions {
   onProgress?: (event: WorkerProgressEvent) => void;
   /** Where native mode writes the repository context; defaults to CONTEXT_ROOT (context.ts). */
   contextRoot?: string;
+  /** Set only for a run the operator asked to trace (CodingTaskInput.debugTrace). */
+  trace?: DebugTracer;
 }
 
 function boundedPrompt(task: string, runId: string): string {
@@ -189,6 +194,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     developerInstructions,
     contextDirectory: context?.directory ?? null,
     skills: context?.skills ?? false,
+    ...(options.trace ? { stderr: (data: string) => options.trace?.record("sdk_stderr", data) } : {}),
   });
   let finalJson: string | undefined;
   let failed = false;
@@ -197,6 +203,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   let toolUnreachable = false;
   try {
     for await (const message of stream) {
+      // Every SDK message, raw: init, assistant (tool_use with the command), user (tool_result), result.
+      options.trace?.record("message", message);
       if (toolServerUnreachable(message)) {
         toolUnreachable = true;
         break;
@@ -219,6 +227,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
       }
     }
   } catch (err) {
+    options.trace?.record("stream_error", describeError(err));
     // The SDK can also end the stream by throwing at the turn limit. Only that
     // is read from the error; its text (which can carry provider content) is never kept.
     if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;

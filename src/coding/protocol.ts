@@ -386,6 +386,10 @@ export const DEFAULT_CLAUDE_MAX_TURNS = 200;
 
 /** Longest line a debug-traced worker writes to its log (src/coding-worker/debug-trace.ts). */
 export const MAX_DEBUG_TRACE_LINE_BYTES = 16 * 1024;
+/** A traced run's total trace output when the agent sets no cap (CodingAgentProfile.debugTraceMaxMb), in MiB. */
+export const DEFAULT_DEBUG_TRACE_MAX_MB = 2;
+/** Upper bound on CodingAgentProfile.debugTraceMaxMb. */
+export const MAX_DEBUG_TRACE_MAX_MB = 64;
 
 /** C0 and C1 control characters, which have no place in a context file path. */
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
@@ -459,6 +463,12 @@ export const CodingTaskInputSchema = z
      * untraced run is unchanged for workers that predate it.
      */
     debugTrace: z.boolean().optional(),
+    /**
+     * Cap on a traced run's total trace output, in MiB (CodingRun.debugTraceMaxMb).
+     * Written only on a traced run whose agent sets one; absent means the
+     * worker default (DEFAULT_DEBUG_TRACE_MAX_MB).
+     */
+    debugTraceMaxMb: z.number().int().min(1).max(MAX_DEBUG_TRACE_MAX_MB).optional(),
     /**
      * Claude Code turn limit (CodingAgentProfile.maxTurns, fixed on the run at
      * dispatch). Absent means the worker default; written only when the agent
