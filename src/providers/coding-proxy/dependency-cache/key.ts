@@ -4,7 +4,7 @@
  * from a lockfile plan the proxy approved, and the repository, image and
  * policy come from the run's own records.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 /** The only ecosystem the cache serves today. */
 export const DEPENDENCY_CACHE_ECOSYSTEM = "npm";
@@ -76,25 +76,31 @@ export interface SnapshotKeyParts {
 
 export interface SnapshotKey extends SnapshotKeyParts {
   ecosystem: string;
-  /** Where the snapshot lives in the blob store. */
-  blobKey: string;
-  /** The opaque id a worker downloads the derived key by: sha256 of the blob key. */
+  /** The opaque id a worker downloads the derived key by: sha256 of the canonical identity tuple. */
   keyId: string;
 }
 
 export function deriveSnapshotKey(parts: SnapshotKeyParts): SnapshotKey {
-  const ecosystem = DEPENDENCY_CACHE_ECOSYSTEM;
-  const blobKey =
-    `dependency-cache/${ecosystem}/${sha256Hex(parts.repository)}/${sha256Hex(parts.projectPath).slice(0, 16)}/` +
-    `${parts.lockHash}-${sha256Hex(parts.workerImage).slice(0, 16)}-${parts.policyHash.slice(0, 16)}.tgz`;
-  return {
-    ecosystem,
+  const identity = {
+    ecosystem: DEPENDENCY_CACHE_ECOSYSTEM,
     repository: parts.repository,
     projectPath: parts.projectPath,
     lockHash: parts.lockHash,
     workerImage: parts.workerImage,
     policyHash: parts.policyHash,
-    blobKey,
-    keyId: sha256Hex(blobKey),
   };
+  return { ...identity, keyId: sha256Hex(canonicalJson(identity)) };
+}
+
+/**
+ * A fresh blob key for one upload of `key`. Each upload writes its own object
+ * (the random suffix), so a concurrent or refused upload can never replace
+ * the bytes of a snapshot already committed; a row always names the exact
+ * object its sha256 and size describe.
+ */
+export function newBlobKey(key: SnapshotKey): string {
+  return (
+    `dependency-cache/${key.ecosystem}/${sha256Hex(key.repository)}/${sha256Hex(key.projectPath).slice(0, 16)}/` +
+    `${key.lockHash}-${sha256Hex(key.workerImage).slice(0, 16)}-${key.policyHash.slice(0, 16)}-${randomUUID()}.tgz`
+  );
 }

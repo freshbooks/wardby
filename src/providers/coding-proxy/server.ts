@@ -122,9 +122,10 @@ function readPlanBody(request: IncomingMessage, signal: AbortSignal): Promise<st
   });
 }
 
-/** A dependency cache upload, the one request whose body may take longer than `requestMs`. */
-function isCacheUpload(request: IncomingMessage): boolean {
-  return request.method === "PUT" && request.url?.split("?", 1)[0] === "/cache/npm/blob";
+/** An error answer to a request whose body was not read: close the
+ *  connection rather than read (or keep) what the client is still sending. */
+function closeIfBodyUnread(request: IncomingMessage, response: ServerResponse): void {
+  if (!request.complete && !response.headersSent) response.setHeader("connection", "close");
 }
 
 function routeProtocol(method: string | undefined, url: string | undefined): ProxyProtocol | undefined {
@@ -162,16 +163,17 @@ export async function startCodingProxyServer(
   // A snapshot upload (up to WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB) cannot
   // arrive within requestMs, and Node's requestTimeout is server-wide: with
   // the cache on it is widened to cover the upload window (which the cache
-  // enforces on the upload itself), and every other request keeps requestMs
-  // through its own timer.
+  // enforces on the upload itself), and every request gets a requestMs timer
+  // of its own. Only the cache lifts that timer, and only for an upload it
+  // has authenticated, found eligible and given its upload slot.
   const extendedRequests = config.dependencyCache !== undefined;
   const server = createServer({ maxHeaderSize: 16 * 1024, requireHostHeader: true }, (request, response) => {
     const startedAt = performance.now();
-    if (extendedRequests && !isCacheUpload(request)) {
-      setTimeout(() => {
-        if (!request.complete) request.socket.destroy();
-      }, requestMs).unref();
-    }
+    const bodyTimer = extendedRequests
+      ? setTimeout(() => {
+          if (!request.complete) request.socket.destroy();
+        }, requestMs).unref()
+      : undefined;
     const protocol = routeProtocol(request.method, request.url) ?? "other";
     response.once("finish", () => {
       try {
@@ -182,16 +184,19 @@ export async function startCodingProxyServer(
     });
     void (async () => {
       if (config.expectedHost && request.headers.host !== config.expectedHost) {
+        closeIfBodyUnread(request, response);
         sendError(response, 403, "invalid_host");
         return;
       }
       if (request.url?.startsWith("/cache/")) {
         if (!config.dependencyCache) {
-          if (isCacheUpload(request)) response.setHeader("connection", "close");
+          closeIfBodyUnread(request, response);
           sendError(response, 404, "not_found");
           return;
         }
-        await config.dependencyCache.handle(request, response, registryToken(request.headers.authorization));
+        await config.dependencyCache.handle(request, response, registryToken(request.headers.authorization), () =>
+          clearTimeout(bodyTimer),
+        );
         return;
       }
       if (request.url?.startsWith("/registry/")) {
@@ -315,6 +320,7 @@ export async function startCodingProxyServer(
         if (!response.destroyed) response.destroy();
         return;
       }
+      closeIfBodyUnread(request, response);
       if (error instanceof CodingProxyError || error instanceof HttpBoundaryError) {
         proxyLog.info(
           { event: "request.rejected", code: error instanceof CodingProxyError ? error.code : error.message },

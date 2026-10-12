@@ -12,7 +12,9 @@
  *   seal answers 409 `sealed`, and an upload still streaming when the seal
  *   lands is discarded.
  * - A run uploads at most once per project, only within its upload window,
- *   and only for its derived key. An existing key is never overwritten.
+ *   and only for its derived key. Each upload writes its own blob object
+ *   (a unique key), so no upload can replace a committed snapshot's bytes;
+ *   an upload that does not end in its own row deletes its own object.
  * - The sha256 is computed while the upload streams and stored in Postgres;
  *   downloads carry it so the worker verifies before extracting.
  */
@@ -27,6 +29,7 @@ import {
   DEPENDENCY_CACHE_ECOSYSTEM,
   deriveSnapshotKey,
   isLockHash,
+  newBlobKey,
   parseProjectPath,
   type SnapshotKey,
 } from "./key.js";
@@ -88,7 +91,7 @@ export interface DependencyCacheServiceOptions {
 export class DependencyCacheService {
   readonly uploadMs: number;
   private readonly now: () => Date;
-  /** `runId\0projectPath` and blob keys of uploads streaming right now (per replica). */
+  /** `runId\0projectPath` and key ids of uploads streaming right now (per replica). */
   private readonly uploading = new Set<string>();
   private activeUploads = 0;
 
@@ -97,15 +100,25 @@ export class DependencyCacheService {
     this.now = options.now ?? (() => new Date());
   }
 
-  /** Answers one `/cache/...` request. `token` is the registry token the request carried. */
-  async handle(request: IncomingMessage, response: ServerResponse, token: string): Promise<void> {
+  /**
+   * Answers one `/cache/...` request. `token` is the registry token the
+   * request carried. `releaseBodyTimer` lifts the server's per-request body
+   * timer; it is called only for an authenticated, eligible upload that holds
+   * its upload slot (the upload window bounds it from then on).
+   */
+  async handle(
+    request: IncomingMessage,
+    response: ServerResponse,
+    token: string,
+    releaseBodyTimer: () => void = () => {},
+  ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://proxy");
     const matched = matchRoute(request.method, url.pathname);
     const isUpload = typeof matched === "object" && matched.route === "upload";
     try {
       if (matched === 404) throw new CacheRefusal(404, "not_found");
       if (matched === 405) throw new CacheRefusal(405, "method_not_allowed");
-      await this.route(matched.route, matched.id, url.searchParams, token, request, response);
+      await this.route(matched.route, matched.id, url.searchParams, token, request, response, releaseBodyTimer);
     } catch (error) {
       if (error instanceof CacheRefusal) {
         // An upload refused before its body was read: close rather than read it.
@@ -125,6 +138,7 @@ export class DependencyCacheService {
     token: string,
     request: IncomingMessage,
     response: ServerResponse,
+    releaseBodyTimer: () => void,
   ): Promise<void> {
     const context = await this.options.registry.findRunByRegistryTokenHash(capabilityHash(token), this.now());
     if (!context) throw new CacheRefusal(401, "invalid_capability");
@@ -153,7 +167,7 @@ export class DependencyCacheService {
     });
     if (route === "lookup") await this.lookup(key, response);
     else if (route === "download") await this.download(key, id ?? "", response);
-    else await this.upload(context, session.createdAt, key, request, response);
+    else await this.upload(context, session.createdAt, key, request, response, releaseBodyTimer);
   }
 
   private async lookup(key: SnapshotKey, response: ServerResponse): Promise<void> {
@@ -212,6 +226,7 @@ export class DependencyCacheService {
     key: SnapshotKey,
     request: IncomingMessage,
     response: ServerResponse,
+    releaseBodyTimer: () => void,
   ): Promise<void> {
     const deadline = sessionCreatedAt.getTime() + this.uploadMs;
     if (this.now().getTime() >= deadline) throw new CacheRefusal(409, "upload_expired");
@@ -221,7 +236,7 @@ export class DependencyCacheService {
     if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > this.options.maxSnapshotBytes))
       throw new CacheRefusal(413, "too_large");
     const projectSlot = `${context.runId}\0${key.projectPath}`;
-    if (this.uploading.has(projectSlot) || this.uploading.has(key.blobKey))
+    if (this.uploading.has(projectSlot) || this.uploading.has(key.keyId))
       throw new CacheRefusal(409, "upload_in_progress");
     if (await this.options.store.hasUploaded(context.runId, key.ecosystem, key.projectPath))
       throw new CacheRefusal(409, "already_uploaded");
@@ -232,16 +247,17 @@ export class DependencyCacheService {
     if (this.activeUploads >= (this.options.maxConcurrentUploads ?? DEFAULT_MAX_CONCURRENT_UPLOADS))
       throw new CacheRefusal(503, "busy");
     // Re-checked after the awaits above: the slot is taken synchronously.
-    if (this.uploading.has(projectSlot) || this.uploading.has(key.blobKey))
+    if (this.uploading.has(projectSlot) || this.uploading.has(key.keyId))
       throw new CacheRefusal(409, "upload_in_progress");
     this.uploading.add(projectSlot);
-    this.uploading.add(key.blobKey);
+    this.uploading.add(key.keyId);
     this.activeUploads += 1;
+    releaseBodyTimer();
     try {
       await this.storeUpload(context, deadline, key, request, response);
     } finally {
       this.uploading.delete(projectSlot);
-      this.uploading.delete(key.blobKey);
+      this.uploading.delete(key.keyId);
       this.activeUploads -= 1;
     }
   }
@@ -253,6 +269,7 @@ export class DependencyCacheService {
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> {
+    const blobKey = newBlobKey(key);
     let expired = false;
     const timer = setTimeout(
       () => {
@@ -263,7 +280,7 @@ export class DependencyCacheService {
     );
     let stored: { sizeBytes: number; sha256: string };
     try {
-      stored = await this.options.blobs.putStream(key.blobKey, request, {
+      stored = await this.options.blobs.putStream(blobKey, request, {
         contentType: "application/gzip",
         maxBytes: this.options.maxSnapshotBytes,
       });
@@ -288,7 +305,7 @@ export class DependencyCacheService {
     const refusal =
       !session || session.sealedAt ? "sealed" : this.now().getTime() >= deadline ? "upload_expired" : null;
     if (refusal) {
-      await this.discard(key);
+      await this.discard(blobKey);
       this.refused(context, refusal);
       throw new CacheRefusal(409, refusal);
     }
@@ -301,18 +318,18 @@ export class DependencyCacheService {
         lockHash: key.lockHash,
         workerImage: key.workerImage,
         policyHash: key.policyHash,
-        blobKey: key.blobKey,
+        blobKey,
         sha256: stored.sha256,
         sizeBytes: stored.sizeBytes,
         createdByRunId: context.runId,
       });
     } catch (error) {
-      await this.discard(key);
+      await this.discard(blobKey);
       throw error;
     }
     if (outcome === "exists") {
-      // Another writer stored this key while this upload streamed (the blob
-      // is theirs now, so it stays; a digest mismatch fails the worker's check).
+      // Another upload of this key committed first; its object is untouched.
+      await this.discard(blobKey);
       send(response, 200, { stored: false, reason: "exists" });
       return;
     }
@@ -323,11 +340,10 @@ export class DependencyCacheService {
     send(response, 201, { stored: true, sha256: stored.sha256, sizeBytes: stored.sizeBytes });
   }
 
-  /** Removes an upload's blob unless a row now refers to it. */
-  private async discard(key: SnapshotKey): Promise<void> {
+  /** Removes an upload's own blob object (unique to the upload, so no row refers to it). */
+  private async discard(blobKey: string): Promise<void> {
     try {
-      if (await this.options.store.findByIdentity(key)) return;
-      await this.options.blobs.delete(key.blobKey);
+      await this.options.blobs.delete(blobKey);
     } catch (error) {
       cacheLog.warn({ event: "dependency_cache.discard_failed", err: error }, "dependency cache: blob not removed");
     }

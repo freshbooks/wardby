@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,7 @@ import { MemoryProxyLedger } from "../memory-ledger.js";
 import { CodingProxy, capabilityHash } from "../proxy.js";
 import { MemoryRegistryStore, type RegistryRunContext } from "../registry/store.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "../server.js";
-import { computePolicyHash, deriveSnapshotKey } from "./key.js";
+import { computePolicyHash, deriveSnapshotKey, newBlobKey } from "./key.js";
 import { DependencyCacheService } from "./service.js";
 import { MemoryDependencyCacheStore } from "./store.js";
 
@@ -55,6 +55,7 @@ async function setup(
     now?: () => Date;
     lockHashes?: string[];
     requestMs?: number;
+    expectedHost?: string;
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), "dep-cache-"));
@@ -73,22 +74,27 @@ async function setup(
       createdAt: new Date(),
     });
   const store = new MemoryDependencyCacheStore(registry.cacheSessions);
-  const cache = new DependencyCacheService({
-    registry,
-    store,
-    blobs,
-    maxSnapshotBytes: options.maxSnapshotBytes ?? 1024 * 1024,
-    uploadMs: options.uploadMs ?? 900_000,
-    now: options.now,
-  });
-  const server = await startCodingProxyServer(fakeProxy(), {
-    host: "127.0.0.1",
-    port: 0,
-    requestMs: options.requestMs,
-    ...(options.configured === false ? {} : { dependencyCache: cache }),
-  });
-  servers.push(server);
-  const base = `http://127.0.0.1:${server.port}`;
+  /** One proxy replica over the shared store and blob store. */
+  const startPod = async () => {
+    const cache = new DependencyCacheService({
+      registry,
+      store,
+      blobs,
+      maxSnapshotBytes: options.maxSnapshotBytes ?? 1024 * 1024,
+      uploadMs: options.uploadMs ?? 900_000,
+      now: options.now,
+    });
+    const server = await startCodingProxyServer(fakeProxy(), {
+      host: "127.0.0.1",
+      port: 0,
+      requestMs: options.requestMs,
+      ...(options.expectedHost ? { expectedHost: options.expectedHost } : {}),
+      ...(options.configured === false ? {} : { dependencyCache: cache }),
+    });
+    servers.push(server);
+    return `http://127.0.0.1:${server.port}`;
+  };
+  const base = await startPod();
   const auth = (token = TOKEN) => ({ authorization: `Bearer ${token}` });
   const query = (params: Record<string, string | undefined>) => {
     const search = new URLSearchParams();
@@ -103,6 +109,7 @@ async function setup(
     store,
     registry,
     base,
+    startPod,
     lookup: (params: Record<string, string | undefined> = { lock: LOCK }, token?: string) =>
       fetch(`${base}/cache/npm/lookup${query(params)}`, { headers: auth(token) }).then(json),
     upload: (body: Uint8Array, params: Record<string, string | undefined> = { lock: LOCK }, token?: string) =>
@@ -122,6 +129,40 @@ async function setup(
 }
 
 const archive = new TextEncoder().encode("gzip tar bytes of node_modules");
+
+/** A chunked upload sent in two parts, so a test can act while it streams. */
+function streamingUpload(base: string, token: string, first: string) {
+  let body = "";
+  let status = 0;
+  let finish!: (rest: string) => void;
+  const done = new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+    const request = httpRequest(
+      `${base}/cache/npm/blob?lock=${LOCK}`,
+      { method: "PUT", headers: { authorization: `Bearer ${token}`, "transfer-encoding": "chunked" } },
+      (response) => {
+        status = response.statusCode ?? 0;
+        response.on("data", (chunk) => (body += chunk));
+        response.on("end", () => resolve({ status, body: JSON.parse(body) }));
+      },
+    );
+    request.on("error", reject);
+    request.write(first);
+    finish = (rest) => request.end(rest);
+  });
+  return {
+    finish: (rest: string) => {
+      finish(rest);
+      return done;
+    },
+  };
+}
+
+async function storedFiles(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  return entries.filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name));
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 
 describe("dependency cache routes: switches and authentication", () => {
   it("answers 404 for every route when the cache is not configured", async () => {
@@ -217,13 +258,13 @@ describe("dependency cache upload and download", () => {
         lockHash: LOCK,
         workerImage: IMAGE,
         policyHash: computePolicyHash(ALLOWLIST, POLICY),
-        blobKey: key.blobKey,
+        blobKey: expect.stringMatching(/^dependency-cache\/npm\/.+-[0-9a-f-]{36}\.tgz$/),
         sha256: hex(archive),
         sizeBytes: archive.byteLength,
         createdByRunId: "run-1",
       }),
     ]);
-    expect(await blobs.head(key.blobKey)).toMatchObject({ sizeBytes: archive.byteLength });
+    expect(await blobs.head(store.rows[0].blobKey)).toMatchObject({ sizeBytes: archive.byteLength });
 
     expect((await lookup()).body).toEqual({ key: key.keyId, hit: true, maxBytes: 1024 * 1024 });
     const before = store.rows[0].lastUsedAt;
@@ -321,7 +362,7 @@ describe("dependency cache upload and download", () => {
   it("drops a row whose blob is gone", async () => {
     const { upload, download, derived, store, blobs } = await setup();
     await upload(archive);
-    await blobs.delete(derived().blobKey);
+    await blobs.delete(store.rows[0].blobKey);
     expect((await download(derived().keyId)).status).toBe(404);
     expect(store.rows).toEqual([]);
   });
@@ -401,5 +442,101 @@ describe("request time limits with the cache on", () => {
       setTimeout(() => resolve("still open"), 3_000);
     });
     expect(stalled).toBe("closed");
+  });
+});
+
+describe("each upload writes its own blob object", () => {
+  it("keeps the winner's bytes when two replicas upload the same key at once, and deletes the loser's", async () => {
+    // run-1 and run-2 share a repository, so they derive the same key.
+    const { base, startPod, store, dir } = await setup({ run: { repository: "owner/repo" } });
+    const otherPod = await startPod();
+    const winner = streamingUpload(base, TOKEN, "winner ");
+    const loser = streamingUpload(otherPod, OTHER_TOKEN, "loser ");
+    await settle(); // both past their checks and streaming
+    expect(await winner.finish("bytes")).toEqual({
+      status: 201,
+      body: { stored: true, sha256: hex("winner bytes"), sizeBytes: 12 },
+    });
+    expect(await loser.finish("other bytes")).toEqual({ status: 200, body: { stored: false, reason: "exists" } });
+    expect(store.rows).toHaveLength(1);
+    const files = await storedFiles(dir);
+    expect(files).toEqual([join(dir, store.rows[0].blobKey)]);
+    const bytes = await readFile(files[0]);
+    expect(hex(bytes)).toBe(store.rows[0].sha256);
+    expect(bytes.byteLength).toBe(store.rows[0].sizeBytes);
+  });
+
+  it("an upload refused after the seal leaves a committed snapshot's blob intact", async () => {
+    const { base, startPod, store, dir, seal } = await setup({ run: { repository: "owner/repo" } });
+    const otherPod = await startPod();
+    const refused = streamingUpload(base, TOKEN, "late ");
+    await settle();
+    const committed = await fetch(`${otherPod}/cache/npm/blob?lock=${LOCK}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${OTHER_TOKEN}` },
+      body: archive,
+    });
+    expect(committed.status).toBe(201);
+    expect((await seal()).status).toBe(200);
+    expect(await refused.finish("bytes")).toEqual({ status: 409, body: { error: "sealed" } });
+    expect(store.rows).toHaveLength(1);
+    const files = await storedFiles(dir);
+    expect(files).toEqual([join(dir, store.rows[0].blobKey)]);
+    expect(hex(await readFile(files[0]))).toBe(hex(archive));
+    expect(store.rows[0].sha256).toBe(hex(archive));
+  });
+
+  it("writes a new object per upload under the key's prefix", async () => {
+    const { upload, store, derived } = await setup();
+    await upload(archive);
+    await upload(archive, { lock: LOCK, project: "web" });
+    const [root, web] = store.rows;
+    expect(root.blobKey).not.toBe(web.blobKey);
+    expect(root.blobKey.slice(0, -41)).toBe(newBlobKey(derived()).slice(0, -41));
+  });
+});
+
+describe("the per-request body timer before an upload is admitted", () => {
+  /** Sends an upload-shaped request and keeps trickling its body; resolves when the server cuts it. */
+  function trickle(base: string, headers: Record<string, string>) {
+    const started = Date.now();
+    return new Promise<{ status: number | null; closedAfterMs: number }>((resolve) => {
+      let status: number | null = null;
+      const request = httpRequest(`${base}/cache/npm/blob?lock=${LOCK}`, {
+        method: "PUT",
+        agent: false,
+        // keep-alive: a client that asks for close would end the connection by itself.
+        headers: { "content-length": "100000", connection: "keep-alive", ...headers },
+      });
+      const drip = setInterval(() => request.write("x"), 50);
+      const done = () => {
+        clearInterval(drip);
+        resolve({ status, closedAfterMs: Date.now() - started });
+      };
+      request.on("response", (response) => {
+        status = response.statusCode ?? null;
+        response.resume();
+      });
+      request.on("error", done);
+      request.on("close", done);
+      request.write("x");
+      setTimeout(() => {
+        request.destroy();
+      }, 5_000);
+    });
+  }
+
+  it("cuts an upload-shaped request with a bad host or bad token at the normal limit", async () => {
+    const host = "wardby-proxy:8787";
+    const { base } = await setup({ requestMs: 300, expectedHost: host });
+    const badHost = await trickle(base, { host: "elsewhere:1", authorization: `Bearer ${TOKEN}` });
+    expect(badHost.status).toBe(403);
+    expect(badHost.closedAfterMs).toBeLessThan(2_000);
+    const badToken = await trickle(base, { host, authorization: "Bearer rrg_nope" });
+    expect(badToken.status).toBe(401);
+    expect(badToken.closedAfterMs).toBeLessThan(2_000);
+    const encoded = await trickle(base, { host, authorization: `Bearer ${TOKEN}`, "content-encoding": "gzip" });
+    expect(encoded.status).toBe(400);
+    expect(encoded.closedAfterMs).toBeLessThan(2_000);
   });
 });

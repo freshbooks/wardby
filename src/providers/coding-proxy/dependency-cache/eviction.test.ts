@@ -1,4 +1,9 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
+import { LocalBlobStore } from "../../storage/local.js";
 import type { BlobStore } from "../../storage/types.js";
 import { runEviction, selectEvictions, startEviction } from "./eviction.js";
 import { MemoryDependencyCacheStore, type EvictionRow } from "./store.js";
@@ -68,6 +73,39 @@ describe("dependency cache eviction order", () => {
     expect(result).toEqual({ ran: true, deleted: 1, failed: 1 });
     expect(deleted).toEqual(["dependency-cache/npm/s2.tgz"]);
     expect(store.rows.map((r) => r.id).sort()).toEqual(["s1", "s3"]);
+  });
+
+  it("deletes exactly the evicted row's own blob object, nothing else under the key", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dep-evict-"));
+    try {
+      const blobs = new LocalBlobStore(dir);
+      const store = new MemoryDependencyCacheStore();
+      const prefix = "dependency-cache/npm/aa/bb/lock-img-pol";
+      const base = {
+        ecosystem: "npm",
+        repository: "a",
+        projectPath: ".",
+        lockHash: "lock",
+        workerImage: "img",
+        policyHash: "pol",
+        sha256: "x",
+        createdByRunId: null,
+      };
+      store.rows.push(
+        { ...row("expired", "a", 1, 20, 20), ...base, blobKey: `${prefix}-11111111.tgz` },
+        { ...row("fresh", "b", 1, 1, 1), ...base, repository: "b", blobKey: `${prefix}-22222222.tgz` },
+      );
+      // An object under the same key prefix that no evicted row names (e.g. an upload in flight).
+      for (const key of [`${prefix}-11111111.tgz`, `${prefix}-22222222.tgz`, `${prefix}-33333333.tgz`])
+        await blobs.putStream(key, Readable.from([Buffer.from(key)]));
+      expect(await runEviction({ store, blobs, limits, now: () => NOW })).toEqual({ ran: true, deleted: 1, failed: 0 });
+      expect(await blobs.head(`${prefix}-11111111.tgz`)).toBeNull();
+      expect(await blobs.head(`${prefix}-22222222.tgz`)).not.toBeNull();
+      expect(await blobs.head(`${prefix}-33333333.tgz`)).not.toBeNull();
+      expect(store.rows.map((r) => r.id)).toEqual(["fresh"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("skips a pass while another holds the eviction lock", async () => {
