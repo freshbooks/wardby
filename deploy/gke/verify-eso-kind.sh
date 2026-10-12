@@ -18,9 +18,8 @@
 #      ExternalSecret that already exists (an interrupted earlier run) runs
 #      and recovers: an ownerReferences strip forces the Secret back into the
 #      unowned state.
-#   3b. A key removed from an ExternalSecret (DATABASE_URL, as the password
-#      retirement does) is removed from its Secret on the next sync, which
-#      updates the Secret in place.
+#   3b. A key removed from an ExternalSecret (here a DATABASE_URL) is removed
+#      from its Secret on the next sync, which updates the Secret in place.
 #   4. ESO does nothing outside wardby-coding.
 #   5. ESO's service account cannot write Secrets in another namespace.
 #   6. wait_external_secrets_synced fails with a readable reason for a key
@@ -172,13 +171,11 @@ k -n "$NAMESPACE" get secret wardby-control-plane-env -o jsonpath='{.metadata.ow
 echo "    ok"
 
 echo "==> 3b. a key removed from an ExternalSecret leaves its Secret"
-# The retirement of the database password depends on this: the earlier
-# revision's ExternalSecrets synced a DATABASE_URL key; applying this
-# revision's (which have none) over them, as up.sh does, must drop the key
-# from each ESO-owned Secret, or bootstrap-database-iam.sh's default mode
-# keeps refusing. The earlier manifests are the committed ones plus a
-# DATABASE_URL entry at the top of each spec.data list, read from a store
-# that still holds a database-url secret.
+# A release that drops a key from an ExternalSecret relies on this: applying
+# the new ExternalSecrets over the old, as up.sh does, must drop the key from
+# each ESO-owned Secret rather than leave a stale value behind. The "old"
+# manifests are the committed ones plus a DATABASE_URL entry at the top of
+# each spec.data list, read from a store that holds a database-url secret.
 with_database_url() {
   awk '{ print } $0 == "  data:" {
     print "    - secretKey: DATABASE_URL"

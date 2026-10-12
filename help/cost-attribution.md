@@ -62,8 +62,7 @@ cost per model.
 
 If a company-managed Jira site still uses the legacy Epic Link field, set
 `WARDBY_JIRA_EPIC_LINK_FIELD` (for example `customfield_10014`) so runs are
-grouped under their epic. On GKE, re-run the database grants bootstrap after
-upgrading so coding runs record their per-model usage; until then they still
-run and a warning is logged.
+grouped under their epic. On GKE, `deploy/gke/up.sh` applies the database
+grant coding runs need to record their per-model usage when you upgrade.
 
 For the full guide, follow [`docs/jira-agents.md`](../docs/jira-agents.md).

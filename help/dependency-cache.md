@@ -78,8 +78,8 @@ for folders restored from a snapshot.
    `WARDBY_DEPENDENCY_CACHE=true bash deploy/kind-coding/up.sh` (not durable).
    Docker quickstart: add `WARDBY_DEPENDENCY_CACHE=true` to `.wardby/.env`
    (requires wardby 0.6.1 or later).
-2. GKE: re-run `bootstrap-database-iam.sh` before deploying so the proxy can
-   use the `DependencySnapshot` table.
+2. GKE: nothing extra. `up.sh` grants the proxy the `DependencySnapshot`
+   table before the rollout.
 3. Per agent, once the worker images are current: `update_agent` with
    `codingProfile.dependencyCache: true`. This needs `packages:approve` or
    `agents:admin`.

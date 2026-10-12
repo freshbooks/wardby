@@ -76,9 +76,6 @@ resource "google_sql_database_instance" "main" {
     # REQUIRED refuses any connection that does not come through the Auth
     # Proxy or a Cloud SQL connector -- the default now that every workload
     # connects through the Auth Proxy and no password login remains.
-    # An older deployment still on password login moves off it on the earlier
-    # revision of this module whose default is still NOT_REQUIRED; see
-    # var.connector_enforcement and docs/getting-started-gke.md.
     connector_enforcement = var.connector_enforcement
 
     ip_configuration {
@@ -116,9 +113,8 @@ resource "google_sql_database" "app" {
 # authenticates through database-iam.tf's IAM users. The built-in owner
 # (var.database_user) still exists and still owns every table -- it is
 # managed by bootstrap-database-iam.sh, which creates it on a new deployment
-# and sets its password through the Cloud SQL Admin API only when needed
-# (e.g. the one-off `--password-from-stdin` cutover), never storing it here
-# or anywhere else. `removed` (not a plain delete) tells Terraform to drop
+# and sets a one-time password through the Cloud SQL Admin API for each run,
+# never storing it here or anywhere else. `removed` (not a plain delete) tells Terraform to drop
 # this resource from state without touching the live user, matching the
 # `deletion_policy = "ABANDON"` this resource used to carry: once migrations
 # have created tables owned by this user, Postgres refuses to drop it, and a
