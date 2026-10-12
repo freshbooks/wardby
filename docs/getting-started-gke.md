@@ -50,6 +50,7 @@ Install and authenticate:
 - `kubectl`
 - Helm 3 or later (installs External Secrets Operator)
 - Node.js 24 and npm
+- `curl`, `openssl` and `base64` (the database grants step uses them)
 
 You also need:
 
@@ -315,10 +316,9 @@ Allow DNS and the managed certificate to converge before treating an HTTPS
 failure as an application failure.
 
 On a brand-new project, run `terraform apply` and then
-`bootstrap-database-iam.sh` before `up.sh`: the bootstrap has to grant the
-migrator before any migration can run. See "Database login" below for the
-exact order, including the database check `up.sh` doesn't pass until a second
-bootstrap run has granted the coding proxy too.
+`bootstrap-database-iam.sh` once before the first `up.sh`: the bootstrap has to
+grant the migrator before any migration can run. See "Database login" below
+for the exact order.
 
 ### Database login
 
@@ -335,12 +335,11 @@ group role in `deploy/gke/database-grants.sql`:
 | Migrations     | `<name_prefix>-migrator` | `wardby-migrator`          | Acts as the table owner (`SET ROLE`), so `prisma migrate deploy` and `dbos schema` can alter and create tables                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 `deploy/gke/bootstrap-database-iam.sh` applies the grants as the built-in
-owner, from a short-lived Job inside the cluster. Run it whenever
-`database-grants.sql` changes, before deploying the release that needs the new
-grants (`bootstrap-database-iam.sh --check`, then `bootstrap-database-iam.sh`,
-then `up.sh`), and as part of the orders below. A release deployed ahead of its
-grants fails with "permission denied" wherever it uses one it doesn't have yet.
-The grants run in one transaction, so a statement the database refuses leaves
+owner, from a short-lived Job inside the cluster. `up.sh` runs it on every
+deploy, after the migrations and before the rollout (see
+[Upgrading an existing deployment](#upgrading-an-existing-deployment)); you
+run it by hand only on a brand-new project, below, or with `--check`. The
+grants run in one transaction, so a statement the database refuses leaves
 nothing applied.
 
 The built-in owner is not a Terraform resource: `bootstrap-database-iam.sh`
@@ -349,119 +348,28 @@ SQL Admin API, uses that password once to apply the grants, and resets it to
 a value nobody holds on every exit, including a failed grant. No password is
 ever stored, printed, or passed as a process argument.
 
-A deployment that already runs and then gains the native gateway identity from
-`terraform apply` runs `deploy/gke/bootstrap-database-iam.sh` once, so the
-gateway's user gets its `wardby_app` membership, and then `deploy/gke/up.sh`.
-`up.sh`'s database check also tests the native gateway and says so if the
-grant is missing.
-
 A brand-new project runs, in this order:
 
 1. `terraform -chdir=deploy/gke apply` — creates the cluster, the instance
    and the four IAM database users. Run it yourself rather than through
    `up.sh`, which would go on to the migrations before the migrator has its
    grants.
-2. `deploy/gke/bootstrap-database-iam.sh` (default mode) — fetches the
-   cluster's kubectl credentials if you don't have them yet, creates the
-   owner, and applies the migrator's (and the app's) grants. The coding
-   proxy's ledger tables don't exist yet, so its grants are skipped: expected.
-3. `deploy/gke/up.sh` — applies the migrations and rolls out, then stops at
-   the database check: the coding proxy's grants are on tables that did not
-   exist in step 2.
-4. `deploy/gke/bootstrap-database-iam.sh` again — now that the tables exist,
-   also applies the coding proxy's ledger grants.
-5. `deploy/gke/up.sh` — rolls out again and passes every check.
-
-Two bootstrap runs, not one: a grant on a named table can't apply before the
-migration that creates that table has run.
-
-The same applies to every later release that adds a table the coding proxy
-uses: run `bootstrap-database-iam.sh` again after its migration. `up.sh`
-checks this for you. After the rollout it asks the database, as the proxy's
-own role, for every privilege `database-grants.sql` gives `wardby_proxy`
-(`deploy/gke/proxy-grant-checks.mjs`), and stops with the list of missing
-grants instead of letting the proxy fail registry requests with "permission
-denied".
-
-After upgrading an existing deployment to a release with cost attribution,
-re-run `bootstrap-database-iam.sh` so the coding proxy can record per-model
-usage for coding runs (used by the `cost_report` tool's `model` grouping).
-Until then coding runs still work, but their per-model breakdown isn't
-recorded.
+2. `deploy/gke/bootstrap-database-iam.sh` — fetches the cluster's kubectl
+   credentials if you don't have them yet, creates the owner, and applies the
+   migrator's (and the app's) grants. Grants on tables that don't exist yet
+   are skipped: expected.
+3. `deploy/gke/up.sh` — applies the migrations, then the grants again (now
+   that every table exists), then rolls out and passes every check.
 
 `bootstrap-database-iam.sh --check` runs the grants inside a transaction that
 is then rolled back, and reports success or the exact statement the database
-refused, without changing anything. Run it before the real run on a live
-deployment.
+refused, without changing any grant. Use it to see why a grants step failed.
 
 `connector_enforcement` (the Cloud SQL instance setting) defaults to
 `REQUIRED`: it refuses any connection that does not come through the Auth
 Proxy or a Cloud SQL connector, and with port 5432 to the instance closed in
 every NetworkPolicy, there's no route left for a plain Postgres connection to
-even attempt. Leave it at the default; an older deployment still on password
-login moves off it on an earlier revision of this module, below.
-
-### Moving an older deployment
-
-A deployment still on password login — from before this module retired it —
-can't adopt this revision directly: this revision no longer syncs the
-password `DATABASE_URL`, closes port 5432 and refuses non-Auth-Proxy
-connections, which would cut off pods still logging in with the password.
-It moves over in stages, because real pods are already serving traffic
-throughout.
-
-**1–2. Cut the running pods to IAM login, on the revision before this one.**
-Check out the revision of this module that added IAM login, before the
-password was retired: the merge of pull request #83 into `main`.
-`git log --oneline --first-parent main -- deploy/gke` lists the merges that
-changed this module, newest first; it's the one titled
-`Merge pull request #83 ...`, just below the merge that retired the password
-(`git log --oneline --merges --grep='#83' main` finds it directly). Then
-`git checkout <that commit>` and follow that revision's own
-`docs/getting-started-gke.md`, "Database login", and its order for "an
-existing deployment still on password login": `bootstrap-database-iam.sh
---password-from-stdin --check`, the same without `--check`, then `up.sh`.
-That rolls out password-less pods while the password still works as a
-fallback, and proves the control plane and the coding proxy each read the
-database through their own IAM login. That revision's
-`connector_enforcement` default is still `NOT_REQUIRED`, so nothing that
-still uses the password is cut off. Then return to this revision
-(`git checkout main`) for the last stage.
-
-**3. Retire the password**, once every pod speaks IAM login and this change
-has merged to `main`:
-
-1. Confirm nothing still uses the password: both Deployments' pods log in as
-   IAM users, and no pod has a password `DATABASE_URL` in its effective env.
-2. Delete the `database-url` Secret Manager secret:
-   `gcloud secrets delete <name_prefix>-database-url --quiet` — this module no
-   longer creates or reads it. Deleting it by hand first, before the next
-   step, is what lets Terraform drop it from state instead of trying to
-   destroy it.
-3. Remove any `connector_enforcement` line from `terraform.tfvars` (or set
-   it to `REQUIRED`), so the new default takes effect. Then `terraform plan`:
-   expect the generated password destroyed, the `database-url` secret and
-   its IAM binding gone from state (already deleted by hand), the old
-   password-login user forgotten (not destroyed), `connector_enforcement`
-   moving to `REQUIRED` on the instance (updated in place, not replaced),
-   and no other destroy. Review
-   the plan, then apply only once it matches that. If apply still fails
-   trying to destroy the `database-url` secret, the secret wasn't actually
-   deleted in step 2 — delete it and re-apply. Never turn off
-   `secrets_deletion_protection` to get past that error: it unprotects every
-   other secret in the same set, including `SECRET_APP_KEY` and the auth
-   keys, and losing `SECRET_APP_KEY` makes every credential already stored
-   in the database unreadable.
-4. `deploy/gke/up.sh` — new ExternalSecrets carry no `DATABASE_URL`,
-   NetworkPolicies no longer allow 5432, migrations, rollout, and the
-   database and endpoint checks.
-5. `deploy/gke/bootstrap-database-iam.sh` (default mode) — the guard now
-   passes, since the Secret no longer has a `DATABASE_URL`: it sets a
-   one-time owner password, reapplies the grants, and resets the password to
-   a value nobody holds.
-6. Verify: a direct password connection is refused (NetworkPolicy blocks
-   5432, and the instance refuses it too), the pods still log in through
-   IAM, and the Terraform state holds no database password.
+even attempt. Leave it at the default.
 
 ## 7. Verify
 
@@ -552,6 +460,38 @@ roll; if it fails, `up.sh` prints the `migrate` and `cloud-sql-proxy` container
 logs (and, if those are empty or the Job timed out, the Job's and pod's
 events), then stops.
 
+### Upgrading an existing deployment
+
+To upgrade, check out the new release and re-run `deploy/gke/up.sh`. No
+manual database step is needed: `up.sh` applies the migrations, then the
+database grants (`deploy/gke/bootstrap-database-iam.sh`, which applies
+`deploy/gke/database-grants.sql`), and only then rolls out the new pods. A
+release that adds a table, a column, or a workload that needs a new grant
+therefore never runs without it.
+
+- **If the migrations fail**, `up.sh` stops before the grants and the
+  rollout; the running version is untouched.
+- **If the grants fail**, `up.sh` stops before the rollout with a non-zero
+  exit; the running version keeps serving. The migrations already applied
+  are additive, so the running version tolerates them. Run
+  `deploy/gke/bootstrap-database-iam.sh --check` to see the exact statement
+  the database refused without changing anything, fix the cause, and re-run
+  `up.sh`.
+- **After the rollout**, `up.sh` checks that each new pod can read the
+  database, and asks the database, as the coding proxy's own role, for every
+  privilege `database-grants.sql` gives it
+  (`deploy/gke/proxy-grant-checks.mjs`). A missing grant stops the deploy
+  with a non-zero exit and the list of what's missing, rather than letting
+  the proxy fail registry requests with "permission denied".
+
+Never run two `up.sh` deploys against the same project at once: both would
+run migrations, set and reset the database owner's password, and roll out
+over each other. Nothing locks against it, so wait for one to finish.
+
+You run `bootstrap-database-iam.sh` by hand only on a brand-new project,
+between `terraform apply` and the first `up.sh` (see
+[Database login](#database-login)), or as `--check` for a dry run.
+
 ### Durable executor
 
 The control plane runs native runs on the durable executor (`EXECUTOR=dbos`):
@@ -588,12 +528,9 @@ the step that was in flight runs again. Coding runs are Kubernetes Jobs and are 
   [Durable executor](security-deployment.md#durable-executor) for what is
   stored and how to prune it with `DBOS.deleteWorkflow`.
 
-**Enabling it on an existing deployment.** The grants changed, so apply them
-before deploying: run `deploy/gke/bootstrap-database-iam.sh --check`, then
-`deploy/gke/bootstrap-database-iam.sh`, then `deploy/gke/up.sh`. Without the
-grants the new control-plane pod crash-loops with "permission denied" while
-the old one keeps serving, and `up.sh` stops at the rollout. On a brand-new
-project the order under "Database login" already covers it.
+**Enabling it on an existing deployment.** Re-run `deploy/gke/up.sh`: it
+applies the durable executor's grants before the rollout (see
+[Upgrading an existing deployment](#upgrading-an-existing-deployment)).
 
 **Switching back** to the in-process executor: set `EXECUTOR` to `in-process`
 in `deploy/kind-coding/manifests/overlays/gke-autopilot/control-plane.yaml`
@@ -643,10 +580,10 @@ control plane is configured with `NATIVE_SANDBOX_LAUNCHER=kubernetes`,
 `NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS=60000`. Worker pods use the gVisor runtime
 class, `KUBERNETES_PLATFORM=gke-autopilot`, and the run priority class.
 
-- **One-time bootstrap.** The gateway has its own database login. After
-  `terraform apply` adds its identity to an existing deployment, run
-  `deploy/gke/bootstrap-database-iam.sh` once, then `deploy/gke/up.sh`; see
-  [Database login](#database-login).
+- **Database login.** The gateway has its own database login. `up.sh`
+  applies its `wardby_app` membership before the rollout, so adding its
+  identity to an existing deployment needs no manual step; see
+  [Upgrading an existing deployment](#upgrading-an-existing-deployment).
 - **Enable per agent.** Nothing runs in the sandbox until you opt an agent in:
   set its `nativeExecutionMode` to `sandbox` with the `update_agent` MCP tool
   (native agents only).
@@ -804,9 +741,10 @@ cached. Raise `KUBERNETES_READY_TIMEOUT_MS` if you see runs fail
 Off by default. To keep npm `node_modules` snapshots for coding runs
 (see [Dependency cache](coding-packages.md#dependency-cache)), set
 `dependency_cache_enabled = true` and a unique `dependency_cache_bucket_name` in
-`terraform.tfvars`, re-run `deploy/gke/bootstrap-database-iam.sh` so the coding
-proxy's role can use the `DependencySnapshot` table, and deploy with
-`WARDBY_DEPENDENCY_CACHE=true deploy/gke/up.sh`. Keep
+`terraform.tfvars`, and deploy with `WARDBY_DEPENDENCY_CACHE=true
+deploy/gke/up.sh` (it grants the coding proxy's role the `DependencySnapshot`
+table before the rollout; see
+[Upgrading an existing deployment](#upgrading-an-existing-deployment)). Keep
 `dependency_cache_max_age_days` equal to the proxy's
 `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS` (default 14). Details:
 [`deploy/gke/README.md`](../deploy/gke/README.md#run-dependency-cache).
@@ -822,11 +760,9 @@ kubectl -n wardby-coding rollout undo deploy/wardby-coding-proxy
 kubectl -n wardby-coding rollout undo deploy/wardby-native-gateway
 ```
 
-`rollout undo` restores only the Deployments' images and pod templates — there
-is no password path to fall back to any more, so a rollback is safe only for
-a version that still speaks IAM login. It does not touch any NetworkPolicy: a
-change to the database egress rules themselves is not undone by `rollout
-undo`.
+`rollout undo` restores only the Deployments' images and pod templates. It
+does not touch the database grants or any NetworkPolicy: a change to the
+database egress rules themselves is not undone by `rollout undo`.
 
 Database migrations only go forward: a rollback does not undo a schema change.
 That is safe while every migration is additive (new tables, nullable columns,

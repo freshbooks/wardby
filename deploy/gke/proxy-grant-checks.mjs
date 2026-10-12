@@ -3,12 +3,12 @@
 // connected role is still missing. up.sh runs that query inside the proxy pod,
 // as the proxy's own IAM user, after a rollout.
 //
-// Why: the grants only take effect when deploy/gke/bootstrap-database-iam.sh
-// runs, and up.sh does not run it. Twice a release added proxy tables whose
-// grants were in this file but never applied, and every registry request then
-// failed with "permission denied", surfacing only as an unlogged 502 to npm or
-// pip. Deriving the checks from the file itself means a new table's grant is
-// checked the moment it is written, with no second list to keep in sync.
+// Why: up.sh applies the grants (deploy/gke/bootstrap-database-iam.sh) before
+// the rollout, and this proves they took. A proxy missing a grant fails every
+// registry request with "permission denied", surfacing only as an unlogged 502
+// to npm or pip. Deriving the checks from the file itself means a new table's
+// grant is checked the moment it is written, with no second list to keep in
+// sync.
 //
 //   node deploy/gke/proxy-grant-checks.mjs          # prints the query
 import { readFileSync } from "node:fs";

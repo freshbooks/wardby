@@ -123,8 +123,8 @@ variables (`WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` and the others in
 [Dependency cache limits](../../docs/coding-packages.md#dependency-cache-limits))
 are not passed through `up.sh`; set them on the proxy Deployment if you need
 them. The proxy also needs `wardby_proxy` access to the `DependencySnapshot`
-table: re-run `bootstrap-database-iam.sh` first (see
-[Database login](#database-login)).
+table, which `up.sh` grants before the rollout (see
+[Upgrading an existing deployment](../../docs/getting-started-gke.md#upgrading-an-existing-deployment)).
 
 ## Egress
 
@@ -178,10 +178,9 @@ kubectl -n wardby-coding delete externalsecret wardby-control-plane-env --cascad
 ```
 
 (A plain delete would also delete the Secret, because ESO owns it.) Then
-recreate it directly — `deploy/kind-coding/control-plane-secret.sh` is
-written for the password era and takes `DATABASE_URL` from the existing
-`wardby-coding-proxy-env` Secret, which no longer has one on this deployment;
-don't run it here. `DATABASE_URL` isn't a secret value on GKE at all: the
+recreate it directly — don't use `deploy/kind-coding/control-plane-secret.sh`,
+which is for the kind harness and expects a `DATABASE_URL` this deployment's
+Secrets don't have. `DATABASE_URL` isn't a secret value on GKE at all: the
 Deployment's own manifest supplies it directly (`control-plane.yaml`), not
 the Secret, so a hand-rebuilt Secret needs none. Recreate every
 `secret_ids` key (`secrets.tf`) plus `AUTH_PROVIDER` (the constant
@@ -209,86 +208,46 @@ application code just connects to localhost.
 
 `database-grants.sql` grants each privilege set to a `NOLOGIN` group role
 (`wardby_app`, `wardby_proxy`) rather than to the IAM users directly, then
-grants the IAM users membership (the gateway's user joins `wardby_app`). `bootstrap-database-iam.sh` applies that file
-as the built-in owner, from a short-lived Job inside the cluster (the instance
-has no public address to reach from outside it), in one transaction: a
-statement the database refuses leaves nothing applied. Run it again whenever
-`database-grants.sql` changes, before deploying the release that needs the new
-grants: `bootstrap-database-iam.sh --check`, then `bootstrap-database-iam.sh`,
-then `up.sh`. A release deployed ahead of its grants fails with "permission
-denied" wherever it uses one it doesn't have yet. Grants on named tables apply
-only once the migrations have created them, which is why a brand-new project
-runs it twice.
+grants the IAM users membership (the gateway's user joins `wardby_app`).
+`bootstrap-database-iam.sh` applies that file as the built-in owner, from a
+short-lived Job inside the cluster (the instance has no public address to reach
+from outside it), in one transaction: a statement the database refuses leaves
+nothing applied. It sets a random password on the built-in owner through the
+Cloud SQL Admin API, creating the owner if it does not exist, uses it once, and
+resets it to another random value that is never stored — on every exit,
+including a failed grant.
 
-A brand-new project, in order:
+`up.sh` runs it on every deploy, after the migrations and before the rollout,
+so an upgrade needs no manual database step; see
+[Upgrading an existing deployment](../../docs/getting-started-gke.md#upgrading-an-existing-deployment). Run it by hand only on a brand-new project, in this order:
 
 1. `terraform apply` — the instance and the four IAM database users. Run
    it directly, not through `up.sh`: `up.sh` would go on to the migrations
    before the migrator has its grants.
-2. `bootstrap-database-iam.sh` (default mode) — fetches the cluster's kubectl
-   credentials if they're missing, creates the built-in owner and applies the
-   migrator's (and the app's) grants. The coding proxy's
-   ledger tables don't exist yet, so its grants are skipped: expected.
-3. `up.sh` — migrations and rollout; its database check then stops it,
-   because the coding proxy's grants are on tables that did not exist in
-   step 2.
-4. `bootstrap-database-iam.sh` again — adds the coding proxy's ledger
-   grants, now that its tables exist.
-5. `up.sh` — passes every check.
+2. `bootstrap-database-iam.sh` — fetches the cluster's kubectl credentials if
+   they're missing, creates the built-in owner and applies the migrator's (and
+   the app's) grants. Grants on tables that don't exist yet are skipped:
+   expected.
+3. `up.sh` — migrations, then the grants again now that every table exists,
+   then the rollout and every check.
 
-A deployment that already runs, and then gains the native gateway identity from
-`terraform apply`, runs `bootstrap-database-iam.sh` once so the gateway's user
-gets its `wardby_app` membership, then `up.sh`. `up.sh`'s database check tests
-the native gateway too and says so if that membership is missing.
-
-Two bootstrap runs, not one: a grant on a named table can't apply before the
-migration that creates it has run. See `docs/getting-started-gke.md`,
-"Moving an older deployment", for a deployment still on password login: it
-moves to IAM login with `--password-from-stdin` on the earlier revision of
-this module that added IAM login, then returns here to retire the password.
-
-The bootstrap has two modes:
-
-- **Default.** The normal path above, and for reapplying grants later (e.g.
-  after `database-grants.sql` changes). Sets a random password on the
-  built-in owner through the Cloud SQL Admin API, creating the owner if it
-  does not exist, uses it once for this run, and resets it to another random
-  value that is never stored — on every exit, including a failed grant. It
-  refuses to run this way while Secret `wardby-control-plane-env` still has a
-  `DATABASE_URL` key, since that means an older, not-yet-migrated deployment
-  whose running pods still log in with the current owner password, and
-  changing it would cut them off; `--force-rotate` overrides that refusal
-  and is for an emergency only, knowing it cuts those pods off.
-- **`--password-from-stdin`.** Uses the password it is given and never
-  changes it. Only for moving an older deployment off password login: the
-  owner password the pods already use also applies the grants, so nothing
-  already running is disturbed. A brand-new deployment never has a password
-  to give it.
-
-Re-run it after upgrading an existing deployment to a release that lets the
-coding proxy write per-model usage (`RunModelUsage`, used by the `cost_report`
-tool's `model` grouping). Until then coding runs still work, but their
-per-model breakdown isn't recorded.
-
-Either mode takes `--check`: the grants run inside a transaction that is
-rolled back, and the bootstrap reports success or the exact refusal while
-changing nothing. Run it before the real run on a live deployment.
+`bootstrap-database-iam.sh --check` runs the grants inside a transaction that
+is rolled back, and reports success or the exact refusal while changing no
+grant.
 
 `connector_enforcement` (a Cloud SQL instance setting, `cloudsql.tf`) set to
 `REQUIRED` refuses any connection that does not come through the Auth Proxy
 or a Cloud SQL connector — so a leaked password would be useless on the
 network anyway, and it is the default now that every workload connects
-through the Auth Proxy and no password login remains. Leave it at the
-default: an older deployment still on password login moves off it on the
-earlier revision (whose default is still `NOT_REQUIRED`), and removes any
-`connector_enforcement` override from `terraform.tfvars` when it retires the
-password here.
+through the Auth Proxy. Leave it at the default.
 
 After the rollout, `up.sh` runs one query through the control plane's, the
 coding proxy's, and the native gateway's own database login, and fails the
-deploy if any cannot read the database. `kubectl rollout undo` then restores the previous images and
-pod templates (any revision since the IAM cutover), which also log in through
-IAM — there is no password path to fall back to.
+deploy if any cannot read the database. It also checks, as the coding proxy's
+own role, every privilege `database-grants.sql` gives `wardby_proxy`
+(`proxy-grant-checks.mjs`), and fails the deploy if one is missing.
+`kubectl rollout undo` then restores the previous images and pod templates,
+which also log in through IAM.
 
 ## Teardown
 

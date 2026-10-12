@@ -136,7 +136,7 @@ variable "secrets_deletion_protection" {
 }
 
 variable "connector_enforcement" {
-  description = "REQUIRED refuses connections that bypass the Cloud SQL Auth Proxy. NOT_REQUIRED only while moving an older deployment from password login."
+  description = "REQUIRED refuses connections that bypass the Cloud SQL Auth Proxy. Leave it at REQUIRED: every workload connects through the Auth Proxy."
   type        = string
   default     = "REQUIRED"
 
