@@ -1,4 +1,5 @@
 import { createConnection } from "node:net";
+import { BUDGET_MEASURE_TIMEOUT_MS, DEFAULT_TIMEOUTS } from "../coding-worker/dependency-cache.mjs";
 
 /** Where the tool runner listens (claude-tool-runner/main.mjs) and the relay connects (tool-relay.ts). */
 export const TOOL_SOCKET_PATH = "/run/wardby/tool/runner.sock";
@@ -29,12 +30,16 @@ export async function assertToolRunnerReachable(socketPath = TOOL_SOCKET_PATH, t
 
 /** The tool runner's internal tool (claude-tool-runner/main.mjs); the agent's SDK options disallow it (sdk.ts). */
 export const PREPARE_DEPENDENCIES_TOOL = "wardby_prepare_dependencies";
+/** Room for the tool runner and the socket on top of the module's own bounds. */
+const PREPARE_DEPENDENCIES_MARGIN_MS = 60_000;
 /**
- * The dependency cache's own bound (dependency-cache.mjs: totalMs 20 min + settleMs) plus room for
- * the tool runner. A worker that stops waiting earlier is still safe: the tool runner holds the
- * first command until the cache has finished.
+ * Derived from the dependency cache's own bounds (dependency-cache.mjs, the same file the tool runner
+ * runs): the budget walk, then the whole prepare (totalMs) and its settle grace, plus a margin. A
+ * worker that stops waiting earlier is still safe: the tool runner holds the first command until
+ * the cache has finished, and seals before it.
  */
-export const PREPARE_DEPENDENCIES_TIMEOUT_MS = 25 * 60_000;
+export const PREPARE_DEPENDENCIES_TIMEOUT_MS =
+  BUDGET_MEASURE_TIMEOUT_MS + DEFAULT_TIMEOUTS.totalMs + DEFAULT_TIMEOUTS.settleMs + PREPARE_DEPENDENCIES_MARGIN_MS;
 const MAX_RESPONSE_LINE_BYTES = 256 * 1024;
 
 export interface PrepareDependenciesCall {

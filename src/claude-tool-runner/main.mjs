@@ -31,15 +31,26 @@ const loadDefaultDependencyCache = () => import("../coding-worker/dependency-cac
 
 /**
  * Process-wide, across every socket connection: the dependency cache runs at most once, only
- * before the first command, and the first command never starts while it is still running.
- * When it never ran, the first command seals the run's upload window first, so nothing a command
- * (the agent) does can be uploaded as a snapshot. The proxy's upload deadline is the backstop.
+ * before the first command, and the first command never starts while it is still running. Before
+ * the first command the run's upload window is always sealed (memoized; the proxy's seal is
+ * idempotent), whether or not prepare ran, failed or was skipped, so nothing a command (the
+ * agent) does can be uploaded as a snapshot. The proxy's upload deadline is the backstop.
  */
 function dependencyGate(setup, workspacePath, loadDependencyCache) {
   let preparing;
   let sealing;
   let commandStarted = false;
   const env = () => commandEnvironment(setup, workspacePath);
+  const seal = () =>
+    (sealing ??= (async () => {
+      try {
+        await prepareCommandWorkspace(setup, workspacePath);
+        const module = await loadDependencyCache();
+        await module.sealUploadWindow({ env: env() });
+      } catch {
+        // The proxy's upload deadline still closes the window.
+      }
+    })());
   return {
     prepare() {
       if (preparing) return preparing;
@@ -48,7 +59,15 @@ function dependencyGate(setup, workspacePath, loadDependencyCache) {
         try {
           await prepareCommandWorkspace(setup, workspacePath);
           const module = await loadDependencyCache();
-          return await module.prepareDependencies({ workspace: workspacePath, env: env() });
+          // The run's volume (setup.diskMb) minus what the workspace already uses: statfs can't
+          // see a Kubernetes emptyDir's sizeLimit. A size it can't measure skips the cache.
+          const budget = await module.dependencyCacheBudget({ workspace: workspacePath, diskMb: setup.diskMb });
+          if (budget.reason !== undefined) return { projects: [], reason: budget.reason };
+          return await module.prepareDependencies({
+            workspace: workspacePath,
+            env: env(),
+            budgetBytes: budget.budgetBytes,
+          });
         } catch {
           return { projects: [], reason: "worker_error" };
         }
@@ -58,21 +77,8 @@ function dependencyGate(setup, workspacePath, loadDependencyCache) {
     async beforeCommand() {
       commandStarted = true;
       if (!setup.dependencyCache) return;
-      if (preparing) {
-        // It seals on its own before it returns.
-        await preparing;
-        return;
-      }
-      sealing ??= (async () => {
-        try {
-          await prepareCommandWorkspace(setup, workspacePath);
-          const module = await loadDependencyCache();
-          await module.sealUploadWindow({ env: env() });
-        } catch {
-          // The proxy's upload deadline still closes the window.
-        }
-      })();
-      await sealing;
+      if (preparing) await preparing;
+      await seal();
     },
   };
 }

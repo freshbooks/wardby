@@ -13,6 +13,8 @@ describe("Claude coding worker image policy", () => {
     // The shared debug tracer and the registry-token derivation it redacts with.
     expect(dockerfile).toContain("/build/dist/coding-worker/debug-trace.js");
     expect(dockerfile).toContain("/build/dist/coding/registry/token.js");
+    // tool-socket.js reads the dependency cache module's timeouts.
+    expect(dockerfile).toContain("COPY src/coding-worker/dependency-cache.mjs ./coding-worker/dependency-cache.mjs");
     expect(dockerfile).toContain("/worker/node_modules ./node_modules");
     expect(dockerfile).toContain("USER 10001:10001");
     expect(dockerfile).toContain('ENTRYPOINT ["node"');

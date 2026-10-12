@@ -38,6 +38,10 @@ COPY --from=build /build/dist/coding-worker/debug-trace.js ./coding-worker/debug
 COPY --from=build /build/dist/coding-worker/keeper.js ./coding-worker/keeper.js
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 COPY --from=build /build/dist/coding/registry/token.js ./coding/registry/token.js
+# tool-socket.js derives its wait for the tool runner's dependency cache from the module's own
+# timeouts (DEFAULT_TIMEOUTS); only its constants are read here, the tool runner runs it.
+COPY src/coding-worker/dependency-cache.mjs ./coding-worker/dependency-cache.mjs
+RUN node --input-type=module -e 'const m = await import("/opt/wardby/claude-coding-worker/tool-socket.js"); if (!(m.PREPARE_DEPENDENCIES_TIMEOUT_MS > 0)) process.exit(1)'
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \

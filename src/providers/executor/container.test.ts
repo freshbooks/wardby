@@ -908,11 +908,17 @@ describe("ContainerExecutor", () => {
       return { input: input!, spec: created.jobs.lastSpec! };
     };
     const on = await launched({ dependencyCache: true });
-    expect(on.input).toMatchObject({ dependencyCache: true });
+    // The volume size rides along, so the cache can stay inside it: the deployment default here...
+    expect(on.input).toMatchObject({ dependencyCache: true, diskMb: on.spec.limits.diskMb });
     expect(on.spec.dependencyCache).toBe(true);
-    for (const overrides of [{ dependencyCache: false }, {}]) {
+    // ...and the agent's own workspace size when it sets one.
+    const sized = await launched({ dependencyCache: true, workspaceDiskMb: 512 });
+    expect(sized.input).toMatchObject({ dependencyCache: true, diskMb: 512 });
+    expect(sized.spec.limits.diskMb).toBe(512);
+    for (const overrides of [{ dependencyCache: false }, {}, { workspaceDiskMb: 512 }]) {
       const off = await launched(overrides);
       expect(off.input).not.toHaveProperty("dependencyCache");
+      expect(off.input).not.toHaveProperty("diskMb");
       expect(off.spec).not.toHaveProperty("dependencyCache");
     }
   });

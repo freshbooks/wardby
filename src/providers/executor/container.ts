@@ -1484,8 +1484,11 @@ export class ContainerExecutor implements Executor {
         ...(run.repoSkills === false ? { repoSkills: false } : {}),
         // Only when off: every other run's input stays exactly what older workers expect.
         ...(run.claudeBareMode === false ? { claudeBareMode: false } : {}),
-        // Only when on: every other run's input stays exactly what older workers expect.
-        ...(run.dependencyCache ? { dependencyCache: true as const } : {}),
+        // Only when on: every other run's input stays exactly what older workers expect. The volume
+        // size (the job spec's limits.diskMb) bounds what the cache may restore.
+        ...(run.dependencyCache
+          ? { dependencyCache: true as const, diskMb: run.workspaceDiskMb ?? this.options.limits.diskMb }
+          : {}),
         // Only when there are some: every other run's input stays exactly what older workers expect.
         ...(services.length > 0 ? { services: workerServices(services) } : {}),
         // Only when there is something to load: every other run's input stays exactly what older workers expect.

@@ -80,6 +80,11 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
   // Set by the launcher only on a dependency-cache run (claude-tool-setup.ts); main.mjs then offers
   // the worker its one prepare call. An older tool runner ignores the key.
   if (value.dependencyCache !== undefined && typeof value.dependencyCache !== "boolean") throw invalid();
+  // The workspace volume size (MiB) the dependency cache must stay inside; only with the flag.
+  if (value.diskMb !== undefined) {
+    if (value.dependencyCache !== true) throw invalid();
+    if (!Number.isSafeInteger(value.diskMb) || value.diskMb < 64 || value.diskMb > 32_768) throw invalid();
+  }
   if (!Array.isArray(value.files) || value.files.length > MAX_FILES) throw invalid();
   const cacheRoot = `${cacheRootFor(workspacePath)}/`;
   const files = value.files.map((file) => {
@@ -92,6 +97,7 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
     env: Object.freeze(env),
     files: Object.freeze(files),
     ...(value.dependencyCache === true ? { dependencyCache: true } : {}),
+    ...(value.diskMb !== undefined ? { diskMb: value.diskMb } : {}),
   });
 }
 

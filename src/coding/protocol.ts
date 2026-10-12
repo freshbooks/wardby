@@ -16,6 +16,9 @@ export const MAX_CODING_SUMMARY_BYTES = 8 * 1024;
 export const MAX_CODING_TESTS = 64;
 export const MAX_CODING_TEST_COMMAND_BYTES = 2 * 1024;
 export const MAX_TAG_BYTES = 32;
+/** The workspace volume bounds every launcher enforces (docker-isolation.ts, kubernetes-isolation.ts). */
+export const MIN_CODING_DISK_MB = 64;
+export const MAX_CODING_DISK_MB = 32_768;
 
 /**
  * Coding-run services (docs/coding-services.md): the catalog name and version
@@ -471,6 +474,12 @@ export const CodingTaskInputSchema = z
      */
     dependencyCache: z.literal(true).optional(),
     /**
+     * The run's workspace volume size in MiB (the job's limits.diskMb), so the dependency cache can
+     * stay inside it: on Kubernetes the emptyDir sizeLimit is invisible to statfs. Written only with
+     * dependencyCache, so every other input is unchanged for workers that predate it.
+     */
+    diskMb: z.number().int().min(MIN_CODING_DISK_MB).max(MAX_CODING_DISK_MB).optional(),
+    /**
      * Cap on a traced run's total trace output, in MiB (CodingRun.debugTraceMaxMb).
      * Written only on a traced run whose agent sets one; absent means the
      * worker default (DEFAULT_DEBUG_TRACE_MAX_MB).
@@ -521,6 +530,9 @@ export const CodingTaskInputSchema = z
         path: ["headRef"],
         message: "must match wardby/run-<runId> (or wardby/run-<continuationOf.runId>)",
       });
+    }
+    if (value.diskMb !== undefined && value.dependencyCache !== true) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["diskMb"], message: "only with dependencyCache" });
     }
     const names = (value.services ?? []).map((service) => service.name);
     if (new Set(names).size !== names.length) {

@@ -20,7 +20,9 @@ import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   checkConsistency,
+  dependencyCacheBudget,
   DEFAULT_TIMEOUTS,
+  MIN_BUDGET_BYTES,
   discoverProjects,
   extractArchive,
   prepareDependencies,
@@ -840,6 +842,25 @@ describe("seal and timeouts", () => {
     expect(events.some((entry) => entry.event === "snapshot_skipped" && entry.reason === "sealed")).toBe(true);
   });
 
+  it("a cancelled run stops the work promptly, still seals, and changes nothing afterwards", async () => {
+    state.hang = "GET /cache/npm/lookup";
+    const controller = new AbortController();
+    const started = Date.now();
+    const running = prepare({ signal: controller.signal, timeouts: { httpMs: 60_000, settleMs: 200 } });
+    setTimeout(() => controller.abort(), 100);
+    const result = await running;
+    expect(result.result).toBe("skipped");
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(state.seals).toBe(1);
+  });
+
+  it("an already-cancelled signal does no project work", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await prepareAll({ signal: controller.signal, timeouts: { settleMs: 200 } });
+    expect(state.calls.filter((call) => call !== "POST /cache/npm/seal")).toEqual([]);
+  });
+
   it("sealUploadWindow seals on its own with the registry's token (a tool runner's first command)", async () => {
     expect(await sealUploadWindow({ env })).toEqual({ status: 200, confirmed: true });
     expect(state.calls).toEqual(["POST /cache/npm/seal"]);
@@ -1286,5 +1307,51 @@ describe("review fixes", () => {
     const refused = events.find((entry) => entry.event === "archive_refused");
     expect(refused).toMatchObject({ rule: "case_fold_duplicate", pathLength: expect.any(Number) });
     expect(JSON.stringify(refused)).not.toContain("node_modules/a");
+  });
+});
+
+// ---------------------------------------------------------------- budget
+
+describe("dependencyCacheBudget", () => {
+  const MiB = 1024 * 1024;
+
+  it("is diskMb minus what the workspace already uses minus max(64 MiB, 5%)", async () => {
+    await writeFile(join(workspace, "big.bin"), Buffer.alloc(3 * MiB, 1));
+    const budget = await dependencyCacheBudget({ workspace, diskMb: 2048 });
+    expect(budget.reason).toBeUndefined();
+    expect(budget.usedBytes).toBeGreaterThanOrEqual(3 * MiB);
+    expect(budget.budgetBytes).toBe(2048 * MiB - budget.usedBytes! - Math.floor(2048 * MiB * 0.05));
+    const small = await dependencyCacheBudget({ workspace, diskMb: 512 });
+    expect(small.budgetBytes).toBe(512 * MiB - small.usedBytes! - 64 * MiB);
+  });
+
+  it("skips a volume too small to be worth it", async () => {
+    expect(await dependencyCacheBudget({ workspace, diskMb: 64 })).toMatchObject({ reason: "budget_too_small" });
+    await writeFile(join(workspace, "big.bin"), Buffer.alloc(80 * MiB, 1));
+    const full = await dependencyCacheBudget({ workspace, diskMb: 200 });
+    expect(full).toMatchObject({ reason: "budget_too_small" });
+    expect(MIN_BUDGET_BYTES).toBe(64 * MiB);
+  });
+
+  it("is budget_unknown without a disk size, past its entry or time bound, or for a missing workspace", async () => {
+    expect(await dependencyCacheBudget({ workspace, diskMb: undefined })).toEqual({ reason: "budget_unknown" });
+    expect(await dependencyCacheBudget({ workspace, diskMb: 0 })).toEqual({ reason: "budget_unknown" });
+    for (let i = 0; i < 5; i += 1) await writeFile(join(workspace, `f${i}`), "x");
+    expect(await dependencyCacheBudget({ workspace, diskMb: 2048, maxEntries: 3 })).toEqual({
+      reason: "budget_unknown",
+    });
+    expect(await dependencyCacheBudget({ workspace, diskMb: 2048, timeoutMs: 0 })).toEqual({
+      reason: "budget_unknown",
+    });
+    expect(await dependencyCacheBudget({ workspace: join(root, "absent"), diskMb: 2048 })).toEqual({
+      reason: "budget_unknown",
+    });
+  });
+
+  it("counts links as entries without following them", async () => {
+    await writeFile(join(root, "outside.bin"), Buffer.alloc(8 * MiB, 1));
+    await symlink(join(root, "outside.bin"), join(workspace, "link"));
+    const budget = await dependencyCacheBudget({ workspace, diskMb: 2048 });
+    expect(budget.usedBytes).toBeLessThan(1 * MiB);
   });
 });

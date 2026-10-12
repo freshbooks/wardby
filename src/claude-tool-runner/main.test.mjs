@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { parseToolSetup, toolEnvironment } from "./command.mjs";
+import { dependencyCacheBudget } from "../coding-worker/dependency-cache.mjs";
 import { PREPARE_DEPENDENCIES_TOOL, startToolRunner, TOOL_RUNNER_READY_MESSAGE } from "./main.mjs";
 
 test("exposes a fixed lifecycle readiness marker", () => {
@@ -96,7 +97,7 @@ async function connect(socketPath) {
 const callTool = (client, name, args = {}) => client.request("tools/call", { name, arguments: args });
 const toolJson = (response) => JSON.parse(response.result.content[0].text);
 
-async function withRunner({ dependencyCache = true, module } = {}, body) {
+async function withRunner({ dependencyCache = true, diskMb = 2048, module } = {}, body) {
   const directory = await mkdtemp(join(tmpdir(), "wardby-claude-depcache-"));
   const workspace = join(directory, "workspace");
   const socketPath = join(directory, "runner.sock");
@@ -116,7 +117,7 @@ async function withRunner({ dependencyCache = true, module } = {}, body) {
           mode: 0o600,
         },
       ],
-      ...(dependencyCache ? { dependencyCache: true } : {}),
+      ...(dependencyCache ? { dependencyCache: true, ...(diskMb === null ? {} : { diskMb }) } : {}),
     }),
     workspace,
   );
@@ -147,6 +148,10 @@ function fakeModule(order = []) {
   const calls = { prepare: [], seal: [] };
   return {
     calls,
+    dependencyCacheBudget: (options) => {
+      order.push("budget");
+      return dependencyCacheBudget(options);
+    },
     prepareDependencies: async (options) => {
       order.push("prepare");
       calls.prepare.push(options);
@@ -230,15 +235,65 @@ test("seals before the first command when prepare never ran, once", async () => 
   });
 });
 
-test("a command after prepare neither seals again nor waits on anything", async () => {
+test("a command after prepare seals once more (idempotent), and only once", async () => {
   const order = [];
   const module = fakeModule(order);
   await withRunner({ module }, async ({ connect }) => {
     const client = await connect();
     await callTool(client, PREPARE_DEPENDENCIES_TOOL);
     await callTool(client, "run_command", { command: "true" });
-    assert.deepEqual(order, ["prepare"]);
+    await callTool(client, "run_command", { command: "true" });
+    assert.deepEqual(order, ["budget", "prepare", "seal"]);
   });
+});
+
+test("a prepare that failed still leaves the window sealed before the first command", async () => {
+  const order = [];
+  const module = fakeModule(order);
+  module.prepareDependencies = async () => {
+    order.push("prepare");
+    throw new Error("boom");
+  };
+  module.sealUploadWindow = async (options) => {
+    await assert.rejects(stat(join(options.env.TMPDIR, "..", "..", "marker")));
+    order.push("seal");
+    return { status: 200, confirmed: true };
+  };
+  await withRunner({ module }, async ({ connect, workspace }) => {
+    const client = await connect();
+    assert.deepEqual(toolJson(await callTool(client, PREPARE_DEPENDENCIES_TOOL)), {
+      projects: [],
+      reason: "worker_error",
+    });
+    await callTool(client, "run_command", { command: "touch marker" });
+    assert.deepEqual(order, ["budget", "prepare", "seal"]);
+    await stat(join(workspace, "marker"));
+  });
+});
+
+test("budgets the run's volume minus what the workspace uses; a tiny volume is a skip, not an attempt", async () => {
+  const module = fakeModule();
+  await withRunner({ module, diskMb: 1024 }, async ({ connect, workspace }) => {
+    await writeFile(join(workspace, "big.bin"), Buffer.alloc(5 * 1024 * 1024, 1));
+    const client = await connect();
+    await callTool(client, PREPARE_DEPENDENCIES_TOOL);
+    const [options] = module.calls.prepare;
+    assert.ok(options.budgetBytes > 0);
+    assert.ok(options.budgetBytes <= (1024 - 5 - 64) * 1024 * 1024, String(options.budgetBytes));
+  });
+  for (const [diskMb, reason] of [
+    [64, "budget_too_small"],
+    [null, "budget_unknown"],
+  ]) {
+    const order = [];
+    const small = fakeModule(order);
+    await withRunner({ module: small, diskMb }, async ({ connect }) => {
+      const client = await connect();
+      assert.deepEqual(toolJson(await callTool(client, PREPARE_DEPENDENCIES_TOOL)), { projects: [], reason });
+      await callTool(client, "run_command", { command: "true" });
+      assert.deepEqual(order, ["budget", "seal"]);
+    });
+  }
 });
 
 test("a command arriving while prepare runs waits for it to finish", async () => {
@@ -262,7 +317,7 @@ test("a command arriving while prepare runs waits for it to finish", async () =>
     release();
     await preparing;
     await command;
-    assert.deepEqual(order, ["prepare:start", "prepare:end"]);
+    assert.deepEqual(order, ["budget", "prepare:start", "prepare:end", "seal"]);
     await stat(join(workspace, "ran.txt"));
   });
 });

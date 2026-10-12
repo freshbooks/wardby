@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CodingTaskInputSchema,
   CODING_PROTOCOL_VERSION,
   CodingAgentOutputSchema,
   dependencyCacheTaskNote,
@@ -137,5 +138,31 @@ describe("restoredDependencyFolders", () => {
       }),
     ).toEqual([".", "b"]);
     expect(restoredDependencyFolders(undefined)).toEqual([]);
+  });
+});
+
+describe("worker input: diskMb", () => {
+  const input = {
+    schemaVersion: CODING_PROTOCOL_VERSION,
+    runId: "run_123",
+    repository: "openai/example",
+    baseRef: "main",
+    headRef: "wardby/run-run_123",
+    task: "Fix it.",
+    model: "gpt-5.6-luna",
+    budgetUsd: 1,
+    deadlineAt: "2026-09-07T13:00:00.000Z",
+  };
+
+  it("carries the volume size with the dependency cache, within the launchers' bounds", () => {
+    expect(CodingTaskInputSchema.parse({ ...input, dependencyCache: true, diskMb: 2048 }).diskMb).toBe(2048);
+    for (const diskMb of [63, 32_769, 1.5, "2048"]) {
+      expect(() => CodingTaskInputSchema.parse({ ...input, dependencyCache: true, diskMb })).toThrow();
+    }
+  });
+
+  it("refuses it without the dependency cache, and an input without either is unchanged", () => {
+    expect(() => CodingTaskInputSchema.parse({ ...input, diskMb: 2048 })).toThrow();
+    expect(CodingTaskInputSchema.parse(input)).not.toHaveProperty("diskMb");
   });
 });

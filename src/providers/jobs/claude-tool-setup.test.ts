@@ -42,12 +42,14 @@ describe("claudeToolSetup", () => {
   });
 
   it("carries the dependency cache flag only when on, and the tool runner reads it back", () => {
-    const on = claudeToolSetup({ ...spec, dependencyCache: true }, CAPABILITY);
-    expect(JSON.parse(on).dependencyCache).toBe(true);
-    expect(parseToolSetup(on).dependencyCache).toBe(true);
+    const on = claudeToolSetup({ ...spec, dependencyCache: true, limits: { ...spec.limits, diskMb: 768 } }, CAPABILITY);
+    expect(JSON.parse(on)).toMatchObject({ dependencyCache: true, diskMb: 768 });
+    expect(parseToolSetup(on)).toMatchObject({ dependencyCache: true, diskMb: 768 });
     const off = claudeToolSetup(spec, CAPABILITY);
     expect(JSON.parse(off)).not.toHaveProperty("dependencyCache");
+    expect(JSON.parse(off)).not.toHaveProperty("diskMb");
     expect(parseToolSetup(off)).not.toHaveProperty("dependencyCache");
+    expect(parseToolSetup(off)).not.toHaveProperty("diskMb");
   });
 
   it("hands the tool runner the registry settings a Codex shell gets, under /workspace/.cache", () => {

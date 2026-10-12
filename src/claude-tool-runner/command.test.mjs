@@ -109,6 +109,22 @@ test("parses the dependency cache flag: true only when set, anything but a boole
   }
 });
 
+test("parses the volume size only with the dependency cache flag, within the launchers' bounds", () => {
+  const withDisk = (extra) => JSON.stringify({ ...JSON.parse(setupFor("/workspace")), ...extra });
+  assert.equal(parseToolSetup(withDisk({ dependencyCache: true, diskMb: 2048 })).diskMb, 2048);
+  assert.equal(parseToolSetup(withDisk({ dependencyCache: true })).diskMb, undefined);
+  for (const extra of [
+    { diskMb: 2048 },
+    { dependencyCache: false, diskMb: 2048 },
+    { dependencyCache: true, diskMb: 63 },
+    { dependencyCache: true, diskMb: 32_769 },
+    { dependencyCache: true, diskMb: 1.5 },
+    { dependencyCache: true, diskMb: "2048" },
+  ]) {
+    assert.throws(() => parseToolSetup(withDisk(extra)), /tool_setup_invalid/, JSON.stringify(extra));
+  }
+});
+
 test("commandEnvironment is exactly what a command's shell gets", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "wardby-claude-tools-env-"));
   try {

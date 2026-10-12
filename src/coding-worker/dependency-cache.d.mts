@@ -80,6 +80,8 @@ export interface PrepareDependenciesOptions {
   /** Workspace disk budget in bytes; defaults to CODING_DISK_MB, else DEFAULT_BUDGET_MB. */
   readonly budgetBytes?: number;
   readonly timeouts?: Partial<DependencyCacheTimeouts>;
+  /** The run's cancellation: aborting it ends the work like the deadline (the module still seals and settles). */
+  readonly signal?: AbortSignal;
   /** Tests only: hooks into the flow. */
   readonly testHooks?: DependencyCacheTestHooks;
 }
@@ -88,6 +90,29 @@ export interface DependencyCacheTestHooks {
   readonly beforeRename?: () => Promise<void>;
   readonly beforeDiscovery?: () => Promise<void>;
 }
+
+export declare const MIN_BUDGET_BYTES: number;
+export declare const BUDGET_MEASURE_TIMEOUT_MS: number;
+
+export interface DependencyCacheBudgetOptions {
+  readonly workspace: string;
+  /** The run's workspace volume size in MiB (CodingTaskInput.diskMb / the tool setup's diskMb). */
+  readonly diskMb: number | undefined;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+  readonly maxEntries?: number;
+}
+
+export type DependencyCacheBudget =
+  | { readonly budgetBytes: number; readonly usedBytes: number; readonly reason?: undefined }
+  | {
+      readonly reason: "budget_unknown" | "budget_too_small";
+      readonly usedBytes?: number;
+      readonly budgetBytes?: undefined;
+    };
+
+/** diskMb MiB − the workspace's current usage − max(64 MiB, 5%); a skip reason when unknown or too small. Never throws. */
+export declare function dependencyCacheBudget(options: DependencyCacheBudgetOptions): Promise<DependencyCacheBudget>;
 
 export interface SealUploadWindowOptions {
   /** The same agent-equivalent env `prepareDependencies` takes (registry settings and the npmrc). */

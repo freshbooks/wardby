@@ -1370,6 +1370,61 @@ export async function sealUploadWindow({ env, proxyUrl, token, timeoutMs = DEFAU
   return postSeal(auth, timeoutMs);
 }
 
+/** What the budget check keeps back from the volume: max(64 MiB, 5%). */
+const BUDGET_MARGIN_MIN_BYTES = 64 * MIB;
+const BUDGET_MARGIN_FRACTION = 0.05;
+/** Below this the cache is skipped (`budget_too_small`): no restore is worth trying. */
+export const MIN_BUDGET_BYTES = 64 * MIB;
+/** Bounds on measuring the workspace: time and entries. Past either, `budget_unknown`. */
+export const BUDGET_MEASURE_TIMEOUT_MS = 30_000;
+const BUDGET_MEASURE_MAX_ENTRIES = 500_000;
+
+/**
+ * The bytes the cache may restore or install into the workspace volume: the
+ * run's volume size (`diskMb`, the Kubernetes emptyDir sizeLimit / Docker
+ * tmpfs size, which statfs cannot see on Kubernetes) minus what the
+ * workspace already uses minus a margin. Usage is a bounded walk of the whole
+ * workspace (nothing excluded: the volume's limit counts everything),
+ * allocated blocks where the platform reports them, links not followed.
+ * Never throws: `{ reason: "budget_unknown" }` when diskMb is missing or the
+ * walk can't finish in time, `{ reason: "budget_too_small" }` when what is
+ * left is under MIN_BUDGET_BYTES; the caller then skips the cache.
+ */
+export async function dependencyCacheBudget({
+  workspace,
+  diskMb,
+  signal,
+  timeoutMs = BUDGET_MEASURE_TIMEOUT_MS,
+  maxEntries = BUDGET_MEASURE_MAX_ENTRIES,
+}) {
+  if (!Number.isSafeInteger(diskMb) || diskMb <= 0) return { reason: "budget_unknown" };
+  const deadlineAt = Date.now() + timeoutMs;
+  let used = 0;
+  let entries = 0;
+  try {
+    const stack = [workspace];
+    while (stack.length) {
+      signal?.throwIfAborted();
+      if (Date.now() >= deadlineAt) return { reason: "budget_unknown" };
+      const directory = stack.pop();
+      const names = await readdir(directory);
+      for (const name of names) {
+        if (++entries > maxEntries) return { reason: "budget_unknown" };
+        const info = await lstat(join(directory, name));
+        used += Number.isFinite(info.blocks) && info.blocks > 0 ? info.blocks * 512 : info.size;
+        if (info.isDirectory()) stack.push(join(directory, name));
+      }
+    }
+  } catch {
+    return { reason: "budget_unknown" };
+  }
+  const total = diskMb * MIB;
+  const margin = Math.max(BUDGET_MARGIN_MIN_BYTES, Math.floor(total * BUDGET_MARGIN_FRACTION));
+  const budgetBytes = total - used - margin;
+  if (budgetBytes < MIN_BUDGET_BYTES) return { reason: "budget_too_small", usedBytes: used };
+  return { budgetBytes, usedBytes: used };
+}
+
 // ---------------------------------------------------------------- entry point
 
 const KEPT = new Set(["hit", "nearest", "cold"]);
@@ -1391,6 +1446,7 @@ export async function prepareDependencies({
   log = () => {},
   budgetBytes,
   timeouts: overrides = {},
+  signal: cancel,
   testHooks,
 }) {
   const timeouts = { ...DEFAULT_TIMEOUTS, ...overrides };
@@ -1498,10 +1554,22 @@ export async function prepareDependencies({
   // still has not settled, the session is closed (below) so it can no longer
   // rename, remove, install or rebuild anything, nor upload.
   let grace;
+  let endLate;
   const late = new Promise((resolve) => {
+    endLate = resolve;
     grace = setTimeout(resolve, timeouts.totalMs + timeouts.settleMs);
   });
+  // The caller's cancellation (the run was cancelled): the same as the
+  // deadline arriving now, so the work stops and has settleMs to clean up.
+  const onCancel = () => {
+    deadline.abort(new Skip("cancelled"));
+    clearTimeout(grace);
+    grace = setTimeout(endLate, timeouts.settleMs);
+  };
+  if (cancel?.aborted) onCancel();
+  else cancel?.addEventListener("abort", onCancel, { once: true });
   await Promise.race([phases, late]);
+  cancel?.removeEventListener("abort", onCancel);
   clearTimeout(grace);
   clearTimeout(deadlineTimer);
   session.closed = true;

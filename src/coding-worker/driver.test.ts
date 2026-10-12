@@ -1,11 +1,14 @@
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import type { CodingTaskInput } from "../coding/protocol.js";
 import { CODING_OUTPUT_JSON_SCHEMA, runCodingWorker, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
-import type { WorkerClientConfig, WorkerEvent, WorkerThread } from "./types.js";
+import type { DependencyCacheModule, WorkerClientConfig, WorkerEvent, WorkerThread } from "./types.js";
+import { dependencyCacheBudget } from "./dependency-cache.mjs";
 import { createDebugTracer } from "./debug-trace.js";
 
 async function tempWorkspace(): Promise<string> {
@@ -398,6 +401,7 @@ describe("runCodingWorker", () => {
 });
 
 describe("runCodingWorker dependency cache", () => {
+  const MiB = 1024 * 1024;
   const agentOutput = JSON.stringify({
     schemaVersion: 1,
     runId: input.runId,
@@ -405,14 +409,40 @@ describe("runCodingWorker dependency cache", () => {
     summary: "None.",
     tests: [],
   });
+  const cacheInput: CodingTaskInput = { ...input, dependencyCache: true, diskMb: 2048 };
+
+  type PrepareOptions = Parameters<DependencyCacheModule["prepareDependencies"]>[0];
+
+  /** A module whose budget is the real one and whose prepare/seal are recorded. */
+  function fakeModule(order: string[], prepare: (options: PrepareOptions) => Promise<unknown>) {
+    const seen: { prepare?: PrepareOptions; seals: number } = { seals: 0 };
+    const module: DependencyCacheModule = {
+      dependencyCacheBudget: async (options) => {
+        order.push("budget");
+        return dependencyCacheBudget(options);
+      },
+      prepareDependencies: async (options) => {
+        order.push("prepare");
+        seen.prepare = options;
+        return (await prepare(options)) as never;
+      },
+      sealUploadWindow: async () => {
+        order.push("seal");
+        seen.seals += 1;
+        return { status: 200, confirmed: true };
+      },
+    };
+    return { module, seen };
+  }
 
   async function run(
     runInput: CodingTaskInput,
-    prepare: (options: { workspace: string; env: Record<string, string | undefined> }) => Promise<unknown>,
+    loadDependencyCache: () => Promise<DependencyCacheModule>,
     capture: { config?: WorkerClientConfig; thread?: unknown; prompt?: string } = {},
     order: string[] = [],
+    extra: { proxyBaseUrl?: string; signal?: AbortSignal; workspace?: string } = {},
   ) {
-    const workspace = await tempWorkspace();
+    const workspace = extra.workspace ?? (await tempWorkspace());
     const createClient = clientFor(
       [{ type: "item.completed", item: { type: "agent_message", text: agentOutput } }],
       capture,
@@ -420,26 +450,23 @@ describe("runCodingWorker dependency cache", () => {
     const output = await runCodingWorker({
       input: runInput,
       workspace,
-      proxyBaseUrl: "http://proxy:8080",
+      proxyBaseUrl: extra.proxyBaseUrl ?? "http://proxy:8080",
       capability: "rrp_worker_capability",
-      signal: new AbortController().signal,
+      signal: extra.signal ?? new AbortController().signal,
       createClient: (config) => {
         order.push("client");
         return createClient(config);
       },
-      prepareDependencies: async (options) => {
-        order.push("prepare");
-        return (await prepare(options)) as never;
-      },
+      loadDependencyCache,
     });
     return { output, workspace };
   }
 
-  it("never calls the module when the run's flag is off, and reports nothing", async () => {
-    const prepare = vi.fn(async () => ({ projects: [] }));
+  it("never loads the module when the run's flag is off, and reports nothing", async () => {
+    const load = vi.fn(async () => fakeModule([], async () => ({ projects: [] })).module);
     const capture: { prompt?: string } = {};
-    const { output } = await run(input, prepare, capture);
-    expect(prepare).not.toHaveBeenCalled();
+    const { output } = await run(input, load, capture);
+    expect(load).not.toHaveBeenCalled();
     expect("dependencyCache" in output).toBe(false);
     expect(capture.prompt).not.toContain("pre-installed");
   });
@@ -449,32 +476,31 @@ describe("runCodingWorker dependency cache", () => {
     try {
       const capture: { config?: WorkerClientConfig; prompt?: string } = {};
       const order: string[] = [];
-      let seen: { workspace: string; env: Record<string, string | undefined> } | undefined;
+      const { module, seen } = fakeModule(order, async (options) => {
+        // The registry's npmrc is already written when the module runs.
+        await stat(options.env.npm_config_userconfig as string);
+        return {
+          projects: [{ path: ".", result: "hit", key: "abc", sizeBytes: 10, restoreMs: 5, rebuild: "skipped" }],
+        };
+      });
       const { output, workspace } = await run(
         {
-          ...input,
-          dependencyCache: true,
+          ...cacheInput,
           services: [{ name: "postgres", version: "16", testEnv: { DATABASE_URL: "postgres://db" } }],
         },
-        async (options) => {
-          seen = options;
-          // The registry's npmrc is already written when the module runs.
-          await stat(options.env.npm_config_userconfig as string);
-          return {
-            projects: [{ path: ".", result: "hit", key: "abc", sizeBytes: 10, restoreMs: 5, rebuild: "skipped" }],
-          };
-        },
+        async () => module,
         capture,
         order,
       );
-      expect(order).toEqual(["prepare", "client"]);
-      expect(seen?.workspace).toBe(workspace);
-      expect(seen?.env).toEqual(capture.config?.environment);
-      expect(seen?.env.HOME).toBe("/home/wardby");
-      expect(seen?.env.DATABASE_URL).toBe("postgres://db");
-      expect(JSON.stringify(seen?.env)).not.toContain("rrp_driver_secret_sentinel");
-      expect(JSON.stringify(seen?.env)).not.toContain("rrp_worker_capability");
-      expect(seen?.env.WARDBY_RUN_CAPABILITY).toBeUndefined();
+      expect(order).toEqual(["budget", "prepare", "client"]);
+      const env = seen.prepare!.env;
+      expect(seen.prepare?.workspace).toBe(workspace);
+      expect(env).toEqual(capture.config?.environment);
+      expect(env.HOME).toBe("/home/wardby");
+      expect(env.DATABASE_URL).toBe("postgres://db");
+      expect(JSON.stringify(env)).not.toContain("rrp_driver_secret_sentinel");
+      expect(JSON.stringify(env)).not.toContain("rrp_worker_capability");
+      expect(env.WARDBY_RUN_CAPABILITY).toBeUndefined();
       expect(output.dependencyCache).toEqual({
         projects: [{ path: ".", result: "hit", key: "abc", sizeBytes: 10, restoreMs: 5, rebuild: "skipped" }],
       });
@@ -486,35 +512,94 @@ describe("runCodingWorker dependency cache", () => {
     }
   });
 
+  it("budgets the run's volume minus what the workspace already uses, and passes the run's cancellation", async () => {
+    const workspace = await tempWorkspace();
+    await writeFile(join(workspace, "big.bin"), Buffer.alloc(5 * MiB, 1));
+    const { module, seen } = fakeModule([], async () => ({ projects: [] }));
+    const controller = new AbortController();
+    await run({ ...cacheInput, diskMb: 1024 }, async () => module, {}, [], { workspace, signal: controller.signal });
+    expect(seen.prepare?.budgetBytes).toBeLessThanOrEqual(1024 * MiB - 5 * MiB - 64 * MiB);
+    expect(seen.prepare?.budgetBytes).toBeGreaterThan(0);
+    expect(seen.prepare?.signal).toBe(controller.signal);
+  });
+
+  it("a volume too small is a budget skip, never an attempt, and the window is sealed before the agent", async () => {
+    const order: string[] = [];
+    const { module } = fakeModule(order, async () => ({ projects: [] }));
+    const { output } = await run({ ...cacheInput, diskMb: 64 }, async () => module, {}, order);
+    expect(order).toEqual(["budget", "seal", "client"]);
+    expect(output.dependencyCache).toEqual({ projects: [], reason: "budget_too_small" });
+  });
+
+  it("no volume size (budget_unknown) is a skip too", async () => {
+    const order: string[] = [];
+    const { module } = fakeModule(order, async () => ({ projects: [] }));
+    const { output } = await run({ ...input, dependencyCache: true }, async () => module, {}, order);
+    expect(order).toEqual(["budget", "seal", "client"]);
+    expect(output.dependencyCache).toEqual({ projects: [], reason: "budget_unknown" });
+  });
+
   it("adds no task note when nothing was installed", async () => {
     const capture: { prompt?: string } = {};
-    const { output } = await run(
-      { ...input, dependencyCache: true },
-      async () => ({ projects: [{ path: ".", result: "skipped", reason: "no_lockfile" }] }),
-      capture,
-    );
+    const { module } = fakeModule([], async () => ({
+      projects: [{ path: ".", result: "skipped", reason: "no_lockfile" }],
+    }));
+    const { output } = await run(cacheInput, async () => module, capture);
     expect(output.dependencyCache).toEqual({ projects: [{ path: ".", result: "skipped", reason: "no_lockfile" }] });
     expect(capture.prompt).not.toContain("pre-installed");
   });
 
-  it("never fails the run: a module that throws is a worker_error and the agent still runs", async () => {
+  it("never fails the run: a module that throws is a worker_error, sealed before the agent starts", async () => {
     const capture: { prompt?: string } = {};
-    const { output } = await run(
-      { ...input, dependencyCache: true },
-      async () => {
-        throw new Error("boom SECRET");
-      },
-      capture,
-    );
+    const order: string[] = [];
+    const { module } = fakeModule(order, async () => {
+      throw new Error("boom SECRET");
+    });
+    const { output } = await run(cacheInput, async () => module, capture, order);
+    expect(order).toEqual(["budget", "prepare", "seal", "client"]);
     expect(output.outcome).toBe("no_changes");
     expect(output.dependencyCache).toEqual({ projects: [], reason: "worker_error" });
     expect(capture.prompt).toContain(input.task);
   });
 
+  it("a module that won't load is a worker_error, and the driver seals with the registry token itself", async () => {
+    const seals: { path?: string; authorization?: string }[] = [];
+    const order: string[] = [];
+    const server = createServer((request, response) => {
+      seals.push({ path: `${request.method} ${request.url}`, authorization: request.headers.authorization });
+      order.push("seal");
+      response.writeHead(200, { "content-type": "application/json" }).end('{"sealed":true}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const { output } = await run(
+        cacheInput,
+        async () => {
+          throw new Error("ERR_MODULE_NOT_FOUND");
+        },
+        {},
+        order,
+        { proxyBaseUrl: `http://127.0.0.1:${port}` },
+      );
+      expect(order).toEqual(["seal", "client"]);
+      expect(seals).toEqual([
+        {
+          path: "POST /cache/npm/seal",
+          authorization: `Bearer ${deriveRegistryToken("rrp_worker_capability")}`,
+        },
+      ]);
+      expect(output.dependencyCache).toEqual({ projects: [], reason: "worker_error" });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("bounds what the module returned", async () => {
-    const { output } = await run({ ...input, dependencyCache: true }, async () => ({
+    const { module } = fakeModule([], async () => ({
       projects: [{ path: ".", result: "refused", reason: "npm said: ERR! raw output" }],
     }));
+    const { output } = await run(cacheInput, async () => module);
     expect(output.dependencyCache).toEqual({ projects: [], omitted: 1 });
   });
 });

@@ -16,6 +16,8 @@ export interface ToolSetup {
   readonly files: ReadonlyArray<{ path: string; content: string; mode: number }>;
   /** Present (true) only on a dependency-cache run. */
   readonly dependencyCache?: true;
+  /** With dependencyCache only: the workspace volume size in MiB. */
+  readonly diskMb?: number;
 }
 
 export declare function toolEnvironment(workspacePath?: string): Record<string, string>;

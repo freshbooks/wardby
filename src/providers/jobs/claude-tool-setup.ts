@@ -34,6 +34,8 @@ export interface ClaudeToolSetup {
   files: { path: string; content: string; mode: number }[];
   /** Present only when the run's dependency cache is on, so older tool runners see an unchanged setup. */
   dependencyCache?: true;
+  /** With dependencyCache only: the workspace volume size (limits.diskMb) the cache must stay inside. */
+  diskMb?: number;
 }
 
 export function claudeToolSetup(spec: JobSpec, capability: string): string {
@@ -48,7 +50,7 @@ export function claudeToolSetup(spec: JobSpec, capability: string): string {
     // Same precedence as the Codex driver: the registry's own settings win over a service's.
     env: { ...serviceEnvironment(spec.services), ...registry.env },
     files: registry.files,
-    ...(spec.dependencyCache ? { dependencyCache: true } : {}),
+    ...(spec.dependencyCache ? { dependencyCache: true, diskMb: spec.limits.diskMb } : {}),
   };
   const raw = JSON.stringify(setup);
   const limits = CLAUDE_TOOL_SETUP_LIMITS;

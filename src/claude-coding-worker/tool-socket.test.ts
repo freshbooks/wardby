@@ -3,7 +3,13 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { assertToolRunnerReachable, callPrepareDependencies, PREPARE_DEPENDENCIES_TOOL } from "./tool-socket.js";
+import { BUDGET_MEASURE_TIMEOUT_MS, DEFAULT_TIMEOUTS } from "../coding-worker/dependency-cache.mjs";
+import {
+  assertToolRunnerReachable,
+  callPrepareDependencies,
+  PREPARE_DEPENDENCIES_TIMEOUT_MS,
+  PREPARE_DEPENDENCIES_TOOL,
+} from "./tool-socket.js";
 
 const roots: string[] = [];
 const servers: Server[] = [];
@@ -113,5 +119,13 @@ describe("callPrepareDependencies", () => {
     const call = callPrepareDependencies({ socketPath: silent.path, signal: controller.signal });
     controller.abort();
     await expect(call).rejects.toThrow("dependency_cache_tool_failed");
+  });
+});
+
+describe("PREPARE_DEPENDENCIES_TIMEOUT_MS", () => {
+  it("outlasts everything the tool runner's prepare can take: the budget walk, totalMs and settleMs", () => {
+    expect(PREPARE_DEPENDENCIES_TIMEOUT_MS).toBeGreaterThan(
+      BUDGET_MEASURE_TIMEOUT_MS + DEFAULT_TIMEOUTS.totalMs + DEFAULT_TIMEOUTS.settleMs,
+    );
   });
 });
