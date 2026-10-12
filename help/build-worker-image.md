@@ -58,7 +58,9 @@ Know the filesystem a run gets before you choose where things go:
   64 MB; anything the image put there is hidden, and nothing there can be run;
 - `/workspace` is the checkout, on a disk of `CODING_DISK_MB` (2048 MB by
   default; raise it per agent with `codingProfile.workspaceDiskMb`, up to the
-  operator's `CODING_MAX_DISK_MB`). It is the only place where a run can write
+  operator's `CODING_MAX_DISK_MB`; see
+  [the error for a larger size](errors/coding-workspace-disk-exceeds-limit.md)).
+  It is the only place where a run can write
   and execute files;
 - a run has **no network** except Wardby's npm and PyPI proxy, so other
   dependencies must be in the image;

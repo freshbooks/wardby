@@ -126,6 +126,25 @@ them. The proxy also needs `wardby_proxy` access to the `DependencySnapshot`
 table, which `up.sh` grants before the rollout (see
 [Upgrading an existing deployment](../../docs/getting-started-gke.md#upgrading-an-existing-deployment)).
 
+## Coding workspace disk
+
+A coding run's workspace is 2048 MiB unless the agent sets `workspaceDiskMb`,
+and by default an agent can't ask for more than that. To let agents ask for
+more (for example, for a large dependency install), deploy with
+`CODING_MAX_DISK_MB`:
+
+```bash
+CODING_MAX_DISK_MB=8192 deploy/gke/up.sh
+```
+
+`up.sh` adds it to the control plane only, which launches the coding runs. It
+must be an integer between 2048 and 32768. On Autopilot the control plane also
+refuses at startup a value that doesn't leave room for the worker's 1 GiB
+inside the 10 GiB pod ephemeral-storage ceiling (see
+[Coding worker isolation](../../docs/coding-worker-isolation.md)). Leaving it
+unset keeps the 2048 MiB limit. A run whose agent asks for more than the limit
+fails with `coding_workspace_disk_exceeds_limit`.
+
 ## Egress
 
 The namespace is default-deny. The control plane, the coding proxy, and the
