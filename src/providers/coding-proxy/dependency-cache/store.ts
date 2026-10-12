@@ -48,6 +48,8 @@ export interface DependencyCacheStore {
   insert(snapshot: NewSnapshot): Promise<"inserted" | "exists">;
   touch(id: string, now: Date): Promise<void>;
   delete(id: string): Promise<void>;
+  /** Deletes the row only while it still points at `blobKey` (a re-upload may have replaced it); true when deleted. */
+  deleteIfBlob(id: string, blobKey: string): Promise<boolean>;
   listForEviction(): Promise<EvictionRow[]>;
   /** Runs `work` while holding the cluster-wide eviction lock; returns false (without running it) when another holder has it. */
   withEvictionLock(work: () => Promise<void>): Promise<boolean>;
@@ -110,6 +112,13 @@ export class MemoryDependencyCacheStore implements DependencyCacheStore {
   async delete(id: string): Promise<void> {
     const index = this.rows.findIndex((row) => row.id === id);
     if (index >= 0) this.rows.splice(index, 1);
+  }
+
+  async deleteIfBlob(id: string, blobKey: string): Promise<boolean> {
+    const index = this.rows.findIndex((row) => row.id === id && row.blobKey === blobKey);
+    if (index < 0) return false;
+    this.rows.splice(index, 1);
+    return true;
   }
 
   async listForEviction(): Promise<EvictionRow[]> {

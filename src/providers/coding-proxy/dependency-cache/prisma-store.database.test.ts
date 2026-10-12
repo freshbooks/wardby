@@ -179,6 +179,18 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
     expect(await cache.findByIdentity(snapshot(repository, runId, "evict me"))).toBeNull();
   });
 
+  it("deletes a row by id only while it still points at the given blob key", async () => {
+    const { runId, repository } = await seedRun();
+    const cache = new PrismaDependencyCacheStore(db);
+    await cache.insert(snapshot(repository, runId, "guarded"));
+    const row = (await cache.findByIdentity(snapshot(repository, runId, "guarded")))!;
+    expect(await cache.deleteIfBlob(row.id, `${row.blobKey}-other`)).toBe(false);
+    expect(await cache.findByIdentity(row)).not.toBeNull();
+    expect(await cache.deleteIfBlob(row.id, row.blobKey)).toBe(true);
+    expect(await cache.deleteIfBlob(row.id, row.blobKey)).toBe(false);
+    expect(await cache.findByIdentity(row)).toBeNull();
+  });
+
   it("lets one eviction pass hold the lock at a time", async () => {
     const cache = new PrismaDependencyCacheStore(db);
     const otherClient = createPrismaClient();

@@ -104,6 +104,11 @@ export class PrismaDependencyCacheStore implements DependencyCacheStore {
     await this.db.dependencySnapshot.deleteMany({ where: { id } });
   }
 
+  async deleteIfBlob(id: string, blobKey: string): Promise<boolean> {
+    const { count } = await this.db.dependencySnapshot.deleteMany({ where: { id, blobKey } });
+    return count > 0;
+  }
+
   async listForEviction(): Promise<EvictionRow[]> {
     const rows = await this.db.dependencySnapshot.findMany({
       select: { id: true, repository: true, blobKey: true, sizeBytes: true, createdAt: true, lastUsedAt: true },

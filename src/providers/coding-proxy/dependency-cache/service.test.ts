@@ -3,7 +3,8 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { Readable } from "node:stream";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LocalBlobStore } from "../../storage/local.js";
 import { MemoryProxyLedger } from "../memory-ledger.js";
 import { CodingProxy, capabilityHash } from "../proxy.js";
@@ -202,6 +203,16 @@ describe("dependency cache routes: switches and authentication", () => {
 });
 
 describe("dependency cache lookup", () => {
+  it("reports the milliseconds left in the run's upload window", async () => {
+    const created = new Date("2026-01-01T00:00:00Z");
+    let clock = created.getTime() + 100_000;
+    const { lookup, registry } = await setup({ uploadMs: 900_000, now: () => new Date(clock) });
+    for (const session of registry.cacheSessions.values()) session.createdAt = created;
+    expect((await lookup()).body).toMatchObject({ uploadExpiresInMs: 800_000 });
+    clock = created.getTime() + 2_000_000;
+    expect((await lookup()).body).toMatchObject({ uploadExpiresInMs: 0 });
+  });
+
   it("requires a lockfile the run's plan approved", async () => {
     const { lookup } = await setup();
     expect(await lookup({ lock: LOCK_TWO })).toEqual({ status: 409, body: { error: "plan_required" } });
@@ -230,7 +241,12 @@ describe("dependency cache lookup", () => {
       key: "dependency-cache/npm/x",
     });
     expect(status).toBe(200);
-    expect(body).toEqual({ key: derived().keyId, hit: false, maxBytes: 1024 * 1024 });
+    expect(body).toEqual({
+      key: derived().keyId,
+      hit: false,
+      maxBytes: 1024 * 1024,
+      uploadExpiresInMs: expect.any(Number),
+    });
   });
 
   it("refuses a repeated query parameter", async () => {
@@ -266,7 +282,12 @@ describe("dependency cache upload and download", () => {
     ]);
     expect(await blobs.head(store.rows[0].blobKey)).toMatchObject({ sizeBytes: archive.byteLength });
 
-    expect((await lookup()).body).toEqual({ key: key.keyId, hit: true, maxBytes: 1024 * 1024 });
+    expect((await lookup()).body).toEqual({
+      key: key.keyId,
+      hit: true,
+      maxBytes: 1024 * 1024,
+      uploadExpiresInMs: expect.any(Number),
+    });
     const before = store.rows[0].lastUsedAt;
     await new Promise((resolve) => setTimeout(resolve, 5));
     const response = await download(key.keyId);
@@ -365,6 +386,64 @@ describe("dependency cache upload and download", () => {
     await blobs.delete(store.rows[0].blobKey);
     expect((await download(derived().keyId)).status).toBe(404);
     expect(store.rows).toEqual([]);
+  });
+
+  describe("a blob that fails its row's checksum", () => {
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+    const broken = async (replacement: Uint8Array | null) => {
+      const env = await setup();
+      await env.upload(archive);
+      const row = env.store.rows[0];
+      if (replacement) await env.blobs.put(row.blobKey, Buffer.from(replacement));
+      return { ...env, row };
+    };
+
+    it.each([
+      ["tampered (same size)", new TextEncoder().encode("GZIP TAR BYTES OF NODE_MODULES")],
+      ["truncated", archive.subarray(0, 10)],
+    ])("drops the row and the blob after one download of a %s blob", async (_name, bytes) => {
+      const { base, lookup, store, blobs, derived, row } = await broken(bytes);
+      expect(bytes.byteLength === archive.byteLength || bytes.byteLength < archive.byteLength).toBe(true);
+      // A truncated body leaves the client waiting for its content-length: give up after a moment.
+      await fetch(`${base}/cache/npm/blob/${derived().keyId}?lock=${LOCK}`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+        signal: AbortSignal.timeout(300),
+      })
+        .then((response) => response.arrayBuffer())
+        .catch(() => undefined);
+      await settle();
+      expect(store.rows).toEqual([]);
+      expect(await blobs.head(row.blobKey)).toBeNull();
+      expect((await lookup()).body).toMatchObject({ hit: false });
+    });
+
+    it("keeps the row when the client aborts mid-stream", async () => {
+      const { base, store, blobs, derived, row } = await broken(null);
+      const spy = vi.spyOn(blobs, "getStream").mockImplementation(async () => {
+        const stalled = new Readable({ read() {} });
+        stalled.push(archive.subarray(0, 5));
+        return stalled;
+      });
+      const controller = new AbortController();
+      const response = await fetch(`${base}/cache/npm/blob/${derived().keyId}?lock=${LOCK}`, {
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(response.status).toBe(200);
+      controller.abort();
+      await settle();
+      spy.mockRestore();
+      expect(store.rows).toHaveLength(1);
+      expect(await blobs.head(row.blobKey)).not.toBeNull();
+    });
+
+    it("does not delete a row that a re-upload replaced while the old blob streamed", async () => {
+      const { store, blobs, row } = await broken(null);
+      const replaced = { ...row, blobKey: "dependency-cache/npm/other-blob.tgz" };
+      expect(await store.deleteIfBlob(row.id, replaced.blobKey)).toBe(false);
+      expect(store.rows).toHaveLength(1);
+      expect(await blobs.head(row.blobKey)).not.toBeNull();
+    });
   });
 });
 

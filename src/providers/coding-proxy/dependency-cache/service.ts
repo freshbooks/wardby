@@ -19,7 +19,8 @@
  *   downloads carry it so the worker verifies before extracting.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { pipeline, type Readable } from "node:stream";
+import { createHash } from "node:crypto";
+import { pipeline, Transform, type Readable } from "node:stream";
 import { logger } from "../../../core/logger.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { capabilityHash } from "../proxy.js";
@@ -165,12 +166,17 @@ export class DependencyCacheService {
       workerImage: context.cacheImage,
       policyHash: computePolicyHash(context.allowlist, context.policy),
     });
-    if (route === "lookup") await this.lookup(key, response);
-    else if (route === "download") await this.download(key, id ?? "", response);
+    if (route === "lookup") await this.lookup(key, session.createdAt, response);
+    else if (route === "download") await this.download(context.runId, key, id ?? "", response);
     else await this.upload(context, session.createdAt, key, request, response, releaseBodyTimer);
   }
 
-  private async lookup(key: SnapshotKey, response: ServerResponse): Promise<void> {
+  /** When the run's upload window closes (epoch ms): the one deadline lookups report and uploads enforce. */
+  private uploadDeadline(sessionCreatedAt: Date): number {
+    return sessionCreatedAt.getTime() + this.uploadMs;
+  }
+
+  private async lookup(key: SnapshotKey, sessionCreatedAt: Date, response: ServerResponse): Promise<void> {
     const row = await this.options.store.findByIdentity(key);
     const nearest = row ? null : await this.options.store.findNearest(key, key.lockHash);
     send(response, 200, {
@@ -178,6 +184,7 @@ export class DependencyCacheService {
       hit: row !== null,
       ...(nearest ? { nearest: { id: nearest.id } } : {}),
       maxBytes: this.options.maxSnapshotBytes,
+      uploadExpiresInMs: Math.max(0, Math.floor(this.uploadDeadline(sessionCreatedAt) - this.now().getTime())),
     });
   }
 
@@ -187,7 +194,7 @@ export class DependencyCacheService {
    * the same query: nothing is remembered between requests, and no other id
    * is ever served.
    */
-  private async download(key: SnapshotKey, id: string, response: ServerResponse): Promise<void> {
+  private async download(runId: string, key: SnapshotKey, id: string, response: ServerResponse): Promise<void> {
     let row: SnapshotRow | null = null;
     if (id === key.keyId) row = await this.options.store.findByIdentity(key);
     else {
@@ -215,9 +222,49 @@ export class DependencyCacheService {
       "x-wardby-sha256": row.sha256,
       "cache-control": "no-store",
     });
-    pipeline(stream as Readable, response, (error) => {
+    // Hash and count while streaming. The flush runs only once the blob was
+    // read to its end (a client abort destroys the pipeline before it), so only
+    // a complete read that disagrees with the row condemns the snapshot.
+    const hash = createHash("sha256");
+    let bytes = 0;
+    const verify = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        hash.update(chunk);
+        bytes += chunk.length;
+        callback(null, chunk);
+      },
+      flush: (callback) => {
+        callback();
+        if (bytes === row.sizeBytes && hash.digest("hex") === row.sha256) return;
+        void this.dropCorrupt(runId, row, bytes);
+      },
+    });
+    pipeline(stream as Readable, verify, response, (error) => {
       if (error && !response.destroyed) response.destroy();
     });
+  }
+
+  /** Removes a snapshot whose blob failed its row's checksum, so the key can be rebuilt. */
+  private async dropCorrupt(runId: string, row: SnapshotRow, readBytes: number): Promise<void> {
+    try {
+      // Only while the row still names the blob that was streamed: a re-upload may have replaced it.
+      if (!(await this.options.store.deleteIfBlob(row.id, row.blobKey))) return;
+      await this.discard(row.blobKey);
+      cacheLog.warn(
+        {
+          event: "snapshot_corrupt",
+          runId,
+          expectedBytes: row.sizeBytes,
+          readBytes,
+        },
+        "dependency cache snapshot failed its checksum and was removed",
+      );
+    } catch (error) {
+      cacheLog.warn(
+        { event: "dependency_cache.corrupt_cleanup_failed", err: error },
+        "dependency cache: cleanup failed",
+      );
+    }
   }
 
   private async upload(
@@ -228,7 +275,7 @@ export class DependencyCacheService {
     response: ServerResponse,
     releaseBodyTimer: () => void,
   ): Promise<void> {
-    const deadline = sessionCreatedAt.getTime() + this.uploadMs;
+    const deadline = this.uploadDeadline(sessionCreatedAt);
     if (this.now().getTime() >= deadline) throw new CacheRefusal(409, "upload_expired");
     const encoding = request.headers["content-encoding"];
     if (encoding && encoding !== "identity") throw new CacheRefusal(400, "bad_request");
