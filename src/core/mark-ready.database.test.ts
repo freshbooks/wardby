@@ -1,8 +1,9 @@
 /**
  * Mark-ready's once-per-pull-request claim (CodingRun.markedReadyAt) against
  * real PostgreSQL: concurrent evaluations mark once, a later evaluation after
- * marking is final, and a host failure releases the claim. The code host is a
- * fake that reports every condition passing. Skipped without DATABASE_URL.
+ * marking is final, and a host failure releases the claim; and a lead's opt-in
+ * reaches the coding builder it delegated to through the run tree. The code host
+ * is a fake that reports every condition passing. Skipped without DATABASE_URL.
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,19 +19,22 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
   const owner = id("owner");
   const builder = id("builder");
   const reviewer = id("reviewer");
+  const lead = id("lead");
+  const subBuilder = id("sub-builder");
+  const stranger = id("stranger");
   const repository = `markready/web-${s8}`;
   const SHA = "0123456789abcdef0123456789abcdef01234567";
 
   let failMark = false;
   const host = {
     provider: "github",
-    pullRequestOrigin: vi.fn(async () => ({
+    pullRequestOrigin: vi.fn(async (_repository: string, prNumber: number) => ({
       headSha: SHA,
       isFork: false,
       state: "open",
       labels: [],
       draft: true,
-      markerRunId: id("root"),
+      markerRunId: prNumber === 7 ? id("root") : id(`sub-${prNumber}`),
     })),
     readOwnChecks: vi.fn(
       async () => new Map([[`wardby review ${s8}`, { status: "completed", conclusion: "success" }]]),
@@ -56,7 +60,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
 
   beforeAll(async () => {
     await db.principal.create({ data: { id: owner, subject: owner } });
-    for (const a of [builder, reviewer]) {
+    for (const a of [builder, reviewer, lead, subBuilder, stranger]) {
       await db.agent.create({ data: { id: a, name: a, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner } });
     }
     await db.agentRepository.create({
@@ -80,27 +84,53 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
         authorizedVia: "host_permission",
       },
     });
-    await db.run.create({ data: { id: id("root"), agentId: builder, status: "succeeded" } });
-    await db.codingRun.create({
+    // The lead (native, triggered by mentions) is opted in; the coding builder it delegates
+    // to has no repository link at all. The stranger is opted in but outside that run tree.
+    await db.agentRepository.create({
       data: {
-        runId: id("root"),
-        task: "t",
+        agentId: lead,
+        provider: "github",
         repository,
-        baseRef: "main",
-        headRef: `wardby/run-${id("root")}`,
-        provider: "codex",
-        model: "m",
-        timeoutSec: 900,
-        protectedPaths: [],
-        budgetReservedUsd: 1,
-        result: {
-          outcome: "pull_request_opened",
-          repository,
-          pullRequestNumber: 7,
-          pullRequestUrl: `https://github.com/${repository}/pull/7`,
-        },
+        access: "write",
+        triggers: ["mention", "review_fix"],
+        markReadyWhenPassing: true,
+        authorizedVia: "host_permission",
       },
     });
+    const codingRun = async (runId: string, prNumber: number) =>
+      db.codingRun.create({
+        data: {
+          runId,
+          task: "t",
+          repository,
+          baseRef: "main",
+          headRef: `wardby/run-${runId}`,
+          provider: "codex",
+          model: "m",
+          timeoutSec: 900,
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+          result: {
+            outcome: "pull_request_opened",
+            repository,
+            pullRequestNumber: prNumber,
+            pullRequestUrl: `https://github.com/${repository}/pull/${prNumber}`,
+          },
+        },
+      });
+    await db.run.create({ data: { id: id("root"), agentId: builder, status: "succeeded" } });
+    await codingRun(id("root"), 7);
+    // PR 8: lead -> sub-builder. PR 9: stranger -> sub-builder, stranger not linked here.
+    await db.run.create({ data: { id: id("lead-run"), agentId: lead, status: "succeeded" } });
+    await db.run.create({
+      data: { id: id("sub-8"), agentId: subBuilder, status: "succeeded", parentRunId: id("lead-run") },
+    });
+    await codingRun(id("sub-8"), 8);
+    await db.run.create({ data: { id: id("stranger-run"), agentId: stranger, status: "succeeded" } });
+    await db.run.create({
+      data: { id: id("sub-9"), agentId: subBuilder, status: "succeeded", parentRunId: id("stranger-run") },
+    });
+    await codingRun(id("sub-9"), 9);
   });
 
   beforeEach(async () => {
@@ -110,10 +140,12 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
   });
 
   afterAll(async () => {
-    await db.codingRun.deleteMany({ where: { runId: id("root") } });
-    await db.run.deleteMany({ where: { agentId: { in: [builder, reviewer] } } });
-    await db.agentRepository.deleteMany({ where: { agentId: { in: [builder, reviewer] } } });
-    await db.agent.deleteMany({ where: { id: { in: [builder, reviewer] } } });
+    const agents = [builder, reviewer, lead, subBuilder, stranger];
+    await db.codingRun.deleteMany({ where: { runId: { in: [id("root"), id("sub-8"), id("sub-9")] } } });
+    await db.run.deleteMany({ where: { agentId: { in: [subBuilder] } } });
+    await db.run.deleteMany({ where: { agentId: { in: agents } } });
+    await db.agentRepository.deleteMany({ where: { agentId: { in: agents } } });
+    await db.agent.deleteMany({ where: { id: { in: agents } } });
     await db.principal.deleteMany({ where: { id: owner } });
     await db.$disconnect();
   });
@@ -140,5 +172,23 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
     failMark = false;
     expect(await maybeMarkReady(deps, repository, 7)).toBe("marked");
     expect(await markedReadyAt()).toBeInstanceOf(Date);
+  });
+
+  it("marks a pull request a coding builder opened for an opted-in lead that delegated to it", async () => {
+    expect(await maybeMarkReady(deps, repository, 8)).toBe("marked");
+    const row = await db.codingRun.findUniqueOrThrow({
+      where: { runId: id("sub-8") },
+      select: { markedReadyAt: true },
+    });
+    expect(row.markedReadyAt).toBeInstanceOf(Date);
+  });
+
+  it("does not mark when the builder's parent is not the opted-in agent", async () => {
+    expect(await maybeMarkReady(deps, repository, 9)).toBe("not_ready");
+    const row = await db.codingRun.findUniqueOrThrow({
+      where: { runId: id("sub-9") },
+      select: { markedReadyAt: true },
+    });
+    expect(row.markedReadyAt).toBeNull();
   });
 });

@@ -51,8 +51,8 @@ merge order set by the delegating agent," counted over the whole set
 (merged and closed pull requests included), so a pull request's step
 number doesn't change as earlier steps merge.
 
-With Wardby 0.7.0 or later, on a builder linked with `markReadyWhenPassing`,
-later steps become ready for review only once this check is `success`. See
+With Wardby 0.7.0 or later, when the delegating lead is linked with
+`markReadyWhenPassing`, later steps become ready for review only once this check is `success`. See
 [Mark ready when passing](code-review-agents.md#mark-ready-when-passing).
 
 ### Waiting for the delegating run to finish
