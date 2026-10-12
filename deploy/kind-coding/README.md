@@ -395,3 +395,11 @@ an `emptyDir`. It is not durable: snapshots disappear when the proxy pod
 restarts. Unset or `false` (the default) leaves the proxy with no blob store.
 It combines with `WARDBY_LOW_POWER=1`. The kind control plane runs on your
 host, so it needs no extra setting for this.
+
+The harness's Codex worker image builds `FROM` the driver image pinned by
+digest in `src/coding-worker/Dockerfile`. Until that pin is a driver from a
+release that includes the cache, a Codex run of an agent with
+`dependencyCache: true` fails at input (`worker_input_failed`): repin the
+driver first, or build `src/coding-worker/Dockerfile.driver` into the local
+registry and build the worker `FROM` it. The Claude Code images are built from
+source by `up.sh`, so they already match.

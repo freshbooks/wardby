@@ -241,9 +241,9 @@ these environment variables:
 | `BLOB_STORE_S3_REGION`    | the `region` output                  |
 | `WARDBY_DEPENDENCY_CACHE` | `true`                               |
 
-The proxy's network policy already allows HTTPS to the public internet, so S3's
-public endpoint is reachable. If you add a VPC gateway endpoint for S3 (private
-addresses), add a matching egress rule for the proxy. The tuning variables are
+The base proxy network policy already allows HTTPS to the public internet, so
+S3's public endpoint is reachable. If you add a VPC gateway endpoint for S3
+(private addresses), add a matching egress rule for the proxy. The tuning variables are
 in [Dependency cache limits](../../docs/coding-packages.md#dependency-cache-limits).
 
 ## Inputs

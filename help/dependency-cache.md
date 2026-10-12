@@ -3,7 +3,7 @@ id: dependency-cache
 title: Dependency cache for coding runs
 summary: Restore npm node_modules from a verified snapshot before a coding agent starts, so runs skip the install.
 audience: operator
-tags: [coding-agents, packages, npm, node_modules, dependency-cache, cache, npm-ci, lockfile, snapshot, restore, blob-store, workspaces, tool_unavailable, sha_mismatch, unsafe_archive, dependencyCache]
+tags: [coding-agents, packages, npm, node_modules, dependency-cache, cache, npm-ci, lockfile, snapshot, restore, blob-store, workspaces, tool_unavailable, sha_mismatch, unsafe_archive, dependencyCache, worker_input_failed, workerImageRef]
 appliesTo: >=0.6.1
 ---
 
@@ -19,7 +19,8 @@ For each eligible project the run reports one result in `get_run`
 (`dependencyCache.projects[]`):
 
 - `hit`: a snapshot for this exact lockfile was restored; nothing was
-  installed.
+  installed. A snapshot that fails to download or verify isn't used: the
+  project installs `cold` instead.
 - `nearest`: a snapshot for an older lockfile of the same repository and folder
   was restored, then updated to the committed lockfile.
 - `cold`: no snapshot, so `npm ci` ran and the result was stored.
@@ -34,13 +35,18 @@ for folders restored from a snapshot.
 ## Why it is safe
 
 - Snapshots are built only by Wardby, before the agent starts. Then the upload
-  window is sealed; the agent can't read or write the cache.
+  window is sealed: the worker seals it, and the coding proxy seals it itself
+  on the run's first model request, so the agent can't read or write the
+  cache.
 - A restore happens only after the coding proxy re-approves the committed
   lockfile under the agent's current allowlist, release age and advisory
   policy. A policy that now refuses a package means no restore.
-- Keys come from the server, not the worker. Downloads are checked against a
-  recorded SHA-256 and size, the archive is scanned and the tree compared with
-  the lockfile before use, and a damaged snapshot is deleted and rebuilt.
+- Keys come from the server, not the worker. Downloads are checked against the
+  SHA-256 and size the proxy recorded (that is the integrity check), the
+  archive is scanned, and the tree's recorded package versions are compared
+  with the lockfile before use. A damaged snapshot is deleted and rebuilt.
+- The packages are the ones the agent's policy approves; the cache doesn't vet
+  their contents beyond what a normal install through the registry does.
 - Install scripts are not cached. Snapshots are built with `--ignore-scripts`;
   `npm rebuild` runs after the seal, only when needed, with a minimal
   environment.
@@ -51,8 +57,13 @@ for folders restored from a snapshot.
   and/or up to 4 projects up to 3 folders deep.
 - Ignored: `node_modules`, dot-folders, symlinks, folders that already have a
   `node_modules`, and npm workspaces monorepos (root and members are skipped).
-- The agent needs a package allowlist, and the worker (or Claude Code
-  tool-runner) image must come from a release that includes the cache.
+- The agent needs a package allowlist.
+- Every worker image must come from a release that includes the cache: the
+  Codex worker images, the Claude Code worker image and its tool runner
+  images. An older Codex or Claude Code worker image fails the run at input
+  (`worker_input_failed`). Rebuild a `workerImageRef` image `FROM` that
+  release's driver image (Codex) or tool runner image (Claude Code) first;
+  `create_agent` and `update_agent` warn when an agent has both.
 
 ## Turn it on
 
@@ -66,8 +77,9 @@ for folders restored from a snapshot.
    (requires wardby 0.6.1 or later).
 2. GKE: re-run `bootstrap-database-iam.sh` before deploying so the proxy can
    use the `DependencySnapshot` table.
-3. Per agent: `update_agent` with `codingProfile.dependencyCache: true`. This
-   needs `packages:approve` or `agents:admin`.
+3. Per agent, once the worker images are current: `update_agent` with
+   `codingProfile.dependencyCache: true`. This needs `packages:approve` or
+   `agents:admin`.
 
 Tuning, on the proxy: `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` (1024),
 `_REPO_CAP_MB` (4096), `_TOTAL_CAP_MB` (20480), `_MAX_AGE_DAYS` (14, counted
@@ -77,22 +89,24 @@ to `_MAX_AGE_DAYS`; the bucket also deletes objects older than that plus 7 days.
 
 ## Troubleshooting
 
-Read `dependencyCache` in `get_run`; then match the `reason`:
+Read `dependencyCache` in `get_run`; then match the `reason`. A rejected `hit`
+or `nearest` snapshot is not a reason: the project shows `cold`.
 
-| Reason                                                                                       | What to do                                                                                                                        |
-| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `no_lockfile`, `lockfile_unreadable`, `no_package_json`, `no_dependencies`                   | Nothing to cache in that folder.                                                                                                  |
-| `lockfile_version`                                                                           | Regenerate the lockfile with npm 7 or later.                                                                                      |
-| `workspaces`, `workspace_member`, `shrinkwrap_present`                                       | Not supported; the agent installs itself.                                                                                         |
-| `node_modules_present`, `cache_dir_unsafe`                                                   | Remove the committed `node_modules` or `.cache` (symlink) from the repository.                                                    |
-| `too_many_projects`                                                                          | Only 4 projects per run are prepared.                                                                                             |
-| `no_registry`, `plan_failed`, `plan_refused`                                                 | Give the agent a package allowlist and fix refused packages; see [Approve packages for coding agents](help://coding-packages).    |
-| `cache_unavailable`, `plan_required`, `sealed`, `lookup_failed`, `download_failed`           | Check `WARDBY_DEPENDENCY_CACHE` and `BLOB_STORE` on the proxy, the store's permissions and the proxy log.                         |
-| `size_mismatch`, `sha_mismatch`, `unsafe_archive`, `inconsistent`                            | The snapshot was not trusted; it is rebuilt when it ages out or is deleted. Repeats point at the blob store.                      |
-| `too_large`, `over_budget`, `budget_unknown`, `budget_too_small`                             | Raise `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` or the agent's `workspaceDiskMb`.                                                 |
-| `install_failed`, `timeout`, `cancelled`, `internal_error`, `worker_error`, `report_invalid` | The agent installs for itself; check the worker log. On Docker a huge restore can exhaust the tmpfs inode limit before its bytes. |
-| `tool_unavailable`                                                                           | Claude Code tool-runner image predates the cache or is custom; rebuild it from the current tool-runner image.                     |
-| `already_started`                                                                            | A command ran before preparation; not expected.                                                                                   |
+| Reason                                                                                       | What to do                                                                                                                                                                                                                 |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `no_lockfile`, `lockfile_unreadable`, `no_package_json`, `no_dependencies`                   | Nothing to cache in that folder.                                                                                                                                                                                           |
+| `lockfile_version`                                                                           | Regenerate the lockfile with npm 7 or later.                                                                                                                                                                               |
+| `workspaces`, `workspace_member`, `shrinkwrap_present`                                       | Not supported; the agent installs itself.                                                                                                                                                                                  |
+| `node_modules_present`, `cache_dir_unsafe`                                                   | Remove the committed `node_modules` or `.cache` (symlink) from the repository.                                                                                                                                             |
+| `too_many_projects`                                                                          | Only 4 projects per run are prepared.                                                                                                                                                                                      |
+| `no_registry`, `plan_failed`, `plan_refused`                                                 | Give the agent a package allowlist and fix refused packages; see [Approve packages for coding agents](help://coding-packages).                                                                                             |
+| `cache_unavailable`, `plan_required`, `sealed`, `lookup_failed`, `download_failed`           | Check `WARDBY_DEPENDENCY_CACHE` and `BLOB_STORE` on the proxy, the store's permissions and the proxy log.                                                                                                                  |
+| `size_mismatch`, `sha_mismatch`, `unsafe_archive`, `inconsistent`                            | The snapshot was not trusted; the project installed `cold` instead. It is rebuilt when it ages out or is deleted. Repeats point at the blob store.                                                                         |
+| `too_large`, `over_budget`, `budget_unknown`, `budget_too_small`                             | Raise `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` or the agent's `workspaceDiskMb`.                                                                                                                                          |
+| `install_failed`, `timeout`, `cancelled`, `internal_error`, `worker_error`, `report_invalid` | The agent installs for itself; check the worker log. The preparation gets at most 20 minutes or half the time left before the run's deadline. On Docker a huge restore can exhaust the tmpfs inode limit before its bytes. |
+| `tool_unavailable`                                                                           | Claude Code tool-runner image predates the cache or is custom; rebuild it from the current tool-runner image. The proxy still seals on the run's first model request.                                                      |
+| `already_started`, `invalid_deadline`                                                        | Not expected: a command ran before preparation, or the worker and tool runner images are from different releases.                                                                                                          |
+| `worker_input_failed` (the run fails)                                                        | A Codex or Claude Code worker image, or a `workerImageRef` image, older than the cache. Update the images, or rebuild the custom image `FROM` the current release, before turning the cache on.                            |
 
 `rebuild` of `failed`, `timeout` or `unsealed` means native add-ons may be
 unbuilt; the agent can run `npm rebuild`.

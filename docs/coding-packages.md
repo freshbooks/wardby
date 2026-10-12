@@ -435,7 +435,8 @@ For each eligible npm project the worker prepares `node_modules` in one of
 these ways, reported per project in [`get_run`](#what-get_run-reports):
 
 - **`hit`**: a snapshot for exactly this lockfile exists. It is downloaded,
-  verified, and put in place. Nothing is installed.
+  verified, and put in place. Nothing is installed. A snapshot that fails to
+  download or verify is not used: the project is installed `cold` instead.
 - **`nearest`**: no exact snapshot, but one exists for the same repository,
   folder, worker image and package policy with a different lockfile. It is
   restored, `npm install --no-save` brings it to the committed lockfile
@@ -453,16 +454,23 @@ or the image starts a new key.
 
 ### The trust model
 
-The cache never lets an agent plant anything that another run will trust.
+A snapshot holds only what Wardby's own code installed, from packages the
+agent's policy approved, before the run's agent existed; and a run restores
+one only after the proxy re-approves the committed lockfile for that run. The
+packages themselves are whatever your allowlist and policy approve: the cache
+doesn't vet their contents beyond what a normal install through the registry
+does.
 
 - **Only Wardby builds snapshots, and only before the agent exists.** The
   worker uploads a snapshot as part of its own preparation step, then seals the
-  run's upload window with the proxy. After the seal the proxy refuses every
-  lookup, download and upload for the run, so nothing the agent does can reach
-  the cache. A proxy-side deadline (`WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS`
-  after the run's proxy session starts) closes the window even if the worker
-  never seals, and bytes that arrive after the seal or the deadline are
-  discarded. A run uploads at most once per project.
+  run's upload window with the proxy. The proxy also seals the window itself on
+  the run's first model request: the worker sends none before its preparation
+  step is over, so the window is closed before the agent can act even when the
+  worker never sealed it. After the seal the proxy refuses every lookup,
+  download and upload for the run, and bytes of an upload that finish after the
+  seal are discarded. A proxy-side deadline
+  (`WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS` after the run's proxy session
+  starts) is the last backstop. A run uploads at most once per project.
 - **A restore needs the plan first.** The worker sends the committed lockfile
   to the proxy's lockfile plan (see
   [Lockfile installs: verified, then approved exactly](#lockfile-installs-verified-then-approved-exactly)).
@@ -482,9 +490,13 @@ The cache never lets an agent plant anything that another run will trust.
   relative links inside `node_modules` only; no absolute or `..` paths, hard
   links, devices, duplicate paths, including by case or Unicode form, or links
   that leave `node_modules`), extracts it into a private temporary folder,
-  re-verifies the tree on disk, compares it with the committed lockfile (each
-  installed package's version and integrity), and only then renames it into
-  place. Any failure removes the temporary tree and skips the project.
+  re-verifies the tree on disk, compares the recorded package metadata (npm's
+  hidden lockfile and each package's `package.json` version) with the committed
+  lockfile, and only then renames it into place. The integrity of the bytes
+  comes from the checksum the proxy holds, not from this comparison. Any
+  failure removes the temporary tree, and the project is installed `cold`
+  instead (except when the run's time is up or the tree would not fit the
+  run's disk).
 - **Install scripts are not cached.** Every preparation step runs npm with
   `--ignore-scripts`. After the upload window is sealed, and only for a project
   whose committed lockfile lists a package with an install script, the worker
@@ -508,11 +520,27 @@ The cache never lets an agent plant anything that another run will trust.
 - A folder that already has a `node_modules` is left alone.
 - The agent needs a package allowlist (registry mode): the restore is approved
   by the lockfile plan.
-- Codex and Claude Code runs on the `node` and `node-python` toolchains. The
-  worker image (Codex) or tool-runner image (Claude Code) must come from a
-  Wardby release that includes the cache. An older or custom image ignores it,
-  and for Claude Code the run reports `tool_unavailable`. Images built `FROM`
-  a release's driver base image or tool-runner image carry it.
+- Codex and Claude Code runs on the `node` and `node-python` toolchains, with
+  worker images from a Wardby release that includes the cache. See
+  [Worker images](#worker-images) before you turn it on.
+
+### Worker images
+
+Use the worker images from the same release as the control plane before you
+turn `dependencyCache` on for any agent: the Codex worker images
+(`CODING_WORKER_IMAGE` and its toolchain variants such as
+`CODING_WORKER_IMAGE_NODE_PYTHON_3_12`), the Claude Code worker image
+(`CODING_CLAUDE_WORKER_IMAGE`) and the Claude Code tool runner images
+(`CODING_CLAUDE_TOOL_RUNNER_IMAGE` and its variants). An older Codex or
+Claude Code worker image validates its input strictly and rejects a run whose
+agent has the cache on: the run fails with `worker_input_failed`. A
+`workerImageRef` image must also be rebuilt for this release: `FROM` this
+release's driver image for a Codex agent, or `FROM` this release's tool runner
+image for a Claude Code agent. `create_agent` and `update_agent` return a
+warning when an agent has both `dependencyCache` and a `workerImageRef`;
+Wardby can't tell how old a custom image is. A Claude Code tool runner without
+the cache doesn't fail the run: its projects report `tool_unavailable`. See
+[Bring-Your-Own Coding-Worker Images](coding-worker-byo-images.md#the-dependency-cache-needs-a-current-driver).
 
 ### Enable it
 
@@ -543,8 +571,9 @@ The cache never lets an agent plant anything that another run will trust.
    role (GKE), re-run `bootstrap-database-iam.sh` before deploying a release
    that includes the cache: the proxy needs access to `DependencySnapshot` and
    a few `CodingRun` columns.
-3. **Per agent.** Set `codingProfile.dependencyCache` to `true` with
-   `create_agent` or `update_agent`. Like the package allowlist, it needs
+3. **Per agent.** Once the [worker images](#worker-images) are current, set
+   `codingProfile.dependencyCache` to `true` with `create_agent` or
+   `update_agent`. Like the package allowlist, it needs
    `packages:approve` or `agents:admin`. The setting is read when a run
    starts.
 
@@ -577,8 +606,11 @@ Other bounds:
   what the workspace already uses and a safety margin. If that can't be
   measured, or leaves under 64 MiB, the cache is skipped (`budget_unknown`,
   `budget_too_small`).
-- The whole preparation is bounded to 20 minutes, a rebuild to 5 minutes, and
-  the worker stops uploading once the proxy's upload window is nearly over.
+- The whole preparation, measuring the disk included, is bounded to 20
+  minutes or half the time left before the run's deadline, whichever is
+  sooner, so a short run keeps most of its time for the agent. A rebuild is
+  bounded to 5 minutes, and the worker stops uploading once the proxy's upload
+  window is nearly over.
 - On Docker the workspace can be a tmpfs, whose inode limit can bind before
   its byte limit on a very large restore. The cache is then skipped
   (`internal_error`) and the run continues.
@@ -624,35 +656,42 @@ failed before its result was collected.
 
 ### Cache reason codes
 
-A skipped project never fails the run. Look the `reason` up here.
+A skipped project never fails the run. Look the `reason` up here. A snapshot
+that a `hit` or `nearest` restore rejects (`download_failed`, `size_mismatch`,
+`sha_mismatch`, `too_large`, `unsafe_archive`, `inconsistent`) is not reported
+as the project's reason: the project installs `cold` instead, and a traced
+Codex run's worker log records the code as `hit_rejected` or
+`nearest_rejected`.
 
-| Reason                                                  | Meaning and what to do                                                                                                                                                                                  |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `no_lockfile`, `lockfile_unreadable`, `no_package_json` | Nothing eligible in that folder. Expected for repositories without npm.                                                                                                                                 |
-| `lockfile_version`                                      | The lockfile is below `lockfileVersion` 2. Regenerate it with npm 7 or later.                                                                                                                           |
-| `workspaces`, `workspace_member`, `shrinkwrap_present`  | An npm workspaces root, a folder inside one, or an `npm-shrinkwrap.json`: not supported. The agent installs for itself.                                                                                 |
-| `node_modules_present`                                  | The checkout already has a `node_modules` there. It is left alone.                                                                                                                                      |
-| `no_dependencies`                                       | The lockfile installs nothing.                                                                                                                                                                          |
-| `too_many_projects`                                     | More than 4 projects were found. The rest are skipped.                                                                                                                                                  |
-| `cache_dir_unsafe`                                      | `.cache` in the checkout isn't a plain folder (for example a committed symlink). Remove it from the repository.                                                                                         |
-| `no_registry`                                           | The worker got no registry settings: the agent has no package allowlist. Enable registry mode first.                                                                                                    |
-| `plan_failed`                                           | The lockfile plan didn't answer properly. See [Error codes](#error-codes); retry.                                                                                                                       |
-| `plan_refused` (result `refused`)                       | The plan refused at least one package under the agent's current policy (not allowlisted, too new, advisory). Fix the allowlist or policy; no snapshot is used.                                          |
-| `cache_unavailable`                                     | The proxy has no cache for this run: the switch is off, there is no blob store, or the run's flag or image is missing. Check `WARDBY_DEPENDENCY_CACHE` and `BLOB_STORE` on the proxy.                   |
-| `plan_required`, `sealed`                               | The proxy refused a lookup because the lockfile wasn't approved by a plan, or the window was already sealed. Usually the preparation was cut short.                                                     |
-| `lookup_failed`, `download_failed`                      | The proxy or the blob store answered unexpectedly. Check the proxy log and the store's permissions.                                                                                                     |
-| `size_mismatch`, `sha_mismatch`                         | The download didn't match its recorded size or digest. It is not used, and the proxy deletes the damaged snapshot. Repeats point at the blob store.                                                     |
-| `too_large`                                             | A snapshot is larger than the maximum the proxy reported. Raise `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` if that is intended.                                                                          |
-| `unsafe_archive`                                        | The archive failed a safety rule or its extracted tree didn't verify. It is skipped on every run until it ages out and is rebuilt. A package shipping two files that differ only in case is not cached. |
-| `over_budget`                                           | The unpacked snapshot is larger than the disk budget. Raise the agent's `workspaceDiskMb`.                                                                                                              |
-| `inconsistent`                                          | The tree doesn't match the committed lockfile. A restored one is discarded; a `cold` one is kept for the agent but not stored.                                                                          |
-| `install_failed`                                        | `npm ci`, or the `npm install` that updates a nearest snapshot, exited non-zero. The agent installs for itself and sees the real error.                                                                 |
-| `budget_unknown`, `budget_too_small`                    | The run's workspace disk couldn't be measured, or under 64 MiB would remain. Raise `workspaceDiskMb`.                                                                                                   |
-| `timeout`, `cancelled`                                  | A step or the 20-minute total ran out, or the run was cancelled.                                                                                                                                        |
-| `internal_error`, `worker_error`                        | Something unexpected in the worker, including a full disk or inode table. The run continues without the cache; check the worker's log.                                                                  |
-| `tool_unavailable`                                      | Claude Code only: the tool-runner image predates the cache or is a custom image without it. Rebuild it `FROM` the current tool-runner image. The proxy's upload deadline still closes the window.       |
-| `report_invalid`                                        | The worker's report was malformed and was replaced by this code.                                                                                                                                        |
-| `already_started`                                       | A command ran before preparation finished. Not expected in normal operation.                                                                                                                            |
+| Reason                                                        | Meaning and what to do                                                                                                                                                                                           |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `no_lockfile`, `lockfile_unreadable`, `no_package_json`       | Nothing eligible in that folder. Expected for repositories without npm.                                                                                                                                          |
+| `lockfile_version`                                            | The lockfile is below `lockfileVersion` 2. Regenerate it with npm 7 or later.                                                                                                                                    |
+| `workspaces`, `workspace_member`, `shrinkwrap_present`        | An npm workspaces root, a folder inside one, or an `npm-shrinkwrap.json`: not supported. The agent installs for itself.                                                                                          |
+| `node_modules_present`                                        | The checkout already has a `node_modules` there. It is left alone.                                                                                                                                               |
+| `no_dependencies`                                             | The lockfile installs nothing.                                                                                                                                                                                   |
+| `too_many_projects`                                           | More than 4 projects were found. The rest are skipped.                                                                                                                                                           |
+| `cache_dir_unsafe`                                            | `.cache` in the checkout isn't a plain folder (for example a committed symlink). Remove it from the repository.                                                                                                  |
+| `no_registry`                                                 | The worker got no registry settings: the agent has no package allowlist. Enable registry mode first.                                                                                                             |
+| `plan_failed`                                                 | The lockfile plan didn't answer properly. See [Error codes](#error-codes); retry.                                                                                                                                |
+| `plan_refused` (result `refused`)                             | The plan refused at least one package under the agent's current policy (not allowlisted, too new, advisory). Fix the allowlist or policy; no snapshot is used.                                                   |
+| `cache_unavailable`                                           | The proxy has no cache for this run: the switch is off, there is no blob store, or the run's flag or image is missing. Check `WARDBY_DEPENDENCY_CACHE` and `BLOB_STORE` on the proxy.                            |
+| `plan_required`, `sealed`                                     | The proxy refused a lookup because the lockfile wasn't approved by a plan, or the window was already sealed. Usually the preparation was cut short.                                                              |
+| `lookup_failed`, `download_failed`                            | The proxy or the blob store answered unexpectedly. Check the proxy log and the store's permissions.                                                                                                              |
+| `size_mismatch`, `sha_mismatch`                               | The download didn't match its recorded size or digest. It is not used, and the proxy deletes the damaged snapshot. Repeats point at the blob store.                                                              |
+| `too_large`                                                   | A snapshot is larger than the maximum the proxy reported. Raise `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` if that is intended.                                                                                   |
+| `unsafe_archive`                                              | The archive failed a safety rule or its extracted tree didn't verify. Runs install `cold` instead until it ages out and is rebuilt. A package shipping two files that differ only in case is not cached.         |
+| `over_budget`                                                 | The unpacked snapshot is larger than the disk budget. Raise the agent's `workspaceDiskMb`.                                                                                                                       |
+| `inconsistent`                                                | The tree doesn't match the committed lockfile. A restored one is discarded and the project installs `cold`; a `cold` one is kept for the agent but not stored.                                                   |
+| `install_failed`                                              | `npm ci`, or the `npm install` that updates a nearest snapshot, exited non-zero. The agent installs for itself and sees the real error.                                                                          |
+| `budget_unknown`, `budget_too_small`                          | The run's workspace disk couldn't be measured, or under 64 MiB would remain. Raise `workspaceDiskMb`.                                                                                                            |
+| `timeout`, `cancelled`                                        | A step or the preparation's bound (20 minutes, or half the time left before the run's deadline) ran out, or the run was cancelled.                                                                               |
+| `internal_error`, `worker_error`                              | Something unexpected in the worker, including a full disk or inode table. The run continues without the cache; check the worker's log.                                                                           |
+| `tool_unavailable`                                            | Claude Code only: the tool-runner image predates the cache or is a custom image without it. Rebuild it `FROM` the current tool-runner image. The proxy still seals the window on the run's first model request.  |
+| `report_invalid`                                              | The worker's report was malformed and was replaced by this code.                                                                                                                                                 |
+| `already_started`                                             | A command ran before preparation finished. Not expected in normal operation.                                                                                                                                     |
+| `invalid_deadline`                                            | Claude Code only: the worker passed the tool runner a deadline it couldn't read. Not expected; the worker and tool runner images are from different releases.                                                    |
+| `worker_input_failed` (the run's error, not a project reason) | The run failed before the agent started: a Codex or Claude Code worker image older than the cache, or a `workerImageRef` image not rebuilt from a release that includes it. See [Worker images](#worker-images). |
 
 For `rebuild`, `failed`, `timeout` and `unsealed` mean native add-ons may be
 unbuilt; the agent can run `npm rebuild` itself.

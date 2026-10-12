@@ -16,9 +16,9 @@ services:
       NODE_ENV: production
       # Run dependency cache. Off unless WARDBY_DEPENDENCY_CACHE=true is in the
       # quickstart env file (.wardby/.env) or the shell: then the proxy keeps
-      # snapshots on the named volume below. Unset, BLOB_STORE is empty, which the
-      # proxy reads as no blob store.
-      BLOB_STORE: ${WARDBY_DEPENDENCY_CACHE:+local}
+      # snapshots on the named volume below. The flag alone switches it; the
+      # blob store is unused while it is off.
+      BLOB_STORE: local
       BLOB_STORE_LOCAL_DIR: /var/lib/wardby/blobs
       WARDBY_DEPENDENCY_CACHE: ${WARDBY_DEPENDENCY_CACHE:-false}
     volumes:
