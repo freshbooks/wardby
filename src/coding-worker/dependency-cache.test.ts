@@ -9,11 +9,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   checkConsistency,
   DEFAULT_TIMEOUTS,
+  discoverProjects,
+  extractArchive,
   prepareDependencies,
   prepareProject,
   scanArchive,
   verifyTree,
   type DependencyCacheEvent,
+  type PrepareDependenciesResult,
   type PrepareResult,
 } from "./dependency-cache.mjs";
 
@@ -70,6 +73,18 @@ const fs = require("node:fs");
 const path = require("node:path");
 fs.appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
 const mode = process.env.FAKE_NPM_MODE || "";
+if (process.argv[2] === "rebuild") {
+  // FAKE_NPM_REBUILD: fail | hang (writes node_modules/.late after 2 s unless killed)
+  const rebuild = process.env.FAKE_NPM_REBUILD || "";
+  if (rebuild === "fail") process.exit(1);
+  if (rebuild === "hang") {
+    setTimeout(() => fs.writeFileSync("node_modules/.late", "x"), 2000);
+    setInterval(() => {}, 1000);
+    return;
+  }
+  fs.writeFileSync("node_modules/.rebuilt", "x");
+  process.exit(0);
+}
 if (mode === "hang") setInterval(() => {}, 1000);
 else if (mode === "fail") process.exit(1);
 else {
@@ -97,8 +112,10 @@ interface ProxyState {
   plans: string[];
   calls: string[];
   authorizations: (string | undefined)[];
-  planAnswer: { status: number; body: unknown };
-  lookupAnswer: (lock: string) => { status: number; body: unknown };
+  planAnswer: { status: number; body: unknown } | ((plan: string) => { status: number; body: unknown });
+  lookupAnswer: (lock: string, project: string) => { status: number; body: unknown };
+  /** The project= of every cache route, in order. */
+  projects: string[];
   blobs: Map<string, Buffer>;
   shaOverride?: string;
   lengthOverride?: number;
@@ -139,8 +156,10 @@ function startProxy(): Promise<void> {
         response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
       if (state.hang && route.startsWith(state.hang)) return; // never answers
       if (route === "POST /registry/npm/-/plan") {
-        state.plans.push((await readBody(request)).toString("utf8"));
-        json(state.planAnswer.status, state.planAnswer.body);
+        const plan = (await readBody(request)).toString("utf8");
+        state.plans.push(plan);
+        const answer = typeof state.planAnswer === "function" ? state.planAnswer(plan) : state.planAnswer;
+        json(answer.status, answer.body);
         return;
       }
       if (route === "POST /cache/npm/seal") {
@@ -155,12 +174,25 @@ function startProxy(): Promise<void> {
         return;
       }
       const lock = url.searchParams.get("lock") ?? "";
-      if (url.searchParams.get("project") !== "." || !state.plans.some((plan) => sha256(plan) === lock)) {
+      const project = url.searchParams.get("project") ?? "";
+      state.projects.push(project);
+      // The proxy's projectPath rule (key.ts parseProjectPath).
+      const validProject =
+        project === "." ||
+        (project.split("/").length <= 3 &&
+          project
+            .split("/")
+            .every((segment) => /^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}$/.test(segment) && segment !== "node_modules"));
+      if (!validProject) {
+        json(400, { error: "invalid_project" });
+        return;
+      }
+      if (!state.plans.some((plan) => sha256(plan) === lock)) {
         json(409, { error: "plan_required" });
         return;
       }
       if (route === "GET /cache/npm/lookup") {
-        const answer = state.lookupAnswer(lock);
+        const answer = state.lookupAnswer(lock, project);
         json(answer.status, answer.body);
         return;
       }
@@ -199,6 +231,7 @@ beforeEach(async () => {
     planAnswer: { status: 200, body: { approved: 3, refused: [] } },
     lookupAnswer: () => ({ status: 200, body: { key: "k".repeat(64), hit: false, maxBytes: 64 * 1024 * 1024 } }),
     blobs: new Map(),
+    projects: [],
     uploads: [],
     sealed: false,
     seals: 0,
@@ -237,7 +270,9 @@ async function writeRepo(lockfile: object, packageJson: object = { name: "demo",
   await writeFile(join(workspace, "package-lock.json"), JSON.stringify(lockfile, null, 2));
 }
 
-function prepare(options: Partial<Parameters<typeof prepareDependencies>[0]> = {}): Promise<PrepareResult> {
+function prepareAll(
+  options: Partial<Parameters<typeof prepareDependencies>[0]> = {},
+): Promise<PrepareDependenciesResult> {
   return prepareDependencies({
     workspace,
     env,
@@ -245,6 +280,31 @@ function prepare(options: Partial<Parameters<typeof prepareDependencies>[0]> = {
     log: (event, fields) => events.push({ event, ...fields }),
     ...options,
   });
+}
+
+/** For a repo with only the root project: its result, without `path` and `rebuild`. */
+async function prepare(options: Partial<Parameters<typeof prepareDependencies>[0]> = {}): Promise<PrepareResult> {
+  const { projects } = await prepareAll(options);
+  expect(projects.map((project) => project.path)).toEqual(["."]);
+  const { path: _path, rebuild: _rebuild, ...rest } = projects[0];
+  return rest;
+}
+
+/** Writes a project (package.json + package-lock.json) in `dir`, relative to the workspace. */
+async function writeProject(dir: string, lockfile: object, packageJson: object = { name: "demo", version: "1.0.0" }) {
+  await mkdir(join(workspace, dir), { recursive: true });
+  await writeFile(join(workspace, dir, "package.json"), JSON.stringify(packageJson));
+  await writeFile(join(workspace, dir, "package-lock.json"), JSON.stringify(lockfile, null, 2));
+}
+
+/** Every file name under `dir`, recursively (links not followed). */
+async function allNames(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    out.push(entry.name);
+    if (entry.isDirectory()) out.push(...(await allNames(join(dir, entry.name))));
+  }
+  return out;
 }
 
 async function npmCalls(): Promise<string[][]> {
@@ -463,6 +523,15 @@ describe("prepareDependencies", () => {
 
 // ---------------------------------------------------------------- integrity and safety
 
+const CASE_FOLD_CHAIN: RawEntry[] = [
+  { name: "node_modules/a/", type: "5" },
+  { name: "node_modules/a/S", type: "2", link: ".." },
+  { name: "node_modules/a/s/T", type: "2", link: ".." },
+  { name: "node_modules/a/s/t/V", type: "2", link: ".." },
+  { name: "node_modules/a/s/t/v/W", type: "2", link: ".." },
+  { name: "node_modules/a/s/t/v/w/PWNED", body: "written outside\n" },
+];
+
 const MALICIOUS: [string, RawEntry[], string][] = [
   ["path traversal", [{ name: "node_modules/../../etc/evil", body: "x" }], "unsafe_archive"],
   ["absolute path", [{ name: "/tmp/evil", body: "x" }], "unsafe_archive"],
@@ -507,6 +576,21 @@ const MALICIOUS: [string, RawEntry[], string][] = [
     ],
     "unsafe_archive",
   ],
+  // On a case-insensitive file system `a/s` is the link `a/S`, and each link
+  // climbs one more level: PWNED would land beside the workspace's .cache.
+  [
+    "paths equal under case folding (a link chain on a case-insensitive file system)",
+    CASE_FOLD_CHAIN,
+    "unsafe_archive",
+  ],
+  [
+    "paths equal under Unicode NFC normalization",
+    [
+      { name: "node_modules/caf\u00e9", body: "x" },
+      { name: "node_modules/cafe\u0301", body: "y" },
+    ],
+    "unsafe_archive",
+  ],
 ];
 describe("untrusted archives", () => {
   it("rejects a sha256 mismatch and deletes the download", async () => {
@@ -547,6 +631,52 @@ describe("untrusted archives", () => {
     const archive = join(root, "bad.tgz");
     await writeFile(archive, rawTar([{ name: "node_modules/", type: "5" }, ...entries]));
     await expect(scanArchive(archive, { budgetBytes: 1024 * 1024 * 1024 })).rejects.toMatchObject({ reason });
+  });
+
+  it("rejects the case-folding link chain with nothing written outside the temp folder, on any file system", async () => {
+    hitWith(rawTar([{ name: "node_modules/", type: "5" }, ...CASE_FOLD_CHAIN]));
+    const before = (await readdir(workspace)).sort();
+    expect(await prepare({ budgetBytes: 1024 * 1024 * 1024 })).toEqual({ result: "skipped", reason: "unsafe_archive" });
+    expect(await allNames(root)).not.toContain("PWNED");
+    expect((await readdir(workspace)).filter((name) => name !== ".cache").sort()).toEqual(before);
+    expect(await cacheLeftovers()).toEqual([]);
+  });
+
+  it("extraction refuses to write through a folder that is a symlink, and opens files without following links", async () => {
+    const destination = join(root, "dest");
+    const outside = join(root, "elsewhere");
+    await mkdir(destination);
+    await mkdir(outside);
+    await symlink(outside, join(destination, "node_modules")); // planted parent
+    const archive = join(root, "plain.tgz");
+    await writeFile(
+      archive,
+      rawTar([
+        { name: "node_modules/", type: "5" },
+        { name: "node_modules/x", body: "x" },
+      ]),
+    );
+    await expect(extractArchive(archive, destination, { budgetBytes: 1024 * 1024 })).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+    expect(await readdir(outside)).toEqual([]);
+
+    // A planted link one level down, reached by a file entry's parent.
+    await rm(join(destination, "node_modules"));
+    await mkdir(join(destination, "node_modules"));
+    await symlink(outside, join(destination, "node_modules/p"));
+    await writeFile(archive, rawTar([{ name: "node_modules/p/x", body: "x" }]));
+    await expect(extractArchive(archive, destination, { budgetBytes: 1024 * 1024 })).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+    expect(await readdir(outside)).toEqual([]);
+
+    // A planted link where a file goes: never followed, never replaced.
+    await rm(join(destination, "node_modules/p"));
+    await symlink(join(outside, "target"), join(destination, "node_modules/y"));
+    await writeFile(archive, rawTar([{ name: "node_modules/y", body: "x" }]));
+    await expect(extractArchive(archive, destination, { budgetBytes: 1024 * 1024 })).rejects.toBeDefined();
+    expect(await readdir(outside)).toEqual([]);
   });
 
   it("verifyTree rejects a written tree with a link out of node_modules, even through a linked folder", async () => {
@@ -727,8 +857,10 @@ describe("seal and timeouts", () => {
     await expect(prepare()).resolves.toMatchObject({ result: "skipped" });
   });
 
-  it("after a deadline, a step that ignored it never puts node_modules in place", async () => {
+  it("after a deadline, a step that ignored it never puts node_modules in place, and its temps are removed", async () => {
     hitWith(await realTarSnapshot(LOCKFILE));
+    await mkdir(join(workspace, ".cache"));
+    await writeFile(join(workspace, ".cache", "keep.txt"), "not ours");
     const started = Date.now();
     const result = await prepare({
       timeouts: { totalMs: 400, killGraceMs: 100, settleMs: 200 },
@@ -739,13 +871,264 @@ describe("seal and timeouts", () => {
     expect(result).toEqual({ result: "skipped", reason: "timeout" });
     expect(Date.now() - started).toBeLessThan(1_400);
     expect(state.seals).toBe(1);
+    // Only this module's own temp paths go; nothing else in .cache is touched.
+    expect(await cacheLeftovers()).toEqual(["keep.txt"]);
     await new Promise((resolve) => setTimeout(resolve, 2_000));
     expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await cacheLeftovers()).toEqual(["keep.txt"]);
   });
 
   it("seals even when the workspace .cache is not a directory", async () => {
     await symlink(root, join(workspace, ".cache"));
     expect(await prepare()).toEqual({ result: "skipped", reason: "cache_dir_unsafe" });
     expect(state.seals).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------- several projects
+
+describe("several npm projects in one repo", () => {
+  const hitEverywhere = async () => hitWith(await realTarSnapshot(LOCKFILE));
+
+  it("restores the root, app/ and server/ projects into their own folders, then seals once", async () => {
+    await writeProject("app", LOCKFILE);
+    await writeProject("server", LOCKFILE);
+    await hitEverywhere();
+    const { projects } = await prepareAll();
+    expect(projects.map((project) => [project.path, project.result])).toEqual([
+      [".", "hit"],
+      ["app", "hit"],
+      ["server", "hit"],
+    ]);
+    for (const dir of [".", "app", "server"])
+      expect(await exists(join(workspace, dir, "node_modules/alpha/package.json"))).toBe(true);
+    expect(new Set(state.projects)).toEqual(new Set([".", "app", "server"]));
+    expect(state.seals).toBe(1);
+    expect(state.calls.at(-1)).toBe("POST /cache/npm/seal");
+    expect(state.calls.filter((call) => call === "POST /cache/npm/seal")).toHaveLength(1);
+    expect(await npmCalls()).toEqual([]);
+    expect(await cacheLeftovers()).toEqual([]);
+  });
+
+  it("takes at most four projects, root first then by path; the rest are too_many_projects", async () => {
+    for (const dir of ["e", "b", "d", "a", "c"]) await writeProject(dir, LOCKFILE);
+    await hitEverywhere();
+    const { projects } = await prepareAll();
+    expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
+      [".", "hit", undefined],
+      ["a", "hit", undefined],
+      ["b", "hit", undefined],
+      ["c", "hit", undefined],
+      ["d", "skipped", "too_many_projects"],
+      ["e", "skipped", "too_many_projects"],
+    ]);
+    expect(await exists(join(workspace, "d/node_modules"))).toBe(false);
+    expect(state.projects).not.toContain("d");
+  });
+
+  it("ignores lockfiles in node_modules, dot-folders, symlinked folders, odd names and below three levels", async () => {
+    await writeProject("node_modules/x", LOCKFILE);
+    await writeProject("app/node_modules/y", LOCKFILE);
+    await writeProject(".hidden", LOCKFILE);
+    await writeProject("has space", LOCKFILE);
+    await writeProject("x/y/z", LOCKFILE);
+    await writeProject("x/y/z/deep", LOCKFILE);
+    await writeProject("app", LOCKFILE);
+    await symlink(join(workspace, "app"), join(workspace, "linked"));
+    await symlink(join(workspace, "app"), join(workspace, "x/linked"));
+    expect(await discoverProjects(workspace)).toEqual(["."].concat(["app", "x/y/z"]));
+  });
+
+  it("discovers nothing but a missing root lockfile when the repo has no npm project", async () => {
+    await rm(join(workspace, "package-lock.json"));
+    expect((await prepareAll()).projects).toEqual([{ path: ".", result: "skipped", reason: "no_lockfile" }]);
+  });
+
+  it("a subfolder project works without a root project", async () => {
+    await rm(join(workspace, "package-lock.json"));
+    await writeProject("web/client", LOCKFILE);
+    await hitEverywhere();
+    const { projects } = await prepareAll();
+    expect(projects.map((project) => [project.path, project.result])).toEqual([["web/client", "hit"]]);
+    expect(await exists(join(workspace, "web/client/node_modules/alpha"))).toBe(true);
+    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+  });
+
+  it("skips projects inside another project's workspaces globs", async () => {
+    await writeRepo(LOCKFILE, { name: "mono", workspaces: ["packages/*"] });
+    await writeProject("packages/a", LOCKFILE);
+    await writeProject("packages/a/inner", LOCKFILE);
+    await writeProject("tools", LOCKFILE);
+    await writeProject(
+      "apps/web",
+      { ...LOCKFILE, name: "apps" },
+      { name: "apps", workspaces: { packages: ["./web/"] } },
+    );
+    await writeProject("apps/web/site", LOCKFILE);
+    await hitEverywhere();
+    const { projects } = await prepareAll();
+    expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
+      [".", "skipped", "workspaces"],
+      ["apps/web", "skipped", "workspaces"],
+      ["apps/web/site", "hit", undefined],
+      ["packages/a", "skipped", "workspace_member"],
+      ["packages/a/inner", "skipped", "workspace_member"],
+      ["tools", "hit", undefined],
+    ]);
+  });
+
+  it("one project's refusal or failure never stops the others", async () => {
+    await writeProject("app", { ...LOCKFILE, name: "refuse-me" });
+    await writeProject("server", { ...LOCKFILE, name: "server" });
+    await writeProject("tools", { ...LOCKFILE, name: "tools" });
+    const good = await realTarSnapshot(LOCKFILE);
+    state.blobs.set("a".repeat(64), good);
+    state.blobs.set("e".repeat(64), rawTar([{ name: "node_modules/../evil", body: "x" }]));
+    state.planAnswer = (plan) =>
+      plan.includes('"refuse-me"')
+        ? { status: 200, body: { approved: 1, refused: [{ name: "beta", version: "2.0.0", code: "too_new" }] } }
+        : { status: 200, body: { approved: 3, refused: [] } };
+    state.lookupAnswer = (_lock, project) => ({
+      status: 200,
+      body: { key: project === "server" ? "e".repeat(64) : "a".repeat(64), hit: true, maxBytes: 64 * 1024 * 1024 },
+    });
+    const { projects } = await prepareAll();
+    expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
+      [".", "hit", undefined],
+      ["app", "refused", "plan_refused"],
+      ["server", "skipped", "unsafe_archive"],
+      ["tools", "hit", undefined],
+    ]);
+    expect(await exists(join(workspace, "server/node_modules"))).toBe(false);
+    expect(await exists(join(workspace, "tools/node_modules/alpha"))).toBe(true);
+    expect(state.seals).toBe(1);
+  });
+
+  it("shares the size budget: a restore is checked against what earlier restores left", async () => {
+    await writeProject("app", LOCKFILE);
+    const blob = await realTarSnapshot(LOCKFILE);
+    const archive = join(root, "measure.tgz");
+    await writeFile(archive, blob);
+    const { unpackedBytes } = await scanArchive(archive, { budgetBytes: 1024 * 1024 * 1024 });
+    hitWith(blob);
+    const { projects } = await prepareAll({ budgetBytes: blob.length + Math.floor(unpackedBytes * 1.5) });
+    expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
+      [".", "hit", undefined],
+      ["app", "skipped", "over_budget"],
+    ]);
+    expect(await exists(join(workspace, "app/node_modules"))).toBe(false);
+  });
+
+  it("shares the size budget with what an install before it wrote", async () => {
+    await writeProject("app", LOCKFILE);
+    const blob = await realTarSnapshot(LOCKFILE);
+    const archive = join(root, "measure.tgz");
+    await writeFile(archive, blob);
+    const { unpackedBytes } = await scanArchive(archive, { budgetBytes: 1024 * 1024 * 1024 });
+    state.blobs.set("a".repeat(64), blob);
+    state.lookupAnswer = (_lock, project) => ({
+      status: 200,
+      body: { key: "a".repeat(64), hit: project === "app", maxBytes: 64 * 1024 * 1024 },
+    });
+    const { projects } = await prepareAll({ budgetBytes: blob.length + Math.floor(unpackedBytes * 1.5) });
+    expect(projects.map((project) => [project.path, project.result, project.reason])).toEqual([
+      [".", "cold", undefined],
+      ["app", "skipped", "over_budget"],
+    ]);
+  });
+
+  it("the deadline reports unfinished projects as timeout and still seals once", async () => {
+    await writeProject("app", LOCKFILE);
+    env.FAKE_NPM_MODE = "hang";
+    const { projects } = await prepareAll({ timeouts: { totalMs: 500, killGraceMs: 100 } });
+    expect(projects).toEqual([
+      { path: ".", result: "skipped", reason: "timeout" },
+      { path: "app", result: "skipped", reason: "timeout" },
+    ]);
+    expect(state.seals).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------- install scripts
+
+describe("npm rebuild after the seal", () => {
+  const SCRIPTED = {
+    ...LOCKFILE,
+    packages: {
+      ...LOCKFILE.packages,
+      "node_modules/beta": { ...LOCKFILE.packages["node_modules/beta"], hasInstallScript: true },
+    },
+  };
+
+  it("runs npm rebuild after the seal for a project with install scripts; its output is never uploaded", async () => {
+    await writeRepo(SCRIPTED);
+    const { projects } = await prepareAll();
+    expect(projects).toEqual([expect.objectContaining({ path: ".", result: "cold", rebuild: "ok" })]);
+    expect(await npmCalls()).toEqual([["ci", "--ignore-scripts", "--no-audit", "--no-fund"], ["rebuild"]]);
+    const order = events.map((entry) => entry.event);
+    expect(order.indexOf("seal")).toBeLessThan(order.indexOf("rebuild"));
+    expect(await exists(join(workspace, "node_modules/.rebuilt"))).toBe(true);
+    // The snapshot went up before the rebuild ran.
+    expect(state.uploads).toHaveLength(1);
+    const uploaded = join(root, "uploaded.tgz");
+    await writeFile(uploaded, state.uploads[0].body);
+    const listing = spawnSync("tar", ["-tzf", uploaded], { encoding: "utf8" }).stdout;
+    expect(listing).toContain("node_modules/alpha/package.json");
+    expect(listing).not.toContain(".rebuilt");
+  });
+
+  it("rebuilds a restored hit too", async () => {
+    await writeRepo(SCRIPTED);
+    hitWith(await realTarSnapshot(SCRIPTED));
+    const { projects } = await prepareAll();
+    expect(projects).toEqual([expect.objectContaining({ result: "hit", rebuild: "ok" })]);
+    expect(await npmCalls()).toEqual([["rebuild"]]);
+  });
+
+  it("skips the rebuild when no package has an install script, and for a skipped project", async () => {
+    await writeProject("app", { ...LOCKFILE, name: "app" });
+    state.lookupAnswer = (_lock, project) =>
+      project === "app"
+        ? { status: 404, body: { error: "not_found" } }
+        : { status: 200, body: { key: "k".repeat(64), hit: false, maxBytes: 64 * 1024 * 1024 } };
+    const { projects } = await prepareAll();
+    expect(projects).toEqual([
+      expect.objectContaining({ path: ".", result: "cold", rebuild: "skipped" }),
+      { path: "app", result: "skipped", reason: "cache_unavailable" },
+    ]);
+    expect((await npmCalls()).map((argv) => argv[0])).toEqual(["ci"]);
+  });
+
+  it("a failed rebuild is recorded and changes nothing else", async () => {
+    await writeRepo(SCRIPTED);
+    env.FAKE_NPM_REBUILD = "fail";
+    const { projects } = await prepareAll();
+    expect(projects).toEqual([expect.objectContaining({ result: "cold", rebuild: "failed" })]);
+    expect(projects[0].reason).toBeUndefined();
+    expect(await exists(join(workspace, "node_modules/alpha"))).toBe(true);
+  });
+
+  it("a hung rebuild is killed at its timeout and never writes afterwards", async () => {
+    await writeRepo(SCRIPTED);
+    env.FAKE_NPM_REBUILD = "hang";
+    const started = Date.now();
+    const { projects } = await prepareAll({ timeouts: { rebuildMs: 300, killGraceMs: 100 } });
+    expect(projects).toEqual([expect.objectContaining({ result: "cold", rebuild: "timeout" })]);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(await exists(join(workspace, "node_modules/.late"))).toBe(false);
+  });
+
+  it("the overall deadline covers the rebuild: nothing changes the workspace after the module returns", async () => {
+    await writeRepo(SCRIPTED);
+    hitWith(await realTarSnapshot(SCRIPTED));
+    env.FAKE_NPM_REBUILD = "hang";
+    const started = Date.now();
+    const { projects } = await prepareAll({ timeouts: { totalMs: 1_000, killGraceMs: 100, settleMs: 300 } });
+    expect(Date.now() - started).toBeLessThan(1_300 + 500);
+    expect(projects).toEqual([expect.objectContaining({ result: "hit", rebuild: "timeout" })]);
+    expect(state.seals).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(await exists(join(workspace, "node_modules/.late"))).toBe(false);
   });
 });

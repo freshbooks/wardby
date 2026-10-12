@@ -1,8 +1,9 @@
 // Wardby's pre-agent dependency cache, run by trusted wardby code (the Codex
 // worker driver and the Claude tool runner) before the agent starts.
 //
-// For an npm project with a committed package-lock.json it plans the
-// lockfile with the registry proxy (the same request the npm shim sends),
+// It finds the repo's npm projects (a committed package-lock.json at the root
+// or up to three folders down; at most MAX_PROJECTS), and for each one plans
+// the lockfile with the registry proxy (the same request the npm shim sends),
 // asks the proxy's dependency cache for a snapshot of node_modules made for
 // exactly that lockfile, image and policy, and then either:
 //   hit     - downloads it, verifies its sha256, checks every tar entry,
@@ -12,8 +13,12 @@
 //             (minus the lockfile check), lets `npm install` bring it up to
 //             date, checks the tree, and snapshots the result;
 //   cold    - runs `npm ci`, checks the tree, and snapshots it.
-// It always seals the run's upload window at the end, so nothing the agent
-// does can ever be uploaded.
+// Projects run one after another with a shared disk budget; one project's
+// failure never affects another. It always seals the run's upload window once,
+// after every project, so nothing the agent does can ever be uploaded. Only
+// then, for a project whose lockfile lists install scripts, it runs
+// `npm rebuild` (snapshots are always built with --ignore-scripts, so what the
+// scripts produce is never uploaded).
 //
 // A snapshot is untrusted input (storage could be tampered with), so the
 // archive is parsed here, in one place, and every entry is checked before
@@ -27,7 +32,7 @@
 // Dependency-free on purpose (it runs before anything is installed).
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -46,7 +51,7 @@ import {
 } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
-import { dirname, join, posix, sep } from "node:path";
+import { basename, join, posix, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
@@ -66,6 +71,7 @@ export const DEFAULT_TIMEOUTS = Object.freeze({
   totalMs: 1_200_000,
   killGraceMs: 5_000,
   settleMs: 6_000,
+  rebuildMs: 300_000,
 });
 
 /** The workspace budget when the caller names none and CODING_DISK_MB is unset. */
@@ -76,6 +82,17 @@ const MAX_JSON_BYTES = 1 * MIB;
 const MAX_PAX_BYTES = 1 * MIB;
 const MAX_NAME_BYTES = 4096;
 const ROOT = "node_modules";
+/** Most npm projects one run prepares; more are reported `too_many_projects`. */
+export const MAX_PROJECTS = 4;
+/** Deepest project folder, in path segments (the proxy's own limit). */
+const MAX_PROJECT_DEPTH = 3;
+/** Most folders discovery looks at, so a huge checkout can't stall the run. */
+const MAX_DISCOVERY_DIRS = 10_000;
+/** A project path segment the proxy accepts (key.ts parseProjectPath): no
+ *  leading dot, so dot-folders are never projects. */
+const PROJECT_SEGMENT = /^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,99}$/;
+/** This module's own temp names under <workspace>/.cache (randomName below). */
+const OWN_TEMP = /^dep(?:-restore|-snap)?-[0-9a-f]{16}(?:\.tgz)?$/;
 
 class Skip extends Error {
   constructor(reason) {
@@ -264,6 +281,7 @@ class EntryRules {
     this.budgetBytes = budgetBytes;
     this.maxEntries = maxEntries;
     this.kinds = new Map();
+    this.folded = new Map();
     this.unpackedBytes = 0;
     this.entries = 0;
   }
@@ -286,12 +304,12 @@ class EntryRules {
       const parent = segments.slice(0, depth).join("/");
       const parentKind = this.kinds.get(parent);
       if (parentKind && parentKind !== "dir" && parentKind !== "implied") throw new Skip("unsafe_archive");
-      if (!parentKind) this.kinds.set(parent, "implied");
+      if (!parentKind) this.claim(parent, "implied");
     }
     const existing = this.kinds.get(path);
     // A folder's own entry may follow entries that implied it; nothing else repeats.
     if (existing && !(existing === "implied" && kind === "dir")) throw new Skip("unsafe_archive");
-    this.kinds.set(path, kind);
+    this.claim(path, kind);
     if (kind === "link") {
       const target = entry.linkname;
       if (!plainLinkTarget(path, target)) throw new Skip("unsafe_archive");
@@ -304,6 +322,22 @@ class EntryRules {
     } else if (entry.size !== 0) throw new Skip("unsafe_archive");
     return { kind, path };
   }
+
+  /** Records a path. Two different paths that a case-insensitive or
+   *  normalization-insensitive file system (APFS, NTFS) would treat as one are
+   *  refused: there `a/s` is the link `a/S`, and writing beneath it escapes. */
+  claim(path, kind) {
+    const key = foldPath(path);
+    const owner = this.folded.get(key);
+    if (owner !== undefined && owner !== path) throw new Skip("unsafe_archive");
+    this.folded.set(key, path);
+    this.kinds.set(path, kind);
+  }
+}
+
+/** Case- and normalization-folded form of a path (over-folding only refuses more). */
+function foldPath(path) {
+  return path.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
 }
 
 function safeRelative(path) {
@@ -347,10 +381,39 @@ export async function scanArchive(file, { budgetBytes, maxEntries = MAX_ARCHIVE_
 // The decompressed stream is file bytes plus headers and padding; bound it too.
 const streamCap = (budgetBytes, maxEntries) => budgetBytes + (maxEntries + 2) * 2048 + MAX_PAX_BYTES;
 
+// "wx" plus O_NOFOLLOW where the platform has it: never follows, creates or replaces.
+const CREATE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
+
+/** Each folder from `destination` down through `segments`, made if missing;
+ *  refused if any of them is a symlink or not a folder (defence in depth
+ *  against a file system that resolves two entry names to one path). */
+async function safeDirectory(destination, segments, verified) {
+  let current = destination;
+  for (const segment of ["", ...segments]) {
+    if (segment) current = join(current, segment);
+    if (verified.has(current)) continue;
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw new Skip("unsafe_archive");
+      try {
+        await mkdir(current, { mode: 0o755 });
+        info = await lstat(current);
+      } catch {
+        throw new Skip("unsafe_archive");
+      }
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Skip("unsafe_archive");
+    verified.add(current);
+  }
+}
+
 /** Writes the checked entries under `destination` (the same walk and rules,
  *  so what is written is exactly what was checked). No owner, no setuid. */
-async function extractArchive(file, destination, { budgetBytes, maxEntries = MAX_ARCHIVE_ENTRIES, signal }) {
+export async function extractArchive(file, destination, { budgetBytes, maxEntries = MAX_ARCHIVE_ENTRIES, signal }) {
   const rules = new EntryRules(budgetBytes, maxEntries);
+  const verified = new Set();
   let openHandle;
   try {
     await extractEntries();
@@ -360,18 +423,19 @@ async function extractArchive(file, destination, { budgetBytes, maxEntries = MAX
   async function extractEntries() {
     await walkTar(file, { signal, maxStreamBytes: streamCap(budgetBytes, maxEntries) }, async (entry) => {
       const { kind, path } = rules.check(entry);
-      const target = join(destination, ...path.split("/"));
+      signal?.throwIfAborted();
+      const segments = path.split("/");
+      const target = join(destination, ...segments);
       if (kind === "dir") {
-        await mkdir(target, { recursive: true, mode: 0o755 });
+        await safeDirectory(destination, segments, verified);
         return undefined;
       }
-      await mkdir(dirname(target), { recursive: true, mode: 0o755 });
+      await safeDirectory(destination, segments.slice(0, -1), verified);
       if (kind === "link") {
         await symlink(entry.linkname, target);
         return undefined;
       }
-      // "wx": never follows or replaces anything already there.
-      const handle = await open(target, "wx", entry.mode & 0o111 ? 0o755 : 0o644);
+      const handle = await open(target, CREATE_FLAGS, entry.mode & 0o111 ? 0o755 : 0o644);
       if (entry.size === 0) {
         await handle.close();
         return undefined;
@@ -661,6 +725,13 @@ async function cacheDirectory(workspace) {
 
 const randomName = (prefix) => `${prefix}-${randomBytes(8).toString("hex")}`;
 
+/** Remembers a temp path for this project and for the session, so the
+ *  session can still remove it if the project never settles. */
+function track(context, ...paths) {
+  context.temps.push(...paths);
+  for (const path of paths) context.session.temps?.add(path);
+}
+
 // ---------------------------------------------------------------- one project
 
 /** The project's lockfile, read once: its exact bytes are what is planned,
@@ -748,7 +819,7 @@ async function restore(context, project, id, maxBytes, { consistency }) {
   const { cacheDir, signal, budget } = context;
   const archive = join(cacheDir, `${randomName("dep")}.tgz`);
   const temp = join(cacheDir, randomName("dep-restore"));
-  context.temps.push(archive, temp);
+  track(context, archive, temp);
   const sizeBytes = await download(context, id, archive, maxBytes);
   const limit = Math.max(0, budget.remaining - sizeBytes);
   const scan = await scanArchive(archive, { budgetBytes: limit, signal }).catch((error) => {
@@ -782,7 +853,37 @@ async function restore(context, project, id, maxBytes, { consistency }) {
   const now = new Date();
   await utimes(join(target, ".package-lock.json"), now, now).catch(() => undefined);
   budget.remaining -= scan.unpackedBytes;
+  context.restoredBytes = scan.unpackedBytes;
   return sizeBytes;
+}
+
+/** Bytes of the regular files under `dir` (links not followed). */
+async function treeBytes(dir, signal) {
+  let total = 0;
+  const stack = [dir];
+  while (stack.length) {
+    signal?.throwIfAborted();
+    const directory = stack.pop();
+    let names;
+    try {
+      names = await readdir(directory);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const info = await lstat(join(directory, name)).catch(() => undefined);
+      if (info?.isDirectory()) stack.push(join(directory, name));
+      else if (info?.isFile()) total += info.size;
+    }
+  }
+  return total;
+}
+
+/** Charges the shared budget for what an install added beyond a restore. */
+async function chargeInstall(context, project) {
+  const bytes = await treeBytes(join(project.dir, ROOT), context.signal);
+  const added = Math.max(0, bytes - (context.restoredBytes ?? 0));
+  context.budget.remaining = Math.max(0, context.budget.remaining - added);
 }
 
 async function install(context, project, args) {
@@ -822,7 +923,7 @@ async function restoreCommitted(context, project) {
 async function snapshot(context, project, maxBytes) {
   const { cacheDir, cacheBase, query, token, signal, timeouts, session } = context;
   const archive = join(cacheDir, `${randomName("dep-snap")}.tgz`);
-  context.temps.push(archive);
+  track(context, archive);
   const skip = (reason) => {
     context.log("snapshot_skipped", { reason });
     return undefined;
@@ -878,8 +979,8 @@ async function snapshot(context, project, maxBytes) {
 }
 
 /**
- * The flow for one npm project (`projectPath` relative to the workspace;
- * only "." until subfolder projects are supported). Never throws.
+ * The flow for one npm project (`projectPath` relative to the workspace, as
+ * discoverProjects returns it). Never throws.
  */
 export async function prepareProject(options) {
   const { workspace, projectPath = ".", log, session } = options;
@@ -976,6 +1077,7 @@ export async function prepareProject(options) {
     } else installMs = await install(context, project, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
 
     const check = await checkConsistency(project.dir, project.lockfile, signal);
+    if (check.ok || result === "cold") await chargeInstall(context, project);
     if (!check.ok) {
       log("inconsistent", { detail: check.detail });
       // A tree npm ci built from the committed lockfile is what the agent
@@ -1015,12 +1117,174 @@ async function cleanup(context) {
   for (const path of context.temps.splice(0)) await rm(path, { recursive: true, force: true }).catch(() => undefined);
 }
 
-// ---------------------------------------------------------------- entry point
+// ---------------------------------------------------------------- discovery
+
+async function isFile(path) {
+  try {
+    return (await lstat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Root first, then by path (code point order, the same on every machine). */
+const byProjectOrder = (a, b) => (a === "." ? -1 : b === "." ? 1 : a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * Restores or installs the workspace root's dependencies, then seals the
- * run's upload window. Never throws. `proxyUrl`/`token` override what the
- * registry environment names (the npm shim's npm_config_registry,
+ * The folders holding a committed package-lock.json (a regular file): the
+ * root ("."), then folders up to MAX_PROJECT_DEPTH levels down, root first
+ * and then sorted by path. Never enters node_modules, dot-folders, symlinked
+ * folders or a folder whose name the proxy would refuse as a project path,
+ * so every path returned passes the proxy's projectPath rule.
+ */
+export async function discoverProjects(workspace, signal) {
+  const found = [];
+  if (await isFile(join(workspace, "package-lock.json"))) found.push(".");
+  let visited = 0;
+  const queue = [[]];
+  while (queue.length) {
+    signal?.throwIfAborted();
+    const segments = queue.shift();
+    if (segments.length >= MAX_PROJECT_DEPTH) continue;
+    let entries;
+    try {
+      entries = await readdir(join(workspace, ...segments), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      // Dirent types come from lstat: a symlinked folder is not a directory here.
+      if (!entry.isDirectory() || entry.name === ROOT || !PROJECT_SEGMENT.test(entry.name)) continue;
+      visited += 1;
+      if (visited > MAX_DISCOVERY_DIRS) return found.sort(byProjectOrder);
+      const child = [...segments, entry.name];
+      if (await isFile(join(workspace, ...child, "package-lock.json"))) found.push(child.join("/"));
+      queue.push(child);
+    }
+  }
+  return found.sort(byProjectOrder);
+}
+
+/** One glob segment as a regular expression (`*` and `?` within a segment). */
+function segmentPattern(segment) {
+  let source = "";
+  for (const char of segment) {
+    if (char === "*") source += "[^/]*";
+    else if (char === "?") source += "[^/]";
+    else source += char.replace(/[\\^$.|+(){}[\]]/g, "\\$&");
+  }
+  return new RegExp(`^${source}$`);
+}
+
+/** Whether `segments` (or a folder above them) matches a workspaces glob. */
+function globCovers(glob, segments) {
+  const parts = glob
+    .replace(/^(\.\/)+/, "")
+    .replace(/\/+$/, "")
+    .split("/")
+    .filter((part) => part !== "" && part !== ".");
+  if (!parts.length || parts.some((part) => part.startsWith("!") || part === "..")) return false;
+  const match = (p, s) => {
+    if (p === parts.length) return true; // the glob matched a folder at or above this one
+    if (parts[p] === "**") {
+      for (let skip = s; skip <= segments.length; skip += 1) if (match(p + 1, skip)) return true;
+      return false;
+    }
+    return s < segments.length && segmentPattern(parts[p]).test(segments[s]) && match(p + 1, s + 1);
+  };
+  return match(0, 0);
+}
+
+/** The `workspaces` globs a project's package.json declares (array or { packages }). */
+async function workspaceGlobs(workspace, projectPath) {
+  const file = join(workspace, ...(projectPath === "." ? [] : projectPath.split("/")), "package.json");
+  try {
+    const info = await lstat(file);
+    if (!info.isFile() || info.size > MAX_JSON_BYTES) return [];
+    const manifest = JSON.parse(await readFile(file, "utf8"));
+    const declared = manifest?.workspaces;
+    const list = Array.isArray(declared) ? declared : Array.isArray(declared?.packages) ? declared.packages : [];
+    return list.filter((glob) => typeof glob === "string");
+  } catch {
+    return [];
+  }
+}
+
+/** The projects to prepare (at most MAX_PROJECTS) and those skipped up front:
+ *  a folder inside another project's workspaces globs is `workspace_member`
+ *  (npm-workspaces monorepos are out of scope), extras are `too_many_projects`. */
+async function planProjects(workspace, signal) {
+  const found = await discoverProjects(workspace, signal);
+  const globs = new Map();
+  for (const path of found) globs.set(path, await workspaceGlobs(workspace, path));
+  const run = [];
+  const skipped = [];
+  for (const path of found) {
+    const member = found.some((owner) => {
+      if (owner === path) return false;
+      const inside = owner === "." ? path : path.startsWith(`${owner}/`) ? path.slice(owner.length + 1) : undefined;
+      return inside !== undefined && globs.get(owner).some((glob) => globCovers(glob, inside.split("/")));
+    });
+    if (member) skipped.push({ path, result: "skipped", reason: "workspace_member" });
+    else if (run.length < MAX_PROJECTS) run.push(path);
+    else skipped.push({ path, result: "skipped", reason: "too_many_projects" });
+  }
+  return { run, skipped };
+}
+
+// ---------------------------------------------------------------- install scripts
+
+/** Whether the committed lockfile lists a package with an install script. */
+async function hasInstallScripts(projectDir) {
+  const lockfile = JSON.parse(await readFile(join(projectDir, "package-lock.json"), "utf8"));
+  return Object.values(lockfile?.packages ?? {}).some(
+    (entry) => entry && typeof entry === "object" && entry.hasInstallScript === true,
+  );
+}
+
+/**
+ * After the seal: `npm rebuild` through the shim for a project whose
+ * lockfile lists install scripts (snapshots are built with
+ * --ignore-scripts). Output is never captured; a failure only logs.
+ */
+async function rebuild({ workspace, path, env, npmPath, timeouts, signal, session, log }) {
+  const dir = path === "." ? workspace : join(workspace, ...path.split("/"));
+  let needed;
+  try {
+    needed = await hasInstallScripts(dir);
+  } catch {
+    needed = false;
+  }
+  if (!needed) return "skipped";
+  const started = Date.now();
+  let outcome;
+  try {
+    const code = await run(npmPath, ["rebuild"], {
+      cwd: dir,
+      env,
+      timeoutMs: timeouts.rebuildMs,
+      killGraceMs: timeouts.killGraceMs,
+      signal,
+      session,
+    });
+    outcome = code === 0 ? "ok" : "failed";
+  } catch (error) {
+    outcome = asSkip(error, "failed").reason === "timeout" ? "timeout" : "failed";
+  }
+  log("rebuild", { project: path, status: outcome, ms: Date.now() - started });
+  return outcome;
+}
+
+// ---------------------------------------------------------------- entry point
+
+const KEPT = new Set(["hit", "nearest", "cold"]);
+
+/**
+ * Restores or installs the dependencies of every npm project in the
+ * workspace (see discoverProjects), seals the run's upload window once, then
+ * rebuilds install scripts. Never throws; nothing in the workspace changes
+ * after it returns. `proxyUrl`/`token` override what the registry
+ * environment names (the npm shim's npm_config_registry,
  * WARDBY_NPM_PLAN_REGISTRY and npmrc token).
  */
 export async function prepareDependencies({
@@ -1042,55 +1306,24 @@ export async function prepareDependencies({
       // a logger never fails the cache
     }
   };
-  const session = { sealed: false, closed: false, children: new Set() };
-  const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort(new Skip("timeout")), timeouts.totalMs);
+  const session = { sealed: false, closed: false, children: new Set(), temps: new Set() };
+  // `deadline` bounds everything (projects and rebuilds); `sealing` stops the
+  // project work (and any upload) at the seal.
+  const deadline = new AbortController();
+  const sealing = new AbortController();
+  const deadlineTimer = setTimeout(() => deadline.abort(new Skip("timeout")), timeouts.totalMs);
+  const workSignal = AbortSignal.any([deadline.signal, sealing.signal]);
   let auth;
-  let result;
-  try {
-    auth = await registryAuth(env);
-    if (proxyUrl && (auth || token))
-      auth = { token: auth?.token, base: new URL("/registry/npm/", proxyUrl).toString() };
-    if (auth && token) auth = { ...auth, token };
-    if (!auth?.token) auth = undefined;
-    const budget = await workspaceBudget(workspace, env, budgetBytes);
-    const work = prepareProject({
-      workspace,
-      projectPath: ".",
-      env,
-      npmPath,
-      log: say,
-      auth,
-      budget,
-      timeouts,
-      signal: controller.signal,
-      session,
-      testHooks,
-    });
-    // The deadline aborts the work, which then has settleMs to clean up.
-    // If it still has not settled, the session is closed (below) so it can
-    // no longer rename, remove or install anything, nor upload.
-    let grace;
-    const late = new Promise((resolve) => {
-      grace = setTimeout(() => resolve({ result: "skipped", reason: "timeout" }), timeouts.totalMs + timeouts.settleMs);
-    });
-    result = await Promise.race([work, late]);
-    clearTimeout(grace);
-  } catch {
-    result = { result: "skipped", reason: "internal_error" };
-  } finally {
-    clearTimeout(deadline);
-    session.sealed = true;
-    session.closed = true;
-    controller.abort(new Skip("sealed"));
-    for (const pid of session.children) {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        // already gone
-      }
-    }
-    if (auth) {
+  let planned = ["."];
+  const done = new Map(); // path -> result, filled as projects finish
+  let failure;
+
+  let sealing$;
+  const seal = () =>
+    (sealing$ ??= (async () => {
+      session.sealed = true;
+      sealing.abort(new Skip("sealed"));
+      if (!auth) return;
       let status = 0;
       try {
         const sealed = await callJson(
@@ -1104,8 +1337,109 @@ export async function prepareDependencies({
         // an unsealed session expires with its upload window
       }
       say("seal", { status });
+    })());
+
+  const phases = (async () => {
+    try {
+      auth = await registryAuth(env);
+      if (proxyUrl && (auth || token))
+        auth = { token: auth?.token, base: new URL("/registry/npm/", proxyUrl).toString() };
+      if (auth && token) auth = { ...auth, token };
+      if (!auth?.token) auth = undefined;
+      const budget = await workspaceBudget(workspace, env, budgetBytes);
+      const { run: toRun, skipped } = await planProjects(workspace, workSignal);
+      planned = toRun.length || skipped.length ? [...toRun, ...skipped.map((entry) => entry.path)] : ["."];
+      for (const entry of skipped) done.set(entry.path, { result: entry.result, reason: entry.reason });
+      if (!toRun.length && !skipped.length) done.set(".", { result: "skipped", reason: "no_lockfile" });
+      for (const path of toRun) {
+        if (workSignal.aborted) break;
+        const result = await prepareProject({
+          workspace,
+          projectPath: path,
+          env,
+          npmPath,
+          log: (event, fields) => say(event, { project: path, ...fields }),
+          auth,
+          budget,
+          timeouts,
+          signal: workSignal,
+          session,
+          testHooks,
+        });
+        if (!session.closed) done.set(path, result);
+      }
+    } catch {
+      failure = "internal_error";
+    } finally {
+      await seal();
+    }
+    // After the seal: nothing below can be uploaded. Still bounded by the deadline.
+    for (const path of planned) {
+      const result = done.get(path);
+      if (!result || !KEPT.has(result.result) || session.closed) continue;
+      const outcome = await rebuild({
+        workspace,
+        path,
+        env,
+        npmPath,
+        timeouts,
+        signal: deadline.signal,
+        session,
+        log: say,
+      });
+      if (!session.closed) done.set(path, { ...result, rebuild: outcome });
+    }
+  })();
+
+  // The deadline aborts the work, which then has settleMs to clean up. If it
+  // still has not settled, the session is closed (below) so it can no longer
+  // rename, remove, install or rebuild anything, nor upload.
+  let grace;
+  const late = new Promise((resolve) => {
+    grace = setTimeout(resolve, timeouts.totalMs + timeouts.settleMs);
+  });
+  await Promise.race([phases, late]);
+  clearTimeout(grace);
+  clearTimeout(deadlineTimer);
+  session.closed = true;
+  deadline.abort(new Skip("timeout"));
+  sealing.abort(new Skip("sealed"));
+  for (const pid of session.children) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // already gone
     }
   }
-  say("result", { result: result.result, ...(result.reason ? { reason: result.reason } : {}) });
-  return result;
+  await seal();
+  await removeOwnTemps(workspace, session.temps);
+
+  const projects = planned
+    .map((path) => {
+      const result = done.get(path) ?? { result: "skipped", reason: failure ?? "timeout" };
+      // A kept tree whose rebuild never got its turn before the deadline.
+      const rebuilt = KEPT.has(result.result) && !result.rebuild ? { rebuild: "timeout" } : {};
+      return { path, ...result, ...rebuilt };
+    })
+    .sort((a, b) => byProjectOrder(a.path, b.path));
+  for (const project of projects)
+    say("result", {
+      project: project.path,
+      result: project.result,
+      ...(project.reason ? { reason: project.reason } : {}),
+      ...(project.rebuild ? { rebuild: project.rebuild } : {}),
+    });
+  return { projects };
+}
+
+/** Removes this module's own temp files under <workspace>/.cache, and
+ *  nothing else: called once the session is closed, so a project that never
+ *  settled does not leave its download or extraction folder behind. */
+async function removeOwnTemps(workspace, temps) {
+  const cacheDir = join(workspace, ".cache");
+  for (const path of temps) {
+    if (!path.startsWith(cacheDir + sep) || path.slice(cacheDir.length + 1) !== basename(path)) continue;
+    if (!OWN_TEMP.test(basename(path))) continue;
+    await rm(path, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
