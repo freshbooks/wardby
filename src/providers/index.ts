@@ -37,7 +37,8 @@ export interface ProviderRegistry {
   llm: LlmProvider;
   secrets: SecretCipher;
   auth: AuthProvider;
-  storage: BlobStore;
+  /** Absent unless BLOB_STORE is configured. */
+  storage?: BlobStore;
   executor: Executor;
   datastore: Datastore;
   memory: AgentMemoryStore;

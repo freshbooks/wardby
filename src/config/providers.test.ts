@@ -3,6 +3,7 @@ import {
   loadAuthConfig,
   loadContainerExecutorConfig,
   loadProviderConfig,
+  loadBlobStoreConfig,
   loadMcpConfig,
   loadGitHubVcsConfig,
   loadGitHubEventConfig,
@@ -26,6 +27,25 @@ describe("provider config", () => {
 
   it("defaults VCS to GitHub", () => {
     expect(loadProviderConfig({}).vcs).toBe("github");
+  });
+
+  it("treats an unset BLOB_STORE as no blob store", () => {
+    expect(loadProviderConfig({}).storage).toBeUndefined();
+    expect(loadBlobStoreConfig({})).toBeUndefined();
+  });
+
+  it("accepts local, gcs and s3 and rejects anything else", () => {
+    expect(loadProviderConfig({ BLOB_STORE: "gcs" }).storage).toBe("gcs");
+    expect(loadProviderConfig({ BLOB_STORE: "s3" }).storage).toBe("s3");
+    expect(() => loadProviderConfig({ BLOB_STORE: "azure" })).toThrow(/BLOB_STORE must be one of/);
+  });
+
+  it("requires BLOB_STORE_LOCAL_DIR for the local blob store", () => {
+    expect(loadBlobStoreConfig({ BLOB_STORE: "local", BLOB_STORE_LOCAL_DIR: "/var/blobs" })).toEqual({
+      kind: "local",
+      localDir: "/var/blobs",
+    });
+    expect(() => loadBlobStoreConfig({ BLOB_STORE: "local" })).toThrow(/BLOB_STORE_LOCAL_DIR/);
   });
 });
 
