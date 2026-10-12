@@ -333,17 +333,14 @@ one of two plan slots before it reads the lockfile at all, so an
 unauthenticated or queued plan holds none of it; a run may run one plan at a
 time and make `REGISTRY_PLAN_MAX_PER_RUN` in all (`429 wardby_plan_limit`).
 It only reads the registry for entries it reaches, so a lockfile full of
-unrelated packages costs nothing upstream. Measured
-against real npm and OSV with a 0-day release age, the knock-knock `web/`
-lockfile (216 entries: React 19, HeroUI 3, Vite 8, Vitest 5, jsdom) was
-verified in 9.5 s cold and 0.7 s with stored facts, and its whole `npm ci`
-took 12 s cold and 3 s warm, with the proxy at 183 MiB peak RSS (30 MiB
-heap). At the default 3 days the same plan
-took 8 s and refused 53 entries: vite 8.3.1 and vitest 5.0.2 were days old,
-and those two are answered from the plan, but the 51 entries refused only as
-unreachable through them are lockfile-dependent verdicts, so npm's requests
-for them went to the graph walk, and the failing `npm ci` took 547 s with the
-proxy at 1604 MiB peak RSS.
+unrelated packages costs nothing upstream. As a rough guide, a web-app
+lockfile of about 200 entries verifies in seconds the first time and in under a
+second once its package facts are stored. When the release-age policy refuses
+some entries, packages that are refused only because they're reachable through
+those entries can't be answered from the plan, so npm's requests for them fall
+back to the dependency-graph walk below. That can make a failing install take
+minutes and use much more proxy memory; fix the refusals (wait out the release
+age or adjust the agent's policy) rather than retrying.
 
 ### Lockfile installs without a plan: the dependency-graph walk
 
