@@ -735,6 +735,64 @@ describe("untrusted archives", () => {
     expect(await readdir(outside)).toEqual([]);
   });
 
+  it("restores files over 1 MiB (streamed) and up to 1 MiB (buffered) byte for byte", async () => {
+    const { randomBytes } = await import("node:crypto");
+    const large = randomBytes(1024 * 1024 + 4097);
+    const exact = randomBytes(1024 * 1024);
+    hitWith(
+      await realTarSnapshot(LOCKFILE, async (dir) => {
+        await writeFile(join(dir, "node_modules/beta/large.bin"), large);
+        await writeFile(join(dir, "node_modules/alpha/exact.bin"), exact);
+        await writeFile(join(dir, "node_modules/alpha/empty.txt"), "");
+      }),
+    );
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect((await readFile(join(workspace, "node_modules/beta/large.bin"))).equals(large)).toBe(true);
+    expect((await readFile(join(workspace, "node_modules/alpha/exact.bin"))).equals(exact)).toBe(true);
+    expect(await readFile(join(workspace, "node_modules/alpha/empty.txt"), "utf8")).toBe("");
+    expect(await readlink(join(workspace, "node_modules/.bin/beta"))).toBe("../beta/index.js");
+  });
+
+  it("extraction refuses a pre-existing symlink (live or dangling) where a folder entry goes", async () => {
+    const destination = join(root, "dest-dir");
+    const outside = join(root, "elsewhere-dir");
+    await mkdir(join(destination, "node_modules"), { recursive: true });
+    await mkdir(outside);
+    const archive = join(root, "dir.tgz");
+    await writeFile(
+      archive,
+      rawTar([
+        { name: "node_modules/", type: "5" },
+        { name: "node_modules/p/", type: "5" },
+        { name: "node_modules/p/x", body: "x" },
+      ]),
+    );
+    await symlink(outside, join(destination, "node_modules/p"));
+    await expect(extractArchive(archive, destination, { budgetBytes: 1024 * 1024 })).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+    expect(await readdir(outside)).toEqual([]);
+    await rm(join(destination, "node_modules/p"));
+    await symlink(join(outside, "missing"), join(destination, "node_modules/p"));
+    await expect(extractArchive(archive, destination, { budgetBytes: 1024 * 1024 })).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("verifyTree still refuses a hard link and a fifo in the written tree", async () => {
+    const tree = join(root, "tree-types");
+    await mkdir(join(tree, "node_modules/a"), { recursive: true });
+    await writeFile(join(tree, "node_modules/a/f"), "x");
+    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    const { link } = await import("node:fs/promises");
+    await link(join(tree, "node_modules/a/f"), join(tree, "node_modules/a/g"));
+    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+    await rm(join(tree, "node_modules/a/g"));
+    expect(spawnSync("mkfifo", [join(tree, "node_modules/a/pipe")]).status).toBe(0);
+    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+  });
+
   it("verifyTree rejects a written tree with a link out of node_modules, even through a linked folder", async () => {
     const tree = join(root, "tree");
     await mkdir(join(tree, "node_modules/p"), { recursive: true });

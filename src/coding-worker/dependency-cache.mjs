@@ -35,7 +35,15 @@
 // Dependency-free on purpose (it runs before anything is installed).
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  createReadStream,
+  createWriteStream,
+  lstatSync,
+  openSync,
+  writeSync,
+} from "node:fs";
 import {
   lstat,
   mkdir,
@@ -430,26 +438,47 @@ const CREATE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_
 
 /** Each folder from `destination` down through `segments`, made if missing;
  *  refused if any of them is a symlink or not a folder (defence in depth
- *  against a file system that resolves two entry names to one path). */
+ *  against a file system that resolves two entry names to one path).
+ *  mkdir first (it never follows a link at the last component): a folder it
+ *  made is a real one; only when something already exists there (EEXIST)
+ *  is it checked with lstat. Parents are checked before children, and each
+ *  folder once (`verified`). */
 async function safeDirectory(destination, segments, verified) {
   let current = destination;
   for (const segment of ["", ...segments]) {
     if (segment) current = join(current, segment);
     if (verified.has(current)) continue;
+    try {
+      await mkdir(current, { mode: 0o755 });
+      verified.add(current);
+      continue;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw new Skip("unsafe_archive");
+    }
     let info;
     try {
       info = await lstat(current);
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw new Skip("unsafe_archive");
-      try {
-        await mkdir(current, { mode: 0o755 });
-        info = await lstat(current);
-      } catch {
-        throw new Skip("unsafe_archive");
-      }
+    } catch {
+      throw new Skip("unsafe_archive");
     }
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Skip("unsafe_archive");
     verified.add(current);
+  }
+}
+
+/** Files up to this size are gathered in memory and written in one go. */
+const BUFFERED_FILE_BYTES = 1 * MIB;
+
+/** Creates `target` (never following or replacing anything) and writes
+ *  `data` to it with synchronous calls: for a small file the three async
+ *  round trips of open/write/close cost more than the work itself. */
+function writeNewFileSync(target, mode, data) {
+  const fd = openSync(target, CREATE_FLAGS, mode);
+  try {
+    let offset = 0;
+    while (offset < data.length) offset += writeSync(fd, data, offset, data.length - offset);
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -479,11 +508,28 @@ export async function extractArchive(file, destination, { budgetBytes, maxEntrie
         await symlink(entry.linkname, target);
         return undefined;
       }
-      const handle = await open(target, CREATE_FLAGS, entry.mode & 0o111 ? 0o755 : 0o644);
-      if (entry.size === 0) {
-        await handle.close();
-        return undefined;
+      const mode = entry.mode & 0o111 ? 0o755 : 0o644;
+      if (entry.size <= BUFFERED_FILE_BYTES) {
+        if (entry.size === 0) {
+          writeNewFileSync(target, mode, Buffer.alloc(0));
+          return undefined;
+        }
+        // A file that arrives in one piece is written from it directly;
+        // otherwise its pieces are copied into one buffer of its declared size.
+        let buffer;
+        let filled = 0;
+        return (chunk) => {
+          if (!buffer && chunk.length === entry.size) {
+            writeNewFileSync(target, mode, chunk);
+            return;
+          }
+          buffer ??= Buffer.allocUnsafe(entry.size);
+          chunk.copy(buffer, filled);
+          filled += chunk.length;
+          if (filled === entry.size) writeNewFileSync(target, mode, buffer);
+        };
       }
+      const handle = await open(target, CREATE_FLAGS, mode);
       openHandle = handle;
       let written = 0;
       return async (chunk) => {
@@ -518,11 +564,16 @@ export async function verifyTree(root, signal) {
   while (stack.length) {
     signal?.throwIfAborted();
     const directory = stack.pop();
-    for (const name of await readdir(directory)) {
-      const path = join(directory, name);
-      const info = await lstat(path);
-      if (info.isDirectory()) stack.push(path);
-      else if (info.isSymbolicLink()) {
+    // Types from the folder listing (no lstat per entry); a regular file is
+    // still lstat'ed, for its link count (a hard link is refused): synchronously,
+    // since one async round trip per file costs more than the call itself.
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) stack.push(path);
+      else if (entry.isFile()) {
+        const info = lstatSync(path);
+        if (!info.isFile() || info.nlink > 1) throw new Skip("unsafe_archive");
+      } else if (entry.isSymbolicLink()) {
         const target = await readlink(path);
         if (!plainLinkTarget(toPosix(path.slice(root.length + 1)), target)) throw new Skip("unsafe_archive");
         let real;
@@ -533,7 +584,7 @@ export async function verifyTree(root, signal) {
           throw new Skip("unsafe_archive"); // ELOOP and the like
         }
         if (real !== realTop && !real.startsWith(realTop + sep)) throw new Skip("unsafe_archive");
-      } else if (!info.isFile() || info.nlink > 1) throw new Skip("unsafe_archive");
+      } else throw new Skip("unsafe_archive");
     }
   }
 }
