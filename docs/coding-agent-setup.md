@@ -448,9 +448,16 @@ price (plus the request's input estimate) against the run's budget for every
 model request, so a higher cap needs a larger `budgetUsd`: at a $25/MTok output
 price, 32000 tokens reserve $0.80 per request and 128000 reserve $3.20. A
 request whose reservation does not fit in what is left of the budget is
-refused. Only Claude Code agents take `maxOutputTokens`; `create_agent` and
-`update_agent` refuse it on a Codex agent, and changing an agent's provider to
-`codex` needs it set back to `null` first.
+refused and the run ends as `budget_exhausted`, so a higher value makes a run
+with a small budget end sooner. Only Claude Code agents take
+`maxOutputTokens`; `create_agent` and `update_agent` refuse it on a Codex
+agent, and changing an agent's provider to `codex` needs it set to `null` in
+the same `update_agent` call (or before).
+
+The 32000 default and `maxOutputTokens` need a Claude Code worker image from a
+release that supports them (Wardby 0.7.0 or later). An older pinned image still
+caps each reply at 4096 tokens, and rejects the input of a run whose agent sets
+`maxOutputTokens` as invalid.
 
 ## Stop the setup
 

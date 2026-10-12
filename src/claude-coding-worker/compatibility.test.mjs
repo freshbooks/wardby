@@ -7,6 +7,9 @@ import { afterEach, test } from "node:test";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
+// The worker's default (DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS in src/coding/protocol.ts).
+const MAX_OUTPUT_TOKENS = "32000";
+
 const MODEL = "claude-sonnet-5";
 const CAPABILITY = "rrp_compatibility_only_not_a_real_credential";
 const workspaces = [];
@@ -157,7 +160,7 @@ async function runQuery(baseUrl, abortController = new AbortController(), tools 
         CLAUDE_CODE_SIMPLE: "1",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
         CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "false",
-        CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000",
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: MAX_OUTPUT_TOKENS,
         CLAUDE_CODE_MAX_RETRIES: "0",
         DISABLE_UPDATES: "1",
         MCP_CONNECTION_NONBLOCKING: "true",
@@ -219,7 +222,7 @@ for (const shape of MODEL_SHAPES)
       const body = JSON.parse(messageRequest.body);
       assert.equal(body.model, shape.model);
       assert.equal(body.stream, true);
-      assert.equal(body.max_tokens, 4096);
+      assert.equal(body.max_tokens, Number(MAX_OUTPUT_TOKENS));
       assert.equal(body.output_config.effort, shape.effort);
       assert.equal(typeof JSON.parse(body.metadata.user_id).device_id, "string");
     } finally {

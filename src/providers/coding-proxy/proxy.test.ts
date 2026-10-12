@@ -867,6 +867,19 @@ describe("CodingProxy Anthropic Messages", () => {
       expect(forwarded).not.toHaveProperty("output_config");
     });
 
+    it("forwards the worker's default 32000 max_tokens with a 31999-token thinking budget", async () => {
+      const h = await haiku();
+      const body = await haikuBody((b) => {
+        b.max_tokens = 32_000;
+        b.thinking = { type: "enabled", budget_tokens: 31_999 };
+      });
+      await execute(h, "haiku-32k", new TestSink(), body);
+      expect(h.fetch).toHaveBeenCalledTimes(1);
+      const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(forwarded.max_tokens).toBe(32_000);
+      expect(forwarded.thinking).toEqual({ type: "enabled", budget_tokens: 31_999 });
+    });
+
     it.each([
       ["adaptive thinking", (b: Record<string, unknown>) => (b.thinking = { type: "adaptive" })],
       ["an effort level", (b: Record<string, unknown>) => (b.output_config = { effort: "high" })],
@@ -890,6 +903,17 @@ describe("CodingProxy Anthropic Messages", () => {
         code: "unsupported_anthropic_feature",
       });
       expect(h.fetch).not.toHaveBeenCalled();
+    });
+
+    it("forwards an adaptive-thinking request at the worker's default 32000 max_tokens", async () => {
+      const h = await harness({ protocol: "anthropic-messages" });
+      const body = JSON.parse(await fixture("anthropic-sdk-request.json"));
+      body.stream = false;
+      body.max_tokens = 32_000;
+      await execute(h, "sonnet-32k", new TestSink(), JSON.stringify(body));
+      expect(h.fetch).toHaveBeenCalledTimes(1);
+      const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(forwarded.max_tokens).toBe(32_000);
     });
 
     it("still refuses manual thinking for a model that only takes adaptive thinking", async () => {

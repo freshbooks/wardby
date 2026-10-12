@@ -64,7 +64,11 @@ restores the default) with `update_agent`, for example
 `{ "id": "<agent id>", "codingProfile": { "maxOutputTokens": 64000 } }`. The
 coding proxy reserves `maxOutputTokens` × the model's output price against the
 run's budget for every model request, so a higher value needs a larger
-`budgetUsd`. Codex agents refuse the setting.
+`budgetUsd`; a request whose reservation does not fit ends the run as
+`budget_exhausted`, so a small budget runs out sooner. Codex agents refuse the
+setting. The default and the setting need a Claude Code worker image from
+Wardby 0.7.0 or later: an older pinned image still caps replies at 4096 tokens
+and rejects a run whose agent sets `maxOutputTokens`.
 
 ## Debug trace
 
