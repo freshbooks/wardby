@@ -9,6 +9,8 @@
 #   WARDBY_MOBILE_ENABLED=true   # optional: allow the wardby mobile app to sign in (default false)
 #   WARDBY_DEPENDENCY_CACHE=true   # optional: run dependency cache on the coding proxy (default false; needs dependency_cache_enabled in terraform.tfvars)
 #   CODING_MAX_DISK_MB=8192   # optional: largest per-agent workspaceDiskMb the control plane accepts (default 2048)
+#   CODING_MEMORY_MB=6144   # optional: memory for each coding run's pod, in MiB (default 2048)
+#   CODING_CPUS=2   # optional: CPUs for each coding run's pod (default 1)
 #
 # Idempotent: safe to re-run. Terraform converges, images are rebuilt and
 # re-pushed (digests change only if the source did), values already in Secret
@@ -136,6 +138,47 @@ inject_coding_max_disk_env() {
     }'
 }
 # --- end CODING_MAX_DISK_MB control-plane env ---
+
+# --- CODING_MEMORY_MB and CODING_CPUS check ---
+# Optional: the memory (MiB) and CPUs of every coding run's pod. Empty = the
+# server defaults (2048 MiB, 1 CPU). On Autopilot the server fits them to the
+# platform's memory:CPU band when it builds each pod.
+CODING_MEMORY_MB="${CODING_MEMORY_MB:-}"
+CODING_CPUS="${CODING_CPUS:-}"
+if [[ -n "$CODING_MEMORY_MB" ]]; then
+  if ! [[ "$CODING_MEMORY_MB" =~ ^[1-9][0-9]{3,4}$ ]] || ((CODING_MEMORY_MB < 1024 || CODING_MEMORY_MB > 32768)); then
+    echo "up.sh: CODING_MEMORY_MB must be an integer between 1024 and 32768 (got \"$CODING_MEMORY_MB\")." >&2
+    exit 1
+  fi
+  echo "up.sh: coding pods get ${CODING_MEMORY_MB} MiB of memory."
+fi
+if [[ -n "$CODING_CPUS" ]]; then
+  if ! [[ "$CODING_CPUS" =~ ^[0-9]{1,2}(\.[0-9]{1,3})?$ ]] || ! awk -v c="$CODING_CPUS" 'BEGIN { exit !(c >= 0.25 && c <= 16) }'; then
+    echo "up.sh: CODING_CPUS must be a number between 0.25 and 16 (got \"$CODING_CPUS\")." >&2
+    exit 1
+  fi
+  echo "up.sh: coding pods get ${CODING_CPUS} CPUs."
+fi
+# --- end CODING_MEMORY_MB and CODING_CPUS check ---
+
+# --- CODING_MEMORY_MB and CODING_CPUS control-plane env ---
+# Adds whichever of the two is set to the control plane's container, right after
+# its WARDBY_MOBILE_ENABLED entry, like CODING_MAX_DISK_MB above. The control
+# plane builds the coding pods, so it is the only container that reads them.
+inject_coding_resources_env() {
+  if [[ -z "$CODING_MEMORY_MB" && -z "$CODING_CPUS" ]]; then
+    cat
+    return
+  fi
+  awk -v mib="$CODING_MEMORY_MB" -v cpus="$CODING_CPUS" '
+    { print }
+    /^ *value: wardby_mobile_enabled$/ {
+      match($0, /^ */); value_indent = substr($0, 1, RLENGTH); item_indent = substr(value_indent, 3)
+      if (mib != "") { print item_indent "- name: CODING_MEMORY_MB"; print value_indent "value: \"" mib "\"" }
+      if (cpus != "") { print item_indent "- name: CODING_CPUS"; print value_indent "value: \"" cpus "\"" }
+    }'
+}
+# --- end CODING_MEMORY_MB and CODING_CPUS control-plane env ---
 
 # --- WARDBY_DEPENDENCY_CACHE check ---
 # Optional: true turns on the run dependency cache. It needs the bucket from
@@ -562,6 +605,7 @@ PREVIOUS_IMAGES="$(kubectl -n "$NAMESPACE" get deploy wardby-control-plane wardb
 OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | inject_dependency_cache_env \
   | inject_coding_max_disk_env \
+  | inject_coding_resources_env \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
