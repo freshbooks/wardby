@@ -1,9 +1,9 @@
 ---
 id: errors/coding-workspace-disk-exceeds-limit
 title: Coding workspace larger than the deployment allows
-summary: A coding run failed at start because its agent's workspaceDiskMb is larger than the deployment's CODING_MAX_DISK_MB (CODING_DISK_MB, 2048 MiB, when unset).
+summary: create_agent and update_agent refuse workspaceDiskMb above CODING_MAX_DISK_MB; already-saved agents above the cap fail at run start.
 audience: operator
-tags: [error, coding-agents, workspace, disk, workspaceDiskMb, CODING_MAX_DISK_MB]
+tags: [error, coding-agents, workspace, disk, workspaceDiskMb, CODING_MAX_DISK_MB, create_agent, update_agent]
 appliesTo: ">=0.2.0"
 ---
 
@@ -15,6 +15,15 @@ appliesTo: ">=0.2.0"
 `CODING_MAX_DISK_MB`. The run fails before a worker starts and costs nothing.
 When `CODING_MAX_DISK_MB` is unset, the limit is `CODING_DISK_MB` (2048 MiB by
 default).
+
+`create_agent` also checks this limit at save time. `update_agent` checks it
+when setting a numeric `workspaceDiskMb` or changing an agent's kind to coding.
+You can still make unrelated edits to an already-saved over-cap coding agent,
+lower its size to within the cap, or set it to `null`.
+The error names the requested size in MiB,
+the effective cap in MiB, and `CODING_MAX_DISK_MB`. A size exactly at the cap
+is allowed; `null` uses the deployment default. Agents already saved above
+the cap still fail at run time, including if the operator lowers the cap.
 
 Fix it one of two ways:
 
