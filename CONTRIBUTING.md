@@ -29,8 +29,9 @@ with `ANTHROPIC_API_KEY`) in `.env` or `.env.local`.
 Tilt also launches the desktop viewer (`apps/viewer`, a Tauri app) in its own
 window. It needs Rust ([rustup](https://rustup.rs)) and the Xcode Command Line
 Tools; the first start compiles the Rust shell and takes a few minutes. Set
-`WARDBY_VIEWER=0` to skip it. In the viewer, add the server
-`http://127.0.0.1:8080` and sign in with the key in `.tilt/dev-login-key`.
+`WARDBY_VIEWER=0` to skip it. The viewer opens with the local server already
+added (`http://127.0.0.1:8080`); you only need to sign in with the key in
+`.tilt/dev-login-key`.
 
 Tilt also starts Prometheus and Grafana (`http://127.0.0.1:3000`,
 `admin` / `wardby-local-only`); set `WARDBY_OBSERVABILITY=0` to skip them. Only

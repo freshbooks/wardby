@@ -5,10 +5,10 @@
 #   migrate   -> prisma migrate deploy against the local database
 #   bootstrap-env -> generates missing SECRET_APP_KEY / AUTH_SIGNING_KEY / AUTH_CREDENTIAL_HASH_KEY into .env.local
 #   dev-user  -> creates an admin login (default subject `dev-admin`, override with WARDBY_DEV_SUBJECT);
-#                goits login key is written to .tilt/dev-login-key (owner-only, git-ignored)
+#                its login key is written to .tilt/dev-login-key (owner-only, git-ignored)
 #   wardby    -> `wardby serve` (MCP over HTTP + scheduler + reconciler), restarted on src/ changes
 #   viewer    -> the desktop UI (apps/viewer, Tauri) via `tauri dev`; needs Rust (rustup) and the Xcode
-#                CLI tools. Add http://127.0.0.1:<port> as a server and sign in with the key in
+#                CLI tools. It opens already pointed at http://127.0.0.1:<port>; sign in with the key in
 #                .tilt/dev-login-key. Set WARDBY_VIEWER=0 to skip it.
 #   grafana/prometheus/coding-proxy -> on by default; WARDBY_OBSERVABILITY=0 skips them (see below)
 #
@@ -139,6 +139,14 @@ local_resource(
 
 load('ext://uibutton', 'cmd_button', 'text_input', 'choice_input')
 
+# The first choice is the button's default, so it follows the configured provider key.
+openai_models = ['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4.1']
+anthropic_models = ['claude-haiku-4-5', 'claude-sonnet-5']
+if env_value('LLM_PROVIDER') == 'anthropic':
+    task_models = anthropic_models + openai_models
+else:
+    task_models = openai_models + anthropic_models
+
 # "Run a task" button on the wardby resource: fill in the fields, click, and a fresh native agent is
 # created and run once; output streams to this resource's log and the run shows up in the viewer.
 # This makes a real, billed model request, capped by the budget field (scripts/dev-run-task.mjs).
@@ -150,7 +158,7 @@ cmd_button(
     icon_name='play_arrow',
     inputs=[
         text_input('TASK_PROMPT', label='Task', placeholder='What should the agent do?'),
-        choice_input('TASK_MODEL', label='Model', choices=['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4.1']),
+        choice_input('TASK_MODEL', label='Model', choices=task_models),
         text_input('TASK_BUDGET', label='Budget (USD)', default='0.10'),
         text_input('TASK_NAME', label='Agent name prefix', default='task'),
     ],

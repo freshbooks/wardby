@@ -65,7 +65,7 @@
     "cli": "tsx --conditions=wardby-source src/wardby-bin.ts",
     "codex:rerecord": "tsx --conditions=wardby-source src/tools/codex-rerecord.ts",
     "capture:autopilot": "tsx --conditions=wardby-source src/tools/capture-autopilot-dry-run.ts",
-    "test": "npm run build:vendor && vitest run",
+    "test": "npm run build:vendor && vitest run && node --test scripts/dev-*.test.mjs",
     "test:package": "node scripts/npm-package-acceptance.mjs",
     "test:contract": "vitest run --config vitest.contract.config.ts",
     "test:kubernetes": "WARDBY_KUBERNETES_TEST=1 vitest run src/providers/jobs/kubernetes.integration.test.ts",
