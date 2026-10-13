@@ -451,8 +451,10 @@ A coding agent's profile carries an optional `workspaceDiskMb` (MiB; `null`
 means "use the deployment default `CODING_DISK_MB`"). It is snapshotted onto
 the `CodingRun` at dispatch time, so a later profile edit never changes an
 in-flight run's size, and it is capped by `CODING_MAX_DISK_MB`.
-`create_agent` and `update_agent` refuse to save a coding profile above the
-effective ceiling. The error names the requested MiB, the cap, and
+`create_agent` refuses a coding profile above the effective ceiling.
+`update_agent` checks the ceiling when setting a numeric `workspaceDiskMb`
+or changing an agent's kind to coding. Unrelated edits to an already-saved
+over-cap coding agent remain allowed. The error names the requested MiB, the cap, and
 `CODING_MAX_DISK_MB`, which the operator must raise to allow that size.
 A value exactly at the cap is allowed; `null` restores the deployment default.
 

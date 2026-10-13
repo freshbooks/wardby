@@ -415,6 +415,62 @@ describe("agent CRUD tools", () => {
     }
   });
 
+  it.each([
+    { label: "rename", patch: { name: "renamed" }, expectedSize: 4096, refused: false },
+    {
+      label: "lower to the cap",
+      patch: { codingProfile: { workspaceDiskMb: 2048 } },
+      expectedSize: 2048,
+      refused: false,
+    },
+    {
+      label: "restore the default",
+      patch: { codingProfile: { workspaceDiskMb: null } },
+      expectedSize: null,
+      refused: false,
+    },
+    {
+      label: "set an over-cap number",
+      patch: { codingProfile: { workspaceDiskMb: 3072 } },
+      expectedSize: 4096,
+      refused: true,
+    },
+  ])("update_agent can edit an already-over-cap agent: $label", async ({ patch, expectedSize, refused }) => {
+    vi.stubEnv("CODING_DISK_MB", "2048");
+    vi.stubEnv("CODING_MAX_DISK_MB", "4096");
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    try {
+      const created = await client.callTool({
+        name: "create_agent",
+        arguments: {
+          name: "coder",
+          systemPrompt: "Make the requested change.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 0.25,
+          kind: "coding",
+          codingProfile: { repository: "openai/example", workspaceDiskMb: 4096 },
+        },
+      });
+      expect(created.isError).toBeFalsy();
+      const agent = JSON.parse((created.content as { text: string }[])[0].text);
+      vi.stubEnv("CODING_MAX_DISK_MB", "2048");
+      const updated = await client.callTool({ name: "update_agent", arguments: { id: agent.id, ...patch } });
+      expect(Boolean(updated.isError)).toBe(refused);
+      if (refused) expect((updated.content as { text: string }[])[0].text).toContain("CODING_MAX_DISK_MB");
+      const fetched = await client.callTool({ name: "get_agent", arguments: { id: agent.id } });
+      const saved = JSON.parse((fetched.content as { text: string }[])[0].text);
+      expect(saved.codingProfile.workspaceDiskMb).toBe(expectedSize);
+      expect(saved.name).toBe(patch.name ?? "coder");
+    } finally {
+      await client.close();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("workspaceDiskMb round-trips through create_agent, get_agent, and update_agent(null)", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });

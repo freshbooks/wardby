@@ -842,7 +842,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...profilePatch });
             if (!profileResult.success) throw invalidArguments("coding profile", profileResult.error);
             nextProfile = profileResult.data;
-            validateWorkspaceDiskMb(nextProfile.workspaceDiskMb);
+            if (typeof args.codingProfile?.workspaceDiskMb === "number" || nextKind !== existing.kind) {
+              validateWorkspaceDiskMb(nextProfile.workspaceDiskMb);
+            }
             if (args.codingProfile?.services !== undefined) await requireCatalogServiceNames(tx, nextProfile.services);
             const nextModel = args.model ?? existing.model;
             const pairingChanges =

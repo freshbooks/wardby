@@ -16,8 +16,11 @@ appliesTo: ">=0.2.0"
 When `CODING_MAX_DISK_MB` is unset, the limit is `CODING_DISK_MB` (2048 MiB by
 default).
 
-`create_agent` and `update_agent` also check this limit at save time and
-refuse a coding profile above it. The error names the requested size in MiB,
+`create_agent` also checks this limit at save time. `update_agent` checks it
+when setting a numeric `workspaceDiskMb` or changing an agent's kind to coding.
+You can still make unrelated edits to an already-saved over-cap coding agent,
+lower its size to within the cap, or set it to `null`.
+The error names the requested size in MiB,
 the effective cap in MiB, and `CODING_MAX_DISK_MB`. A size exactly at the cap
 is allowed; `null` uses the deployment default. Agents already saved above
 the cap still fail at run time, including if the operator lowers the cap.
