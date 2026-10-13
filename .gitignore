@@ -49,3 +49,4 @@ src/generated/
 
 # Wardby local runtime and credentials
 .wardby/
+.vscode/numbered-bookmarks.json
