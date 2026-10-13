@@ -3,7 +3,7 @@ id: troubleshooting/coding-workers
 title: Troubleshoot coding workers
 summary: Investigate coding-worker setup, isolation preflight, and safe failure handling.
 audience: operator
-tags: [coding-agents, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex]
+tags: [coding-agents, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex, memory, CODING_MEMORY_MB, CODING_CPUS, out-of-memory]
 appliesTo: >=0.2.1
 ---
 
@@ -69,6 +69,22 @@ run's budget for every model request, so a higher value needs a larger
 setting. The default and the setting need a Claude Code worker image from
 Wardby 0.7.0 or later: an older pinned image still caps replies at 4096 tokens
 and rejects a run whose agent sets `maxOutputTokens`.
+
+## Runs that die while running checks (out of memory)
+
+A run that fails with `coding_failure_executor` while it runs a linter, a type
+check or a test suite has often run out of memory. Each coding pod gets
+`CODING_MEMORY_MB` (2048 MiB by default) and `CODING_CPUS` (1 by default). In a
+Codex run the agent and its commands share that pod. In a Claude Code run the
+commands run in a tool-runner container limited to at most 512 MiB and 0.25 CPU.
+
+1. Turn on a debug trace (below) and run it again. A Node.js crash shows as
+   `Aborted` with exit code 134 in a command's output.
+2. Raise `CODING_MEMORY_MB` and `CODING_CPUS` on the control plane. On GKE, deploy
+   with `CODING_MEMORY_MB=6144 CODING_CPUS=2 deploy/gke/up.sh` (see the GKE deploy
+   guide). This applies to every coding run.
+3. For a Claude Code agent with heavy checks, run it on Codex instead, since raising
+   the pod's memory doesn't raise the tool runner's limit.
 
 ## Debug trace
 
