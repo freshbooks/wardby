@@ -362,6 +362,59 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
+  it.each([
+    { diskMb: undefined, maxDiskMb: undefined, cap: 2048 },
+    { diskMb: "4096", maxDiskMb: undefined, cap: 4096 },
+    { diskMb: "4096", maxDiskMb: "8192", cap: 8192 },
+  ])("create_agent and update_agent enforce the effective disk cap ($cap MiB)", async ({ diskMb, maxDiskMb, cap }) => {
+    vi.stubEnv("CODING_DISK_MB", diskMb);
+    vi.stubEnv("CODING_MAX_DISK_MB", maxDiskMb);
+    const db = fakeDb();
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+    registerAgentTools(mcp);
+    const client = await connectClient(mcp);
+    const argumentsAt = (workspaceDiskMb: number) => ({
+      name: "coder",
+      systemPrompt: "Make the requested change.",
+      model: "gpt-5.6-luna",
+      budgetUsd: 0.25,
+      kind: "coding",
+      codingProfile: { repository: "openai/example", workspaceDiskMb },
+    });
+    try {
+      const refused = await client.callTool({ name: "create_agent", arguments: argumentsAt(cap + 1) });
+      expect(refused.isError).toBe(true);
+      for (const text of [String(cap + 1) + " MiB", String(cap) + " MiB", "CODING_MAX_DISK_MB"]) {
+        expect((refused.content as { text: string }[])[0].text).toContain(text);
+      }
+      expect(await db.agent.findMany({})).toHaveLength(0);
+      const created = await client.callTool({ name: "create_agent", arguments: argumentsAt(cap) });
+      expect(created.isError).toBeFalsy();
+      const agent = JSON.parse((created.content as { text: string }[])[0].text);
+      expect(agent.codingProfile.workspaceDiskMb).toBe(cap);
+      const updated = await client.callTool({
+        name: "update_agent",
+        arguments: { id: agent.id, codingProfile: { workspaceDiskMb: cap } },
+      });
+      expect(updated.isError).toBeFalsy();
+      expect(JSON.parse((updated.content as { text: string }[])[0].text).codingProfile.workspaceDiskMb).toBe(cap);
+      const rejectedUpdate = await client.callTool({
+        name: "update_agent",
+        arguments: { id: agent.id, codingProfile: { workspaceDiskMb: cap + 1 } },
+      });
+      expect(rejectedUpdate.isError).toBe(true);
+      for (const text of [String(cap + 1) + " MiB", String(cap) + " MiB", "CODING_MAX_DISK_MB"]) {
+        expect((rejectedUpdate.content as { text: string }[])[0].text).toContain(text);
+      }
+      const fetched = await client.callTool({ name: "get_agent", arguments: { id: agent.id } });
+      expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.workspaceDiskMb).toBe(cap);
+    } finally {
+      await client.close();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("workspaceDiskMb round-trips through create_agent, get_agent, and update_agent(null)", async () => {
     const db = fakeDb();
     const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
@@ -377,15 +430,15 @@ describe("agent CRUD tools", () => {
         model: "gpt-5.6-luna",
         budgetUsd: 0.25,
         kind: "coding",
-        codingProfile: { repository: "openai/example", workspaceDiskMb: 8192 },
+        codingProfile: { repository: "openai/example", workspaceDiskMb: 2048 },
       },
     });
     expect(created.isError).toBeFalsy();
     const createdAgent = JSON.parse((created.content as { text: string }[])[0].text);
-    expect(createdAgent.codingProfile.workspaceDiskMb).toBe(8192);
+    expect(createdAgent.codingProfile.workspaceDiskMb).toBe(2048);
 
     const fetched = await client.callTool({ name: "get_agent", arguments: { id: createdAgent.id } });
-    expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.workspaceDiskMb).toBe(8192);
+    expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.workspaceDiskMb).toBe(2048);
 
     const updated = await client.callTool({
       name: "update_agent",
