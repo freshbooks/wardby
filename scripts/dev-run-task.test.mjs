@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 import { MAX_BUDGET_USD, parseBudget } from "./dev-run-task.mjs";
 
 test("an empty budget field falls back to the small default", () => {
