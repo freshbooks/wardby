@@ -81,6 +81,14 @@ The signed-in user needs the Wardby `admin` role, because the viewer API
 requires the `admin:view` scope and only that role grants it. See
 [Configure identity and privileged access](../../help/identity-and-access.md).
 
+### Start with a server already added
+
+Set `WARDBY_VIEWER_SERVER_URL` (and optionally `WARDBY_VIEWER_SERVER_NAME`) in
+the environment the app starts in, and it adds or updates that server in its
+saved list at launch, using the same rules as adding it by hand. Only the
+address is read this way; credentials are never taken from the environment, so
+you still sign in in the browser.
+
 ### Self-hosted sign-in
 
 With `AUTH_PROVIDER=self-hosted` the app registers itself as a public client

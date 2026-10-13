@@ -50,3 +50,6 @@ src/generated/
 # Wardby local runtime and credentials
 .wardby/
 .vscode/numbered-bookmarks.json
+
+# Tilt dev loop: generated dev login key
+/.tilt/
