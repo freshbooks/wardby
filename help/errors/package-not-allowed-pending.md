@@ -16,8 +16,10 @@ short (by `REGISTRY_GRAPH_TIMEOUT_MS`), so it was not proven allowed. The error 
 how many packages were walked and how many were still queued.
 
 The answer is final for the agent and is not transient: the walk resumes
-within the run, but the next request usually ends at the same place, so
-retrying rarely helps.
+within the run, but each request continues the walk for at most
+`REGISTRY_GRAPH_TIMEOUT_MS`, so a large allowlist can take several requests or
+never finish in time. Retrying rarely helps; allowlisting the package directly
+is the reliable fix.
 
 ## What the agent should do
 

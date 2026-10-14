@@ -893,7 +893,9 @@ describe("pullRequestBody refusal warning", () => {
     });
     expect(body).not.toContain("usually transient");
     expect(body).toContain("still being checked against the allowed packages' dependency graph; retry shortly");
-    expect(body).toContain("over the package limit; the owner must allowlist it directly");
+    expect(body).toContain(
+      "not reached before the run's dependency graph walk hit its package limit; the owner must allowlist it directly",
+    );
   });
 
   it("does not mention lock files when none changed", () => {

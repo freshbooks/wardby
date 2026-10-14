@@ -1426,10 +1426,10 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     const response = await get("leaf/-/leaf-1.0.0.tgz");
     expect(response).toMatchObject({ status: 403 });
     expect("body" in response && response.body).toContain("wardby_graph_limit");
-    expect("body" in response && response.body).toContain("needs more than 2 packages");
+    expect("body" in response && response.body).toContain("limit of 2 packages");
     expect("body" in response && response.body).toContain("REGISTRY_MAX_GRAPH_PACKAGES");
     expect("body" in response && response.body).toContain("retrying will not help");
-    expect("body" in response && response.body).toContain("owner must allowlist the packages directly");
+    expect("body" in response && response.body).toContain("owner must allowlist leaf directly");
     expect("body" in response && response.body).not.toContain("wardby_package_not_allowed");
     expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_graph_limit" }]);
     // The bound is permanent for the run: a retry gets the same definitive answer.
@@ -2286,7 +2286,7 @@ describe("RegistryService graph walk at scale", () => {
     const { progress, answer } = await untilSettled(scale, "not-a-dep", 5 * 60_000);
     expect(answer.status).toBe(403);
     expect(answer.body).toContain("wardby_graph_limit:");
-    expect(answer.body).toContain("needs more than 600 packages");
+    expect(answer.body).toContain("limit of 600 packages");
     for (let index = 1; index < progress.length; index += 1)
       expect(progress[index]).toBeGreaterThan(progress[index - 1]);
     expect(Math.max(...progress)).toBeLessThan(600);

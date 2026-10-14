@@ -101,8 +101,10 @@ export const DEFAULT_GRAPH_MEMO_BYTES = 32 * 1024 * 1024;
  *  version depends on the release-age cutoff, which only moves forward (a
  *  stale entry can only omit a version that has since become old enough,
  *  which fails closed), and on the OSV audit, which is itself cached for an
- *  hour (audit.ts), so a 15-minute memo changes no advisory decision the
- *  audit cache would not. A version published upstream within the TTL is
+ *  hour (audit.ts). The walk's view of advisories can therefore lag by the
+ *  audit cache TTL plus 15 minutes; that only affects which names the walk
+ *  allows, because every served version is re-audited through keptVersions
+ *  and malware is never allowed. A version published upstream within the TTL is
  *  too new to be kept under any non-zero minReleaseAgeDays; with
  *  minReleaseAgeDays 0 it is omitted until the entry expires (fails
  *  closed). */

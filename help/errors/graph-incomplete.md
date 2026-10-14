@@ -1,7 +1,7 @@
 ---
 id: errors/graph-incomplete
 title: Package still being checked (wardby_graph_incomplete)
-summary: The registry is still checking the package against the allowed dependency graph, usually after a transient registry problem; retry shortly.
+summary: The registry's walk reached the package but timed out before checking its versions, usually a slow upstream; retry shortly.
 audience: operator
 tags: [error, coding-agents, packages, allowlist, wardby_graph_incomplete]
 appliesTo: ">=0.6.1"
@@ -10,10 +10,14 @@ appliesTo: ">=0.6.1"
 # Package still being checked
 
 `wardby_graph_incomplete` (HTTP 503) means the requested package is still
-being checked against the allowed packages' dependency graph, typically because
-the registry or audit service failed while part of the graph was read. The
-error message shows the walk's progress. It never means the package is
-outside the graph.
+being checked against the allowed packages' dependency graph. The walk reached
+the name (an expanded version declares it) but timed out
+(`REGISTRY_GRAPH_TIMEOUT_MS`) before the name's own versions were checked. That
+is usually a slow or failing upstream for that package, or another request's
+walk running out of time. The error message shows the walk's progress. It never
+means the package is outside the graph. When a completed walk has failed
+nodes, the answer is `wardby_upstream_error` or `wardby_audit_unavailable`
+instead.
 
 ## What the agent should do
 

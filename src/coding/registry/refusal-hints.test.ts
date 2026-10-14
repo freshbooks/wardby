@@ -19,6 +19,7 @@ describe("refusal wording", () => {
     expect(message).toContain("npm");
     expect(message).toContain("after 1,171 packages, at least 240 more queued");
     expect(message).toContain("retrying rarely helps");
+    expect(message).toContain("is not on this agent's allowlist");
   });
 
   it("pending message pluralizes one package", () => {
@@ -40,6 +41,8 @@ describe("refusal wording", () => {
     expect(message).toContain("REGISTRY_MAX_GRAPH_PACKAGES");
     expect(message).toContain("5,000");
     expect(message).toContain("retrying will not help");
+    expect(message).toContain("limit of 5,000 packages");
+    expect(message).toContain("owner must allowlist expo directly");
   });
 
   it("incomplete message says try again and never 'not on this agent's allowlist'", () => {

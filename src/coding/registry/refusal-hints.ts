@@ -26,7 +26,7 @@ export function notAllowedMessage(name: string, ecosystem: string, hasAllowlist:
 
 export function notAllowedPendingMessage(name: string, ecosystem: string, progress: WalkProgress): string {
   return (
-    `${name} (${ecosystem}) was not found among the allowlisted packages' dependencies after ` +
+    `${name} (${ecosystem}) is not on this agent's allowlist, and was not found among the allowlisted packages' dependencies after ` +
     `${packages(progress.walked)}, at least ${progress.queued.toLocaleString("en-US")} more queued. ` +
     `It may still be reachable, but the walk was cut short; retrying rarely helps. ` +
     `The agent's owner must allowlist ${name} directly.`
@@ -35,8 +35,9 @@ export function notAllowedPendingMessage(name: string, ecosystem: string, progre
 
 export function graphLimitMessage(name: string, ecosystem: string, limit: number): string {
   return (
-    `Resolving ${name} (${ecosystem}) needs more than ${packages(limit)}, the REGISTRY_MAX_GRAPH_PACKAGES limit; ` +
-    `retrying will not help. The agent's owner must allowlist the packages directly or raise the limit.`
+    `${name} (${ecosystem}) wasn't reached before this run's dependency graph walk hit its limit of ${packages(limit)} ` +
+    `(REGISTRY_MAX_GRAPH_PACKAGES); retrying will not help. ` +
+    `The agent's owner must allowlist ${name} directly, or the operator can raise the limit.`
   );
 }
 
@@ -47,12 +48,12 @@ export function graphIncompleteMessage(name: string, ecosystem: string, progress
   );
 }
 
-const OWNER = "The agent's owner must allowlist the package; retrying will not help.";
+const OWNER = "The agent's owner must allowlist the package directly; retrying will not help.";
 
 const HINTS: Record<string, string> = {
   [PACKAGE_NOT_ALLOWED]: `The package is not on the agent's allowlist and not reachable from it. ${OWNER}`,
   [PACKAGE_NOT_ALLOWED_PENDING]: `The dependency walk ended before reaching the package. Retrying rarely helps. ${OWNER}`,
-  [GRAPH_LIMIT]: `Resolving the package exceeds REGISTRY_MAX_GRAPH_PACKAGES. ${OWNER}`,
+  [GRAPH_LIMIT]: `The run's dependency graph walk hit REGISTRY_MAX_GRAPH_PACKAGES before reaching the package, so it may not be in the graph at all. Retrying will not help. The agent's owner must allowlist the package directly, or the operator can raise the limit.`,
   [GRAPH_INCOMPLETE]:
     "The package is still being checked against the allowed packages' dependency graph, usually a transient problem. Try again shortly.",
 };
@@ -62,7 +63,8 @@ const MEANINGS: Record<string, string> = {
   [PACKAGE_NOT_ALLOWED]:
     "not on the allowlist, or only reachable through a refused package; the owner must allowlist it",
   [PACKAGE_NOT_ALLOWED_PENDING]: "not reached before the dependency walk stopped; the owner must allowlist it",
-  [GRAPH_LIMIT]: "its dependency graph is over the package limit; the owner must allowlist it directly",
+  [GRAPH_LIMIT]:
+    "not reached before the run's dependency graph walk hit its package limit; the owner must allowlist it directly",
   [GRAPH_INCOMPLETE]: "still being checked against the allowed packages' dependency graph; retry shortly",
   wardby_version_filtered: "withheld: newer than the release-age limit, or a high-severity advisory",
   wardby_lockfile_integrity_mismatch: "the lock file's integrity does not match the registry's",

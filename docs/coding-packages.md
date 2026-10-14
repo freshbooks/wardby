@@ -410,8 +410,8 @@ try again" error (`502 wardby_upstream_error`, or
 The walk expands the requested name first, so a request is answered as soon as
 the walk reaches it. It groups all of a package's ranges together, so each
 package is expanded once however many dependents ask for it, and it reuses
-already expanded packages through a bounded per-run memo (32 MiB, kept for 15
-minutes). Because it follows every kept version inside each range, plus
+already expanded packages through a bounded memo (entries are per run, kept for 15
+minutes; its 32 MiB budget is shared by the whole proxy process). Because it follows every kept version inside each range, plus
 optional and peer dependencies, its graph is usually several times larger than
 the graph of one install. The walk runs only while a request waits for it; its
 state is per run, so it resumes within the run and starts again in a new run.
@@ -428,12 +428,17 @@ A request the walk could not settle gets one of four answers:
   reachable. The message shows how many packages were walked and how many were
   queued. It is not transient: the agent should stop, because retrying rarely
   helps, and the owner should allowlist the package directly.
-- `403 wardby_graph_limit`: the graph is over `REGISTRY_MAX_GRAPH_PACKAGES`
-  (counting package names). The bound is permanent for the run: allowlist the
-  package directly, or ask the operator to raise the limit.
-- `503 wardby_graph_incomplete`: only for a name that is still being checked,
-  because an upstream failed while part of the graph was read. Retry shortly
-  (npm retries a 5xx on its own).
+- `403 wardby_graph_limit`: this run's walk reached `REGISTRY_MAX_GRAPH_PACKAGES`
+  (counting package names) before it reached the name, so the name may not be in
+  the graph at all. The bound is permanent for the run: the agent's owner can
+  allowlist the package directly, or the operator can raise the limit.
+- `503 wardby_graph_incomplete`: only for a name that is still being checked.
+  The walk reached the name (an expanded version declares it) but timed out
+  (`REGISTRY_GRAPH_TIMEOUT_MS`) before the name's own versions were checked,
+  usually a slow or failing upstream for that package, or another request's walk
+  running out of time. Retry shortly (npm retries a 5xx on its own). When a
+  completed walk has failed nodes, the answer is `wardby_upstream_error` or
+  `wardby_audit_unavailable` instead.
 
 Large frameworks (for example Expo) can exceed the graph limit, because the
 walk follows every in-range version plus optional and peer dependencies.
@@ -953,8 +958,8 @@ see on a failed install:
 | `wardby_package_too_large`           | 413    | The file exceeds `REGISTRY_MAX_FILE_MB`. Ask the operator to raise it if the file is legitimately larger.                                                                                                                                                                                                                          |
 | `wardby_package_limit`               | 429    | The run hit `REGISTRY_MAX_FILES` or `REGISTRY_MAX_TOTAL_MB`. Trim what the run installs, or ask the operator to raise the limit.                                                                                                                                                                                                   |
 | `wardby_audit_unavailable`           | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the audit failed while resolving a lockfile install's dependency graph. |
-| `wardby_graph_incomplete`            | 503    | A dependency the walk is still checking (typically after an upstream failure). Retry shortly; npm retries 5xx on its own. Never means the package is outside the graph.                                                                                                                                                            |
-| `wardby_graph_limit`                 | 403    | The dependency graph is over `REGISTRY_MAX_GRAPH_PACKAGES` for this run. Permanent for the run, so retrying won't help: allowlist the package directly, or ask the operator to raise the limit.                                                                                                                                    |
+| `wardby_graph_incomplete`            | 503    | A dependency the walk reached but timed out (`REGISTRY_GRAPH_TIMEOUT_MS`) before checking its versions, usually a slow or failing upstream for that package. Retry shortly; npm retries 5xx on its own. Never means the package is outside the graph.                                                                              |
+| `wardby_graph_limit`                 | 403    | The dependency graph is over `REGISTRY_MAX_GRAPH_PACKAGES` for this run. This run's walk reached the limit before the package, so it may not be in the graph. Permanent for the run, so retrying won't help: the owner can allowlist the package directly, or the operator can raise the limit.                                    |
 | `wardby_lockfile_unsupported`        | 400    | The lockfile sent to `POST /-/plan` isn't lockfileVersion 2 or 3 (or has no `packages`). Regenerate it with npm 7 or later. The install still runs, through the walk.                                                                                                                                                              |
 | `wardby_lockfile_too_large`          | 413    | The lockfile is over 20 MiB or has more than `REGISTRY_PLAN_MAX_ENTRIES` entries. The install still runs, through the walk.                                                                                                                                                                                                        |
 | `wardby_lockfile_integrity_mismatch` | —      | A plan refusal: the lockfile's `integrity` for this entry isn't the registry's own (or the registry publishes none). Regenerate the lockfile entry; never edit integrity by hand.                                                                                                                                                  |
