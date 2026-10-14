@@ -16,7 +16,7 @@ WORKDIR /worker
 COPY src/native-worker/package.json src/native-worker/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
-FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
+FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553 AS runtime
 LABEL org.opencontainers.image.source="https://github.com/wardby/wardby"
 # perl-base: the pinned base image ships an older build; take Debian's security fixes.
 RUN apt-get update \

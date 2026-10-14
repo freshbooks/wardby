@@ -1,0 +1,4 @@
+[tool.fresh.project.notifications]
+slack_channels = ["#dxp-spam"]
+pr_notify_channels_on = ["failed", "success"]
+deployment_notify_channels_on = ["failed", "success"]
