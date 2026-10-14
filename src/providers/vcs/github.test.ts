@@ -867,8 +867,35 @@ describe("pullRequestBody refusal warning", () => {
     expect(warning).toBeGreaterThan(-1);
     expect(warning).toBeLessThan(body.indexOf("Added a cart."));
     expect(body).toContain("> - npm `braces`: `wardby_version_filtered` (withheld:");
-    expect(body).toContain("> - npm `fill-range`, npm `is-number`: `wardby_package_not_allowed`");
+    expect(body).toContain(
+      "> - npm `fill-range`, npm `is-number`: `wardby_package_not_allowed` (not on the allowlist, or only reachable through a refused package; the owner must allowlist it)",
+    );
     expect(body).toContain("`package-lock.json` changed in this run and may be incomplete");
+  });
+
+  it('the banner explains the pending code with "the owner must allowlist it"', () => {
+    const body = pullRequestBody({
+      ...base,
+      packageRefusals: [{ ecosystem: "npm", name: "expo", reason: "wardby_package_not_allowed_pending" }],
+    });
+    expect(body).toContain("> - npm `expo`: `wardby_package_not_allowed_pending` (");
+    expect(body).toContain("the owner must allowlist it");
+    expect(body).not.toContain("usually transient");
+  });
+
+  it('the banner no longer calls graph_incomplete "usually transient" for an unreached name', () => {
+    const body = pullRequestBody({
+      ...base,
+      packageRefusals: [
+        { ecosystem: "npm", name: "expo", reason: "wardby_graph_incomplete" },
+        { ecosystem: "npm", name: "huge", reason: "wardby_graph_limit" },
+      ],
+    });
+    expect(body).not.toContain("usually transient");
+    expect(body).toContain("still being checked against the allowed packages' dependency graph; retry shortly");
+    expect(body).toContain(
+      "not reached before the run's dependency graph walk hit its package limit; the owner must allowlist it directly",
+    );
   });
 
   it("does not mention lock files when none changed", () => {
