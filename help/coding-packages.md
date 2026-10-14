@@ -1,16 +1,16 @@
 ---
 id: coding-packages
 title: Approve packages for coding agents
-summary: Let Codex coding workers install vetted npm and PyPI dependencies through Wardby's registry proxy.
+summary: Let coding workers install vetted npm (also with pnpm or yarn) and PyPI dependencies through Wardby's registry proxy.
 audience: operator
-tags: [coding-agents, packages, npm, pypi, supply-chain, refusals, lockfile, extras, pip-extras]
+tags: [coding-agents, packages, npm, pnpm, yarn, pypi, supply-chain, refusals, lockfile, extras, pip-extras]
 appliesTo: >=0.2.1
 ---
 
 # Approve packages for coding agents
 
-Coding workers have no direct registry network access. For **Codex** workers,
-Wardby's registry proxy can allow `npm install` and `pip install` from a
+Coding workers have no direct registry network access. Wardby's registry
+proxy can allow `npm install` (or `pnpm`/`yarn`) and `pip install` from a
 per-agent npm or PyPI allowlist. The proxy records what was fetched and applies
 supply-chain checks, including package graph validation, release-age policy,
 and vulnerability filtering.
@@ -62,6 +62,31 @@ approve), or for a metadata request after a lockfile plan of the run failed
 or refused an entry. Otherwise a metadata request never walks. A
 lockfileVersion 1 lockfile can't be planned, so regenerate it with a current
 npm to avoid the slower walk.
+
+## pnpm and yarn
+
+From Wardby 0.6.1, pnpm, yarn classic (1.x) and yarn 2 or later (Berry, with
+node-modules or Plug'n'Play) install from the same npm allowlist as npm, and
+their lockfiles are verified the same way: before `pnpm install`/`add` or
+`yarn`/`yarn install`/`yarn add`, the worker's shim sends `pnpm-lock.yaml`
+(lockfileVersion 6 or 9) or `yarn.lock` to the registry, which approves its
+exact versions, so `pnpm install --frozen-lockfile`, `yarn install
+--frozen-lockfile` and `yarn install --immutable` need no slow graph walk.
+
+- The stock images have npm, yarn classic and corepack. The shim runs pnpm,
+  and a yarn 2+ release a project pins in `packageManager`, through corepack,
+  which downloads it through the registry: allowlist `pnpm` or
+  `@yarnpkg/cli-dist` (or bake the tool into a custom worker image).
+- yarn 2+ records yarn's own `checksum`, not npm's integrity: its plan
+  approves exact versions, and each download is checked against the
+  registry's integrity.
+- yarn 2+ adds an implicit `node-gyp` dependency to packages with install
+  scripts (such as `fsevents`); allowlist `node-gyp` when the lockfile has it.
+- Install scripts stay off for every client, and lockfiles a run commits
+  name only public registry URLs.
+
+See [pnpm and yarn](../docs/coding-packages.md#pnpm-and-yarn) for each
+client's settings and the plan's rules.
 
 ## PyPI extras
 

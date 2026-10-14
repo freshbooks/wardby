@@ -285,6 +285,11 @@ These details explain the rules above.
   `/etc/profile` and the files in `/etc/profile.d/`, so that is where your own
   settings go. `/etc/profile` resets `PATH` to Debian's default, so add any
   other folder to `PATH` in your `/etc/profile.d/` file.
+  `/opt/wardby/bin` holds wardby's package-manager shim, linked as `npm`,
+  `pnpm` and `yarn`: it verifies the project's lockfile with the registry
+  before an install, then runs the image's own tool (or the release the
+  project pins, through corepack). Keep it first on `PATH`; see
+  [pnpm and yarn](coding-packages.md#pnpm-and-yarn).
 - **Network.** The tool runner reaches only wardby's package registry (npm and
   PyPI).
 - **Images on the Docker launcher are never pulled.** When wardby runs coding

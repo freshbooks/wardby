@@ -1,8 +1,8 @@
 # Installing packages in coding runs
 
 A coding agent's worker has no direct network access — it can reach only the
-coding proxy. Registry mode lets it run `npm install` and `pip install`
-anyway, by routing those requests through the proxy to a per-agent allowlist,
+coding proxy. Registry mode lets it run `npm install` (or pnpm or yarn) and
+`pip install` anyway, by routing those requests through the proxy to a per-agent allowlist,
 with supply-chain safeguards and a full record of what was fetched.
 
 **Registry mode works for both providers.** Claude Code runs every shell
@@ -25,10 +25,11 @@ one. The toolchain picks the tool-runner image: `node` uses
 pytest and ruff, the same packages as the Codex `node-python` worker). As with
 Codex, pip installs go into a virtual environment
 (`python -m venv --system-site-packages .venv`), and pip there reaches only the
-registry. The npm lockfile check
-(the shim on `PATH` that plans `npm ci`/`npm install` against the proxy
-before it runs; see "Lockfile installs: verified, then approved exactly"
-below) applies there exactly as it does for Codex. Before a Claude Code run's
+registry. The lockfile check
+(the shim on `PATH` that plans `npm ci`/`npm install`, and the pnpm and yarn
+installs, against the proxy before they run; see "Lockfile installs:
+verified, then approved exactly" below) applies there exactly as it does for
+Codex. Before a Claude Code run's
 changes are committed, the control plane rewrites any collected lockfile's
 proxy URLs back to the ecosystem's real public registry URL (for example
 `https://registry.npmjs.org/...`), so a lockfile in the resulting pull
@@ -52,8 +53,9 @@ request never names the internal proxy.
    packages), and the registry for the project-level npm/PyPI packages your
    agent adds during the run.
 
-npm and pip in every coding run are always pointed at the proxy — this is not
-optional per run. If an agent has no allowlist entries for an ecosystem (the
+npm, pnpm, yarn and pip in every coding run are always pointed at the proxy —
+this is not optional per run (see [pnpm and yarn](#pnpm-and-yarn) for how
+each client is configured). If an agent has no allowlist entries for an ecosystem (the
 default for a new agent), an install in that ecosystem gets a clear refusal
 (`403 wardby_package_not_allowed`) rather than silently failing or reaching
 the real registry.
@@ -366,6 +368,118 @@ back to the dependency-graph walk below (after a plan with any refusal, this
 applies to metadata requests as well as downloads). That can make a failing install take
 minutes and use much more proxy memory; fix the refusals (wait out the release
 age or adjust the agent's policy) rather than retrying.
+
+### pnpm and yarn
+
+pnpm and yarn install from the same npm allowlist and the same registry
+route as npm, with the same safeguards. The worker configures each of them
+to reach only the proxy, with the run's registry token:
+
+| Client                  | How the worker points it at the proxy                                                                                                                                                                                                                                                                                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| npm                     | `npm_config_registry`, and an npmrc (`npm_config_userconfig`) holding the token. Install scripts, the update notifier, audit and fund are off.                                                                                                                                                                                                                                   |
+| pnpm                    | npm's settings above (pnpm reads the same ones), so install scripts and the update check are off too. The shim puts its store and cache under the workspace's `.cache` (`npm_config_store_dir` and `npm_config_cache_dir`, set for pnpm alone: npm warns about settings it doesn't know).                                                                                        |
+| yarn classic (1.x)      | npm's registry and npmrc. yarn classic sends the token only with `always-auth`, which npm warns about, so the shim sets `npm_config_always_auth` for yarn alone. Install scripts are off with `YARN_IGNORE_SCRIPTS` (yarn classic ignores `npm_config_ignore_scripts`); the shim puts its cache under `.cache` (`npm_config_cache_folder`, for yarn alone).                      |
+| yarn Berry (2 or later) | Berry reads none of npm's settings: `YARN_NPM_REGISTRY_SERVER`, `YARN_NPM_AUTH_TOKEN` with `YARN_NPM_ALWAYS_AUTH`, and the proxy's host in `YARN_UNSAFE_HTTP_WHITELIST` when the proxy is plain HTTP (Berry refuses an `http:` registry otherwise). Telemetry and scripts are off (`YARN_ENABLE_TELEMETRY=0`, `YARN_ENABLE_SCRIPTS=false`); its global folder is under `.cache`. |
+| corepack                | `COREPACK_NPM_REGISTRY` and `COREPACK_NPM_TOKEN`, so it downloads a pinned pnpm or yarn release from the proxy; no download prompt, no `packageManager` pinning, no lookup of the latest release.                                                                                                                                                                                |
+
+Berry's per-project `cacheFolder` is left alone, so a repository that
+commits its cache (zero-install) keeps using it. A service's `testEnv` can't
+set `YARN_*`, `PNPM_*` or `COREPACK_*` variables.
+
+**Getting pnpm or yarn Berry into the run.** The stock worker images ship
+npm, yarn classic and corepack, not pnpm or yarn Berry. The shim runs
+`pnpm`, and `yarn` in a project whose `package.json` (or, for a workspace
+package, the workspace root's) pins yarn 2 or later
+(`"packageManager": "yarn@4.x"`), through corepack, which downloads that
+release through the registry like any other package: allowlist `pnpm` for
+pnpm, `@yarnpkg/cli-dist` for yarn 2 or later, or `yarn` for a pinned yarn
+1.x other than the image's. The release-age policy applies to it too, so a
+release pinned the day it shipped is refused until it is old enough.
+corepack reads one version's document at
+`/registry/npm/<name>/<version>`, which the proxy serves with the same checks
+as the package's whole document. A repository that commits its yarn release
+(`yarnPath` in `.yarnrc.yml`) needs none of this. Alternatively, bake the
+tool into a custom worker image.
+
+**Lockfile plans.** The shim acts as `pnpm` and `yarn` too: before
+`pnpm install`/`i`/`add` it sends `pnpm-lock.yaml`, and before a bare
+`yarn`, `yarn install`, `add`, `remove`, `upgrade`, `upgrade-interactive`
+or `up` (also as `yarn workspace <name> <command>`) it sends `yarn.lock` (the nearest one
+from the project up, so a workspace root's lockfile counts), to the same
+`POST /registry/npm/-/plan`, which tells the formats apart by content.
+Supported:
+
+| Lockfile                     | Versions                                   | Integrity checked against the registry | How a dependency is matched to its entry                                          |
+| ---------------------------- | ------------------------------------------ | -------------------------------------- | --------------------------------------------------------------------------------- |
+| `package-lock.json`          | lockfileVersion 2 and 3                    | `integrity`                            | npm's: the nearest enclosing `node_modules/<name>`                                |
+| `pnpm-lock.yaml`             | lockfileVersion 6 (pnpm 8) and 9 (pnpm 9+) | `resolution.integrity`                 | the reference the parent's entry records (`ms: 2.1.3`, an alias's `name@version`) |
+| `yarn.lock`, yarn classic    | `# yarn lockfile v1`                       | `integrity`                            | the parent's `name@range` descriptor                                              |
+| `yarn.lock`, yarn 2 or later | `__metadata.version` 4 or later            | none: see below                        | the parent's `name@range` descriptor                                              |
+
+Every other check is the one described above: reachability from allowlist
+entries over dependencies the registry declares, inside their declared
+ranges, release age, advisories, the plan's refusal records and allowances,
+and the fallback to the walk after a failed or partial plan. Workspace
+packages and `link:`, `portal:`, `file:`, `exec:` and `patch:` entries are
+local and skipped (a yarn patch applies to an npm entry the lockfile lists
+on its own); git and URL entries are refused with
+`wardby_lockfile_entry_unsupported`. pnpm's older `lockfileVersion` 5.x
+(pnpm 7) is refused with `400 wardby_lockfile_unsupported`: regenerate it
+with pnpm 8 or later. The YAML lockfiles are read as plain strings, and one
+using YAML anchors or aliases (which pnpm and yarn never write) is refused.
+The proxy reads a `pnpm-lock.yaml` or `yarn.lock` in a separate worker
+thread, never on the thread that serves every run's registry and model
+traffic. The read is bounded to 15 seconds and to 384 MiB of memory for
+every 5000 entries `REGISTRY_PLAN_MAX_ENTRIES` allows (384 MiB at the
+default). A lockfile not read in time is answered with
+`503 wardby_plan_incomplete`, and one that needs more memory with
+`413 wardby_lockfile_too_large`; a retry of the same lockfile fails the same
+way, and the install falls back to the walk, as for any failed plan. A
+reader that fails for any other reason is the proxy's own failure: it is
+logged (`registry.failed`) and answered with `502 wardby_upstream_error`.
+A realistic lockfile at the default entry bound (a 3.4 MiB
+`pnpm-lock.yaml`) reads in under a second using about 160 MiB.
+
+**Proxy memory.** Each lockfile plan being read can use that bound on top of
+the proxy's own memory, and two plans are read at once, so allow about
+800 MiB of headroom for lockfile reads at the default settings (more if you
+raise `REGISTRY_PLAN_MAX_ENTRIES`).
+
+**yarn Berry's `checksum` is not npm's integrity.** It is yarn's own hash
+of its cache archive, so the plan can't compare it with the registry's.
+A Berry plan approves exact `name@version` pairs, and each download is then
+checked against the registry's own integrity for that version, as every
+download is. A tampered tarball is still refused (`wardby_integrity_mismatch`);
+what a Berry plan can't catch is a lockfile entry whose checksum was edited,
+which yarn itself rejects at install.
+
+**yarn Berry adds `node-gyp`.** Berry gives every package with an install
+script (such as `fsevents`) an implicit dependency on `node-gyp`, which no
+registry metadata declares. Allowlist `node-gyp` for a Berry project whose
+lockfile has it, or the install is refused at `node-gyp`.
+
+**yarn classic downloads from the URLs in yarn.lock**, never from its
+configured registry, so a frozen install can't reach the proxy on its own.
+For the install, the shim points the lockfile's `registry.yarnpkg.com` and
+`registry.npmjs.org` URLs at the proxy, and afterwards puts the file back
+byte for byte; if yarn rewrote the lockfile (`yarn add`), each entry's
+proxy URL goes back to the host that entry had (a new entry gets the host
+most of the lockfile uses). The shim does this for every command above. A yarn classic install that
+bypasses the shim (the real `yarn` called by its full path) gets neither this
+nor the token, and fails.
+
+**What a run commits.** The proxy serves each download at the registry's
+usual path (`<proxy>/registry/npm/<name>/-/<name>-<version>.tgz`), and pnpm
+and yarn 2 or later record a download URL only when it isn't the usual one,
+so their lockfiles, yarn's `.pnp.cjs` and install state, and the names in
+`.yarn/cache` name nothing of the proxy: a zero-install repository can
+commit them as they are. npm and yarn classic record every download URL, so
+before a run's changes are collected Wardby rewrites their `resolved` URLs
+to public registry URLs (yarn classic's on `registry.yarnpkg.com`). It
+also drops a pnpm `tarball` or a yarn 2+ `__archiveUrl` that still names the
+proxy (from an older Wardby). A committed lockfile never names the proxy or
+the token.
 
 ### Metadata requests are answered at once
 
@@ -879,7 +993,8 @@ collected either.
   run arbitrary code at install/build time, are never served — only wheels.
 - **npm install scripts are off, but only by configuration.** The proxy sets
   `npm_config_ignore_scripts=true` in the agent's environment, which disables
-  npm's install-time script hooks. This is a configuration default, not
+  npm's (and pnpm's) install-time script hooks; `YARN_IGNORE_SCRIPTS` and
+  `YARN_ENABLE_SCRIPTS=false` do the same for yarn classic and yarn Berry. This is a configuration default, not
   something the proxy can enforce on the downloaded tarball itself: the
   proxy cannot strip scripts from a package, so an agent that deliberately
   overrode this setting could still run one. A script that ran would still be
@@ -1022,14 +1137,14 @@ see on a failed install:
 | `wardby_audit_unavailable`           | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the audit failed while resolving a lockfile install's dependency graph.                                                                                                                                                                                                          |
 | `wardby_graph_incomplete`            | 503    | Only for a download the run hasn't resolved (a lockfile install), or a metadata request after a lockfile plan of the run failed or refused an entry: a dependency the walk reached but timed out (`REGISTRY_GRAPH_TIMEOUT_MS`) before checking its versions, usually a slow or failing upstream for that package. Retry shortly; npm retries 5xx on its own. Never means the package is outside the graph.                                                                                                                                  |
 | `wardby_graph_limit`                 | 403    | Only for a download the run hasn't resolved (a lockfile install), or a metadata request after a lockfile plan of the run failed or refused an entry: the dependency graph is over `REGISTRY_MAX_GRAPH_PACKAGES` for this run. This run's walk reached the limit before the package, so it may not be in the graph. Permanent for the run, so retrying won't help: the owner can allowlist the package directly, or the operator can raise the limit.                                                                                        |
-| `wardby_lockfile_unsupported`        | 400    | The lockfile sent to `POST /-/plan` isn't lockfileVersion 2 or 3 (or has no `packages`). Regenerate it with a current npm. The install still runs, but downloads and, for the rest of the run, metadata requests fall back to the slower walk.                                                                                                                                                                                                                                                                                              |
+| `wardby_lockfile_unsupported`        | 400    | The lockfile sent to `POST /-/plan` isn't one the plan reads: a `package-lock.json` with lockfileVersion 2 or 3 (and a `packages` section), a `pnpm-lock.yaml` with lockfileVersion 6 or 9, or a yarn classic or yarn 2+ `yarn.lock`. Regenerate it with a current client. The install still runs, but downloads and, for the rest of the run, metadata requests fall back to the slower walk.                                                                                                                                              |
 | `wardby_lockfile_too_large`          | 413    | The lockfile is over 20 MiB or has more than `REGISTRY_PLAN_MAX_ENTRIES` entries. The install still runs, but downloads and, for the rest of the run, metadata requests fall back to the walk.                                                                                                                                                                                                                                                                                                                                              |
-| `wardby_lockfile_integrity_mismatch` | —      | A plan refusal: the lockfile's `integrity` for this entry isn't the registry's own (or the registry publishes none). Regenerate the lockfile entry; never edit integrity by hand.                                                                                                                                                                                                                                                                                                                                                           |
+| `wardby_lockfile_integrity_mismatch` | —      | A plan refusal: the lockfile's `integrity` for this entry isn't the registry's own (or the registry publishes none, or the lockfile records none; a yarn 2+ `yarn.lock` is never checked this way, see [pnpm and yarn](#pnpm-and-yarn)). Regenerate the lockfile entry; never edit integrity by hand.                                                                                                                                                                                                                                       |
 | `wardby_lockfile_entry_unsupported`  | —      | A plan refusal: the entry is installed from git, a URL or a path, or isn't an exact registry version. Only registry packages can be approved.                                                                                                                                                                                                                                                                                                                                                                                               |
 | `wardby_plan_limit`                  | 429    | The run has made `REGISTRY_PLAN_MAX_PER_RUN` lockfile plans. The install still runs, but downloads and, for the rest of the run, metadata requests fall back to the walk.                                                                                                                                                                                                                                                                                                                                                                   |
 | `wardby_registry_integrity_missing`  | —      | A plan refusal: npm publishes no integrity for this version, so a download of it couldn't be checked.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `wardby_plan_in_progress`            | 429    | A lockfile plan is already running for this run (one at a time). Wait for it; the install still runs, but downloads and, for the rest of the run, metadata requests fall back to the walk.                                                                                                                                                                                                                                                                                                                                                  |
-| `wardby_plan_incomplete`             | 503    | The plan didn't finish within `REGISTRY_PLAN_TIMEOUT_MS` (or the client went away). What was verified is kept, so a retry resumes; the install still runs, but downloads and, for the rest of the run, metadata requests fall back to the walk.                                                                                                                                                                                                                                                                                             |
+| `wardby_plan_incomplete`             | 503    | The plan didn't finish within `REGISTRY_PLAN_TIMEOUT_MS` (or the client went away), or a `pnpm-lock.yaml` or `yarn.lock` wasn't read within 15 seconds (see [pnpm and yarn](#pnpm-and-yarn); a retry of that lockfile won't help). What was verified is kept, so a retry resumes; the install still runs, but downloads and, for the rest of the run, metadata requests fall back to the walk.                                                                                                                                              |
 | `wardby_bad_request`                 | 400    | The request path is malformed (bad percent-encoding, or not a valid package name). A client or agent bug, not a package choice.                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `wardby_upstream_error`              | 502    | The upstream registry answered with an error, or the download failed partway. Retry. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the registry failed while resolving a lockfile install's dependency graph.                                                                                                                                                                                                                                                                    |
 | `wardby_upstream_unavailable`        | 504    | The upstream registry didn't answer a metadata request within `REGISTRY_METADATA_TIMEOUT_MS`. Retry.                                                                                                                                                                                                                                                                                                                                                                                                                                        |

@@ -2,12 +2,13 @@
  * npm registry adapter: parses npm allowlist syntax and semver ranges,
  * routes proxy requests against the npm HTTP protocol (packuments,
  * `-/tarball/<name>/<version>` downloads, and the standard
- * `<name>/-/<unscoped>-<version>.tgz` path lockfiles record), and configures npm/npmrc for
- * the sandboxed worker to use the proxy with install-time scripts disabled.
+ * `<name>/-/<unscoped>-<version>.tgz` path lockfiles record), and configures npm, pnpm,
+ * yarn (classic and Berry) and corepack in the sandboxed worker to use the proxy with
+ * install-time scripts disabled.
  */
 import semver from "semver";
-import { npmLockfiles } from "./npm-lockfile.js";
-import { npmLockfilePlan, registryDependencyEdges } from "./npm-plan.js";
+import { npmClientLockfilePlan, npmClientLockfiles } from "./npm-lockfile-formats.js";
+import { registryDependencyEdges } from "./npm-plan.js";
 import {
   AllowlistEntryError,
   RegistryError,
@@ -110,6 +111,20 @@ function standardTarball(name: string, filename: string): DownloadRoute | null {
   return { kind: "download", name, version, filename: `${version}.tgz` };
 }
 
+/** The download URL the proxy hands out: the registry's usual tarball path,
+ *  `<name>/-/<unscoped>-<version>.tgz`, under the proxy's base (routed by
+ *  `standardTarball`). pnpm and yarn 2+ record a download URL in their
+ *  lockfile (and yarn in .pnp.cjs and its cache names) only when it isn't
+ *  that usual one, so they record nothing of the proxy. */
+function proxyTarballUrl(proxyBase: string, name: string, version: string): string {
+  // The usual path routes only a canonically spelled version (standardTarball);
+  // any other kept version (build metadata, `1.0.0+build`) keeps the proxy's
+  // own route, which the collection rewrite turns public all the same.
+  if (semver.valid(version) !== version)
+    return `${proxyBase}-/tarball/${encodeURIComponent(name)}/${encodeURIComponent(version)}`;
+  return `${proxyBase}${name}/-/${name.slice(name.indexOf("/") + 1)}-${version}.tgz`;
+}
+
 function validName(name: string): string {
   if (!NAME.test(name)) throw new AllowlistEntryError(`"${name}" is not a valid npm package name`);
   return name;
@@ -182,8 +197,8 @@ export const npmAdapter: RegistryAdapter = {
   upstreamHosts: ["registry.npmjs.org"],
   collectExclude: ["node_modules"],
   dependenciesInMetadata: true,
-  lockfiles: npmLockfiles,
-  lockfilePlan: npmLockfilePlan,
+  lockfiles: npmClientLockfiles,
+  lockfilePlan: npmClientLockfilePlan,
 
   parseAllowlistEntry(raw: string): AllowlistEntry {
     const value = raw.trim();
@@ -217,6 +232,9 @@ export const npmAdapter: RegistryAdapter = {
     // one segment (`react`, `@scope%2fpkg`) or a literal scope plus name
     // (`@scope/pkg`); the filename is one raw segment.
     const standard = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/-\/([^/]+)$/);
+    // One version's document, `<name>/<version>` (corepack reads these to
+    // download a pinned pnpm or yarn), for an exact version only.
+    const versionDocument = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/([^/]+)$/);
     try {
       if (tarball) {
         const name = decodeURIComponent(tarball[1]);
@@ -225,6 +243,13 @@ export const npmAdapter: RegistryAdapter = {
         return { kind: "download", name, version, filename: `${version}.tgz` };
       }
       if (standard) return standardTarball(decodeURIComponent(standard[1]), decodeURIComponent(standard[2]));
+      if (versionDocument) {
+        // `@scope/pkg` matches too (as name `@scope`, version `pkg`), and
+        // falls through: no package name is a scope alone.
+        const name = decodeURIComponent(versionDocument[1]);
+        const version = decodeURIComponent(versionDocument[2]);
+        if (NAME.test(name) && semver.valid(version) === version) return { kind: "metadata", name, version };
+      }
       const name = decodeURIComponent(subpath);
       return NAME.test(name) ? { kind: "metadata", name } : null;
     } catch {
@@ -254,7 +279,7 @@ export const npmAdapter: RegistryAdapter = {
       const info = JSON.parse(manifest) as Packument["versions"][string];
       versions[version] = {
         ...info,
-        dist: { ...info.dist, tarball: `${proxyBase}-/tarball/${encodeURIComponent(meta.name)}/${version}` },
+        dist: { ...info.dist, tarball: proxyTarballUrl(proxyBase, meta.name, version) },
       };
       const published = raw.times.get(version);
       if (published !== undefined) time[version] = published;
@@ -268,14 +293,37 @@ export const npmAdapter: RegistryAdapter = {
     };
   },
 
+  renderVersion(meta, version, keptFiles, proxyBase) {
+    const raw = meta.raw as NpmRenderData | undefined;
+    if (!raw) throw new Error(`npm metadata for "${meta.name}" was fetched without render data`);
+    const manifest = raw.manifests.get(version);
+    if (manifest === undefined || !keptFiles.has(`${version}.tgz`)) return null;
+    const info = JSON.parse(manifest) as Packument["versions"][string];
+    return {
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...info,
+        dist: { ...info.dist, tarball: proxyTarballUrl(proxyBase, meta.name, version) },
+      }),
+    };
+  },
+
   resolveDownload(route: DownloadRoute, meta) {
     return meta.versions.get(route.version)?.files.find((file) => file.filename === route.filename) ?? null;
   },
 
   workerConfig({ registryUrl, token, cacheDir }) {
     const npmrc = `${cacheDir}/npmrc`;
+    // yarn Berry and corepack append paths to a registry without a trailing slash.
+    const registryServer = registryUrl.replace(/\/+$/, "");
+    const proxy = new URL(registryUrl);
     return {
       env: {
+        // npm, and pnpm (which reads the same npm_config_* settings and
+        // npmrc). Only settings npm knows: npm warns about any other on
+        // every command, so pnpm's store and cache and yarn classic's cache
+        // folder are set by the shim for that tool alone (npm-shim.mjs),
+        // under npm_config_cache.
         npm_config_registry: registryUrl,
         npm_config_userconfig: npmrc,
         npm_config_ignore_scripts: "true",
@@ -283,7 +331,28 @@ export const npmAdapter: RegistryAdapter = {
         npm_config_audit: "false",
         npm_config_fund: "false",
         npm_config_update_notifier: "false",
-        // The only registry the npm shim (npm-shim.mjs) sends a lockfile to.
+        // yarn classic (1.x): the registry and token from the npm settings
+        // above, and its own switch for install scripts. Nothing here is a
+        // YARN_ setting yarn Berry would reject as unknown.
+        YARN_IGNORE_SCRIPTS: "true",
+        // yarn Berry (2+) ignores npm's settings. Its global folder holds its
+        // shared cache; the per-project cacheFolder is left alone, so a
+        // repository that commits its cache (zero-install) keeps it.
+        YARN_NPM_REGISTRY_SERVER: registryServer,
+        YARN_NPM_AUTH_TOKEN: token,
+        YARN_NPM_ALWAYS_AUTH: "true",
+        ...(proxy.protocol === "http:" ? { YARN_UNSAFE_HTTP_WHITELIST: proxy.hostname } : {}),
+        YARN_ENABLE_TELEMETRY: "0",
+        YARN_ENABLE_SCRIPTS: "false",
+        YARN_GLOBAL_FOLDER: `${cacheDir}/yarn-berry`,
+        // corepack, which downloads the pnpm or yarn release a project pins.
+        COREPACK_NPM_REGISTRY: registryServer,
+        COREPACK_NPM_TOKEN: token,
+        COREPACK_HOME: `${cacheDir}/corepack`,
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+        COREPACK_ENABLE_AUTO_PIN: "0",
+        COREPACK_DEFAULT_TO_LATEST: "0",
+        // The only registry the package-manager shim (npm-shim.mjs) sends a lockfile to.
         WARDBY_NPM_PLAN_REGISTRY: registryUrl,
       },
       files: [{ path: npmrc, content: `${registryUrl.replace(/^https?:/, "")}:_authToken=${token}\n`, mode: 0o600 }],

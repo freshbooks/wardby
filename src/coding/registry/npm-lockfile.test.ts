@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { npmAdapter } from "./npm.js";
-import { npmLockfiles } from "./npm-lockfile.js";
+import { normalizeNpmLockfile } from "./npm-lockfile.js";
 
 const PROXY = "http://wardby-proxy:8787/registry/npm/";
 
@@ -11,15 +10,12 @@ function lockfile(resolved: Record<string, string>): string {
   return `${JSON.stringify({ name: "web", lockfileVersion: 3, requires: true, packages }, null, 2)}\n`;
 }
 
-describe("npmLockfiles", () => {
-  it("is the npm adapter's lockfile hook and names both npm lockfiles", () => {
-    expect(npmAdapter.lockfiles).toBe(npmLockfiles);
-    expect(npmLockfiles.names).toEqual(["package-lock.json", "npm-shrinkwrap.json"]);
-  });
-
+describe("normalizeNpmLockfile", () => {
   it.each([
     [`${PROXY}-/tarball/left-pad/1.3.0`, "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"],
     [`${PROXY}-/tarball/JSONStream/1.3.5`, "https://registry.npmjs.org/JSONStream/-/JSONStream-1.3.5.tgz"],
+    // A version with build metadata, which the proxy serves on its own route.
+    [`${PROXY}-/tarball/pkg/1.0.0%2Bbuild.5`, "https://registry.npmjs.org/pkg/-/pkg-1.0.0+build.5.tgz"],
     [
       `${PROXY}-/tarball/%40react-aria%2Flive-announcer/3.5.1`,
       "https://registry.npmjs.org/@react-aria/live-announcer/-/live-announcer-3.5.1.tgz",
@@ -31,7 +27,7 @@ describe("npmLockfiles", () => {
     [`${PROXY}%40scope%2Fpkg/-/pkg-3.5.1.tgz`, "https://registry.npmjs.org/@scope/pkg/-/pkg-3.5.1.tgz"],
   ])("rewrites %s to the public registry", (proxied, canonical) => {
     const before = lockfile({ "node_modules/a": proxied });
-    expect(npmLockfiles.normalize(before, PROXY)).toBe(before.replace(proxied, canonical));
+    expect(normalizeNpmLockfile(before, PROXY)).toBe(before.replace(proxied, canonical));
   });
 
   it("leaves every URL outside the proxy's npm route untouched", () => {
@@ -48,7 +44,7 @@ describe("npmLockfiles", () => {
       `${PROXY}left-pad`,
     ];
     const before = lockfile(Object.fromEntries(untouched.map((url, index) => [`node_modules/p${index}`, url])));
-    expect(npmLockfiles.normalize(before, PROXY)).toBe(before);
+    expect(normalizeNpmLockfile(before, PROXY)).toBe(before);
   });
 
   it("only rewrites resolved values, preserving every other byte", () => {
@@ -68,7 +64,7 @@ describe("npmLockfiles", () => {
       "}",
       "",
     ].join("\n");
-    const after = npmLockfiles.normalize(before, PROXY);
+    const after = normalizeNpmLockfile(before, PROXY);
     expect(after).toBe(
       before.replace(
         `"resolved":  "${proxied}"`,
@@ -80,7 +76,7 @@ describe("npmLockfiles", () => {
 
   it("accepts a proxy base given without its trailing slash", () => {
     const before = lockfile({ "node_modules/a": `${PROXY}-/tarball/left-pad/1.3.0` });
-    expect(npmLockfiles.normalize(before, PROXY.slice(0, -1))).toContain(
+    expect(normalizeNpmLockfile(before, PROXY.slice(0, -1))).toContain(
       '"resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"',
     );
   });

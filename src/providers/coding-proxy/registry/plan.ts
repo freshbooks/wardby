@@ -4,7 +4,10 @@
  * lockfile claims is trusted:
  *
  * - every entry's integrity must equal the registry's own for that exact
- *   version (a per-version fact read from the registry, stored forever);
+ *   version (a per-version fact read from the registry, stored forever),
+ *   unless the format records no npm integrity at all (yarn Berry): then
+ *   the approval is the exact name@version, and the download is checked
+ *   against the registry's integrity alone;
  * - edges come from the registry too: a parent version's declared
  *   dependencies, resolved to lockfile entries by the client's own rule
  *   (npm: nearest ancestor node_modules), and kept only when the entry is
@@ -163,7 +166,10 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
         continue;
       }
       const { fact } = outcome;
-      if (entry.integrity === null || entry.integrity.trim() !== fact.integrity) {
+      if (
+        lockfile.integrity !== "registry" &&
+        (entry.integrity === null || entry.integrity.trim() !== fact.integrity)
+      ) {
         refusals.set(entry, {
           code: "wardby_lockfile_integrity_mismatch",
           reason: `the lockfile's integrity is not the registry's for ${entry.name}@${entry.version}`,

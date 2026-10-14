@@ -81,8 +81,11 @@ describe("npmAdapter protocol", () => {
         .body,
     );
     expect(Object.keys(doc.versions)).toEqual([versions[0]]);
+    // The registry's usual path under the proxy: a client that records a
+    // download URL only when it isn't the usual one (pnpm, yarn 2+)
+    // records none.
     expect(doc.versions[versions[0]].dist.tarball).toBe(
-      `http://wardby-proxy:8787/registry/npm/-/tarball/left-pad/${versions[0]}`,
+      `http://wardby-proxy:8787/registry/npm/left-pad/-/left-pad-${versions[0]}.tgz`,
     );
     expect(doc["dist-tags"].latest).toBe(versions[0]);
   });
@@ -116,6 +119,167 @@ describe("npmAdapter protocol", () => {
         mode: 0o600,
       },
     ]);
+  });
+});
+
+describe("npmAdapter worker config for pnpm, yarn and corepack", () => {
+  const config = npmAdapter.workerConfig({
+    registryUrl: "http://wardby-proxy:8787/registry/npm/",
+    token: "rrg_example",
+    cacheDir: "/workspace/.cache/npm",
+  });
+
+  it("sets only npm_config_* settings npm itself knows: npm warns about any other on every command", () => {
+    // pnpm's store and cache and yarn classic's cache folder are set by the
+    // shim, for that tool only (npm-shim.mjs).
+    const NPM_KNOWN = [
+      "npm_config_registry",
+      "npm_config_userconfig",
+      "npm_config_ignore_scripts",
+      "npm_config_cache",
+      "npm_config_audit",
+      "npm_config_fund",
+      "npm_config_update_notifier",
+    ];
+    const npmSettings = Object.keys(config.env).filter((name) => name.toLowerCase().startsWith("npm_config_"));
+    expect(npmSettings.sort()).toEqual([...NPM_KNOWN].sort());
+  });
+
+  it("turns yarn classic's install scripts off with its own switch", () => {
+    // yarn classic ignores npm_config_ignore_scripts; YARN_IGNORE_SCRIPTS is its own.
+    expect(config.env.YARN_IGNORE_SCRIPTS).toBe("true");
+  });
+
+  it("points yarn Berry at the proxy with the token, allows its http host, and turns off telemetry and scripts", () => {
+    expect(config.env).toMatchObject({
+      YARN_NPM_REGISTRY_SERVER: "http://wardby-proxy:8787/registry/npm",
+      YARN_NPM_AUTH_TOKEN: "rrg_example",
+      YARN_NPM_ALWAYS_AUTH: "true",
+      YARN_UNSAFE_HTTP_WHITELIST: "wardby-proxy",
+      YARN_ENABLE_TELEMETRY: "0",
+      YARN_ENABLE_SCRIPTS: "false",
+      YARN_GLOBAL_FOLDER: "/workspace/.cache/npm/yarn-berry",
+    });
+    // Never a setting yarn Berry rejects as unknown, or one that would move
+    // a zero-install repository's committed cache.
+    expect(Object.keys(config.env)).not.toContain("YARN_DISABLE_SELF_UPDATE_CHECK");
+    expect(Object.keys(config.env)).not.toContain("YARN_CACHE_FOLDER");
+  });
+
+  it("allows no plain-http host for an https proxy", () => {
+    const https = npmAdapter.workerConfig({
+      registryUrl: "https://proxy.example/registry/npm/",
+      token: "rrg_example",
+      cacheDir: "/workspace/.cache/npm",
+    });
+    expect(https.env.YARN_UNSAFE_HTTP_WHITELIST).toBeUndefined();
+  });
+
+  it("lets corepack fetch pnpm and yarn from the proxy, without prompting or editing package.json", () => {
+    expect(config.env).toMatchObject({
+      COREPACK_NPM_REGISTRY: "http://wardby-proxy:8787/registry/npm",
+      COREPACK_NPM_TOKEN: "rrg_example",
+      COREPACK_HOME: "/workspace/.cache/npm/corepack",
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+      COREPACK_ENABLE_AUTO_PIN: "0",
+      COREPACK_DEFAULT_TO_LATEST: "0",
+    });
+  });
+});
+
+describe("npmAdapter download URLs for versions the usual path can't spell", () => {
+  it("renders a version with build metadata at a URL the adapter routes back to that version", () => {
+    const proxyBase = "http://wardby-proxy:8787/registry/npm/";
+    const manifests = new Map(
+      ["1.0.0", "1.0.0+build.5"].map((version) => [
+        version,
+        JSON.stringify({
+          name: "pkg",
+          version,
+          dist: { tarball: `https://registry.npmjs.org/pkg/-/pkg-${version}.tgz` },
+        }),
+      ]),
+    );
+    const meta = {
+      name: "pkg",
+      versions: new Map(),
+      raw: { name: "pkg", distTags: { latest: "1.0.0" }, manifests, times: new Map() },
+    };
+    const keep = new Set(["1.0.0", "1.0.0+build.5"]);
+    const doc = JSON.parse(
+      npmAdapter.renderMetadata(meta, keep, new Set(["1.0.0.tgz", "1.0.0+build.5.tgz"]), proxyBase).body,
+    ) as { versions: Record<string, { dist: { tarball: string } }> };
+    for (const version of keep) {
+      const url = doc.versions[version].dist.tarball;
+      expect(url.startsWith(proxyBase), url).toBe(true);
+      expect(npmAdapter.route("GET", url.slice(proxyBase.length), new Headers()), url).toEqual({
+        kind: "download",
+        name: "pkg",
+        version,
+        filename: `${version}.tgz`,
+      });
+    }
+    // The usual path wherever it can spell the version.
+    expect(doc.versions["1.0.0"].dist.tarball).toBe(`${proxyBase}pkg/-/pkg-1.0.0.tgz`);
+    const single = npmAdapter.renderVersion!(meta, "1.0.0+build.5", new Set(["1.0.0+build.5.tgz"]), proxyBase)!;
+    const url = (JSON.parse(single.body) as { dist: { tarball: string } }).dist.tarball;
+    expect(npmAdapter.route("GET", url.slice(proxyBase.length), new Headers())).toMatchObject({
+      version: "1.0.0+build.5",
+    });
+  });
+});
+
+describe("npmAdapter version documents (corepack)", () => {
+  const route = (subpath: string) => npmAdapter.route("GET", subpath, new Headers());
+
+  it.each([
+    ["pnpm/10.4.1", "pnpm", "10.4.1"],
+    ["@yarnpkg/cli-dist/4.18.1", "@yarnpkg/cli-dist", "4.18.1"],
+    ["@yarnpkg%2fcli-dist/4.18.1", "@yarnpkg/cli-dist", "4.18.1"],
+    ["yarn/1.22.22", "yarn", "1.22.22"],
+  ])("routes %s as the metadata of %s %s alone", (subpath, name, version) => {
+    expect(route(subpath)).toEqual({ kind: "metadata", name, version });
+  });
+
+  it("keeps a scoped name a whole-package document, and routes no dist-tag or range", () => {
+    expect(route("@yarnpkg/cli-dist")).toEqual({ kind: "metadata", name: "@yarnpkg/cli-dist" });
+    expect(route("pnpm/latest")).toBeNull();
+    expect(route("pnpm/^10.0.0")).toBeNull();
+  });
+
+  it("renders one kept version's manifest, its download pointing at the proxy", () => {
+    const meta = {
+      name: "pnpm",
+      versions: new Map(),
+      raw: {
+        name: "pnpm",
+        distTags: { latest: "10.4.1" },
+        manifests: new Map([
+          [
+            "10.4.1",
+            JSON.stringify({
+              name: "pnpm",
+              version: "10.4.1",
+              dist: { tarball: "https://registry.npmjs.org/pnpm/-/pnpm-10.4.1.tgz", integrity: "sha512-x" },
+            }),
+          ],
+        ]),
+        times: new Map(),
+      },
+    };
+    const proxyBase = "http://wardby-proxy:8787/registry/npm/";
+    const rendered = npmAdapter.renderVersion!(meta, "10.4.1", new Set(["10.4.1.tgz"]), proxyBase);
+    expect(rendered && JSON.parse(rendered.body)).toEqual({
+      name: "pnpm",
+      version: "10.4.1",
+      dist: { tarball: `${proxyBase}pnpm/-/pnpm-10.4.1.tgz`, integrity: "sha512-x" },
+    });
+    const scoped = { ...meta, name: "@yarnpkg/cli-dist" };
+    expect(
+      JSON.parse(npmAdapter.renderVersion!(scoped, "10.4.1", new Set(["10.4.1.tgz"]), proxyBase)!.body).dist.tarball,
+    ).toBe(`${proxyBase}@yarnpkg/cli-dist/-/cli-dist-10.4.1.tgz`);
+    expect(npmAdapter.renderVersion!(meta, "10.4.1", new Set(), proxyBase)).toBeNull();
+    expect(npmAdapter.renderVersion!(meta, "9.0.0", new Set(["9.0.0.tgz"]), proxyBase)).toBeNull();
   });
 });
 
