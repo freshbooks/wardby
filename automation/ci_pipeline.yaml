@@ -96,13 +96,6 @@ stages:
 
   - stage: Build
     displayName: Build and push images
-    dependsOn: []
+    dependsOn: Checks
     jobs:
-      - job: images
-        displayName: Build and push images
-        pool: small-production-pool
-        timeoutInMinutes: 100
-        steps:
-          - checkout: self
-            fetchDepth: 1
-          - template: ./steps/build_images.yaml
+      - template: ./jobs/build_images.yaml

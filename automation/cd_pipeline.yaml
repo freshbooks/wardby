@@ -37,11 +37,9 @@ stages:
     displayName: Generate Artifact
     dependsOn: CheckMainBranch
     jobs:
-      - job: images
-        displayName: Build and push images
+      - job: tag
+        displayName: Generate and push version tag
         pool: small-production-pool
-        timeoutInMinutes: 100
-        cancelTimeoutInMinutes: 1
         steps:
           # Full history so every existing version tag is visible to the tagging step.
           - checkout: self
@@ -52,9 +50,13 @@ stages:
               VERSION=$(uvx bumpver test "${PREV:-$(date -u +%y%m).0.0}" 'YY0M.MINOR.PATCH' --minor | sed -n 's/^New Version: *//p')
               [ -n "$VERSION" ] || { echo "##vso[task.logissue type=error]bumpver produced no version"; exit 1; }
               echo "Previous version: ${PREV:-none}; new version: $VERSION"
-              echo "##vso[task.setvariable variable=version]$VERSION"
+              echo "##vso[task.setvariable variable=version;isOutput=true]$VERSION"
               echo "##vso[build.addbuildtag]current version - $VERSION"
               git tag "$VERSION"
               git push origin "$VERSION"
+            name: version
             displayName: Generate and Push Version Tag
-          - template: ./steps/build_images.yaml
+      - template: ./jobs/build_images.yaml
+        parameters:
+          dependsOn: [tag]
+          version: $[ dependencies.tag.outputs['version.version'] ]
