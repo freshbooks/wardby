@@ -114,6 +114,18 @@ Jira project with read access; it then reads the ticket with
 prompt reads whichever issue the pull request resolves and says in its
 summary when it could not.
 
+## A description maintained by hand
+
+With Wardby 0.7.0 or later, when a person has edited a Wardby pull request's
+description, Wardby doesn't overwrite it on later runs; it keeps one comment
+on the pull request with the current description its latest run proposed.
+While that comment holds a proposal, every review of the pull request is told
+so in its task, with the proposal attached as untrusted data (cut to 16 KB):
+check description requirements, such as `Resolves #N` or the issue's
+acceptance checklist, against that proposal rather than the stale
+description. See
+[Automatic review fix rounds](review-fix-rounds.md#description-updates).
+
 ## Reviewing a pull request a delegated run opened
 
 This requires Wardby 0.6.0 or later; earlier releases review such a pull

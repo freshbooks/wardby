@@ -3,7 +3,7 @@ id: review-fix-rounds
 title: Automatic review fix rounds
 summary: Let wardby fix its own review's findings on pull requests its coding runs opened, with a round cap.
 audience: operator
-tags: [github, code-review, review_fix, autofix, fix-round, pull-requests, pr-description, description]
+tags: [github, code-review, review_fix, autofix, fix-round, pull-requests, pr-description, linked-issue]
 appliesTo: ">=0.4.2"
 ---
 
@@ -72,10 +72,29 @@ working fails with no push made — see
 ## Description updates
 
 Every run's final message is the full pull request description, fix rounds
-included, so a round that changes no code can still update it. If the
-description was edited by hand, wardby doesn't overwrite it: it posts the
-proposed text in a comment instead. A description update doesn't trigger an
-extra review. `get_run` shows what happened as `prDescriptionOutcome`. See
+included, so a round that changes no code can still correct it: add a missing
+`Resolves #N`, the issue's acceptance checklist, or stale test results.
+
+- **The original issue.** A fix round gets the issue the pull request was
+  opened for in its task, as the first run did: the Jira issue, the GitHub
+  issue whose `@wardby` mention started the work, or the issue the description
+  closes. Its acceptance criteria are the contract, and the round's final
+  message must carry the checklist and the closing line. If the issue can't be
+  read, the round goes ahead without it.
+- **Packages.** The description's Packages section lists every package
+  installed by the runs on the pull request; refusals cover the latest run.
+- **Hand-edited descriptions.** If a person edited the description, wardby
+  doesn't overwrite it. It keeps one comment with the current description
+  proposed by its latest run, edited in place by later rounds, which the
+  author can copy in. Reviews are told about that comment and check the
+  description's requirements against it instead of the stale description.
+- **Older pull requests.** For a pull request opened by an earlier wardby
+  version, wardby rebuilds the description its first run wrote from stored
+  records. If the live description still matches, wardby updates it;
+  otherwise it counts as edited and gets the comment.
+
+A description update doesn't trigger an extra review. `get_run` shows what
+happened as `prDescriptionOutcome`. See
 [`docs/code-review-agents.md`](../docs/code-review-agents.md#how-the-pull-request-description-is-kept-current).
 
 If a repository already forwards reviews to a webhook through a
