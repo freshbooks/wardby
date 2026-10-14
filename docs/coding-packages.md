@@ -972,6 +972,13 @@ and 100 refusals, followed by "…and N more — see get_run for the full list";
 `get_run` always has the complete list. If the report can't be loaded or
 rendered, the section is left out and the pull request is still opened.
 
+A later run on the same pull request (a review fix round, a mention
+follow-up, a continuation) rewrites the section as **Packages installed by
+wardby's runs on this pull request**: every package installed by the runs
+that pushed to the pull request plus the latest run's, each package and
+version once. Refusals, and the warning below, cover the latest run only. See
+[How the pull request description is kept current](code-review-agents.md#how-the-pull-request-description-is-kept-current).
+
 When the registry refused anything during the run, the pull request also
 opens with a **Dependency install incomplete** warning, above the agent's
 summary. It names the refused packages grouped by refusal code, says what
