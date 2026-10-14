@@ -28,6 +28,7 @@ import type {
 import type { DescriptionBaseline, RelatedPullRequestEntry } from "../vcs/github.js";
 import {
   ContainerExecutor,
+  DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
   describeFailure,
   normalizeCollectedLockfiles,
@@ -1277,6 +1278,37 @@ describe("ContainerExecutor", () => {
       await created.executor.start("run-1");
       expect(refreshes).toBe(0);
       expect(created.store.completions[0]?.record).toEqual({});
+    });
+
+    it("caps the no_changes refresh at 60 seconds, recording skipped:error", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const created = await fixRound();
+        noChanges(created);
+        let called!: () => void;
+        const refreshStarted = new Promise<void>((resolve) => (called = resolve));
+        created.vcs.refreshPullRequestDescription = () => {
+          called();
+          return new Promise(() => undefined);
+        };
+        const started = created.executor.start("run-1");
+        await refreshStarted;
+        await vi.advanceTimersByTimeAsync(DESCRIPTION_REFRESH_TIMEOUT_MS - 1);
+        expect(created.store.completions).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        await started;
+
+        expect(DESCRIPTION_REFRESH_TIMEOUT_MS).toBe(60_000);
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
+        expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:error" });
+        expect(created.recorded).toEqual([]);
+        expect(
+          logged.filter((line) => line.level === "warn" && line.message.includes("timed out")).map((l) => l.payload),
+        ).toEqual([{ runId: "run-1", timeoutMs: 60_000 }]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("edited_by_hand leaves the root hash untouched and records the outcome on the run", async () => {

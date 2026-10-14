@@ -78,6 +78,8 @@ const MAX_LOGGED_SKIP_PATH_CHARS = 256;
 const CAPACITY_PROBE_INPUT = "/dev/null";
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
 const PROVISIONING_BACKEND = "provisioning";
+/** The longest a no-change fix round's description refresh may hold up the run's terminal write. */
+export const DESCRIPTION_REFRESH_TIMEOUT_MS = 60_000;
 /** Serializes concurrency-slot claims across replicas. Distinct from the OAuth client lock (7412901). */
 const CODING_SLOT_LOCK_SQL = "SELECT 1 AS locked FROM pg_advisory_xact_lock(7412902)";
 
@@ -1197,7 +1199,7 @@ export class ContainerExecutor implements Executor {
       }
       if (output.outcome === "no_changes") {
         // Before complete: the terminal hook (a no-change fix round's re-review) reads the refreshed body.
-        const description = await this.refreshDescriptionWithoutPush(current, output, existingWorkspace);
+        const description = await this.refreshDescriptionInTime(current, output, existingWorkspace);
         await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current), {
           ...dependencyCacheRecord(output),
           ...description,
@@ -1363,6 +1365,32 @@ export class ContainerExecutor implements Executor {
     } catch (err) {
       containerLog.warn({ err, runId: run.runId }, "could not record the pull request description hash");
       return { prDescriptionOutcome: "skipped:error" };
+    }
+  }
+
+  /**
+   * refreshDescriptionWithoutPush, capped at DESCRIPTION_REFRESH_TIMEOUT_MS so a
+   * slow host cannot hold up store.complete; a timeout is skipped:error.
+   */
+  private async refreshDescriptionInTime(
+    run: ContainerRunSnapshot,
+    output: CodingWorkerOutput,
+    existingWorkspace: PreparedWorkspace | null | undefined,
+  ): Promise<CodingRunRecord> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<CodingRunRecord>((resolve) => {
+      timer = setTimeout(() => {
+        containerLog.warn(
+          { runId: run.runId, timeoutMs: DESCRIPTION_REFRESH_TIMEOUT_MS },
+          "pull request description refresh timed out",
+        );
+        resolve({ prDescriptionOutcome: "skipped:error" });
+      }, DESCRIPTION_REFRESH_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([this.refreshDescriptionWithoutPush(run, output, existingWorkspace), timedOut]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
