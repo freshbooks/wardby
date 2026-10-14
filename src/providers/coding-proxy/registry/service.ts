@@ -845,6 +845,30 @@ export class RegistryService {
       throw error;
     }
 
+    if (route.kind === "metadata" && route.version !== undefined) {
+      // One version's document: the same checks as the whole package's,
+      // narrowed to that version.
+      const document = keep.has(route.version)
+        ? (adapter.renderVersion?.(meta, route.version, keptFiles, `${this.options.proxyBase}${adapter.id}/`) ?? null)
+        : null;
+      if (!document) {
+        await this.refuse(context, adapter, name, "wardby_version_filtered", {
+          version: route.version,
+          filename: `${route.version}.tgz`,
+        });
+        throw new RegistryError(
+          404,
+          "wardby_version_filtered",
+          `"${name}" ${route.version} is outside the allowlisted range, newer than the release-age limit, has a high-severity advisory, or is not published`,
+        );
+      }
+      await this.options.store.addAllowances(
+        context.runId,
+        adapter.id,
+        keptDependencies(adapter, meta, new Set([route.version])),
+      );
+      return { status: 200, contentType: document.contentType, body: document.body };
+    }
     if (route.kind === "metadata") {
       if (keep.size === 0) {
         await this.refuse(context, adapter, name, "wardby_version_filtered");

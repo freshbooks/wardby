@@ -218,6 +218,9 @@ export const npmAdapter: RegistryAdapter = {
     // one segment (`react`, `@scope%2fpkg`) or a literal scope plus name
     // (`@scope/pkg`); the filename is one raw segment.
     const standard = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/-\/([^/]+)$/);
+    // One version's document, `<name>/<version>` (corepack reads these to
+    // download a pinned pnpm or yarn), for an exact version only.
+    const versionDocument = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/([^/]+)$/);
     try {
       if (tarball) {
         const name = decodeURIComponent(tarball[1]);
@@ -226,6 +229,13 @@ export const npmAdapter: RegistryAdapter = {
         return { kind: "download", name, version, filename: `${version}.tgz` };
       }
       if (standard) return standardTarball(decodeURIComponent(standard[1]), decodeURIComponent(standard[2]));
+      if (versionDocument) {
+        // `@scope/pkg` matches too (as name `@scope`, version `pkg`), and
+        // falls through: no package name is a scope alone.
+        const name = decodeURIComponent(versionDocument[1]);
+        const version = decodeURIComponent(versionDocument[2]);
+        if (NAME.test(name) && semver.valid(version) === version) return { kind: "metadata", name, version };
+      }
       const name = decodeURIComponent(subpath);
       return NAME.test(name) ? { kind: "metadata", name } : null;
     } catch {
@@ -266,6 +276,21 @@ export const npmAdapter: RegistryAdapter = {
     return {
       contentType: "application/json",
       body: JSON.stringify({ name: raw.name, "dist-tags": tags, time, versions }),
+    };
+  },
+
+  renderVersion(meta, version, keptFiles, proxyBase) {
+    const raw = meta.raw as NpmRenderData | undefined;
+    if (!raw) throw new Error(`npm metadata for "${meta.name}" was fetched without render data`);
+    const manifest = raw.manifests.get(version);
+    if (manifest === undefined || !keptFiles.has(`${version}.tgz`)) return null;
+    const info = JSON.parse(manifest) as Packument["versions"][string];
+    return {
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...info,
+        dist: { ...info.dist, tarball: `${proxyBase}-/tarball/${encodeURIComponent(meta.name)}/${version}` },
+      }),
     };
   },
 

@@ -178,6 +178,56 @@ describe("npmAdapter worker config for pnpm, yarn and corepack", () => {
   });
 });
 
+describe("npmAdapter version documents (corepack)", () => {
+  const route = (subpath: string) => npmAdapter.route("GET", subpath, new Headers());
+
+  it.each([
+    ["pnpm/10.4.1", "pnpm", "10.4.1"],
+    ["@yarnpkg/cli-dist/4.18.1", "@yarnpkg/cli-dist", "4.18.1"],
+    ["@yarnpkg%2fcli-dist/4.18.1", "@yarnpkg/cli-dist", "4.18.1"],
+    ["yarn/1.22.22", "yarn", "1.22.22"],
+  ])("routes %s as the metadata of %s %s alone", (subpath, name, version) => {
+    expect(route(subpath)).toEqual({ kind: "metadata", name, version });
+  });
+
+  it("keeps a scoped name a whole-package document, and routes no dist-tag or range", () => {
+    expect(route("@yarnpkg/cli-dist")).toEqual({ kind: "metadata", name: "@yarnpkg/cli-dist" });
+    expect(route("pnpm/latest")).toBeNull();
+    expect(route("pnpm/^10.0.0")).toBeNull();
+  });
+
+  it("renders one kept version's manifest, its download pointing at the proxy", () => {
+    const meta = {
+      name: "pnpm",
+      versions: new Map(),
+      raw: {
+        name: "pnpm",
+        distTags: { latest: "10.4.1" },
+        manifests: new Map([
+          [
+            "10.4.1",
+            JSON.stringify({
+              name: "pnpm",
+              version: "10.4.1",
+              dist: { tarball: "https://registry.npmjs.org/pnpm/-/pnpm-10.4.1.tgz", integrity: "sha512-x" },
+            }),
+          ],
+        ]),
+        times: new Map(),
+      },
+    };
+    const proxyBase = "http://wardby-proxy:8787/registry/npm/";
+    const rendered = npmAdapter.renderVersion!(meta, "10.4.1", new Set(["10.4.1.tgz"]), proxyBase);
+    expect(rendered && JSON.parse(rendered.body)).toEqual({
+      name: "pnpm",
+      version: "10.4.1",
+      dist: { tarball: `${proxyBase}-/tarball/pnpm/10.4.1`, integrity: "sha512-x" },
+    });
+    expect(npmAdapter.renderVersion!(meta, "10.4.1", new Set(), proxyBase)).toBeNull();
+    expect(npmAdapter.renderVersion!(meta, "9.0.0", new Set(["9.0.0.tgz"]), proxyBase)).toBeNull();
+  });
+});
+
 describe("npmAdapter standard tarball path (lockfile resolved URLs)", () => {
   const route = (subpath: string) => npmAdapter.route("GET", subpath, new Headers());
 

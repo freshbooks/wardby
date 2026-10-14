@@ -110,6 +110,10 @@ export interface FetchMetadataOptions {
 export interface MetadataRoute {
   kind: "metadata";
   name: string;
+  /** One exact version's document instead of the whole package's
+   *  (npm's `/<name>/<version>`, which corepack reads); only for adapters
+   *  with `renderVersion`. */
+  version?: string;
 }
 
 export interface DownloadRoute {
@@ -320,6 +324,16 @@ export interface RegistryAdapter {
     keptFiles: ReadonlySet<string>,
     proxyBase: string,
   ): RenderedDocument;
+  /** The client-facing document for one kept version (a metadata route
+   *  with `version`), its download rewritten to a proxy route; null when
+   *  the version or its file is not kept. Omitted when the ecosystem has
+   *  no per-version documents. */
+  renderVersion?(
+    meta: PackageMetadata,
+    version: string,
+    keptFiles: ReadonlySet<string>,
+    proxyBase: string,
+  ): RenderedDocument | null;
   /** Map a download route to a file in metadata the proxy fetched itself.
    *  Returns null if the route names no known file. */
   resolveDownload(route: DownloadRoute, meta: PackageMetadata): FileRef | null;

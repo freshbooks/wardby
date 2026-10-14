@@ -997,11 +997,12 @@ describe("metadata misses and the run's lockfile plans", () => {
   });
 });
 
+const sri = (name: string, version: string) => sriOf(tarballOf(name, version));
+
 describe("pnpm and yarn lockfiles", () => {
   // The chain (a -> b -> c) as each client writes it; `integrity` overrides
   // one entry's lockfile integrity, `extraEdge` adds a dependency the
   // registry's b@1.1.0 does not declare.
-  const sri = (name: string, version: string) => sriOf(tarballOf(name, version));
   const pnpmV9 = (integrity: Record<string, string> = {}) => `lockfileVersion: '9.0'
 
 importers:
@@ -1205,5 +1206,41 @@ ${extraEdge ? '\n"evil@npm:^1.0.0":\n  version: 1.0.0\n  resolution: "evil@npm:1
       signal: new AbortController().signal,
     });
     expect(response.status).toBe(200);
+  });
+});
+
+describe("version documents (corepack's /<name>/<version>)", () => {
+  const get = (subpath: string) => ({
+    method: "GET",
+    ecosystem: "npm",
+    subpath,
+    token: "rrg_token",
+    signal: new AbortController().signal,
+  });
+
+  it("serves an allowlisted version's manifest with a proxy download, and only a kept version", async () => {
+    const { service } = setup({ ...chain, a: { "1.0.0": { deps: { b: "^1.0.0" } }, "1.1.0": { published: NEW } } });
+    const response = await service.handle(get("a/1.0.0"));
+    expect(response.status).toBe(200);
+    const manifest = JSON.parse((response as { body: string }).body) as Record<string, unknown>;
+    expect(manifest).toMatchObject({
+      name: "a",
+      version: "1.0.0",
+      dependencies: { b: "^1.0.0" },
+      dist: { tarball: "http://wardby-proxy:8787/registry/npm/-/tarball/a/1.0.0", integrity: sri("a", "1.0.0") },
+    });
+    // Too new for the release age, and not published at all.
+    for (const subpath of ["a/1.1.0", "a/9.9.9"]) {
+      const refused = await service.handle(get(subpath));
+      expect(refused.status).toBe(404);
+      expect((refused as { body: string }).body).toContain("wardby_version_filtered");
+    }
+  });
+
+  it("refuses a name that is not allowed, as a metadata request would be", async () => {
+    const { service } = setup({ ...chain, stranger: { "1.0.0": {} } });
+    const response = await service.handle(get("stranger/1.0.0"));
+    expect(response.status).toBe(403);
+    expect((response as { body: string }).body).toContain("wardby_package_not_allowed");
   });
 });
