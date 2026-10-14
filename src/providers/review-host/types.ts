@@ -92,6 +92,8 @@ export interface PullRequestView {
   openThreads: ReviewThreadView[];
   /** CI on headSha (check runs and commit statuses, minus wardby's own); absent on hosts that can't read CI. */
   ci?: CiView;
+  /** Only on a wardby pull request with a pending proposal in its description comment. */
+  descriptionProposal?: DescriptionProposalView;
 }
 
 export interface PullRequestHead {
@@ -157,11 +159,14 @@ export interface IssueView {
   truncated: boolean;
 }
 
-export interface DescriptionProposal {
-  /** The run that proposed it, when the comment names a safe run id. */
-  runId?: string;
-  proposed: string;
-}
+/**
+ * wardby's proposed description on a pull request whose description wardby
+ * couldn't confirm as its own (from its description comment). `current`: the
+ * proposal is for the head being read; `not_for_this_head`: it isn't yet.
+ */
+export type DescriptionProposalView =
+  | { state: "current"; forHead: string; runId?: string; text: string; truncated: boolean; note: string }
+  | { state: "not_for_this_head"; note: string };
 
 export type IssueReadResult =
   ({ kind: "issue" } & IssueView) | { kind: "pull_request"; number: number } | { kind: "not_found"; number: number };
@@ -311,13 +316,6 @@ export interface CodeReviewHost {
   readCi?(repository: string, headSha: string): Promise<CiView>;
   /** Head, labels, and (on an App-authored PR) the run marker. Hosts that can't say leave it out. */
   pullRequestOrigin?(repository: string, prNumber: number): Promise<PullRequestOrigin>;
-  /**
-   * The description wardby's latest run proposed in the pull request's
-   * description comment (posted, by this App, when a person had edited the
-   * description), or null when there is no pending proposal. The text is
-   * untrusted. Hosts without such comments leave it out.
-   */
-  descriptionProposal?(repository: string, prNumber: number): Promise<DescriptionProposal | null>;
   /** Adds a label to a pull request (created if missing). Absent on hosts without labels. */
   addLabel?(repository: string, prNumber: number, label: string): Promise<void>;
   /**
@@ -340,7 +338,8 @@ export interface CodeReviewHost {
   ): Promise<FileReadResult>;
   listFiles(repository: string, ref: string | undefined, pathPrefix?: string): Promise<FileListView>;
   /** An issue and its most recent comments, read-only. Hosts without issues (a local repository) leave it out. */
-  readIssue?(repository: string, number: number): Promise<IssueReadResult>;
+  /** `comments: false` reads the issue alone (title, body, labels), without its comments. */
+  readIssue?(repository: string, number: number, opts?: { comments?: boolean }): Promise<IssueReadResult>;
   publishReview(repository: string, input: PublishReviewInput): Promise<PublishReviewResult>;
   /** `id` identifies the new comment for editComment; a reply is an "inline" comment, anything else "conversation". */
   comment(repository: string, input: CommentInput): Promise<{ url: string; id: string }>;
