@@ -4,6 +4,7 @@ import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { withBaseCommit } from "../../coding/base-commit.js";
 import { withPullRequestDescription } from "../../coding/pr-description-note.js";
+import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue-note.js";
 import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
@@ -77,7 +78,7 @@ import {
   type RelatedPullRequestEntry,
   type RelatedPullRequestsInput,
 } from "../vcs/github.js";
-import { descriptionSha256 } from "../vcs/pr-description.js";
+import { closingIssueNumber, descriptionSha256 } from "../vcs/pr-description.js";
 
 const containerLog = logger.child({ module: "container-executor" });
 /** A logged context skip path is cut to this many characters: a refused import is reported as written. */
@@ -89,6 +90,8 @@ const TERMINAL_STATUSES = new Set(["succeeded", "failed", "refused", "lost", "bu
 const PROVISIONING_BACKEND = "provisioning";
 /** The longest a no-change fix round's description refresh may hold up the run's terminal write. */
 export const DESCRIPTION_REFRESH_TIMEOUT_MS = 60_000;
+/** How many runs above a root coding run are searched for the mention that started it. */
+const MAX_LINKED_ISSUE_RUN_DEPTH = 8;
 /** Serializes concurrency-slot claims across replicas. Distinct from the OAuth client lock (7412901). */
 const CODING_SLOT_LOCK_SQL = "SELECT 1 AS locked FROM pg_advisory_xact_lock(7412902)";
 
@@ -178,6 +181,24 @@ export interface LegacyDescriptionSource {
   issueProvider?: string | null;
   issueKey?: string | null;
 }
+
+/**
+ * Where a continuation's pull request came from, to find the issue it was
+ * opened for: the root run's tracker issue, and the mention status (issue or
+ * pull request number) of the nearest run above the root that has one.
+ */
+export interface LinkedIssueSource {
+  issueProvider?: string | null;
+  issueKey?: string | null;
+  hostStatus?: { provider: string; repository: string; number: number } | null;
+}
+
+/** An issue to read for a continuation's task. */
+export type LinkedIssueRef =
+  { provider: "github"; repository: string; number: number } | { provider: "jira"; key: string };
+
+/** The longest reading the linked issue may hold up a continuation's launch. */
+export const LINKED_ISSUE_READ_TIMEOUT_MS = 15_000;
 
 /** The store's description baseline; `legacySource` only on a legacy pull request. */
 export type StoredDescriptionBaseline = DescriptionBaseline & { legacySource?: LegacyDescriptionSource };
@@ -288,6 +309,11 @@ export interface ContainerExecutionStore {
    * Packages section. Optional: without it the section lists this run's only.
    */
   pullRequestRunIds?(rootRunId: string): Promise<string[]>;
+  /**
+   * Where the root run's pull request came from (see LinkedIssueSource).
+   * Optional: without it continuations get no issue text.
+   */
+  linkedIssueSource?(rootRunId: string): Promise<LinkedIssueSource>;
   /**
    * Compare-and-set of the root run's description hash and author run: writes
    * only while the root still records `expectedSha256` (null = none). False
@@ -458,6 +484,30 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       agentTextRunId,
       ...(legacySource ? { legacySource } : {}),
     };
+  }
+
+  async linkedIssueSource(rootRunId: string): Promise<LinkedIssueSource> {
+    const root = await this.db.codingRun.findUnique({
+      where: { runId: rootRunId },
+      select: { issueProvider: true, issueKey: true, run: { select: { parentRunId: true } } },
+    });
+    if (!root) throw new Error("coding_run_not_found");
+    // The mention that started the work is on the root's delegating run, or a run above it.
+    let hostStatus: LinkedIssueSource["hostStatus"] = null;
+    let parentRunId = root.run.parentRunId;
+    for (let depth = 0; parentRunId && depth < MAX_LINKED_ISSUE_RUN_DEPTH; depth++) {
+      const parent = await this.db.run.findUnique({
+        where: { id: parentRunId },
+        select: { parentRunId: true, hostStatus: { select: { provider: true, repository: true, number: true } } },
+      });
+      if (!parent) break;
+      if (parent.hostStatus) {
+        hostStatus = parent.hostStatus;
+        break;
+      }
+      parentRunId = parent.parentRunId;
+    }
+    return { issueProvider: root.issueProvider, issueKey: root.issueKey, hostStatus };
   }
 
   async pullRequestRunIds(rootRunId: string): Promise<string[]> {
@@ -780,6 +830,13 @@ export interface ContainerExecutorOptions {
    * reporting failure must never fail the run itself.
    */
   registryReport?: (runId: string) => Promise<RegistryReport>;
+  /**
+   * Reads an issue's title and body for a continuation's task (composition
+   * wires the review host's issue read and the issue tracker). Null when it
+   * isn't an issue (a pull request number) or can't be found. Optional:
+   * without it continuations get no issue text.
+   */
+  readLinkedIssue?: (ref: LinkedIssueRef) => Promise<{ title: string; body: string } | null>;
   /** Browse URL for an issue of a tracker provider (composition wires the issue-tracker registry); undefined when unconfigured. */
   issueUrl?: (provider: string, key: string) => string | undefined;
   /**
@@ -1415,6 +1472,79 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
+   * The issue a continuation's pull request was opened for, read for its task
+   * the way the first run had it: the root run's Jira issue, else the GitHub
+   * issue whose mention started the work (same repository), else the issue the
+   * description wardby last wrote closes (same repository). Each candidate is
+   * read in turn until one is an issue. Undefined for a fresh or local run, or
+   * on any failure: the run goes ahead without it.
+   */
+  private async linkedIssueFor(
+    run: ContainerRunSnapshot,
+    description: string | undefined,
+  ): Promise<LinkedIssueText | undefined> {
+    const store = this.options.store;
+    const read = this.options.readLinkedIssue;
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !read || !store.linkedIssueSource) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => {
+        containerLog.warn({ runId: run.runId }, "reading the linked issue timed out; continuing without it");
+        resolve(undefined);
+      }, LINKED_ISSUE_READ_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([this.readLinkedIssue(run, run.rootCodingRunId, description, read), timedOut]);
+    } catch (err) {
+      containerLog.warn({ err, runId: run.runId }, "could not read the linked issue; continuing without it");
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async readLinkedIssue(
+    run: ContainerRunSnapshot,
+    rootRunId: string,
+    description: string | undefined,
+    read: NonNullable<ContainerExecutorOptions["readLinkedIssue"]>,
+  ): Promise<LinkedIssueText | undefined> {
+    const source = await this.options.store.linkedIssueSource!(rootRunId);
+    const candidates: LinkedIssueRef[] = [];
+    if (source.issueProvider === "jira" && source.issueKey && ISSUE_KEY.test(source.issueKey)) {
+      candidates.push({ provider: "jira", key: source.issueKey });
+    }
+    const status = source.hostStatus;
+    if (
+      status?.provider === "github" &&
+      status.repository.toLowerCase() === run.repository.toLowerCase() &&
+      Number.isSafeInteger(status.number) &&
+      status.number > 0
+    ) {
+      candidates.push({ provider: "github", repository: run.repository, number: status.number });
+    }
+    const closed = closingIssueNumber(description, run.repository);
+    if (closed !== undefined && !candidates.some((ref) => ref.provider === "github" && ref.number === closed)) {
+      candidates.push({ provider: "github", repository: run.repository, number: closed });
+    }
+    for (const ref of candidates) {
+      let issue: { title: string; body: string } | null;
+      try {
+        issue = await read(ref);
+      } catch (err) {
+        // The next candidate may still be readable.
+        containerLog.warn({ err, runId: run.runId, issue: ref }, "could not read a linked issue candidate");
+        continue;
+      }
+      if (!issue) continue;
+      return ref.provider === "github"
+        ? { kind: "github", number: ref.number, title: issue.title, body: issue.body }
+        : { kind: "jira", key: ref.key, title: issue.title, body: issue.body };
+    }
+    return undefined;
+  }
+
+  /**
    * A fix round's description baseline (null: no description flow -- a fresh
    * run, or a store without it). Never throws: a load failure is recorded as
    * skipped:error and the push goes ahead without a description update.
@@ -1840,7 +1970,12 @@ export class ContainerExecutor implements Executor {
     const temporary = join(directory, `.input-${randomUUID()}.tmp`);
     const services = parseStoredServices(run.services);
     const withCommit = withBaseCommit(run.task, workspace.baseCommit);
-    const task = withPullRequestDescription(withCommit, await this.currentDescriptionText(run));
+    const description = await this.currentDescriptionText(run);
+    // The ticket first, then the description: each is cut to what's left of the task's budget.
+    const task = withPullRequestDescription(
+      withLinkedIssue(withCommit, await this.linkedIssueFor(run, description)),
+      description,
+    );
     if (withCommit === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
       containerLog.warn(
         { event: "coding.base_commit_omitted", runId: run.runId },

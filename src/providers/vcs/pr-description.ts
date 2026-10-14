@@ -74,6 +74,23 @@ export function hasClosingKeyword(text: string): boolean {
   return CLOSING_KEYWORD.test(text);
 }
 
+const CLOSING_REFERENCES = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+(?:([\w.-]+\/[\w.-]+))?#(\d+)\b/gi;
+
+/**
+ * The issue number of the first closing keyword in `text` that points at an
+ * issue in `repository` (`Resolves #12`, `fixes owner/repo#12` naming this
+ * repository, case-insensitively); undefined when there is none.
+ */
+export function closingIssueNumber(text: string | undefined, repository: string): number | undefined {
+  if (!text) return undefined;
+  for (const match of text.matchAll(CLOSING_REFERENCES)) {
+    if (match[1] && match[1].toLowerCase() !== repository.toLowerCase()) continue;
+    const number = Number(match[2]);
+    if (Number.isSafeInteger(number) && number > 0) return number;
+  }
+  return undefined;
+}
+
 export type FinalMessageVerdict =
   { ok: true } | { ok: false; reason: "empty" | "too_short" | "missing_closing_keyword" };
 

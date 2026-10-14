@@ -31,6 +31,8 @@ import {
   ContainerExecutor,
   DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
+  type LinkedIssueRef,
+  type LinkedIssueSource,
   type StoredDescriptionBaseline,
   describeFailure,
   normalizeCollectedLockfiles,
@@ -178,6 +180,7 @@ class FakeStore implements ContainerExecutionStore {
   /** Fix-round description store methods; tests that need them assign them. */
   pullRequestDescriptionBaseline?: (rootRunId: string) => Promise<StoredDescriptionBaseline>;
   pullRequestRunIds?: (rootRunId: string) => Promise<string[]>;
+  linkedIssueSource?: (rootRunId: string) => Promise<LinkedIssueSource>;
   recordPullRequestDescription?: (input: {
     rootRunId: string;
     expectedSha256: string | null;
@@ -577,6 +580,125 @@ describe("ContainerExecutor", () => {
       await created.executor.start("run-1");
       expect(input!.task as string).toContain("your final summary replaces it");
       expect((input!.task as string).includes("Previous body")).toBe(true);
+    });
+
+    describe("the linked issue", () => {
+      const ISSUE = { title: "Jokes endpoint", body: "## Acceptance\n- [ ] GET /jokes lists jokes" };
+
+      async function continuation(
+        source: LinkedIssueSource | (() => Promise<LinkedIssueSource>),
+        read: (ref: LinkedIssueRef) => Promise<{ title: string; body: string } | null>,
+        overrides: Partial<ContainerRunSnapshot> = {},
+        extra: Partial<ContainerExecutorOptions> = {},
+      ) {
+        const reads: LinkedIssueRef[] = [];
+        const created = await harness(
+          { rootCodingRunId: "root-run", headRef: "wardby/run-root-run", ...overrides },
+          IMAGE,
+          undefined,
+          undefined,
+          {
+            readLinkedIssue: async (ref) => {
+              reads.push(ref);
+              return read(ref);
+            },
+            ...extra,
+          },
+        );
+        created.store.pullRequestDescriptionBaseline = async () => ({
+          recordedSha256: null,
+          previousAgentText: "Previous body. Resolves #31",
+          agentTextRunId: "root-run",
+        });
+        created.store.linkedIssueSource = typeof source === "function" ? source : async () => source;
+        let input: Record<string, unknown> | undefined;
+        created.jobs.onLaunch = () => {
+          input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        };
+        await created.executor.start("run-1");
+        return { created, reads, task: input!.task as string };
+      }
+
+      it("reads the GitHub issue the root run's mention came from and fences it in the task", async () => {
+        const { created, reads, task } = await continuation(
+          { hostStatus: { provider: "github", repository: "openai/example", number: 12 } },
+          async () => ISSUE,
+        );
+        expect(created.store.run.status).toBe("succeeded");
+        expect(reads).toEqual([{ provider: "github", repository: "openai/example", number: 12 }]);
+        expect(task).toContain("acceptance criteria are the contract");
+        expect(task).toContain("`Resolves #12`");
+        expect(task).toContain(
+          "<untrusted_issue>\nIssue #12: Jokes endpoint\n\n## Acceptance\n- [ ] GET /jokes lists jokes\n</untrusted_issue>",
+        );
+        // Before the description note, so both fit and the ticket comes first.
+        expect(task.indexOf("<untrusted_issue>")).toBeLessThan(task.indexOf("<untrusted_pr_description>"));
+      });
+
+      it("reads the root run's Jira issue first", async () => {
+        const { reads, task } = await continuation(
+          {
+            issueProvider: "jira",
+            issueKey: "ABC-12",
+            hostStatus: { provider: "github", repository: "openai/example", number: 12 },
+          },
+          async () => ISSUE,
+        );
+        expect(reads).toEqual([{ provider: "jira", key: "ABC-12" }]);
+        expect(task).toContain("<untrusted_issue>\nJira issue ABC-12: Jokes endpoint");
+      });
+
+      it("falls back to the closing keyword in the description wardby last wrote", async () => {
+        // The mention was on a pull request, not an issue: the host says so and the next candidate is read.
+        const { reads, task } = await continuation(
+          { hostStatus: { provider: "github", repository: "openai/example", number: 40 } },
+          async (ref) => (ref.provider === "github" && ref.number === 31 ? ISSUE : null),
+        );
+        expect(reads).toEqual([
+          { provider: "github", repository: "openai/example", number: 40 },
+          { provider: "github", repository: "openai/example", number: 31 },
+        ]);
+        expect(task).toContain("<untrusted_issue>\nIssue #31: Jokes endpoint");
+      });
+
+      it("ignores a mention status in another repository", async () => {
+        const { reads } = await continuation(
+          { hostStatus: { provider: "github", repository: "other/repo", number: 12 } },
+          async () => null,
+        );
+        expect(reads).toEqual([{ provider: "github", repository: "openai/example", number: 31 }]);
+      });
+
+      it("never fails the run when the issue can't be read or the source can't be loaded", async () => {
+        for (const [source, read] of [
+          [
+            { hostStatus: { provider: "github", repository: "openai/example", number: 12 } },
+            async () => Promise.reject(new Error("github down")),
+          ],
+          [async () => Promise.reject(new Error("db down")), async () => ISSUE],
+        ] as const) {
+          const { created, task } = await continuation(source, read);
+          expect(created.store.run.status).toBe("succeeded");
+          expect(task).not.toContain("<untrusted_issue>");
+          expect(task).toContain("<untrusted_pr_description>");
+        }
+      });
+
+      it("a fresh run and a local continuation read no issue", async () => {
+        const fresh = await continuation({ issueProvider: "jira", issueKey: "ABC-12" }, async () => ISSUE, {
+          rootCodingRunId: null,
+          headRef: "wardby/run-run-1",
+        });
+        expect(fresh.reads).toEqual([]);
+        expect(fresh.task).not.toContain("<untrusted_issue>");
+        const local = await continuation(
+          { issueProvider: "jira", issueKey: "ABC-12" },
+          async () => ISSUE,
+          { repository: LOCAL_REPOSITORY, profileRepository: LOCAL_REPOSITORY },
+          { repoAccess: { authorizeUse: async () => ({ ok: true }) } as never },
+        );
+        expect(local.reads).toEqual([]);
+      });
     });
 
     it("leaves a fresh run's task without the description note", async () => {

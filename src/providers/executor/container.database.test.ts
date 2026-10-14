@@ -301,6 +301,40 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     }
   });
 
+  it("linkedIssueSource returns the root's issue and the nearest mention status above it", async () => {
+    const top = `container-issue-top-${randomUUID()}`;
+    const middle = `container-issue-mid-${randomUUID()}`;
+    const root = `container-issue-root-${randomUUID()}`;
+    const bare = `container-issue-bare-${randomUUID()}`;
+    try {
+      await db.run.create({ data: { id: top, agentId, status: "succeeded" } });
+      await db.runHostStatus.create({
+        data: { runId: top, provider: "github", repository: "openai/example", number: 12, commentKind: "conversation" },
+      });
+      await db.run.create({ data: { id: middle, agentId, status: "succeeded", parentRunId: top } });
+      await codingRunWith(root, "Root text.", { issueProvider: "jira", issueKey: "ABC-12" });
+      await db.run.update({ where: { id: root }, data: { parentRunId: middle } });
+      await codingRunWith(bare, "Bare text.");
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.linkedIssueSource(root)).resolves.toEqual({
+        issueProvider: "jira",
+        issueKey: "ABC-12",
+        hostStatus: { provider: "github", repository: "openai/example", number: 12 },
+      });
+      await expect(store.linkedIssueSource(bare)).resolves.toEqual({
+        issueProvider: null,
+        issueKey: null,
+        hostStatus: null,
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [root, bare] } } });
+      await db.runHostStatus.deleteMany({ where: { runId: top } });
+      await db.run.deleteMany({ where: { id: { in: [root, bare] } } });
+      await db.run.deleteMany({ where: { id: middle } });
+      await db.run.deleteMany({ where: { id: top } });
+    }
+  });
+
   it("pullRequestRunIds lists the root, then continuations that pushed, oldest first", async () => {
     const root = `container-desc-runs-root-${randomUUID()}`;
     const pushedLater = `container-desc-runs-b-${randomUUID()}`;

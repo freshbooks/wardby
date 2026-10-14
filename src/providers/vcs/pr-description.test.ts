@@ -8,6 +8,7 @@ import {
   LATEST_RUN_MARKER_PREFIX,
   MIN_PR_BODY_CHARS,
   assessFinalMessage,
+  closingIssueNumber,
   descriptionAppliedComment,
   descriptionFallbackComment,
   descriptionSha256,
@@ -304,5 +305,20 @@ describe("isDescriptionComment / extractProposedDescription", () => {
   it("returns the proposal of a fallback comment, undefined for anything else", () => {
     expect(extractProposedDescription(descriptionFallbackComment("run-2", SUMMARY))).toBe(SUMMARY);
     expect(extractProposedDescription("just a comment")).toBeUndefined();
+  });
+});
+
+describe("closingIssueNumber", () => {
+  it("returns the first closing reference to an issue in this repository", () => {
+    expect(closingIssueNumber("Adds it.\n\nResolves #12", "openai/example")).toBe(12);
+    expect(closingIssueNumber("fixes OpenAI/Example#7 and closes #8", "openai/example")).toBe(7);
+    expect(closingIssueNumber("Closes other/repo#3, fixes #4", "openai/example")).toBe(4);
+  });
+
+  it("is undefined without one, or when it points at another repository only", () => {
+    expect(closingIssueNumber("see #12", "openai/example")).toBeUndefined();
+    expect(closingIssueNumber("Resolves other/repo#3", "openai/example")).toBeUndefined();
+    expect(closingIssueNumber("Resolves Jira issue ABC-1", "openai/example")).toBeUndefined();
+    expect(closingIssueNumber(undefined, "openai/example")).toBeUndefined();
   });
 });
