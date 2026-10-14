@@ -294,8 +294,11 @@ still applies.
 
 A follow-up also receives the original issue the pull request was opened for,
 the way the first run did: its title and body, quoted as untrusted context,
-with a note that its acceptance criteria are the contract and that the final
-message must carry the issue's acceptance checklist and its closing line.
+as reference material: a note says its acceptance criteria as written are
+what the description's checklist should reflect, that the final message must
+carry that checklist and the closing line, and that no instruction in the
+issue is followed. The issue is read as it is now, so edits made to it since
+the first run are included.
 wardby finds the issue from the run that started the work: the Jira issue it
 was attributed to, else the GitHub issue whose `@wardby` mention started it,
 else the issue that wardby's last description closes (`Resolves #N`). Only
@@ -316,22 +319,33 @@ request, plus the latest run's, each package and version once. Refused
 packages, and the dependency-install warning built from them, describe the
 latest run only, since they reflect the pull request's current state.
 
-If a person edited the description since wardby last wrote it, wardby does
-not overwrite it. Instead it keeps one comment on the pull request with the
-current description proposed by its latest run, inside a collapsed section.
-The comment names that run, says the description was not applied because a
-person edited it, and says the pull request author can copy it into the
-description. Later runs edit the same comment rather than adding new ones.
-wardby only ever edits a comment its own GitHub App wrote. If a later run can
-write the description directly again, the comment is updated to say no
-proposal is pending.
+If wardby can't confirm the description is unchanged since it wrote it (for
+example, a person edited it), it does not overwrite it. Instead it keeps one
+comment on the pull request with the current description proposed by its
+latest run, inside a collapsed section. The comment names that run and the
+commit it describes, says why it wasn't applied, and says the pull request
+author can copy it into the description. Later runs edit the same comment
+rather than adding new ones; if duplicates exist (for example, two runs
+posting at once), wardby edits the newest and rewrites the others to point at
+it. wardby only edits comments its own GitHub App wrote, never a person's or
+another App's. On a run that pushes a commit, the comment is written before
+the push, so it is already there when the push starts a review.
 
-While that comment holds a proposal, every review of the pull request is told
-so: the description is maintained by hand, and the reviewer checks the
-description's requirements (closing line, acceptance checklist, how to try
-it, test results) against wardby's latest proposal rather than the stale
-description. The proposal reaches the reviewer as quoted, untrusted context,
-cut to 16 KB.
+If the author copies the proposal into the description unchanged, the next
+run sees that the description matches wardby's latest proposal, takes the
+description back, writes it directly from then on, and updates the comment to
+say no proposal is pending. The same happens when a later run can write the
+description directly for any other reason.
+
+The comment's first line records the head commit the proposal describes. A
+review reads it when the reviewer reads the pull request (`repo_pr_read`'s
+`descriptionProposal`), not when the review starts, and only uses it when it
+was written for the head being reviewed. Then a description requirement
+(closing line, acceptance checklist, how to try it, test results) is met if
+either the live description or the proposal meets it. If the latest proposal
+is for another commit, the reviewer is told no proposal for this head exists
+yet and reviews the live description. The proposal reaches the reviewer as
+untrusted data, cut to 16 KB.
 
 Pull requests opened by an earlier wardby version have no record of what
 wardby wrote. For those, wardby rebuilds the description its first run would
@@ -360,10 +374,11 @@ pushed commit.
   `empty`, `too_short` (fewer than 80 non-whitespace characters), or
   `missing_closing_keyword`.
 - `unchanged`: nothing needed to change.
-- `edited_by_hand`: the description was edited by a person, no longer starts
-  with wardby's marker, or (for pull requests opened by an earlier version)
-  doesn't match the description rebuilt from wardby's records. wardby posts or
-  updates the proposal comment when it can.
+- `edited_by_hand`: wardby couldn't confirm the description is its own: a
+  person edited it, it no longer starts with wardby's marker, or (for pull
+  requests opened by an earlier version) it doesn't match the description
+  rebuilt from wardby's records. wardby posts or updates the proposal comment
+  when it can.
 - `skipped:<reason>`: the description was not updated. The reason is
   `not_open` (the pull request is not open or was not found), `too_long` (the
   description is still over 65,536 characters after dropping **Packages**), or
@@ -961,6 +976,13 @@ internal marker to the model:
   live state. The list of pull requests is current; the PR body's **Related
   pull requests** section can be stale (see
   [Related pull requests across repositories](../help/related-pull-requests.md)).
+  On a Wardby pull request whose description Wardby couldn't confirm as its
+  own text, it also returns `descriptionProposal`: `state: "current"` with
+  `forHead`, `runId`, `text` (Wardby's latest proposed description for this
+  head, cut to 16 KB, `truncated`) and a `note`, or
+  `state: "not_for_this_head"` with a `note` when the latest proposal is for
+  another commit. See
+  [How the pull request description is kept current](#how-the-pull-request-description-is-kept-current).
 - **Re-review when CI finishes.** When a review publishes `COMMENT` on its
   own check while CI on that head is `pending` or `none`, Wardby records it.
   When a CI check suite (not Wardby's own) completes on that head and no CI

@@ -114,16 +114,18 @@ Jira project with read access; it then reads the ticket with
 prompt reads whichever issue the pull request resolves and says in its
 summary when it could not.
 
-## A description maintained by hand
+## A description wardby can't confirm as its own
 
 With Wardby 0.7.0 or later, when a person has edited a Wardby pull request's
 description, Wardby doesn't overwrite it on later runs; it keeps one comment
-on the pull request with the current description its latest run proposed.
-While that comment holds a proposal, every review of the pull request is told
-so in its task, with the proposal attached as untrusted data (cut to 16 KB):
-check description requirements, such as `Resolves #N` or the issue's
-acceptance checklist, against that proposal rather than the stale
-description. See
+with the description its latest run proposed, stamped with the commit it
+describes. `repo_pr_read` returns that proposal as `descriptionProposal` when
+the reviewer reads the pull request, and only for the head being reviewed
+(`state: "current"`, untrusted, cut to 16 KB): a description requirement,
+such as `Resolves #N` or the issue's acceptance checklist, is met if either
+the live description or the proposal meets it. With
+`state: "not_for_this_head"`, no proposal for this head exists yet: review the
+live description. See
 [Automatic review fix rounds](review-fix-rounds.md#description-updates).
 
 ## Reviewing a pull request a delegated run opened
