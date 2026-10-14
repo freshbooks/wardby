@@ -70,7 +70,13 @@ agent's live link. Properties are not allowlisted: any `write` link can set
 them and any link can read them. They are stored as `wardby.<agentId>.<name>`,
 and anyone with Jira API access to the issue can read or overwrite them, so
 never store secrets there. Run status comments include an `Agent spend: $...`
-line. To see what work on a card, epic, or project cost, read
+line. When an agent's reply is the result (for example a plan) and is longer
+than about 2,000 characters, the status comment says "The full reply follows
+in the next comment(s)." and the reply follows in up to four numbered comments
+("Reply, part i of n") of about 30,000 characters each, split at headings,
+paragraphs or lines. Anything beyond is cut with a note, and the full text
+stays on the run (`get_run`, `finalText`). `@`-mentions are defused. Shorter
+replies stay in the status comment. To see what work on a card, epic, or project cost, read
 [Attribute agent spend to issues](cost-attribution.md).
 If the token belongs to a person, Wardby refuses to act: startup logs an error
 and the webhook answers 503 `jira_personal_account`. Deliveries with a
