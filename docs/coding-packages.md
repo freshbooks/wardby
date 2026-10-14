@@ -389,7 +389,8 @@ set `YARN_*`, `PNPM_*` or `COREPACK_*` variables.
 
 **Getting pnpm or yarn Berry into the run.** The stock worker images ship
 npm, yarn classic and corepack, not pnpm or yarn Berry. The shim runs
-`pnpm`, and `yarn` in a project whose `package.json` pins yarn 2 or later
+`pnpm`, and `yarn` in a project whose `package.json` (or, for a workspace
+package, the workspace root's) pins yarn 2 or later
 (`"packageManager": "yarn@4.x"`), through corepack, which downloads that
 release through the registry like any other package: allowlist `pnpm` for
 pnpm, `@yarnpkg/cli-dist` for yarn 2 or later, or `yarn` for a pinned yarn
@@ -403,7 +404,8 @@ tool into a custom worker image.
 
 **Lockfile plans.** The shim acts as `pnpm` and `yarn` too: before
 `pnpm install`/`i`/`add` it sends `pnpm-lock.yaml`, and before a bare
-`yarn`, `yarn install` or `yarn add` it sends `yarn.lock` (the nearest one
+`yarn`, `yarn install`, `add`, `remove`, `upgrade`, `upgrade-interactive`
+or `up` (also as `yarn workspace <name> <command>`) it sends `yarn.lock` (the nearest one
 from the project up, so a workspace root's lockfile counts), to the same
 `POST /registry/npm/-/plan`, which tells the formats apart by content.
 Supported:
@@ -461,8 +463,9 @@ lockfile has it, or the install is refused at `node-gyp`.
 configured registry, so a frozen install can't reach the proxy on its own.
 For the install, the shim points the lockfile's `registry.yarnpkg.com` and
 `registry.npmjs.org` URLs at the proxy, and afterwards puts the file back
-byte for byte; if yarn rewrote the lockfile (`yarn add`), its proxy URLs are
-mapped back to the host the original used. A yarn classic install that
+byte for byte; if yarn rewrote the lockfile (`yarn add`), each entry's
+proxy URL goes back to the host that entry had (a new entry gets the host
+most of the lockfile uses). The shim does this for every command above. A yarn classic install that
 bypasses the shim (the real `yarn` called by its full path) gets neither this
 nor the token, and fails.
 

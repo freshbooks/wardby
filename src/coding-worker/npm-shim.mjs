@@ -85,7 +85,10 @@ const TOOLS = {
     valueOptions: new Set(["--dir", "-C", "--filter", "-F", "--loglevel", "--reporter", "--registry", "--store-dir"]),
   },
   yarn: {
-    installs: new Set(["", "install", "add"]),
+    // Every command that installs from yarn.lock (yarn classic downloads
+    // from the URLs it records, see routeClassicLockfile), also as
+    // `yarn workspace <name> <command>`.
+    installs: new Set(["", "install", "add", "remove", "upgrade", "upgrade-interactive", "up"]),
     lockfiles: ["yarn.lock"],
     workspaceRoot: true,
     directoryOptions: ["--cwd"],
@@ -146,7 +149,11 @@ function commandOf(args, tool) {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (TOOLS[tool].valueOptions.has(arg)) index += 1;
-    else if (!arg.startsWith("-")) return arg;
+    else if (!arg.startsWith("-")) {
+      // `yarn workspace <name> <command> ...` runs <command> in that workspace.
+      if (tool === "yarn" && arg === "workspace") return commandOf(args.slice(index + 2), tool) || "workspace";
+      return arg;
+    }
   }
   return "";
 }
@@ -185,13 +192,27 @@ function findLockfile(project, tool) {
   }
 }
 
-/** The `packageManager` the project pins (`yarn@4.1.0+sha…`), if any. */
+/** The `packageManager` the project pins (`yarn@4.1.0+sha…`), if any: in
+ *  its own package.json or, for a workspace package, the workspace root's.
+ *  Searches from the project up, and stops at a root (a package.json with
+ *  `workspaces`, a pnpm-workspace.yaml, or a .git folder). */
 function pinnedManager(project) {
-  try {
-    const manifest = JSON.parse(readFileSync(join(project, "package.json"), "utf8"));
-    return typeof manifest.packageManager === "string" ? manifest.packageManager : undefined;
-  } catch {
-    return undefined;
+  let directory = project;
+  for (;;) {
+    let manifest;
+    try {
+      manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+    } catch {
+      manifest = undefined;
+    }
+    if (typeof manifest?.packageManager === "string") return manifest.packageManager;
+    const root =
+      (manifest && manifest.workspaces !== undefined) ||
+      existsSync(join(directory, "pnpm-workspace.yaml")) ||
+      existsSync(join(directory, ".git"));
+    const parent = dirname(directory);
+    if (root || parent === directory) return undefined;
+    directory = parent;
   }
 }
 
@@ -304,15 +325,19 @@ function routeClassicLockfile(lockfile, base) {
   }
   if (!/^# yarn lockfile v1\s*$/m.test(original.slice(0, 1024))) return undefined;
   const counts = new Map(YARN_HOSTS.map((host) => [host, 0]));
+  /** Each original download path (`<name>/-/<file>.tgz`) and its host. */
+  const hosts = new Map();
   const routed = original.replace(RESOLVED, (match, open, url, close) => {
     const host = YARN_HOSTS.find((candidate) => url.startsWith(candidate));
     if (!host) return match;
     counts.set(host, counts.get(host) + 1);
+    hosts.set(url.slice(host.length).split("#")[0], host);
     return `${open}${base}${url.slice(host.length)}${close}`;
   });
   if (routed === original) return undefined;
-  // The host most of the original's URLs use (yarn's own on a tie).
-  const host = [...counts.entries()].reduce((best, entry) => (entry[1] > best[1] ? entry : best))[0];
+  // For an entry the original didn't have: the host most of its URLs use
+  // (yarn's own on a tie).
+  const predominant = [...counts.entries()].reduce((best, entry) => (entry[1] > best[1] ? entry : best))[0];
   try {
     writeFileSync(lockfile, routed);
   } catch (error) {
@@ -331,7 +356,9 @@ function routeClassicLockfile(lockfile, base) {
         const hash = url.indexOf("#");
         const path = hash < 0 ? url.slice(base.length) : url.slice(base.length, hash);
         const mapped = publicPath(path);
-        return mapped ? `${open}${host}${mapped}${hash < 0 ? "" : url.slice(hash)}${close}` : match;
+        if (!mapped) return match;
+        const host = hosts.get(mapped) ?? predominant;
+        return `${open}${host}${mapped}${hash < 0 ? "" : url.slice(hash)}${close}`;
       });
       if (restored !== after) writeFileSync(lockfile, restored);
     } catch (error) {

@@ -388,6 +388,73 @@ describe("package-manager shim for yarn", () => {
     expect(await readFile(join(project, "yarn.lock"), "utf8")).toBe(original);
   }, 15_000);
 
+  it("reads packageManager from the workspace root when run from a workspace package", async () => {
+    const { shim, project, env, calls } = await toolLayout("yarn", ["yarn", "corepack"]);
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ private: true, workspaces: ["packages/*"], packageManager: "yarn@4.18.1" }),
+    );
+    await mkdir(join(project, "packages", "web"), { recursive: true });
+    await writeFile(join(project, "packages", "web", "package.json"), JSON.stringify({ name: "web" }));
+    expect((await run(shim, ["add", "zod"], { cwd: join(project, "packages", "web"), env })).code).toBe(0);
+    expect((await calls()).map((call) => [call.name, call.args])).toEqual([["corepack", ["yarn", "add", "zod"]]]);
+  });
+
+  it("points the lockfile at the proxy for every command that installs from it", async () => {
+    const { shim, project, env, calls } = await toolLayout("yarn", ["yarn"]);
+    const original = classic("https://registry.yarnpkg.com/");
+    await writeFile(join(project, "yarn.lock"), original);
+    const commands = [
+      ["remove", "left-pad"],
+      ["upgrade"],
+      ["upgrade-interactive"],
+      ["workspace", "web", "add", "zod"],
+      ["workspace", "web", "remove", "zod"],
+      ["workspace", "web", "upgrade"],
+    ];
+    for (const args of commands) expect((await run(shim, args, { cwd: project, env })).code).toBe(0);
+    expect((await calls()).map((call) => call.lock)).toEqual(commands.map(() => classic(env.npm_config_registry)));
+    expect(plans).toHaveLength(commands.length);
+    expect(await readFile(join(project, "yarn.lock"), "utf8")).toBe(original);
+    // A workspace's own scripts don't install anything.
+    expect((await run(shim, ["workspace", "web", "test"], { cwd: project, env })).code).toBe(0);
+    expect(plans).toHaveLength(commands.length);
+  });
+
+  it("puts each entry back on its own host after yarn rewrote a mixed-host lockfile", async () => {
+    const { shim, project, env } = await toolLayout("yarn", ["yarn"]);
+    const entry = (name: string, host: string) =>
+      [`${name}@^1.0.0:`, '  version "1.0.0"', `  resolved "${host}${name}/-/${name}-1.0.0.tgz#aa"`, ""].join("\n");
+    const npmjs = "https://registry.npmjs.org/";
+    const yarnpkg = "https://registry.yarnpkg.com/";
+    const proxy = env.npm_config_registry;
+    const header = "# yarn lockfile v1\n\n";
+    await writeFile(
+      join(project, "yarn.lock"),
+      header + [entry("a", npmjs), entry("b", yarnpkg), entry("c", yarnpkg)].join("\n"),
+    );
+    // yarn add d: yarn rewrites every entry (through the proxy) and adds d,
+    // at the proxy's own download route.
+    const written =
+      header +
+      [
+        entry("a", proxy),
+        entry("b", proxy),
+        entry("c", proxy),
+        ["d@^1.0.0:", '  version "1.0.0"', `  resolved "${proxy}-/tarball/d/1.0.0#bb"`, ""].join("\n"),
+      ].join("\n");
+    expect((await run(shim, ["add", "d"], { cwd: project, env: { ...env, FAKE_WRITE_LOCK: written } })).code).toBe(0);
+    expect(await readFile(join(project, "yarn.lock"), "utf8")).toBe(
+      header +
+        [
+          entry("a", npmjs),
+          entry("b", yarnpkg),
+          entry("c", yarnpkg),
+          ["d@^1.0.0:", '  version "1.0.0"', `  resolved "${yarnpkg}d/-/d-1.0.0.tgz#bb"`, ""].join("\n"),
+        ].join("\n"),
+    );
+  });
+
   it("passes yarn's exit code through and still restores the lockfile", async () => {
     const { shim, project, env } = await toolLayout("yarn", ["yarn"]);
     const original = classic("https://registry.yarnpkg.com/");
