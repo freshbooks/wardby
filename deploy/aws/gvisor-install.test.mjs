@@ -3,6 +3,10 @@
 // settings install nothing and leave no marker. The kubelet drop-in (ConditionPathExists on the
 // marker) is written first in every case, so a sandbox node without gVisor never starts kubelet
 // and never joins the cluster.
+//
+// The script downloads with the real curl and unpacks a .tar.bz2, so these tests need curl and
+// bzip2 on the machine. Images without them (such as the coding-run worker, which ships no curl
+// on purpose) skip the file; CI and developer machines run it.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -12,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const script = fileURLToPath(new URL("./gvisor-install.sh", import.meta.url));
+const missingTools = ["curl", "bzip2"].filter((tool) => spawnSync("sh", ["-c", `command -v ${tool}`]).status !== 0);
 const VERSION = "20260101.0";
 let root, release, installDir, bin, systemctlLog, dropIn, marker, sha512;
 
@@ -72,7 +77,7 @@ const expectBlocked = (result) => {
   expect(existsSync(join(installDir, "containerd-shim-runsc-v1"))).toBe(false);
 };
 
-describe("gvisor-install.sh", () => {
+describe.skipIf(missingTools.length > 0)("gvisor-install.sh", () => {
   it("installs runsc, the containerd shim and the runsc config from a verified archive, then writes the marker", () => {
     const result = run(good());
     expect(result.status, result.stderr).toBe(0);
