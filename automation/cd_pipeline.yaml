@@ -1,0 +1,62 @@
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+
+pr: none
+
+resources:
+  repositories:
+    - repository: fresh-cli
+      type: github
+      endpoint: TheBakery
+      name: freshbooks/fresh-cli
+      ref: refs/tags/6.12.1
+
+variables:
+  - group: docker-hub
+
+stages:
+  - stage: CheckMainBranch
+    displayName: Check Main Branch
+    jobs:
+      - job: CheckBranch
+        displayName: Check Branch
+        pool: small-production-pool
+        steps:
+          - bash: |
+              echo BUILD_SOURCEBRANCH = $(Build.SourceBranch)
+              if [[ "$BUILD_SOURCEBRANCH" != "refs/heads/main" ]]; then
+                echo "##vso[task.logissue type=error] CD pipelines are restricted to run only on the main branch"
+                exit 1
+              fi
+            displayName: Check Main Branch
+
+  - stage: GenerateArtifact
+    displayName: Generate Artifact
+    dependsOn: CheckMainBranch
+    jobs:
+      - job: tag
+        displayName: Generate and push version tag
+        pool: small-production-pool
+        steps:
+          # Full history so every existing version tag is visible to the tagging step.
+          - checkout: self
+            fetchDepth: 0
+          - script: |
+              set -euo pipefail
+              PREV=$(git tag | grep -E '^[0-9]{4}\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+              VERSION=$(uvx bumpver test "${PREV:-$(date -u +%y%m).0.0}" 'YY0M.MINOR.PATCH' --minor | sed -n 's/^New Version: *//p')
+              [ -n "$VERSION" ] || { echo "##vso[task.logissue type=error]bumpver produced no version"; exit 1; }
+              echo "Previous version: ${PREV:-none}; new version: $VERSION"
+              echo "##vso[task.setvariable variable=version;isOutput=true]$VERSION"
+              echo "##vso[build.addbuildtag]current version - $VERSION"
+              git tag "$VERSION"
+              git push origin "$VERSION"
+            name: version
+            displayName: Generate and Push Version Tag
+      - template: ./jobs/build_images.yaml
+        parameters:
+          dependsOn: [tag]
+          version: $[ dependencies.tag.outputs['version.version'] ]

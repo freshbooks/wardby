@@ -1,0 +1,107 @@
+# Builds and pushes the wardby images, one parallel job per image. The build command and the tags are those of
+# fresh-cli's azure_pipelines/templates/jobs/generate_artifact_job.yaml (docker buildx build --push
+# when the remote BuildKit is up, classic docker build otherwise). That template builds one
+# Dockerfile with its dev/prod targets, which wardby's eight images are not, so it is not called
+# directly. Each image is its own project, gcr.io/freshbooks-builds/<name>, and its one build is the
+# default target ("prod"), so the tags are the ones every fresh-cli project gets:
+#
+#   pull request:  <version>-prod, ci-prod-<version>, <version>
+#   otherwise:     <version>-prod, cd-prod-<version>, <version>
+#
+# Everything goes to gcr.io/freshbooks-builds; nothing is pushed to freshbooks-software.
+#
+# The ci-/cd- prefixes are what the registry's retention policies key on. Needs the docker-hub
+# variable group (Docker Hub login) and the fresh-cli repository resource.
+
+parameters:
+  - name: version
+    type: string
+    default: $(Build.SourceVersion)
+  # Jobs the image jobs wait for; empty means they start as soon as their stage does.
+  - name: dependsOn
+    type: object
+    default: []
+  - name: platforms
+    type: string
+    default: linux/amd64
+  # name: the image (gcr.io/freshbooks-builds/<name>); target: the Dockerfile stage, or "" for none.
+  # The same eight images as deploy/gke/docker-bake.hcl.
+  - name: images
+    type: object
+    default:
+      - { name: wardby-runtime, dockerfile: deploy/Dockerfile, target: runtime }
+      - { name: wardby-migration, dockerfile: deploy/Dockerfile, target: migration }
+      - { name: wardby-coding-worker, dockerfile: src/coding-worker/Dockerfile, target: "" }
+      - { name: wardby-coding-worker-node-python, dockerfile: src/coding-worker/Dockerfile.node-python, target: "" }
+      - { name: wardby-claude-coding-worker, dockerfile: src/claude-coding-worker/Dockerfile, target: "" }
+      - { name: wardby-claude-tool-runner, dockerfile: src/claude-tool-runner/Dockerfile, target: "" }
+      - {
+          name: wardby-claude-tool-runner-node-python,
+          dockerfile: src/claude-tool-runner/Dockerfile,
+          target: node-python,
+        }
+      - { name: wardby-native-worker, dockerfile: src/native-worker/Dockerfile, target: "" }
+
+jobs:
+  - ${{ each image in parameters.images }}:
+      - job: image_${{ replace(image.name, '-', '_') }}
+        displayName: Build ${{ image.name }}
+        dependsOn: ${{ parameters.dependsOn }}
+        pool: small-production-pool
+        timeoutInMinutes: 100
+        cancelTimeoutInMinutes: 1
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: Docker@2
+            displayName: Login to Docker
+            inputs:
+              containerRegistry: FreshbooksBuildsGCR
+              command: login
+
+          - script: echo "$(DOCKER_HUB_PASS)" | docker login -u "$(DOCKER_HUB_USER)" --password-stdin
+            displayName: Login to Docker Hub
+
+          - template: azure_pipelines/templates/steps/use_remote_buildkit.yaml@fresh-cli
+
+          - script: |
+              set -euo pipefail
+              NAME="${{ image.name }}"
+              REGISTRY="gcr.io/freshbooks-builds"
+              TARGET="prod"
+
+              if [ "$REMOTE_BUILDKIT_AVAILABLE" = "true" ] && [ "$(BUILDKIT_ACTIVE)" = "true" ]; then
+                echo "Using docker buildx (BuildKit available and active), builder: $(BUILDER_NAME)"
+                BUILD_CMD="docker buildx build"
+              else
+                echo "Using classic docker build (BuildKit unavailable or inactive)"
+                BUILD_CMD="docker build"
+              fi
+
+              if [ "$(Build.Reason)" = "PullRequest" ]; then
+                TAG_PREFIX="ci-${TARGET}"
+              else
+                TAG_PREFIX="cd-${TARGET}"
+              fi
+              TAGS="--tag ${REGISTRY}/${NAME}:${VERSION}-${TARGET} \
+                    --tag ${REGISTRY}/${NAME}:${TAG_PREFIX}-${VERSION} \
+                    --tag ${REGISTRY}/${NAME}:${VERSION}"
+
+              # Not every Dockerfile has stages to choose between.
+              TARGET_ARG=""
+              if [ -n "${{ image.target }}" ]; then TARGET_ARG="--target ${{ image.target }}"; fi
+
+              echo "Building ${NAME} from ${{ image.dockerfile }} ${TARGET_ARG}"
+              $BUILD_CMD --push \
+                --pull \
+                -f ${{ image.dockerfile }} \
+                $TARGET_ARG \
+                $TAGS \
+                --platform ${{ parameters.platforms }} .
+              echo "##vso[build.addbuildtag]${VERSION}-${NAME}"
+            displayName: Build Image ${{ image.name }}
+            env:
+              # Mapped here, not inlined, so a runtime expression such as an output variable of an
+              # earlier job also works.
+              VERSION: ${{ parameters.version }}

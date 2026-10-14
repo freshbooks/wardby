@@ -1,0 +1,101 @@
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - README.md
+      - .gitignore
+
+resources:
+  repositories:
+    - repository: fresh-cli
+      type: github
+      endpoint: TheBakery
+      name: freshbooks/fresh-cli
+      ref: refs/tags/6.12.1
+
+variables:
+  - group: docker-hub
+
+stages:
+  - stage: Checks
+    displayName: Checks and tests
+    jobs:
+      - job: checks
+        displayName: Typecheck, lint, format
+        pool: small-production-pool
+        timeoutInMinutes: 20
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - script: |
+              . ~/.bashrc
+              set -euo pipefail
+              nvm install 24
+              nvm use 24
+              npm ci
+              npm run prisma:generate
+              npm run typecheck
+              npm run lint
+              npm run format:check
+              npm run okf:check
+              npm run test:production-boundary
+            displayName: Run checks
+
+      - job: tests
+        displayName: Unit and database tests
+        pool: small-production-pool
+        timeoutInMinutes: 30
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - script: echo "$(DOCKER_HUB_PASS)" | docker login -u "$(DOCKER_HUB_USER)" --password-stdin
+            displayName: Login to Docker Hub
+          # Database tests need a real Postgres, with the same throwaway settings as the GitHub
+          # security workflow. It listens on 55432 so it cannot clash with another service on the agent.
+          - script: |
+              set -euo pipefail
+              docker run -d --name wardby-test-db \
+                -e POSTGRES_USER=wardby -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=security \
+                -p 55432:5432 \
+                --health-cmd pg_isready --health-interval 5s --health-retries 10 \
+                postgres:16-alpine
+              for _ in $(seq 1 30); do
+                [ "$(docker inspect -f '{{.State.Health.Status}}' wardby-test-db)" = healthy ] && exit 0
+                sleep 2
+              done
+              echo "Postgres did not become healthy" >&2
+              exit 1
+            displayName: Start Postgres
+          - script: |
+              . ~/.bashrc
+              set -euo pipefail
+              nvm install 24
+              nvm use 24
+              npm ci
+              npx playwright install --with-deps chromium
+              # deploy/aws/gvisor-install.test.mjs builds a .tar.bz2 fixture, which needs bzip2.
+              command -v bzip2 >/dev/null || apt-get install -y -qq bzip2
+              npm run prisma:generate
+              npm run prisma:migrate
+              # Public deterministic fixture material for tests only; never a deployment key. Exported
+              # here because the step's env: block did not deliver it to the shell on this agent pool,
+              # although DATABASE_URL in the same block arrived.
+              export SECRET_APP_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+              echo "SECRET_APP_KEY length: ${#SECRET_APP_KEY}"
+              npm test
+            displayName: Run tests
+            env:
+              DATABASE_URL: postgresql://wardby:test-only@localhost:55432/security
+          - script: docker rm -f wardby-test-db
+            displayName: Stop Postgres
+            condition: always()
+
+  - stage: Build
+    displayName: Build and push images
+    dependsOn: Checks
+    jobs:
+      - template: ./jobs/build_images.yaml
