@@ -1336,7 +1336,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
   function fake(opts: {
     prBody?: string;
     prs?: unknown[];
-    comments?: Array<{ id: number; body: string }>;
+    comments?: Array<{ id: number; body: string; user?: { type: string } }>;
     patchStatus?: number;
     patchThrows?: boolean;
   }) {
@@ -1344,9 +1344,11 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     const commentPosts: string[] = [];
     const commentPatches: Array<{ id: string; body: string }> = [];
     let tokenMints = 0;
+    let requests = 0;
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? "GET";
+      requests += 1;
       if (url.endsWith("/installation")) return json({ id: 42 });
       if (url.endsWith("/access_tokens")) {
         tokenMints += 1;
@@ -1378,7 +1380,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
       throw new Error(`unexpected request ${method} ${url}`);
     }) as typeof fetch;
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
-    return { client, pulls, commentPosts, commentPatches, tokenMints: () => tokenMints };
+    return { client, pulls, commentPosts, commentPatches, tokenMints: () => tokenMints, requests: () => requests };
   }
 
   function baseline(body: string) {
@@ -1530,7 +1532,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
       prBody: current,
       comments: [
         { id: 98, body: `<!-- wardby-status:${RUN} -->\n\nworking` },
-        { id: 99, body: `<!-- wardby-description:${RUN} -->\n\nold proposal` },
+        { id: 99, body: `<!-- wardby-description:${RUN} -->\n\nold proposal`, user: { type: "Bot" } },
       ],
     });
 
@@ -1548,6 +1550,49 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     expect(commentPatches).toHaveLength(1);
     expect(commentPatches[0].id).toBe("99");
     expect(commentPatches[0].body).toContain(NEW_SUMMARY);
+  });
+
+  it("a human comment quoting the description marker is not overwritten", async () => {
+    const written = originalBody();
+    const current = `${written}\n\nA reviewer's note added by hand.`;
+    const { client, commentPosts, commentPatches } = fake({
+      prBody: current,
+      comments: [
+        { id: 97, body: `> <!-- wardby-description:${RUN} -->\n> quoted by a person`, user: { type: "User" } },
+        { id: 96, body: `<!-- wardby-description:${RUN} -->\n\nno author recorded` },
+      ],
+    });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: baseline(written),
+    });
+
+    expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
+    expect(commentPatches).toHaveLength(0);
+    expect(commentPosts).toHaveLength(1);
+    expect(commentPosts[0].startsWith(`<!-- wardby-description:${RUN} -->\n`)).toBe(true);
+  });
+
+  it("headRef not wardby/run-<root> → skipped:error, no requests", async () => {
+    const current = originalBody();
+    const { client, pulls, requests } = fake({ prBody: current });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      headRef: "feature/someone-elses-branch",
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: baseline(current),
+    });
+
+    expect(result).toEqual({ kind: "skipped", reason: "error" });
+    expect(requests()).toBe(0);
+    expect(pulls).toHaveLength(0);
   });
 
   it("preserves the current Related section verbatim", async () => {
@@ -1657,7 +1702,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     expect(pulls).toHaveLength(1);
   });
 
-  it("never PATCHes a PR whose body lacks the root marker", async () => {
+  it("never PATCHes a PR whose body doesn't start with the root marker", async () => {
     const written = originalBody();
     const current = `Context a person wrote above the marker.\n\n${written}`;
     const { client, pulls, commentPosts } = fake({ prBody: current });

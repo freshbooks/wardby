@@ -1033,7 +1033,9 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       if (
         !SAFE_RUN_ID.test(input.runId) ||
         !SAFE_RUN_ID.test(input.rootRunId) ||
-        !SAFE_RUN_ID.test(input.baseline.agentTextRunId)
+        !SAFE_RUN_ID.test(input.baseline.agentTextRunId) ||
+        // Only wardby's own pull request: its branch is the root run's.
+        headRef !== `wardby/run-${input.rootRunId}`
       ) {
         throw new Error("github_pull_request_description_input_invalid");
       }
@@ -1076,6 +1078,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
           return { kind: "unchanged", sha256: proposedSha256, agentTextRunId: input.baseline.agentTextRunId } as const;
         }
         const [owner, name] = repository.split("/");
+        // Known, accepted race: a person editing between our read and this PATCH is overwritten (GitHub has no If-Match); the store's compare-and-set only covers wardby runs racing each other.
         const response = await this.requestJson(
           `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${pr.number}`,
           token,
@@ -1148,6 +1151,8 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       repository,
       pullRequestNumber,
       `${DESCRIPTION_COMMENT_MARKER_PREFIX}${runId} -->`,
+      // A person's comment quoting the marker is never overwritten.
+      { botAuthorOnly: true },
     );
     const [owner, name] = repository.split("/");
     if (existing) {
@@ -1330,12 +1335,16 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     return this.findMarkedComment(token, repository, pullRequestNumber, `${STATUS_COMMENT_MARKER_PREFIX}${runId} -->`);
   }
 
-  /** The first comment on the pull request whose body contains `marker`. */
+  /**
+   * The first comment on the pull request whose body contains `marker`; with
+   * `botAuthorOnly`, only among comments a bot account wrote.
+   */
   private async findMarkedComment(
     token: string,
     repository: string,
     pullRequestNumber: number,
     marker: string,
+    options: { botAuthorOnly?: boolean } = {},
   ): Promise<{ id: number } | null> {
     const [owner, name] = repository.split("/");
     const response = await this.requestJson(
@@ -1346,9 +1355,12 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     if (!Array.isArray(payload)) throw new Error("github_api_invalid_response");
     for (const item of payload) {
       const candidate = record(item);
-      if (typeof candidate.body === "string" && candidate.body.includes(marker)) {
-        return { id: positiveInteger(candidate.id) };
+      if (typeof candidate.body !== "string" || !candidate.body.includes(marker)) continue;
+      if (options.botAuthorOnly) {
+        const user = candidate.user;
+        if (!user || typeof user !== "object" || (user as Record<string, unknown>).type !== "Bot") continue;
       }
+      return { id: positiveInteger(candidate.id) };
     }
     return null;
   }
