@@ -54,7 +54,7 @@ describe("normalizeGitHubEvent", () => {
     }
   });
 
-  it("a pull_request `edited` event starts no review", () => {
+  it("normalizeGitHubEvent ignores a pull_request edited event (description update by the bot)", () => {
     // A description PATCH by wardby fires `edited`; it must never be a review trigger.
     const edited = { ...pr("edited"), changes: { body: { from: "old" } }, sender: { login: "wardby[bot]" } };
     expect(normalizeGitHubEvent("pull_request", edited, APP)).toBeNull();
