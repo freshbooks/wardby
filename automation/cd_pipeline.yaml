@@ -1,0 +1,53 @@
+# Azure Pipelines CD for the freshbooks/wardby fork: on main, build the images and push them with the
+# prod tags (<sha>-prod, cd-prod-<sha>, <sha>) to freshbooks-builds. It only builds and pushes; it does
+# not deploy. Shaped like fresh-cli's cd_stages.yaml (main-only guard, then generate artifact) minus
+# versioning, deployment and tests; steps/build_images.yaml has the build.
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+
+pr: none
+
+resources:
+  repositories:
+    - repository: fresh-cli
+      type: github
+      endpoint: TheBakery
+      name: freshbooks/fresh-cli
+      ref: refs/tags/6.12.1
+
+variables:
+  - group: docker-hub
+
+stages:
+  - stage: CheckMainBranch
+    displayName: Check Main Branch
+    jobs:
+      - job: CheckBranch
+        displayName: Check Branch
+        pool: small-production-pool
+        steps:
+          - bash: |
+              echo BUILD_SOURCEBRANCH = $(Build.SourceBranch)
+              if [[ "$BUILD_SOURCEBRANCH" != "refs/heads/main" ]]; then
+                echo "##vso[task.logissue type=error] CD pipelines are restricted to run only on the main branch"
+                exit 1
+              fi
+            displayName: Check Main Branch
+
+  - stage: GenerateArtifact
+    displayName: Generate Artifact
+    dependsOn: CheckMainBranch
+    jobs:
+      - job: images
+        displayName: Build and push images
+        pool: small-production-pool
+        timeoutInMinutes: 100
+        cancelTimeoutInMinutes: 1
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - template: ./steps/build_images.yaml
