@@ -6,6 +6,7 @@
  */
 import { MAX_PULL_REQUEST_BODY_CHARS, upsertRelatedSection, type GitHubAppClient } from "../vcs/github.js";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
+import { extractProposedDescription, isDescriptionComment, proposingRunId } from "../vcs/pr-description.js";
 import { MAX_CI_CHECKS, summarizeCi } from "./ci.js";
 import { partitionComments } from "./diff-lines.js";
 import { appMarkerRunId } from "./github-events.js";
@@ -19,6 +20,7 @@ import {
   verdictConclusion,
 } from "./review-format.js";
 import {
+  type DescriptionProposal,
   ReviewHostError,
   type CiCheckView,
   type CiView,
@@ -356,6 +358,31 @@ export class GitHubReviewHost implements CodeReviewHost {
         draft: pr.draft === true,
         ...(markerRunId ? { markerRunId } : {}),
       };
+    });
+  }
+
+  async descriptionProposal(repository: string, prNumber: number): Promise<DescriptionProposal | null> {
+    const { id: appId } = await this.client.appIdentity();
+    const base = repoPath(repository);
+    return this.withToken(repository, ISSUES_READ, async (get) => {
+      for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+        const comments = list(
+          await (await get(`${base}/issues/${prNumber}/comments?per_page=100&page=${page}`)).json(),
+        );
+        // Only this App's comment: a person's comment carrying the marker is not wardby's proposal.
+        const mine = comments.find(
+          (c) => typeof c.body === "string" && writtenByApp(c, appId) && isDescriptionComment(c.body),
+        );
+        if (mine) {
+          const body = mine.body as string;
+          const proposed = extractProposedDescription(body);
+          if (proposed === undefined) return null;
+          const runId = proposingRunId(body);
+          return { ...(runId ? { runId } : {}), proposed };
+        }
+        if (comments.length < 100) break;
+      }
+      return null;
     });
   }
 

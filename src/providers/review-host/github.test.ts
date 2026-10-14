@@ -4,6 +4,7 @@ import { RELATED_SECTION_END, RELATED_SECTION_START, type GitHubAppClient } from
 import { GitHubReviewHost } from "./github.js";
 import { APP_ID, BY_APP, fakeGitHub, json, OLD_SHA, PATCH, PR, REPO, SHA } from "./github.test-support.js";
 import { reviewMarker } from "./review-format.js";
+import { descriptionAppliedComment, descriptionFallbackComment } from "../vcs/pr-description.js";
 
 const BASE = "/repos/chfields/knock-knock-jokes";
 
@@ -1204,5 +1205,40 @@ describe("GitHubReviewHost.markReadyForReview", () => {
       method === "GET" && path === `${BASE}/pulls/7` ? json(draftPr()) : undefined,
     );
     expect(await new GitHubReviewHost(client).markReadyForReview(REPO, 7, SHA, "run_2")).toBe("skipped");
+  });
+});
+
+describe("GitHubReviewHost.descriptionProposal", () => {
+  const proposal = "Adds the jokes endpoint.\n\n- [x] lists jokes\n\nResolves #12";
+
+  it("returns the proposal from the App's description comment", async () => {
+    const { client, grants } = fakeGitHub(({ path }) =>
+      path === `${BASE}/issues/7/comments?per_page=100&page=1`
+        ? json([
+            // A person's comment carrying the marker, and another App's, are ignored.
+            { id: 1, body: descriptionFallbackComment("run-1", "a person's text"), user: { type: "User" } },
+            {
+              id: 2,
+              body: descriptionFallbackComment("run-1", "other app"),
+              performed_via_github_app: { id: APP_ID + 1 },
+            },
+            { id: 3, body: descriptionFallbackComment("run-9", proposal), ...BY_APP },
+          ])
+        : undefined,
+    );
+    await expect(new GitHubReviewHost(client).descriptionProposal(REPO, 7)).resolves.toEqual({
+      runId: "run-9",
+      proposed: proposal,
+    });
+    expect(grants.at(-1)).toMatchObject({ issues: "read" });
+  });
+
+  it("is null with no comment, or once a later run applied its description", async () => {
+    for (const comments of [[], [{ id: 3, body: descriptionAppliedComment("run-9"), ...BY_APP }]]) {
+      const { client } = fakeGitHub(({ path }) =>
+        path === `${BASE}/issues/7/comments?per_page=100&page=1` ? json(comments) : undefined,
+      );
+      await expect(new GitHubReviewHost(client).descriptionProposal(REPO, 7)).resolves.toBeNull();
+    }
   });
 });

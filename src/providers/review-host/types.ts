@@ -157,6 +157,12 @@ export interface IssueView {
   truncated: boolean;
 }
 
+export interface DescriptionProposal {
+  /** The run that proposed it, when the comment names a safe run id. */
+  runId?: string;
+  proposed: string;
+}
+
 export type IssueReadResult =
   ({ kind: "issue" } & IssueView) | { kind: "pull_request"; number: number } | { kind: "not_found"; number: number };
 
@@ -305,6 +311,13 @@ export interface CodeReviewHost {
   readCi?(repository: string, headSha: string): Promise<CiView>;
   /** Head, labels, and (on an App-authored PR) the run marker. Hosts that can't say leave it out. */
   pullRequestOrigin?(repository: string, prNumber: number): Promise<PullRequestOrigin>;
+  /**
+   * The description wardby's latest run proposed in the pull request's
+   * description comment (posted, by this App, when a person had edited the
+   * description), or null when there is no pending proposal. The text is
+   * untrusted. Hosts without such comments leave it out.
+   */
+  descriptionProposal?(repository: string, prNumber: number): Promise<DescriptionProposal | null>;
   /** Adds a label to a pull request (created if missing). Absent on hosts without labels. */
   addLabel?(repository: string, prNumber: number, label: string): Promise<void>;
   /**

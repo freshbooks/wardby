@@ -148,6 +148,12 @@ export function extractProposedDescription(commentBody: string): string | undefi
   return proposal || undefined;
 }
 
+/** The run a fallback comment names as its proposer; undefined when it names none. */
+export function proposingRunId(commentBody: string): string | undefined {
+  const named = /latest run \(`([^`\n]+)`\)/.exec(commentBody)?.[1];
+  return named && SAFE_RUN_ID.test(named) ? named : undefined;
+}
+
 /**
  * The pull request's description comment, carrying the description wardby's
  * latest run proposed when it could not apply it because a person edited the
