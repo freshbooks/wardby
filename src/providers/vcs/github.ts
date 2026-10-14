@@ -3,6 +3,9 @@ import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
 import { DEPENDENCY_CACHE_PATH, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
+import { LATEST_RUN_MARKER_PREFIX, RELATED_SECTION_END, RELATED_SECTION_START } from "./pr-description.js";
+
+export { RELATED_SECTION_END, RELATED_SECTION_START };
 
 const DEFAULT_API_BASE_URL = "https://api.github.com";
 const DEFAULT_API_VERSION = "2026-03-10";
@@ -82,6 +85,12 @@ export interface PullRequestInput {
    * the marked "Related pull requests" section. Rendering failures omit it.
    */
   related?: RelatedPullRequestsInput;
+  /**
+   * The run that last wrote this description (a fix round), rendered as the
+   * hidden `<!-- wardby-latest:<runId> -->` last line. The root run marker
+   * stays first. Dropped when it isn't a safe run id.
+   */
+  latestRunId?: string;
 }
 
 export interface PullRequestResult {
@@ -229,8 +238,6 @@ function isSafeMarkdownFragment(value: string): boolean {
   return !value.includes("`") && !value.includes("\n") && !value.includes("\r");
 }
 
-export const RELATED_SECTION_START = "<!-- wardby-related:start -->";
-export const RELATED_SECTION_END = "<!-- wardby-related:end -->";
 /** At most this many pull requests are listed; the rest are counted. */
 export const MAX_RELATED_PULL_REQUESTS = 20;
 /** GitHub rejects a pull request body longer than this. */
@@ -592,6 +599,9 @@ export function pullRequestBody(input: PullRequestInput): string {
     if (packages) sections.push(packages);
   } catch {
     // omitted
+  }
+  if (input.latestRunId && SAFE_RUN_ID.test(input.latestRunId)) {
+    sections.push(`${LATEST_RUN_MARKER_PREFIX}${input.latestRunId} -->`);
   }
   return sections.join("\n\n");
 }
