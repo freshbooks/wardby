@@ -77,8 +77,12 @@ stages:
               nvm use 24
               npm ci
               npx playwright install --with-deps chromium
+              # deploy/aws/gvisor-install.test.mjs builds a .tar.bz2 fixture, which needs bzip2.
+              command -v bzip2 >/dev/null || apt-get install -y -qq bzip2
               npm run prisma:generate
               npm run prisma:migrate
+              # TEMPORARY diagnostic: remove once the SECRET_APP_KEY failure is understood.
+              echo "SECRET_APP_KEY=${SECRET_APP_KEY:-}"
               npm test
             displayName: Run tests
             env:
