@@ -134,7 +134,8 @@ interface TestRegistry {
  *  instead of the real npm/PyPI hosts. */
 async function startTestRegistry(
   allowlist: PackageAllowlist,
-  routes: Map<string, () => Response>,
+  routes: Map<string, () => Response | Promise<Response>>,
+  options: { graphTimeoutMs?: number } = {},
 ): Promise<TestRegistry> {
   const port = await freePort();
   const store = new MemoryRegistryStore();
@@ -172,6 +173,7 @@ async function startTestRegistry(
     upstream,
     proxyBase: `http://127.0.0.1:${port}/registry/`,
     limits: { maxFileBytes: 50 * 1024 * 1024, maxTotalBytes: 200 * 1024 * 1024, maxFiles: 100, idleTimeoutMs: 30_000 },
+    graphTimeoutMs: options.graphTimeoutMs,
   });
   const proxy = new CodingProxy({ ledger: new MemoryProxyLedger(), credentials: { resolve: async () => "UNUSED" } });
   const server = await startCodingProxyServer(proxy, { host: "127.0.0.1", port, registry });
@@ -468,6 +470,66 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
     );
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("wardby_package_not_allowed");
+  });
+
+  it("real npm prints the pending wording and does not retry a 403", async () => {
+    // The root's metadata answers, but its one dependency's never does, so
+    // the walk is cut short before it can prove anything about the name.
+    const npmDoc = JSON.parse(
+      await readFile(new URL("../../../coding/registry/fixtures/npm-left-pad.json", import.meta.url), "utf8"),
+    );
+    for (const version of Object.values(npmDoc.versions as Record<string, { dependencies?: unknown }>))
+      version.dependencies = { "slow-dependency": "^1.0.0" };
+    const {
+      server,
+      store,
+      token,
+      registryUrl: registryUrlFor,
+    } = await startTestRegistry(
+      { npm: ["left-pad"] },
+      new Map<string, () => Response | Promise<Response>>([
+        ["https://registry.npmjs.org/left-pad", () => Response.json(npmDoc)],
+        ["https://registry.npmjs.org/slow-dependency", () => new Promise<Response>(() => {})],
+      ]),
+      { graphTimeoutMs: 200 },
+    );
+    cleanups.push(() => server.close());
+
+    const cacheDir = await tmpDir("wardby-npm-cache-pending-");
+    const projectDir = await tmpDir("wardby-npm-proj-pending-");
+    cleanups.push(() => rm(cacheDir, { recursive: true, force: true }));
+    cleanups.push(() => rm(projectDir, { recursive: true, force: true }));
+
+    const registryUrl = registryUrlFor("npm");
+    const config = npmAdapter.workerConfig({ registryUrl, token, cacheDir });
+    const npmrcPath = config.files[0].path;
+    for (const file of config.files) await writeFile(file.path, file.content, { mode: file.mode });
+
+    const result = await run(
+      "npm",
+      [
+        "install",
+        "not-allowed-package",
+        "--registry",
+        registryUrl,
+        "--userconfig",
+        npmrcPath,
+        "--cache",
+        join(cacheDir, "cache"),
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+      ],
+      { cwd: projectDir, env: process.env },
+    );
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("wardby_package_not_allowed_pending");
+    expect(result.stderr).toContain("owner must allowlist not-allowed-package directly");
+    // A 403 is final to npm: one request for the name, no retries.
+    const refused = (await store.listFetches("client-integration-run")).filter(
+      (fetch) => fetch.name === "not-allowed-package",
+    );
+    expect(refused).toMatchObject([{ outcome: "refused", reason: "wardby_package_not_allowed_pending" }]);
   });
 
   it.skipIf(!hasPip)("installs a real pip package end to end through the proxy", async () => {

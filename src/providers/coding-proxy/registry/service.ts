@@ -13,6 +13,17 @@ import { logger } from "../../../core/logger.js";
 import { matchRoot, parseAllowlist, resolvePolicy } from "../../../coding/registry/allowlist.js";
 import { acceptedAdvisoriesReason, PLAN_REFUSAL_FILENAME } from "../../../coding/registry/report.js";
 import {
+  GRAPH_INCOMPLETE,
+  GRAPH_LIMIT,
+  graphIncompleteMessage,
+  graphLimitMessage,
+  notAllowedMessage,
+  notAllowedPendingMessage,
+  PACKAGE_NOT_ALLOWED,
+  PACKAGE_NOT_ALLOWED_PENDING,
+  type WalkProgress,
+} from "../../../coding/registry/refusal-hints.js";
+import {
   RegistryError,
   type AllowlistEntry,
   type DependencySpec,
@@ -188,10 +199,43 @@ interface GraphWalk {
 
 const edgeKey = (edge: GraphEdge) => `${edge.name}\0${edge.range}`;
 
+/** Edges the walk has not expanded yet: queued, or parked in `failed` with
+ *  attempts left. Read only between walks (a running walk has its batch
+ *  off the queue). */
+function unexpandedEdges(walk: GraphWalk): GraphEdge[] {
+  const retriable = [...walk.failed.entries()]
+    .filter(([key]) => (walk.attempts.get(key) ?? 0) < MAX_GRAPH_NODE_ATTEMPTS)
+    .map(([, entry]) => entry.edge);
+  return [...walk.queue, ...retriable];
+}
+
+/** Packages walked so far, and the distinct names with an unexpanded edge
+ *  that are not yet expanded themselves (a further edge to an expanded
+ *  package adds no new package). */
+function walkProgress(walk: GraphWalk): WalkProgress {
+  const queued = new Set(unexpandedEdges(walk).map((edge) => edge.name));
+  for (const name of walk.expandedVersions.keys()) queued.delete(name);
+  return { walked: walk.expandedVersions.size, queued: queued.size };
+}
+
+/** Whether `name` has an unexpanded edge: a kept version of an expanded
+ *  package declares it, so only its own versions remain to be checked. */
+function inFrontier(walk: GraphWalk, name: string): boolean {
+  return unexpandedEdges(walk).some((edge) => edge.name === name);
+}
+
 /** `cutShort`: the walk stopped (its time ran out, or the package bound
  *  tripped) before it either found the name or expanded the whole graph,
- *  so whether the name is in the graph is unknown. */
-type GraphAnswer = "found" | "absent" | { cutShort: "timeout" | "limit" } | { unavailable: NodeFailure };
+ *  so whether the name is in the graph is unknown. On a timeout,
+ *  `frontier` says whether the name is already declared by an expanded
+ *  version (only its own versions are left to check), rather than never
+ *  reached at all. */
+type GraphAnswer =
+  | "found"
+  | "absent"
+  | { cutShort: "timeout"; progress: WalkProgress; frontier: boolean }
+  | { cutShort: "limit"; progress: WalkProgress; limit: number }
+  | { unavailable: NodeFailure };
 
 /** Discriminated result of one `reader.read()` call in `download`'s stream
  *  loop, folding a rejection (`ok: false`) into the same shape as a
@@ -786,21 +830,25 @@ export class RegistryService {
         // never succeed: answer with a definitive 4xx (npm does not retry
         // it) rather than a 503 that a client or agent would retry forever.
         // Still not "not allowed": the name was not proven absent.
-        await this.refuse(context, adapter, name, "wardby_graph_limit");
-        throw new RegistryError(
-          403,
-          "wardby_graph_limit",
-          `"${name}" was not reached before this agent's ${adapter.id} dependency graph walk hit its package limit (REGISTRY_MAX_GRAPH_PACKAGES) for this run; retrying will not help: allowlist the package directly, or ask the operator to raise the limit`,
-        );
+        await this.refuse(context, adapter, name, GRAPH_LIMIT);
+        throw new RegistryError(403, GRAPH_LIMIT, graphLimitMessage(name, adapter.id, graph.limit));
       }
-      // Not proven absent, so never "not allowed": a timed-out walk resumes
-      // where it stopped on the next miss, so a retry (npm retries a 5xx on
-      // its own) can find the name.
-      await this.refuse(context, adapter, name, "wardby_graph_incomplete");
+      if (graph.frontier) {
+        // An expanded version declares the name and only its own versions
+        // are left to check: the walk resumes there on the next miss, so a
+        // retry (npm retries a 5xx on its own) can find it.
+        await this.refuse(context, adapter, name, GRAPH_INCOMPLETE);
+        throw new RegistryError(503, GRAPH_INCOMPLETE, graphIncompleteMessage(name, adapter.id, graph.progress));
+      }
+      // The walk never reached the name. Not proven absent, so not the
+      // final "not allowed", but definite (a 4xx npm does not retry): a
+      // later miss may still resume the walk and find it, which is no
+      // reason to keep the agent waiting on retries now.
+      await this.refuse(context, adapter, name, PACKAGE_NOT_ALLOWED_PENDING);
       throw new RegistryError(
-        503,
-        "wardby_graph_incomplete",
-        `"${name}" was not reached before this agent's ${adapter.id} dependency graph walk was cut short by its time limit (REGISTRY_GRAPH_TIMEOUT_MS); the walk continues where it stopped: try again`,
+        403,
+        PACKAGE_NOT_ALLOWED_PENDING,
+        notAllowedPendingMessage(name, adapter.id, graph.progress),
       );
     }
     if (typeof graph === "object") {
@@ -817,12 +865,8 @@ export class RegistryService {
         `"${name}" could not be checked against this agent's approved ${adapter.id} dependency graph because ${source} was unavailable while resolving it; try again`,
       );
     }
-    await this.refuse(context, adapter, name, "wardby_package_not_allowed");
-    const hint =
-      entries.length === 0
-        ? `this agent has no ${adapter.id} package allowlist`
-        : `"${name}" is not on this agent's ${adapter.id} package allowlist or in its dependency graph`;
-    throw new RegistryError(403, "wardby_package_not_allowed", hint);
+    await this.refuse(context, adapter, name, PACKAGE_NOT_ALLOWED);
+    throw new RegistryError(403, PACKAGE_NOT_ALLOWED, notAllowedMessage(name, adapter.id, entries.length > 0));
   }
 
   /** Whether `name` is in the run's approved graph for this ecosystem:
@@ -860,7 +904,12 @@ export class RegistryService {
     let started = false;
     for (;;) {
       if (current.found.has(name)) return "found";
-      if (current.exhausted) return { cutShort: "limit" };
+      if (current.exhausted)
+        return {
+          cutShort: "limit",
+          progress: walkProgress(current),
+          limit: this.options.maxGraphPackages ?? DEFAULT_MAX_GRAPH_PACKAGES,
+        };
       // Single-flight: a miss while a walk is running waits for it rather
       // than starting a second one, then re-checks (that walk may have
       // stopped on finding a different name). Checked before the queue: a
@@ -879,7 +928,8 @@ export class RegistryService {
         });
       }
       const end = await current.running;
-      if (end === "timeout" && !current.found.has(name)) return { cutShort: "timeout" };
+      if (end === "timeout" && !current.found.has(name))
+        return { cutShort: "timeout", progress: walkProgress(current), frontier: inFrontier(current, name) };
     }
   }
 

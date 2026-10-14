@@ -1385,11 +1385,15 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     expect(store.fetches).toMatchObject([{ name: "leaf", version: "1.0.0", outcome: "served" }]);
   });
 
-  it("refuses and records a package outside the graph", async () => {
+  it('answers the final 403 wardby_package_not_allowed, with "the owner must allowlist it", only once the walk has completed', async () => {
     const { get, store } = graphService();
     const response = await get("stranger/-/stranger-1.0.0.tgz");
     expect(response).toMatchObject({ status: 403 });
-    expect("body" in response && response.body).toContain("wardby_package_not_allowed");
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed:");
+    expect("body" in response && response.body).toContain(
+      "stranger (npm) is not on this agent's allowlist, and is not reachable from an allowlisted package",
+    );
+    expect("body" in response && response.body).toContain("owner must allowlist it; retrying will not help");
     expect("body" in response && response.body).not.toContain("cut short");
     expect(store.fetches).toMatchObject([
       { name: "stranger", outcome: "refused", reason: "wardby_package_not_allowed" },
@@ -1406,13 +1410,16 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     expect(await store.isAllowedDependency("run-1", "npm", name)).toBe(false);
   });
 
-  it("answers a definitive 403 wardby_graph_limit, never not-allowed and never a retryable 503, when the package bound trips", async () => {
+  it("graph_limit carries the owner-must-allowlist wording and the limit", async () => {
     // app and mid fit in the bound; leaf, a third package, does not.
     const { get, store } = graphService({ maxGraphPackages: 2 });
     const response = await get("leaf/-/leaf-1.0.0.tgz");
     expect(response).toMatchObject({ status: 403 });
     expect("body" in response && response.body).toContain("wardby_graph_limit");
+    expect("body" in response && response.body).toContain("needs more than 2 packages");
+    expect("body" in response && response.body).toContain("REGISTRY_MAX_GRAPH_PACKAGES");
     expect("body" in response && response.body).toContain("retrying will not help");
+    expect("body" in response && response.body).toContain("owner must allowlist the packages directly");
     expect("body" in response && response.body).not.toContain("wardby_package_not_allowed");
     expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_graph_limit" }]);
     // The bound is permanent for the run: a retry gets the same definitive answer.
@@ -1421,14 +1428,97 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     await expect(get("mid")).resolves.toMatchObject({ status: 200 });
   });
 
-  it("answers 503 wardby_graph_incomplete, never not-allowed, when the walk times out", async () => {
+  it("answers 403 wardby_package_not_allowed_pending, never a retryable 503, for a name the timed-out walk has not reached", async () => {
+    const { get, store } = graphService({ hang: "mid", graphTimeoutMs: 30 });
+    const response = await get("stranger");
+    expect(response).toMatchObject({ status: 403 });
+    const body = "body" in response ? response.body : "";
+    expect(body).toContain("wardby_package_not_allowed_pending:");
+    expect(body).toContain("after 1 package,");
+    expect(body).toContain("at least 1 more queued");
+    expect(body).toContain("owner must allowlist stranger directly");
+    expect(body).toContain("retrying rarely helps");
+    expect(body).not.toContain("wardby_graph_incomplete");
+    expect(store.fetches).toMatchObject([
+      { name: "stranger", outcome: "refused", reason: "wardby_package_not_allowed_pending" },
+    ]);
+  });
+
+  it("answers the timed-out walk's pending 403 for a reachable name it has not reached yet, never not-allowed", async () => {
+    // leaf is in the graph, but mid (its parent) never answers: the walk
+    // has not seen leaf, so it gets the pending answer, not the final one.
     const { get } = graphService({ hang: "mid", graphTimeoutMs: 30 });
     const response = await get("leaf");
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed_pending:");
+    expect("body" in response && response.body).not.toContain("wardby_package_not_allowed:");
+    expect("body" in response && response.body).not.toContain("wardby_package_not_found");
+  });
+
+  it("keeps 503 wardby_graph_incomplete for a name an expanded version declares while its own versions are still being checked", async () => {
+    const { get, store } = graphService({ hang: "leaf", graphTimeoutMs: 30 });
+    const response = await get("leaf");
     expect(response).toMatchObject({ status: 503 });
-    expect("body" in response && response.body).toContain("wardby_graph_incomplete");
-    expect("body" in response && response.body).toContain("cut short by its time limit");
-    expect("body" in response && response.body).not.toContain("wardby_package_not_allowed");
-    expect("body" in response && response.body).not.toContain("not found");
+    const body = "body" in response ? response.body : "";
+    expect(body).toContain("wardby_graph_incomplete:");
+    expect(body).toContain("could not be fully checked after 2 packages");
+    expect(body).toContain("Please try again");
+    expect(body).not.toContain("wardby_package_not_allowed");
+    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_graph_incomplete" }]);
+  });
+
+  it("a pending answer becomes final once a later request completes the walk", async () => {
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const { get, store } = graphService({ gate, graphTimeoutMs: 30 });
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    open();
+    const final = await get("stranger");
+    expect(final).toMatchObject({ status: 403 });
+    expect("body" in final && final.body).toContain("wardby_package_not_allowed:");
+    expect(store.fetches).toMatchObject([
+      { name: "stranger", outcome: "refused", reason: "wardby_package_not_allowed_pending" },
+      { name: "stranger", outcome: "refused", reason: "wardby_package_not_allowed" },
+    ]);
+  });
+
+  it("resumes across requests: the second request continues the first walk without re-fetching packages it already expanded", async () => {
+    const { get, urls } = graphService({ hang: "mid", graphTimeoutMs: 30 });
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    const retry = await get("stranger");
+    expect(retry).toMatchObject({ status: 403 });
+    expect(urls.filter((url) => url.endsWith("/app"))).toHaveLength(1);
+    // The retry went on from where the first walk stopped (app expanded,
+    // mid queued), and app was not walked again.
+    expect("body" in retry && retry.body).toContain("after 1 package, at least 1 more queued");
+  });
+
+  it("a new run starts its own walk", async () => {
+    // Walks are per run on purpose: another run's allowlist must never
+    // widen this one's graph, so the second run fetches app again.
+    const { get, urls } = graphService({ hang: "mid", graphTimeoutMs: 30, otherRuns: { rrg_other: ["app@^1"] } });
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get("stranger", "rrg_other")).resolves.toMatchObject({ status: 403 });
+    expect(urls.filter((url) => url.endsWith("/app"))).toHaveLength(2);
+  });
+
+  it("the pending answer counts only names not yet expanded as queued", async () => {
+    // The first walk stops once it finds mid, leaving edges queued for mid
+    // (by dist-tag) and leaf (by range), both already expanded under
+    // another spec, and for leaf-new. Then mid stops answering.
+    const options: Parameters<typeof graphService>[0] = { allowlist: ["app@^1", "leaf", "tagged"], graphTimeoutMs: 30 };
+    const { get } = graphService(options);
+    await expect(get("mid")).resolves.toMatchObject({ status: 200 });
+    options.hang = "mid";
+    const response = await get("stranger");
+    expect(response).toMatchObject({ status: 403 });
+    const body = "body" in response ? response.body : "";
+    expect(body).toContain("wardby_package_not_allowed_pending:");
+    // app, leaf, tagged and mid were expanded; of the three queued edges
+    // (mid@latest, leaf@^1, leaf-new@^1) only leaf-new is a new package.
+    expect(body).toContain("after 4 packages, at least 1 more queued");
   });
 
   it("serves a name on retry once a timed-out walk resumes and reaches it", async () => {
@@ -1437,13 +1527,14 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       open = resolve;
     });
     const { get, store } = graphService({ gate, graphTimeoutMs: 30 });
-    await expect(get("leaf/-/leaf-1.0.0.tgz")).resolves.toMatchObject({ status: 503 });
+    // Nothing was expanded yet, so leaf is not in the frontier: pending.
+    await expect(get("leaf/-/leaf-1.0.0.tgz")).resolves.toMatchObject({ status: 403 });
     open();
     const retried = await get("leaf/-/leaf-1.0.0.tgz");
     if (!("stream" in retried)) throw new Error(`expected a stream, got ${JSON.stringify(retried)}`);
     await new Response(retried.stream).arrayBuffer();
     expect(store.fetches).toMatchObject([
-      { name: "leaf", outcome: "refused", reason: "wardby_graph_incomplete" },
+      { name: "leaf", outcome: "refused", reason: "wardby_package_not_allowed_pending" },
       { name: "leaf", outcome: "served" },
     ]);
   });
@@ -1559,8 +1650,11 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       now: () => new Date(NOW.getTime() + (tick += 5_000)),
     });
     const response = await get("leaf");
-    expect(response).toMatchObject({ status: 503 });
-    expect("body" in response && response.body).toContain("cut short by its time limit");
+    // The deadline passed before anything was expanded: leaf was never
+    // reached, so the answer is the pending 403, with app still queued.
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed_pending:");
+    expect("body" in response && response.body).toContain("after 0 packages, at least 1 more queued");
     expect(urls).toEqual([]);
   });
 
@@ -1619,7 +1713,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     expect(audited.filter((name) => name === "leaf")).toHaveLength(1);
   });
 
-  it("makes no walk calls for PyPI, whose index carries no dependencies", async () => {
+  it("PyPI, which does not walk, answers the final wording", async () => {
     const store = new MemoryRegistryStore();
     store.contexts.set(capabilityHash("rrg_token"), {
       runId: "run-1",
@@ -1645,7 +1739,11 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     });
     const response = await registry.handle({ ...request("simple/stranger/"), ecosystem: "pypi" });
     expect(response).toMatchObject({ status: 403 });
-    expect("body" in response && response.body).toContain("wardby_package_not_allowed");
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed:");
+    expect("body" in response && response.body).toContain("stranger (pypi) is not on this agent's allowlist");
+    expect("body" in response && response.body).toContain("owner must allowlist it; retrying will not help");
+    // PyPI never walks, so it never answers "pending".
+    expect("body" in response && response.body).not.toContain("pending");
     expect(urls).toEqual([]);
   });
 });
