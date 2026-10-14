@@ -203,9 +203,9 @@ export declare function extractArchive(
   file: string,
   destination: string,
   options: { budgetBytes: number; maxEntries?: number; signal?: AbortSignal },
-): Promise<void>;
+): Promise<{ links: string[] }>;
 
-export declare function verifyTree(root: string, signal?: AbortSignal): Promise<void>;
+export declare function verifyLinks(root: string, links: readonly string[], signal?: AbortSignal): Promise<void>;
 
 export declare function checkConsistency(
   projectRoot: string,

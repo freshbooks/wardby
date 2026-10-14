@@ -904,7 +904,7 @@ as the project's reason: the project installs `cold` instead, and a traced
 Codex run's worker log records the code as `hit_rejected` or
 `nearest_rejected`. The same log times each restore's stages as
 `restore_phase` events (`stage` is `download`, `scan`, `extract`,
-`verify_tree` or `check_consistency`, with `ms`), for finding a slow restore.
+`verify_links` or `check_consistency`, with `ms`), for finding a slow restore.
 
 | Reason                                                        | Meaning and what to do                                                                                                                                                                                           |
 | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
