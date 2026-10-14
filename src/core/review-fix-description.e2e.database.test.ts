@@ -107,7 +107,14 @@ class FakeGitHub {
   readonly requests: string[] = [];
   readonly descriptionPatches: string[] = [];
   readonly markReadyMutations: Json[] = [];
-  readonly comments: Array<{ id: number; body: string; user: { type: string; login: string } }> = [];
+  readonly comments: Array<{
+    id: number;
+    body: string;
+    user: { type: string; login: string };
+    performed_via_github_app: { id: number };
+    html_url: string;
+  }> = [];
+  readonly commentWrites: string[] = [];
   readonly checkRuns: CheckRun[] = [];
   issueReads = 0;
   private nextId = 1000;
@@ -121,6 +128,7 @@ class FakeGitHub {
   ) {
     this.pr = {
       number: prNumber,
+      title: "Knock-knock jokes endpoint",
       html_url: `https://github.com/${repository}/pull/${prNumber}`,
       node_id: `PR_node_${prNumber}`,
       state: "open",
@@ -136,6 +144,11 @@ class FakeGitHub {
 
   get body(): string {
     return this.pr.body as string;
+  }
+
+  /** wardby's description comments (other comments, such as round status, left out). */
+  get descriptionComments() {
+    return this.comments.filter((comment) => comment.body.startsWith("<!-- wardby-description"));
   }
 
   get labels(): string[] {
@@ -174,6 +187,7 @@ class FakeGitHub {
       return json(open ? [this.pr] : []);
     }
     if (method === "GET" && path === pr) return json(this.pr);
+    if (method === "GET" && path === `${pr}/files`) return json([]);
     if (method === "GET" && path === `${repo}/issues/${ISSUE_NUMBER}`) {
       this.issueReads += 1;
       return json({
@@ -199,17 +213,23 @@ class FakeGitHub {
 
     if (method === "GET" && path === `${issue}/comments`) return json(this.comments);
     if (method === "POST" && path === `${issue}/comments`) {
-      const comment = { id: this.nextId++, body: String(sent.body), user: { type: "Bot", login: `${APP_SLUG}[bot]` } };
+      const id = this.nextId++;
+      const comment = {
+        id,
+        body: String(sent.body),
+        user: { type: "Bot", login: `${APP_SLUG}[bot]` },
+        performed_via_github_app: { id: APP_ID },
+        html_url: `https://github.com/${this.repository}/pull/${this.prNumber}#issuecomment-${id}`,
+      };
       this.comments.push(comment);
-      return json(
-        { ...comment, html_url: `https://github.com/${this.repository}/pull/${this.prNumber}#c${comment.id}` },
-        201,
-      );
+      this.commentWrites.push(`POST ${id}`);
+      return json(comment, 201);
     }
     const commentPatch = new RegExp(`^${repo}/issues/comments/(\\d+)$`).exec(path);
     if (method === "PATCH" && commentPatch) {
       const comment = this.comments.find((c) => c.id === Number(commentPatch[1]));
       if (comment) comment.body = String(sent.body);
+      this.commentWrites.push(`PATCH ${commentPatch[1]}`);
       return json(comment ?? {});
     }
     if (method === "POST" && path === `${issue}/labels`) {
@@ -260,6 +280,9 @@ class FakeGitHub {
         this.markReadyMutations.push(sent.variables as Json);
         if ((sent.variables as Json).id === this.pr.node_id) this.pr.draft = false;
         return json({ data: { markPullRequestReadyForReview: { pullRequest: { isDraft: false } } } });
+      }
+      if (query.includes("reviewThreads")) {
+        return json({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
       }
     }
     return json({ message: `unexpected ${method} ${path}` }, 404);
@@ -421,7 +444,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
     });
 
     /** The draft PR, its root run (from a mention on issue #12), and the review that requested changes. */
-    async function draftWithFailedReview(name: string, prNumber: number) {
+    async function draftWithFailedReview(name: string, prNumber: number, edit?: (body: string) => string) {
       const rootRunId = id(`${name}-root`);
       const headRef = `wardby/run-${rootRunId}`;
       // --- The draft PR wardby opened: its root coding run recorded the description's hash. ---
@@ -433,7 +456,8 @@ describe.skipIf(!process.env.DATABASE_URL)(
         summary: OLD_SUMMARY,
         tests: [{ command: "npm test", outcome: "passed" }],
       });
-      const github = new FakeGitHub(repository, prNumber, headRef, originalBody);
+      // A person may have edited it since; the recorded hash stays the one wardby wrote.
+      const github = new FakeGitHub(repository, prNumber, headRef, edit ? edit(originalBody) : originalBody);
       // The delivery run a mention on issue #12 started; it delegated the root coding run.
       const openerRun = id(`${name}-opener`);
       await db.run.create({ data: { id: openerRun, agentId: delivery, status: "succeeded", trigger: "host_event" } });
@@ -525,8 +549,8 @@ describe.skipIf(!process.env.DATABASE_URL)(
      * agent, which finds no code to change and ends with the description it can write from its
      * task. `withIssueRead: false` is the control: the executor has no linked-issue read.
      */
-    async function fixRound(name: string, prNumber: number, withIssueRead: boolean) {
-      const draft = await draftWithFailedReview(name, prNumber);
+    async function fixRound(name: string, prNumber: number, withIssueRead: boolean, edit?: (body: string) => string) {
+      const draft = await draftWithFailedReview(name, prNumber, edit);
       const { rootRunId, headRef, github, firstReview } = draft;
       // --- Production components; only GitHub's HTTP API, git, the launcher and sessions are fakes. ---
       const key = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
@@ -618,7 +642,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
         onCodingRunTerminal: (runId) => reReviewAfterNoChangeFix(runId, deps),
       });
       await executor.start(codingRunId);
-      return { ...draft, reviewHost, jobs, nativeStarts, codingRunId };
+      return { ...draft, reviewHost, jobs, nativeStarts, codingRunId, executor, fixRun };
     }
 
     it("review asks for the issue's checklist and `Resolves #N` -> the fix round is handed the issue and rewrites the description -> re-review approves -> marked ready", async () => {
@@ -631,7 +655,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
 
       // The fix round's task carried issue #12, read through the App, fenced as untrusted data.
       expect(github.issueReads).toBe(1);
-      expect(jobs.task).toContain("acceptance criteria are the contract");
+      expect(jobs.task).toContain("acceptance criteria as written are what the description's checklist should reflect");
       expect(jobs.task).toContain("<untrusted_issue>\nIssue #12: Knock-knock jokes endpoint");
       for (const line of CHECKLIST) expect(jobs.task).toContain(line);
 
@@ -711,6 +735,151 @@ describe.skipIf(!process.env.DATABASE_URL)(
       expect(jobs.task).not.toContain("<untrusted_issue>");
       expect(github.body).not.toContain("## Acceptance");
       expect(github.body).not.toContain("Resolves #12");
+    });
+
+    /** The re-review's read of the pull request, and its approval leading to mark-ready. */
+    async function approveReReview(github: FakeGitHub, reviewHost: GitHubReviewHost, reReview: string): Promise<void> {
+      const check = await db.runHostCheck.findUniqueOrThrow({ where: { runId: reReview } });
+      await reviewHost.completeCheck(repository, {
+        checkId: check.checkId,
+        conclusion: "success",
+        title: "Approved",
+        summary: "The description requirements are met.",
+      });
+      await db.runHostCheck.update({
+        where: { runId: reReview },
+        data: { verdict: "APPROVED", reviewBody: "LGTM", completedAt: new Date() },
+      });
+      await db.run.update({ where: { id: reReview }, data: { status: "succeeded" } });
+      await expect(markReadyAfterRun({ db, hosts: { github: reviewHost } }, reReview)).resolves.toBe("marked");
+      expect(github.pr.draft).toBe(false);
+    }
+
+    const PERSON_NOTE = "Note from the author: please also check the docs.";
+
+    it("hand-edited description: the fix round's proposal comment is stamped with the head, the re-review reads it, approves, and the PR is marked ready", async () => {
+      const prNumber = 9;
+      const { github, reviewHost, jobs, nativeStarts, codingRunId } = await fixRound(
+        "edited",
+        prNumber,
+        true,
+        (body) => `${body}\n\n${PERSON_NOTE}`,
+      );
+      const editedBody = github.body;
+      // Not overwritten: a proposal comment instead, stamped with the (unchanged) head.
+      expect(github.descriptionPatches).toHaveLength(0);
+      expect(github.body).toBe(editedBody);
+      expect(github.descriptionComments).toHaveLength(1);
+      const comment = github.descriptionComments[0].body;
+      expect(comment.startsWith(`<!-- wardby-description head=${HEAD_SHA} -->\n`)).toBe(true);
+      expect(comment).toContain(fixRoundSummary(jobs.task));
+      expect(comment).toContain("- [x] `GET /jokes` lists the seeded jokes");
+      await expect(
+        db.codingRun.findUniqueOrThrow({ where: { runId: codingRunId }, select: { prDescriptionOutcome: true } }),
+      ).resolves.toEqual({ prDescriptionOutcome: "edited_by_hand" });
+
+      // The re-review reads the pull request when it runs: the proposal for this head is there.
+      expect(nativeStarts).toHaveLength(2);
+      const view = await reviewHost.readPullRequest(repository, prNumber, {
+        maxPatchChars: 1000,
+        agentMarker: reviewer,
+      });
+      expect(view.body).toContain(PERSON_NOTE);
+      expect(view.descriptionProposal).toMatchObject({ state: "current", forHead: HEAD_SHA, runId: codingRunId });
+      const text = view.descriptionProposal?.state === "current" ? view.descriptionProposal.text : "";
+      expect(text).toContain("Resolves #12");
+      expect(text).toContain("- [x] `GET /jokes` lists the seeded jokes");
+
+      await approveReReview(github, reviewHost, nativeStarts[1]);
+    });
+
+    it("hand-edited description: once the author copies the proposal in, the next run takes the description back", async () => {
+      const prNumber = 10;
+      const { github, jobs, rootRunId, fixRun } = await fixRound(
+        "copied",
+        prNumber,
+        true,
+        (body) => `${body}\n\n${PERSON_NOTE}`,
+      );
+      const proposal = /```markdown\n([\s\S]*?)\n```/.exec(github.descriptionComments[0].body)![1];
+      // The author pastes the proposal into the description.
+      github.pr.body = proposal;
+
+      // A later run on the pull request (a follow-up) ends with no change and the same final message.
+      const followUp = id("copied-follow-up");
+      await db.run.create({
+        data: { id: followUp, agentId: coder, status: "pending", parentRunId: fixRun, executionManaged: true },
+      });
+      await db.codingRun.create({
+        data: {
+          runId: followUp,
+          task: "Follow up.",
+          repository,
+          baseRef: "main",
+          headRef: `wardby/run-${rootRunId}`,
+          rootCodingRunId: rootRunId,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 900,
+          protectedPaths: [".github/workflows/**", "CODEOWNERS"],
+          budgetReservedUsd: 1,
+        },
+      });
+      const second = new FinishedJobs(() => ({
+        exitCode: 0,
+        reason: "completed",
+        resultArtifact: JSON.stringify({
+          schemaVersion: 1,
+          runId: followUp,
+          outcome: "no_changes",
+          summary: fixRoundSummary(jobs.task),
+          tests: [{ command: "npm test", outcome: "passed" }],
+        }),
+      }));
+      const workRoot = await mkdtemp(join(tmpdir(), "wardby-fixdesc-"));
+      workRoots.push(workRoot);
+      const key = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
+        type: "pkcs1",
+        format: "pem",
+      });
+      const client = new GitHubAppClient({ appId: String(APP_ID), privateKey: key.toString() }, github.fetch);
+      const executor = new ContainerExecutor({
+        store: new InMemorySlotStore(db),
+        jobs: second,
+        vcs: new RoutingVcsProvider({
+          github: new GitVcsProvider({
+            rootDir: join(workRoot, "vcs"),
+            remote: new GitHubRemote({ github: client, sleep: async () => {} }),
+            git: new ScriptedGit(`https://github.com/${repository}.git`, `wardby/run-${rootRunId}`),
+          }),
+          local: null,
+        }),
+        sessions,
+        capabilities: new RunCapabilityVault(),
+        artifactRoot: join(workRoot, "artifacts"),
+        workerImage: IMAGE,
+        credentialRef: "env:OPENAI_API_KEY",
+        limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
+        maxDiskMb: 8192,
+        sleep: async () => {},
+        repoAccess: { authorizeUse: async () => ({ ok: true }) } as unknown as RepoAccessGate,
+      });
+      await executor.start(followUp);
+
+      // Taken back: wardby wrote the description directly and records it as its own again.
+      expect(github.descriptionPatches).toHaveLength(1);
+      expect(github.body).toContain("Resolves #12");
+      expect(github.body.endsWith(`<!-- wardby-latest:${followUp} -->`)).toBe(true);
+      await expect(
+        db.codingRun.findUniqueOrThrow({
+          where: { runId: rootRunId },
+          select: { prDescriptionSha256: true, prDescriptionRunId: true },
+        }),
+      ).resolves.toEqual({ prDescriptionSha256: descriptionSha256(github.body), prDescriptionRunId: followUp });
+      // The comment now says the description was applied, with no pending proposal.
+      expect(github.descriptionComments).toHaveLength(1);
+      expect(github.descriptionComments[0].body).toContain("<!-- wardby-description-applied -->");
+      expect(github.descriptionComments[0].body).not.toContain("```markdown");
     });
   },
 );
