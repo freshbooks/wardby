@@ -18,13 +18,14 @@ import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } f
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
+  DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
   PreparedWorkspace,
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
-import type { RelatedPullRequestEntry } from "../vcs/github.js";
+import type { DescriptionBaseline, RelatedPullRequestEntry } from "../vcs/github.js";
 import {
   ContainerExecutor,
   RunCapabilityVault,
@@ -169,6 +170,15 @@ class FakeStore implements ContainerExecutionStore {
     if (this.related instanceof Error) throw this.related;
     return this.related ?? [];
   }
+
+  /** Fix-round description store methods; tests that need them assign them. */
+  pullRequestDescriptionBaseline?: (rootRunId: string) => Promise<DescriptionBaseline>;
+  recordPullRequestDescription?: (input: {
+    rootRunId: string;
+    expectedSha256: string | null;
+    sha256: string;
+    agentTextRunId: string;
+  }) => Promise<boolean>;
 
   constructor(public run: ContainerRunSnapshot) {}
 
@@ -326,6 +336,13 @@ class FakeVcs implements VcsProvider {
   lastPrepareInput?: VcsPrepareInput;
   /** Make finalize report a pushed branch (a local repository) instead of a pull request. */
   pushBranchOnly = false;
+  /** The description outcome finalize reports on a pull request, when set. */
+  finalizeDescription?: DescriptionWriteOutcome;
+  /** The no-push description refresh; tests that need it assign it. */
+  refreshPullRequestDescription?: (
+    workspace: PreparedWorkspace,
+    details: FinalizeChangesDetails,
+  ) => Promise<DescriptionWriteOutcome | undefined>;
   notifyStartedCalls = 0;
   lastNotifyStartedAgentName?: string;
   notifyFinishedCalls: Array<{
@@ -381,6 +398,7 @@ class FakeVcs implements VcsProvider {
       commitSha: "b".repeat(40),
       pullRequestNumber: 42,
       pullRequestUrl: "https://github.com/openai/example/pull/42",
+      ...(this.finalizeDescription ? { description: structuredClone(this.finalizeDescription) } : {}),
     };
   }
   async cleanup(): Promise<void> {
@@ -1118,6 +1136,217 @@ describe("ContainerExecutor", () => {
     expect(created.vcs.notifyFinishedCalls).toEqual([
       { outcome: "succeeded", summary: "Fixed it.", agentName: "knock-knock-implement" },
     ]);
+  });
+
+  describe("pull request description", () => {
+    const RECORDED = "a".repeat(64);
+    const NEW_SHA = "c".repeat(64);
+    const baseline: DescriptionBaseline = {
+      recordedSha256: RECORDED,
+      previousAgentText: "The original description text.",
+      agentTextRunId: "root-run",
+    };
+
+    /** A fix round on root-run's PR, with the description store methods and call order recorded in events. */
+    async function fixRound(overrides: Partial<ContainerRunSnapshot> = {}) {
+      const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run", ...overrides });
+      const recorded: unknown[] = [];
+      created.store.pullRequestDescriptionBaseline = async (rootRunId) => {
+        created.events.push(`baseline:${rootRunId}`);
+        return structuredClone(baseline);
+      };
+      created.store.recordPullRequestDescription = async (input) => {
+        created.events.push("record");
+        recorded.push(input);
+        return true;
+      };
+      const complete = created.store.complete.bind(created.store);
+      created.store.complete = async (...args) => {
+        created.events.push("complete");
+        return complete(...args);
+      };
+      return { ...created, recorded };
+    }
+
+    function noChanges(created: Awaited<ReturnType<typeof harness>>) {
+      created.jobs.result.resultArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "no_changes",
+        summary: "Already correct.",
+        tests: [],
+      });
+    }
+
+    const descriptionWarnings = () =>
+      logged.filter((line) => line.level === "warn" && /description/.test(line.message));
+
+    it("fresh PR run records written hash on its own row", async () => {
+      const created = await harness();
+      const baselines: string[] = [];
+      created.store.pullRequestDescriptionBaseline = async (rootRunId) => {
+        baselines.push(rootRunId);
+        return structuredClone(baseline);
+      };
+      created.vcs.finalizeDescription = { kind: "written", sha256: NEW_SHA };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(baselines).toEqual([]);
+      expect(created.vcs.lastFinalizeDetails).not.toHaveProperty("description");
+      expect(created.store.completions[0]?.record).toEqual({
+        baseSha: "a".repeat(40),
+        prDescriptionOutcome: "written",
+        prDescriptionSha256: NEW_SHA,
+        prDescriptionRunId: "run-1",
+      });
+    });
+
+    it("review_fix continuation passes the baseline and records replaced + new hash on the root", async () => {
+      const created = await fixRound();
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.lastFinalizeDetails?.description).toEqual({ baseline });
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: RECORDED, sha256: NEW_SHA, agentTextRunId: "run-1" },
+      ]);
+      const record = created.store.completions[0]?.record;
+      expect(record).toMatchObject({ prDescriptionOutcome: "replaced" });
+      // The hash and author run belong to the root row, written by the compare-and-set alone.
+      expect(record).not.toHaveProperty("prDescriptionSha256");
+      expect(record).not.toHaveProperty("prDescriptionRunId");
+      expect(created.events.filter((e) => ["baseline:root-run", "finalize", "record", "complete"].includes(e))).toEqual(
+        ["baseline:root-run", "finalize", "record", "complete"],
+      );
+    });
+
+    it("records refreshed:<reason> and unchanged outcomes with the compare-and-set", async () => {
+      for (const [outcome, label] of [
+        [
+          { kind: "refreshed", reason: "too_short", sha256: NEW_SHA, agentTextRunId: "root-run" },
+          "refreshed:too_short",
+        ],
+        [{ kind: "unchanged", sha256: RECORDED, agentTextRunId: "root-run" }, "unchanged"],
+      ] as const) {
+        const created = await fixRound();
+        created.vcs.finalizeDescription = outcome;
+        await created.executor.start("run-1");
+        expect(created.recorded).toEqual([
+          { rootRunId: "root-run", expectedSha256: RECORDED, sha256: outcome.sha256, agentTextRunId: "root-run" },
+        ]);
+        expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: label });
+      }
+    });
+
+    it("no_changes continuation refreshes the description before store.complete (call order asserted)", async () => {
+      const created = await fixRound();
+      noChanges(created);
+      let refreshed: FinalizeChangesDetails | undefined;
+      created.vcs.refreshPullRequestDescription = async (workspace, details) => {
+        created.events.push("refresh");
+        expect(workspace.runId).toBe("run-1");
+        refreshed = details;
+        return { kind: "refreshed", reason: "too_short", sha256: NEW_SHA, agentTextRunId: "root-run" };
+      };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
+      expect(created.vcs.finalized).toBe(0);
+      expect(refreshed).toMatchObject({ summary: "Already correct.", tests: [], description: { baseline } });
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: RECORDED, sha256: NEW_SHA, agentTextRunId: "root-run" },
+      ]);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "refreshed:too_short" });
+      // The terminal hook (reReviewAfterNoChangeFix) must see the new body, so all of it lands before complete.
+      expect(
+        created.events.filter((e) => ["baseline:root-run", "refresh", "record", "complete", "cleanup"].includes(e)),
+      ).toEqual(["baseline:root-run", "refresh", "record", "complete", "cleanup"]);
+    });
+
+    it("a fresh no_changes run never refreshes a description", async () => {
+      const created = await harness();
+      noChanges(created);
+      let refreshes = 0;
+      created.vcs.refreshPullRequestDescription = async () => {
+        refreshes += 1;
+        return undefined;
+      };
+      await created.executor.start("run-1");
+      expect(refreshes).toBe(0);
+      expect(created.store.completions[0]?.record).toEqual({});
+    });
+
+    it("edited_by_hand leaves the root hash untouched and records the outcome on the run", async () => {
+      const created = await fixRound();
+      created.vcs.finalizeDescription = { kind: "edited_by_hand", commentPosted: true };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.recorded).toEqual([]);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "edited_by_hand" });
+    });
+
+    it("records skipped:<reason> from the remote without a compare-and-set", async () => {
+      const created = await fixRound();
+      created.vcs.finalizeDescription = { kind: "skipped", reason: "too_long" };
+      await created.executor.start("run-1");
+      expect(created.recorded).toEqual([]);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:too_long" });
+    });
+
+    it("CAS miss logs and keeps the run succeeded", async () => {
+      const created = await fixRound();
+      created.store.recordPullRequestDescription = async () => false;
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated" });
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "replaced" });
+      expect(descriptionWarnings()).toHaveLength(1);
+    });
+
+    it("description failure never changes the run's outcome", async () => {
+      // The baseline cannot be loaded: the PR is pushed without a description update.
+      const noBaseline = await fixRound();
+      noBaseline.store.pullRequestDescriptionBaseline = async () => {
+        throw new Error("db down");
+      };
+      await noBaseline.executor.start("run-1");
+      expect(noBaseline.store.run.status).toBe("succeeded");
+      expect(noBaseline.store.run.result).toMatchObject({ outcome: "pull_request_updated" });
+      expect(noBaseline.vcs.lastFinalizeDetails).not.toHaveProperty("description");
+      expect(noBaseline.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:error" });
+
+      // The compare-and-set throws after the description was written.
+      const noRecord = await fixRound();
+      noRecord.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      noRecord.store.recordPullRequestDescription = async () => {
+        throw new Error("db down");
+      };
+      await noRecord.executor.start("run-1");
+      expect(noRecord.store.run.status).toBe("succeeded");
+      expect(noRecord.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:error" });
+
+      // The no-push refresh throws.
+      const noRefresh = await fixRound();
+      noChanges(noRefresh);
+      noRefresh.vcs.refreshPullRequestDescription = async () => {
+        throw new Error("github down");
+      };
+      await noRefresh.executor.start("run-1");
+      expect(noRefresh.store.run.status).toBe("succeeded");
+      expect(noRefresh.store.run.result).toMatchObject({ outcome: "no_changes" });
+      expect(noRefresh.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "skipped:error" });
+      expect(noRefresh.vcs.notifyFinishedCalls).toEqual([
+        { outcome: "succeeded", summary: "Already correct.", agentName: "knock-knock-implement" },
+      ]);
+
+      expect(descriptionWarnings()).toHaveLength(3);
+    });
   });
 
   describe("originating issue on the pull request", () => {

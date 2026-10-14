@@ -154,4 +154,169 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       await db.run.deleteMany({ where: { id: alreadyFailedRunId } });
     }
   });
+  /** A succeeded coding run with a stored result summary; extra CodingRun columns from `data`. */
+  async function codingRunWith(runId: string, summary: string, data: Record<string, unknown> = {}) {
+    await db.run.create({ data: { id: runId, agentId, executionManaged: true, status: "succeeded" } });
+    await db.codingRun.create({
+      data: {
+        runId,
+        task: "Fix it.",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: `wardby/run-${runId}`,
+        provider: "codex",
+        model: "gpt-5.6-luna",
+        timeoutSec: 900,
+        allowedEgress: [],
+        protectedPaths: ["CODEOWNERS"],
+        budgetReservedUsd: 1,
+        result: { outcome: "pull_request_opened", summary },
+        ...data,
+      },
+    });
+  }
+
+  it("recordPullRequestDescription only updates when the expected hash matches (null for legacy)", async () => {
+    const legacy = `container-desc-legacy-${randomUUID()}`;
+    const recorded = `container-desc-recorded-${randomUUID()}`;
+    const [h1, h2, h3] = ["1", "2", "3"].map((c) => c.repeat(64));
+    try {
+      await codingRunWith(legacy, "Legacy text.");
+      await codingRunWith(recorded, "Root text.", { prDescriptionSha256: h1, prDescriptionRunId: recorded });
+      const store = new PrismaContainerExecutionStore(db);
+      const row = (runId: string) =>
+        db.codingRun.findUniqueOrThrow({
+          where: { runId },
+          select: { prDescriptionSha256: true, prDescriptionRunId: true },
+        });
+
+      // A legacy row (no hash) only matches an expected null.
+      await expect(
+        store.recordPullRequestDescription({ rootRunId: legacy, expectedSha256: h1, sha256: h2, agentTextRunId: "x" }),
+      ).resolves.toBe(false);
+      await expect(row(legacy)).resolves.toEqual({ prDescriptionSha256: null, prDescriptionRunId: null });
+      await expect(
+        store.recordPullRequestDescription({
+          rootRunId: legacy,
+          expectedSha256: null,
+          sha256: h2,
+          agentTextRunId: "x",
+        }),
+      ).resolves.toBe(true);
+      await expect(row(legacy)).resolves.toEqual({ prDescriptionSha256: h2, prDescriptionRunId: "x" });
+
+      // A recorded row matches only its current hash; a stale expectation (a lost race) writes nothing.
+      await expect(
+        store.recordPullRequestDescription({
+          rootRunId: recorded,
+          expectedSha256: null,
+          sha256: h2,
+          agentTextRunId: "y",
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        store.recordPullRequestDescription({
+          rootRunId: recorded,
+          expectedSha256: h1,
+          sha256: h2,
+          agentTextRunId: "y",
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        store.recordPullRequestDescription({
+          rootRunId: recorded,
+          expectedSha256: h1,
+          sha256: h3,
+          agentTextRunId: "z",
+        }),
+      ).resolves.toBe(false);
+      await expect(row(recorded)).resolves.toEqual({ prDescriptionSha256: h2, prDescriptionRunId: "y" });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [legacy, recorded] } } });
+      await db.run.deleteMany({ where: { id: { in: [legacy, recorded] } } });
+    }
+  });
+
+  it("pullRequestDescriptionBaseline reads the root's hash and the author run's stored summary", async () => {
+    const root = `container-desc-root-${randomUUID()}`;
+    const author = `container-desc-author-${randomUUID()}`;
+    const legacy = `container-desc-legacy-${randomUUID()}`;
+    const hash = "4".repeat(64);
+    try {
+      await codingRunWith(author, "Fix round text.");
+      await codingRunWith(root, "Root text.", { prDescriptionSha256: hash, prDescriptionRunId: author });
+      await codingRunWith(legacy, "Legacy text.");
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.pullRequestDescriptionBaseline(root)).resolves.toEqual({
+        recordedSha256: hash,
+        previousAgentText: "Fix round text.",
+        agentTextRunId: author,
+      });
+      await expect(store.pullRequestDescriptionBaseline(legacy)).resolves.toEqual({
+        recordedSha256: null,
+        previousAgentText: "Legacy text.",
+        agentTextRunId: legacy,
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [root, author, legacy] } } });
+      await db.run.deleteMany({ where: { id: { in: [root, author, legacy] } } });
+    }
+  });
+
+  it("complete records the outcome on the run, and a fresh run's written hash on its own row", async () => {
+    const fresh = `container-desc-fresh-${randomUUID()}`;
+    const round = `container-desc-round-${randomUUID()}`;
+    try {
+      for (const runId of [fresh, round]) {
+        await db.run.create({ data: { id: runId, agentId, executionManaged: true, status: "running" } });
+        await db.codingRun.create({
+          data: {
+            runId,
+            task: "Fix it.",
+            repository: "openai/example",
+            baseRef: "main",
+            headRef: `wardby/run-${runId}`,
+            provider: "codex",
+            model: "gpt-5.6-luna",
+            timeoutSec: 900,
+            allowedEgress: [],
+            protectedPaths: ["CODEOWNERS"],
+            budgetReservedUsd: 1,
+          },
+        });
+      }
+      const store = new PrismaContainerExecutionStore(db);
+      const result = (runId: string) => ({
+        schemaVersion: 1 as const,
+        outcome: "no_changes" as const,
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: `wardby/run-${runId}`,
+        summary: "Done.",
+        tests: [],
+        usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+      });
+      const hash = "5".repeat(64);
+      await store.complete(fresh, "succeeded", result(fresh), {
+        prDescriptionOutcome: "written",
+        prDescriptionSha256: hash,
+        prDescriptionRunId: fresh,
+      });
+      await store.complete(round, "succeeded", result(round), { prDescriptionOutcome: "edited_by_hand" });
+      const select = { prDescriptionSha256: true, prDescriptionRunId: true, prDescriptionOutcome: true };
+      await expect(db.codingRun.findUniqueOrThrow({ where: { runId: fresh }, select })).resolves.toEqual({
+        prDescriptionSha256: hash,
+        prDescriptionRunId: fresh,
+        prDescriptionOutcome: "written",
+      });
+      await expect(db.codingRun.findUniqueOrThrow({ where: { runId: round }, select })).resolves.toEqual({
+        prDescriptionSha256: null,
+        prDescriptionRunId: null,
+        prDescriptionOutcome: "edited_by_hand",
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [fresh, round] } } });
+      await db.run.deleteMany({ where: { id: { in: [fresh, round] } } });
+    }
+  });
 });
