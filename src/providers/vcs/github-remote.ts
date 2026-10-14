@@ -9,7 +9,13 @@ import {
   type RepositoryFileInput,
 } from "./github.js";
 import type { GitRemote, PublishInput, PublishResult } from "./remote.js";
-import type { ContinuationFinishedDetails, ContinuationOutcome, PreparedWorkspace } from "./types.js";
+import type {
+  ContinuationFinishedDetails,
+  ContinuationOutcome,
+  DescriptionWriteOutcome,
+  FinalizeChangesDetails,
+  PreparedWorkspace,
+} from "./types.js";
 
 export interface GitHubRemoteOptions {
   github: GitHubRepositoryAccess;
@@ -131,7 +137,57 @@ export class GitHubRemote implements GitRemote {
       ...(details?.issue ? { issue: details.issue } : {}),
       ...(details?.related ? { related: details.related } : {}),
     });
-    return { kind: "pull_request", number: pullRequest.number, url: pullRequest.url };
+    let description: DescriptionWriteOutcome | undefined;
+    if (prepared.continuation) {
+      description = await this.updateDescription(prepared, details, changedPaths);
+    } else if (pullRequest.descriptionSha256) {
+      description = { kind: "written", sha256: pullRequest.descriptionSha256 };
+    }
+    return {
+      kind: "pull_request",
+      number: pullRequest.number,
+      url: pullRequest.url,
+      ...(description ? { description } : {}),
+    };
+  }
+
+  /** The no-push path: a fix round that changed nothing still re-derives its PR description. */
+  async refreshDescription(
+    workspace: PreparedWorkspace,
+    details: FinalizeChangesDetails,
+  ): Promise<DescriptionWriteOutcome | undefined> {
+    return this.updateDescription(workspace, details, []);
+  }
+
+  /** Never throws: a description problem must not fail an already-pushed run. */
+  private async updateDescription(
+    prepared: PreparedWorkspace,
+    details: FinalizeChangesDetails | undefined,
+    changedPaths: readonly string[],
+  ): Promise<DescriptionWriteOutcome | undefined> {
+    const github = this.options.github;
+    if (!prepared.continuation || !details?.description || !github.updatePullRequestDescription) return undefined;
+    try {
+      return await github.updatePullRequestDescription({
+        rootRunId: prepared.continuation.rootRunId,
+        runId: prepared.runId,
+        repository: prepared.repository,
+        baseRef: prepared.baseRef,
+        headRef: prepared.headRef,
+        summary: details.summary,
+        tests: details.tests,
+        tag: details.tag,
+        packages: details.packages,
+        packageRefusals: details.packageRefusals,
+        ...(details.restoredDependencies?.length ? { restoredDependencies: details.restoredDependencies } : {}),
+        changedLockfiles: changedPaths.filter(isLockfilePath),
+        ...(details.issue ? { issue: details.issue } : {}),
+        baseline: details.description.baseline,
+      });
+    } catch (error) {
+      logger.warn({ err: error, runId: prepared.runId }, "pull request description update failed");
+      return { kind: "skipped", reason: "error" };
+    }
   }
 
   /**

@@ -19,6 +19,7 @@ import type { GitRemote } from "./remote.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
+  DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
   PreparedWorkspace,
@@ -533,7 +534,20 @@ export class GitVcsProvider implements VcsProvider {
       commitSha,
       pullRequestNumber: published.number,
       pullRequestUrl: published.url,
+      ...(published.description ? { description: published.description } : {}),
     };
+  }
+
+  /** Re-derive a continuation's PR description without a push, delegated to the remote; never throws. */
+  async refreshPullRequestDescription(
+    workspace: PreparedWorkspace,
+    details: FinalizeChangesDetails,
+  ): Promise<DescriptionWriteOutcome | undefined> {
+    try {
+      return await this.remote.refreshDescription?.(workspace, details);
+    } catch {
+      return { kind: "skipped", reason: "error" };
+    }
   }
 
   async cleanup(workspace: PreparedWorkspace): Promise<void> {

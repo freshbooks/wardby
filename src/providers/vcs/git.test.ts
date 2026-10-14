@@ -9,8 +9,10 @@ import type {
   ContinuationCheckRunCompleteInput,
   ContinuationCheckRunInput,
   ContinuationStatusCommentInput,
+  DescriptionUpdateResult,
   GitHubRepositoryAccess,
   PullRequestInput,
+  UpdateDescriptionInput,
   PullRequestResult,
 } from "./github.js";
 import {
@@ -64,9 +66,29 @@ class FakeGitHub implements GitHubRepositoryAccess {
     return action(TOKEN);
   }
 
+  /** Set to make createOrFindDraftPullRequest report the created body's hash. */
+  createdDescriptionSha256: string | undefined;
+  descriptionCalls: UpdateDescriptionInput[] = [];
+  /** Call order across the fake's PR methods. */
+  order: string[] = [];
+  descriptionResult: DescriptionUpdateResult = { kind: "replaced", sha256: "n".repeat(64), agentTextRunId: "run-2" };
+  descriptionThrows = false;
+
+  async updatePullRequestDescription(input: UpdateDescriptionInput): Promise<DescriptionUpdateResult> {
+    this.order.push("update");
+    this.descriptionCalls.push(structuredClone(input));
+    if (this.descriptionThrows) throw new Error("boom");
+    return this.descriptionResult;
+  }
+
   async createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
+    this.order.push("create");
     this.pullRequestCalls.push(structuredClone(input));
-    return { number: 42, url: "https://github.com/openai/example/pull/42" };
+    return {
+      number: 42,
+      url: "https://github.com/openai/example/pull/42",
+      ...(this.createdDescriptionSha256 ? { descriptionSha256: this.createdDescriptionSha256 } : {}),
+    };
   }
 
   async upsertContinuationStatusComment(input: ContinuationStatusCommentInput): Promise<void> {
@@ -483,6 +505,75 @@ describe("GitVcsProvider", () => {
       });
     });
 
+    const BASELINE = { recordedSha256: "r".repeat(64), previousAgentText: "old", agentTextRunId: "run-1" };
+
+    it("finalizeChanges returns the remote's description outcome on pull_request_updated", async () => {
+      const { provider, github, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      git.remoteSha = BASE_SHA;
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      const result = await provider.finalizeChanges(prepared, { summary: "new", description: { baseline: BASELINE } });
+      expect(result).toMatchObject({
+        outcome: "pull_request_updated",
+        description: { kind: "replaced", sha256: "n".repeat(64), agentTextRunId: "run-2" },
+      });
+      expect(github.descriptionCalls).toHaveLength(1);
+    });
+
+    it("publish on a continuation calls updatePullRequestDescription after the push with the root marker id and this run's latestRunId", async () => {
+      const { provider, github, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      git.remoteSha = BASE_SHA;
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      await provider.finalizeChanges(prepared, { summary: "new", description: { baseline: BASELINE } });
+      expect(github.order).toEqual(["create", "update"]);
+      expect(github.descriptionCalls[0]).toMatchObject({
+        rootRunId: "run-1",
+        runId: "run-2",
+        repository: REPOSITORY,
+        headRef: "wardby/run-run-1",
+        summary: "new",
+        baseline: BASELINE,
+      });
+    });
+
+    it("a continuation without details.description never touches the description", async () => {
+      const { provider, github, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      git.remoteSha = BASE_SHA;
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      const result = await provider.finalizeChanges(prepared);
+      expect(github.descriptionCalls).toHaveLength(0);
+      expect(result).not.toHaveProperty("description");
+    });
+
+    it("a description failure never fails publish", async () => {
+      const { provider, github, git } = await harness();
+      github.descriptionThrows = true;
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      git.remoteSha = BASE_SHA;
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      const result = await provider.finalizeChanges(prepared, { description: { baseline: BASELINE } });
+      expect(result).toMatchObject({
+        outcome: "pull_request_updated",
+        description: { kind: "skipped", reason: "error" },
+      });
+    });
+
+    it("refreshPullRequestDescription delegates to the remote and never throws", async () => {
+      const { provider, github } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      await expect(
+        provider.refreshPullRequestDescription?.(prepared, { description: { baseline: BASELINE } }),
+      ).resolves.toMatchObject({ kind: "replaced" });
+      expect(github.order).toEqual(["update"]);
+      github.descriptionThrows = true;
+      await expect(
+        provider.refreshPullRequestDescription?.(prepared, { description: { baseline: BASELINE } }),
+      ).resolves.toEqual({ kind: "skipped", reason: "error" });
+      await expect(provider.refreshPullRequestDescription?.(prepared, {})).resolves.toBeUndefined();
+    });
+
     it("refuses to prepare a continuation whose PR is no longer open, before cloning", async () => {
       const { provider, github, git } = await harness();
       github.openPullRequest = null;
@@ -500,6 +591,19 @@ describe("GitVcsProvider", () => {
       await expect(provider.finalizeChanges(prepared)).rejects.toThrow(CONTINUATION_CLOSED_ERROR);
       expect(git.calls.some((call) => call.args.includes("push"))).toBe(false);
       expect(github.pullRequestCalls).toHaveLength(0);
+    });
+
+    it("a fresh publish reports written with the created hash", async () => {
+      const { provider, github, input } = await harness();
+      github.createdDescriptionSha256 = "h".repeat(64);
+      const prepared = await provider.prepareWorkspace(input);
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      const result = await provider.finalizeChanges(prepared);
+      expect(result).toMatchObject({
+        outcome: "pull_request_opened",
+        description: { kind: "written", sha256: "h".repeat(64) },
+      });
+      expect(github.descriptionCalls).toHaveLength(0);
     });
 
     it("never asks for a fresh run", async () => {

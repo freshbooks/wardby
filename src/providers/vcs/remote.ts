@@ -1,4 +1,4 @@
-import type { FinalizeChangesDetails, PreparedWorkspace, VcsProvider } from "./types.js";
+import type { DescriptionWriteOutcome, FinalizeChangesDetails, PreparedWorkspace, VcsProvider } from "./types.js";
 
 /** What a remote needs to publish a pushed commit (GitHub: open or find the draft PR). */
 export interface PublishInput {
@@ -9,7 +9,9 @@ export interface PublishInput {
   changedPaths: readonly string[];
 }
 
-export type PublishResult = { kind: "pull_request"; number: number; url: string } | { kind: "branch"; branch: string };
+export type PublishResult =
+  | { kind: "pull_request"; number: number; url: string; description?: DescriptionWriteOutcome }
+  | { kind: "branch"; branch: string };
 
 /**
  * The remote-specific half of GitVcsProvider: where a repository is cloned
@@ -49,4 +51,6 @@ export interface GitRemote {
   notifyContinuationStarted?: VcsProvider["notifyContinuationStarted"];
   notifyContinuationFinished?: VcsProvider["notifyContinuationFinished"];
   readRepositoryFile?: VcsProvider["readRepositoryFile"];
+  /** Optional: re-derive a continuation's PR description without a push (GitHub only). Never throws. */
+  refreshDescription?: VcsProvider["refreshPullRequestDescription"];
 }
