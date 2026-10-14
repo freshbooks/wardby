@@ -332,3 +332,14 @@ describe("allowlist refusal help", () => {
     }
   });
 });
+
+describe("pnpm and yarn help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["pnpm", "yarn", "yarn berry", "pnpm-lock.yaml", "corepack"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("coding-packages");
+    }
+  });
+});
