@@ -22,6 +22,7 @@ import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../
 import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
 import { providerClassOfCategory, providerSentence, type ProviderFailureClass } from "./provider-wording.js";
+import { defuseMentions } from "./reply-parts.js";
 
 const log = logger.child({ module: "host-status" });
 
@@ -121,8 +122,7 @@ const cutReply = (text: string): string =>
   text.length > MAX_REPLY_CHARS ? `${text.slice(0, MAX_REPLY_CHARS)}…` : text;
 
 function quoteReply(text: string): string {
-  return cutReply(text)
-    .replace(/@(?=[\w-])/g, "@​")
+  return defuseMentions(cutReply(text))
     .split("\n")
     .map((line) => `> ${line}`)
     .join("\n");
