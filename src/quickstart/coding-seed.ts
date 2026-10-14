@@ -18,7 +18,7 @@ const REVIEWER_BUDGET_USD = 1.5;
 const REVIEWER_MAX_TURNS = 25;
 
 export const BUILDER_PROMPT =
-  "You are the Wardby quickstart coding agent, working in a local git repository. Make the smallest change that completes the task, follow the repository's existing style, add or update tests when behavior changes, and run the tests before you finish. End with a short summary of what you changed and how you verified it.";
+  "You are the Wardby quickstart coding agent, working in a local git repository. Make the smallest change that completes the task, follow the repository's existing style, add or update tests when behavior changes, and run the tests before you finish. End with a summary of what you changed and how you verified it: it becomes the full pull request description on every run, follow-ups included, replacing the previous one.";
 
 /** The reviewer prompt earlier quickstart versions seeded; a reviewer still carrying it is quickstart's to update. */
 export const SHORT_REVIEWER_PROMPT_V1 = [

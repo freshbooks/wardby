@@ -3,6 +3,7 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import { withBaseCommit } from "../../coding/base-commit.js";
+import { withPullRequestDescription } from "../../coding/pr-description-note.js";
 import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
@@ -1307,6 +1308,22 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
+   * The pull request description a continuation run is about to replace, for
+   * its task. Undefined for a fresh run or when it cannot be loaded: the run
+   * goes ahead without the note.
+   */
+  private async currentDescriptionText(run: ContainerRunSnapshot): Promise<string | undefined> {
+    const store = this.options.store;
+    if (!run.rootCodingRunId || !store.pullRequestDescriptionBaseline) return undefined;
+    try {
+      return (await store.pullRequestDescriptionBaseline(run.rootCodingRunId)).previousAgentText;
+    } catch (err) {
+      containerLog.debug({ err, runId: run.runId }, "could not load the pull request description for the task");
+      return undefined;
+    }
+  }
+
+  /**
    * A fix round's description baseline (null: no description flow -- a fresh
    * run, or a store without it). Never throws: a load failure is recorded as
    * skipped:error and the push goes ahead without a description update.
@@ -1657,8 +1674,9 @@ export class ContainerExecutor implements Executor {
     const destination = join(directory, "input.json");
     const temporary = join(directory, `.input-${randomUUID()}.tmp`);
     const services = parseStoredServices(run.services);
-    const task = withBaseCommit(run.task, workspace.baseCommit);
-    if (task === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
+    const withCommit = withBaseCommit(run.task, workspace.baseCommit);
+    const task = withPullRequestDescription(withCommit, await this.currentDescriptionText(run));
+    if (withCommit === run.task && /^[0-9a-f]{40}$/.test(workspace.baseCommit)) {
       containerLog.warn(
         { event: "coding.base_commit_omitted", runId: run.runId },
         "the coding task left no room for the base commit line",

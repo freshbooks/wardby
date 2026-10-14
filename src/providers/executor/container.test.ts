@@ -554,6 +554,40 @@ describe("ContainerExecutor", () => {
       ).toBe(true);
     });
 
+    it("appends the current PR description to a continuation's task", async () => {
+      const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      let input: Record<string, unknown> | undefined;
+      created.store.pullRequestDescriptionBaseline = async () => ({
+        recordedSha256: null,
+        previousAgentText: "Previous body",
+        agentTextRunId: "root-run",
+      });
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      expect(input!.task as string).toContain("your final summary replaces it");
+      expect((input!.task as string).includes("Previous body")).toBe(true);
+    });
+
+    it("leaves a fresh run's task without the description note", async () => {
+      const { input } = await launched({});
+      expect(input.task as string).not.toContain("your final summary replaces it");
+    });
+
+    it("skips the note when the baseline cannot be loaded", async () => {
+      const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      let input: Record<string, unknown> | undefined;
+      created.store.pullRequestDescriptionBaseline = async () => {
+        throw new Error("db down");
+      };
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      expect(input!.task as string).not.toContain("your final summary replaces it");
+    });
+
     it("hands the launcher the run's services and the worker only their names, versions and variables", async () => {
       const { created, input } = await launched({ services: [POSTGRES] });
       expect(created.jobs.specs[0]?.services).toEqual([POSTGRES]);
@@ -1219,7 +1253,7 @@ describe("ContainerExecutor", () => {
       expect(record).not.toHaveProperty("prDescriptionSha256");
       expect(record).not.toHaveProperty("prDescriptionRunId");
       expect(created.events.filter((e) => ["baseline:root-run", "finalize", "record", "complete"].includes(e))).toEqual(
-        ["baseline:root-run", "finalize", "record", "complete"],
+        ["baseline:root-run", "baseline:root-run", "finalize", "record", "complete"],
       );
     });
 
@@ -1264,7 +1298,7 @@ describe("ContainerExecutor", () => {
       // The terminal hook (reReviewAfterNoChangeFix) must see the new body, so all of it lands before complete.
       expect(
         created.events.filter((e) => ["baseline:root-run", "refresh", "record", "complete", "cleanup"].includes(e)),
-      ).toEqual(["baseline:root-run", "refresh", "record", "complete", "cleanup"]);
+      ).toEqual(["baseline:root-run", "baseline:root-run", "refresh", "record", "complete", "cleanup"]);
     });
 
     it("a fresh no_changes run never refreshes a description", async () => {
