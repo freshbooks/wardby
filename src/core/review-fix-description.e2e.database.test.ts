@@ -2,10 +2,16 @@
  * End to end, against real PostgreSQL: a fix round that changes no code but rewrites the pull
  * request description, from the review that asked for it to the PR being marked ready.
  *
- *   draft PR -> review CHANGES_REQUESTED (description lacks `Resolves #12`) -> fix round whose
- *   coding run ends no_changes with a final message that adds it -> description PATCHed (new
- *   text, refreshed sections, latest-run marker) -> one no-change re-review -> it approves ->
- *   markReadyWhenPassing marks the PR ready.
+ *   draft PR opened from a mention on issue #12 -> review CHANGES_REQUESTED (description lacks
+ *   the issue's acceptance checklist and `Resolves #12`) -> fix round whose coding run is handed
+ *   issue #12's text in its task and ends no_changes with a final message that adds both ->
+ *   description PATCHed (new text, refreshed sections, latest-run marker) -> one no-change
+ *   re-review -> it approves -> markReadyWhenPassing marks the PR ready.
+ *
+ * The coding agent is a fake that can only write the checklist if the issue's text was in its
+ * task (the workspace has no copy of it), so the correction depends on the fix round being
+ * given the linked issue; a control run without the issue read shows the description stays
+ * uncorrected.
  *
  * Everything between the database and GitHub's HTTP API is the production code: the
  * orchestration (startReviewFixAfterReview, reReviewAfterNoChangeFix, markReadyAfterRun), the
@@ -23,7 +29,7 @@
  * Skipped without DATABASE_URL.
  */
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -37,7 +43,8 @@ import {
   type CodingSessionController,
   type ProvisioningClaim,
 } from "../providers/executor/container.js";
-import type { JobHandle, JobResult, JobStatus, WorkspaceJobLauncher } from "../providers/jobs/types.js";
+import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "../providers/jobs/types.js";
+import { linkedIssueReader } from "../providers/executor/linked-issue-reader.js";
 import { GitHubReviewHost } from "../providers/review-host/github.js";
 import type { GitCommandOptions, GitCommandResult, GitCommandRunner } from "../providers/vcs/git.js";
 import { GitHubAppClient, GitHubRemote, GitVcsProvider, RoutingVcsProvider } from "../providers/vcs/index.js";
@@ -57,9 +64,30 @@ const CHECK_NAME = "wardby review";
 
 const OLD_SUMMARY =
   "Adds the knock-knock joke endpoint with a seeded list of jokes, and a handler test covering the happy path.";
-const NEW_SUMMARY = `${OLD_SUMMARY}\n\nResolves #12`;
+const ISSUE_NUMBER = 12;
+const CHECKLIST = ["- [ ] `GET /jokes` lists the seeded jokes", "- [ ] a handler test covers the happy path"];
+const ISSUE_BODY = ["Add a knock-knock jokes endpoint.", "", "## Acceptance", ...CHECKLIST].join("\n");
 const REVIEW_BODY =
-  "MUST_FIX: the pull request description does not link its issue. Add `Resolves #12` so merging closes it.";
+  "MUST_FIX: the pull request description has no acceptance checklist from issue #12 and does not link it. " +
+  "Add the checklist and `Resolves #12`.";
+
+/**
+ * The fake coding agent: the PR description it ends with is only complete when its task carried
+ * the issue's acceptance checklist, fenced as the original ticket (the workspace has no copy).
+ */
+function fixRoundSummary(task: string): string {
+  const fenced = /<untrusted_issue>\n([\s\S]*?)\n<\/untrusted_issue>/.exec(task)?.[1] ?? "";
+  const checklist = fenced.split("\n").filter((line) => line.startsWith("- [ ]"));
+  if (checklist.length === 0) return OLD_SUMMARY;
+  return [
+    OLD_SUMMARY,
+    "",
+    "## Acceptance",
+    ...checklist.map((line) => line.replace("- [ ]", "- [x]")),
+    "",
+    `Resolves #${ISSUE_NUMBER}`,
+  ].join("\n");
+}
 
 type Json = Record<string, unknown>;
 
@@ -81,6 +109,7 @@ class FakeGitHub {
   readonly markReadyMutations: Json[] = [];
   readonly comments: Array<{ id: number; body: string; user: { type: string; login: string } }> = [];
   readonly checkRuns: CheckRun[] = [];
+  issueReads = 0;
   private nextId = 1000;
   readonly pr: Json;
 
@@ -145,6 +174,21 @@ class FakeGitHub {
       return json(open ? [this.pr] : []);
     }
     if (method === "GET" && path === pr) return json(this.pr);
+    if (method === "GET" && path === `${repo}/issues/${ISSUE_NUMBER}`) {
+      this.issueReads += 1;
+      return json({
+        number: ISSUE_NUMBER,
+        title: "Knock-knock jokes endpoint",
+        state: "open",
+        body: ISSUE_BODY,
+        labels: [],
+        user: { login: "octo" },
+        html_url: `https://github.com/${this.repository}/issues/${ISSUE_NUMBER}`,
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-01T00:00:00Z",
+        comments: 0,
+      });
+    }
     if (method === "PATCH" && path === pr) {
       if (typeof sent.body === "string") {
         this.descriptionPatches.push(sent.body);
@@ -270,18 +314,21 @@ class ScriptedGit implements GitCommandRunner {
 /** The worker: launched, finished at once, and its result is the no-change round's final message. */
 class FinishedJobs implements WorkspaceJobLauncher {
   readonly handle: JobHandle = { backend: "fake", id: "job-fix-round" };
-  constructor(private readonly result: () => JobResult) {}
+  /** The task the executor wrote into the worker's input. */
+  task = "";
+  constructor(private readonly result: (task: string) => JobResult) {}
   supportsServicesFor(_provider: CodingProvider): boolean {
     return false;
   }
-  async launch(): Promise<JobHandle> {
+  async launch(spec: JobSpec): Promise<JobHandle> {
+    this.task = (JSON.parse(await readFile(spec.inputArtifact, "utf8")) as { task: string }).task;
     return this.handle;
   }
   async status(): Promise<JobStatus> {
     return { state: "succeeded" };
   }
   async collect(): Promise<JobResult> {
-    return this.result();
+    return this.result(this.task);
   }
   async stop(): Promise<void> {}
   async remove(): Promise<void> {}
@@ -319,8 +366,6 @@ describe.skipIf(!process.env.DATABASE_URL)(
     const coder = id("coder");
     const reviewer = id("reviewer");
     const repository = `acme/fixdesc-${s8}`;
-    const rootRunId = id("root");
-    const headRef = `wardby/run-${rootRunId}`;
     const workRoots: string[] = [];
 
     beforeAll(async () => {
@@ -375,7 +420,10 @@ describe.skipIf(!process.env.DATABASE_URL)(
       await Promise.all(workRoots.map((root) => rm(root, { recursive: true, force: true })));
     });
 
-    it("review asks for `Resolves #N` -> no-change fix round rewrites the description -> re-review approves -> marked ready", async () => {
+    /** The draft PR, its root run (from a mention on issue #12), and the review that requested changes. */
+    async function draftWithFailedReview(name: string, prNumber: number) {
+      const rootRunId = id(`${name}-root`);
+      const headRef = `wardby/run-${rootRunId}`;
       // --- The draft PR wardby opened: its root coding run recorded the description's hash. ---
       const originalBody = pullRequestBody({
         repository,
@@ -385,9 +433,20 @@ describe.skipIf(!process.env.DATABASE_URL)(
         summary: OLD_SUMMARY,
         tests: [{ command: "npm test", outcome: "passed" }],
       });
-      const github = new FakeGitHub(repository, 7, headRef, originalBody);
-      const openerRun = id("opener");
-      await db.run.create({ data: { id: openerRun, agentId: delivery, status: "succeeded", trigger: "manual" } });
+      const github = new FakeGitHub(repository, prNumber, headRef, originalBody);
+      // The delivery run a mention on issue #12 started; it delegated the root coding run.
+      const openerRun = id(`${name}-opener`);
+      await db.run.create({ data: { id: openerRun, agentId: delivery, status: "succeeded", trigger: "host_event" } });
+      await db.runHostStatus.create({
+        data: {
+          runId: openerRun,
+          provider: "github",
+          repository,
+          number: ISSUE_NUMBER,
+          commentKind: "conversation",
+          completedAt: new Date(),
+        },
+      });
       await db.run.create({
         data: { id: rootRunId, agentId: coder, status: "succeeded", parentRunId: openerRun, executionManaged: true },
       });
@@ -410,8 +469,8 @@ describe.skipIf(!process.env.DATABASE_URL)(
             baseRef: "main",
             headRef,
             commitSha: HEAD_SHA,
-            pullRequestUrl: `https://github.com/${repository}/pull/7`,
-            pullRequestNumber: 7,
+            pullRequestUrl: `https://github.com/${repository}/pull/${prNumber}`,
+            pullRequestNumber: prNumber,
             summary: OLD_SUMMARY,
             tests: [{ command: "npm test", outcome: "passed" }],
             usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
@@ -422,8 +481,8 @@ describe.skipIf(!process.env.DATABASE_URL)(
         },
       });
 
-      // --- The review requested changes: the description lacks `Resolves #12`. ---
-      const firstReview = id("review-1");
+      // --- The review requested changes: the description lacks the checklist and `Resolves #12`. ---
+      const firstReview = id(`${name}-review-1`);
       const reviewedAt = new Date(Date.now() - 60_000);
       await db.run.create({
         data: { id: firstReview, agentId: reviewer, status: "succeeded", trigger: "host_event", startedAt: reviewedAt },
@@ -435,7 +494,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
           repository,
           checkId: "1",
           headSha: HEAD_SHA,
-          prNumber: 7,
+          prNumber,
           verdict: "CHANGES_REQUESTED",
           reviewBody: REVIEW_BODY,
           completedAt: new Date(reviewedAt.getTime() + 1_000),
@@ -458,7 +517,17 @@ describe.skipIf(!process.env.DATABASE_URL)(
         conclusion: "success",
         app: { id: 1 },
       });
+      return { rootRunId, headRef, originalBody, github, firstReview };
+    }
 
+    /**
+     * Steps 1-2: the review's finalizer starts a fix round; its agent delegates to the coding
+     * agent, which finds no code to change and ends with the description it can write from its
+     * task. `withIssueRead: false` is the control: the executor has no linked-issue read.
+     */
+    async function fixRound(name: string, prNumber: number, withIssueRead: boolean) {
+      const draft = await draftWithFailedReview(name, prNumber);
+      const { rootRunId, headRef, github, firstReview } = draft;
       // --- Production components; only GitHub's HTTP API, git, the launcher and sessions are fakes. ---
       const key = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
         type: "pkcs1",
@@ -493,9 +562,8 @@ describe.skipIf(!process.env.DATABASE_URL)(
       await expect(db.run.findUniqueOrThrow({ where: { id: fixRun } })).resolves.toMatchObject({ agentId: delivery });
       expect(github.labels).toEqual(["wardby-autofix-1"]);
 
-      // --- 2. The fix agent delegates to the coding agent, which finds no code to change and
-      //        ends with the full description, now carrying `Resolves #12`. ---
-      const codingRunId = id("coding");
+      // --- 2. The fix agent delegates to the coding agent. ---
+      const codingRunId = id(`${name}-coding`);
       await db.run.update({ where: { id: fixRun }, data: { status: "running" } });
       await db.run.create({
         data: { id: codingRunId, agentId: coder, status: "pending", parentRunId: fixRun, executionManaged: true },
@@ -503,7 +571,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
       await db.codingRun.create({
         data: {
           runId: codingRunId,
-          task: "Address the review of PR #7.",
+          task: `Address the review of PR #${prNumber}.`,
           repository,
           baseRef: "main",
           headRef,
@@ -515,22 +583,23 @@ describe.skipIf(!process.env.DATABASE_URL)(
           budgetReservedUsd: 1,
         },
       });
+      const jobs = new FinishedJobs((task) => ({
+        exitCode: 0,
+        reason: "completed",
+        resultArtifact: JSON.stringify({
+          schemaVersion: 1,
+          runId: codingRunId,
+          outcome: "no_changes",
+          summary: fixRoundSummary(task),
+          tests: [
+            { command: "npm test", outcome: "passed" },
+            { command: "npm run lint", outcome: "passed" },
+          ],
+        }),
+      }));
       const executor = new ContainerExecutor({
         store: new InMemorySlotStore(db),
-        jobs: new FinishedJobs(() => ({
-          exitCode: 0,
-          reason: "completed",
-          resultArtifact: JSON.stringify({
-            schemaVersion: 1,
-            runId: codingRunId,
-            outcome: "no_changes",
-            summary: NEW_SUMMARY,
-            tests: [
-              { command: "npm test", outcome: "passed" },
-              { command: "npm run lint", outcome: "passed" },
-            ],
-          }),
-        })),
+        jobs,
         vcs,
         sessions,
         capabilities: new RunCapabilityVault(),
@@ -541,18 +610,42 @@ describe.skipIf(!process.env.DATABASE_URL)(
         maxDiskMb: 8192,
         sleep: async () => {},
         repoAccess,
+        // composition.ts wires the same reader over the same review host.
+        ...(withIssueRead
+          ? { readLinkedIssue: linkedIssueReader({ hosts: { github: reviewHost }, issueTrackers: {} }) }
+          : {}),
         // composition.ts runs the same hook (in the background there; awaited here).
         onCodingRunTerminal: (runId) => reReviewAfterNoChangeFix(runId, deps),
       });
       await executor.start(codingRunId);
+      return { ...draft, reviewHost, jobs, nativeStarts, codingRunId };
+    }
+
+    it("review asks for the issue's checklist and `Resolves #N` -> the fix round is handed the issue and rewrites the description -> re-review approves -> marked ready", async () => {
+      const prNumber = 7;
+      const { rootRunId, originalBody, github, reviewHost, jobs, nativeStarts, codingRunId } = await fixRound(
+        "issue",
+        prNumber,
+        true,
+      );
+
+      // The fix round's task carried issue #12, read through the App, fenced as untrusted data.
+      expect(github.issueReads).toBe(1);
+      expect(jobs.task).toContain("acceptance criteria are the contract");
+      expect(jobs.task).toContain("<untrusted_issue>\nIssue #12: Knock-knock jokes endpoint");
+      for (const line of CHECKLIST) expect(jobs.task).toContain(line);
 
       // The description was PATCHed once, through the routing provider's no-push refresh.
       expect(github.descriptionPatches).toHaveLength(1);
       const patched = github.body;
       expect(github.descriptionPatches[0]).toBe(patched);
       expect(patched.startsWith(`<!-- wardby:${rootRunId} -->\n`)).toBe(true);
-      expect(patched).toContain(NEW_SUMMARY);
+      const newSummary = fixRoundSummary(jobs.task);
+      expect(newSummary).not.toBe(OLD_SUMMARY);
+      expect(patched).toContain(newSummary);
+      expect(patched).toContain("- [x] `GET /jokes` lists the seeded jokes");
       expect(patched).toContain("Resolves #12");
+      expect(originalBody).not.toContain("Resolves #12");
       // Tests rebuilt from this round's run.
       expect(patched).toContain("`npm run lint`: passed");
       expect(originalBody).not.toContain("npm run lint");
@@ -565,7 +658,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
         select: { result: true, prDescriptionOutcome: true, run: { select: { status: true } } },
       });
       expect(coding.run.status).toBe("succeeded");
-      expect(coding.result).toMatchObject({ outcome: "no_changes", summary: NEW_SUMMARY });
+      expect(coding.result).toMatchObject({ outcome: "no_changes", summary: newSummary });
       expect(coding.prDescriptionOutcome).toBe("replaced");
       await expect(
         db.codingRun.findUniqueOrThrow({
@@ -575,23 +668,23 @@ describe.skipIf(!process.env.DATABASE_URL)(
       ).resolves.toEqual({ prDescriptionSha256: descriptionSha256(patched), prDescriptionRunId: codingRunId });
 
       // --- 3. The terminal hook started exactly one re-review of the unchanged head. ---
-      const patchAt = github.requests.indexOf(`PATCH /repos/${repository}/pulls/7`);
+      const patchAt = github.requests.indexOf(`PATCH /repos/${repository}/pulls/${prNumber}`);
       expect(patchAt).toBeGreaterThan(-1);
       expect(nativeStarts).toHaveLength(2);
       const reReview = nativeStarts[1];
       await expect(db.run.findUniqueOrThrow({ where: { id: reReview } })).resolves.toMatchObject({ agentId: reviewer });
       const reReviewCheck = await db.runHostCheck.findUniqueOrThrow({ where: { runId: reReview } });
-      expect(reReviewCheck).toMatchObject({ headSha: HEAD_SHA, prNumber: 7, verdict: null });
+      expect(reReviewCheck).toMatchObject({ headSha: HEAD_SHA, prNumber, verdict: null });
       expect(github.labels).toEqual(["wardby-autofix-1", "wardby-autofix-2"]);
       // The re-review read the PR after the PATCH, and still resolved the root's marker from the new body.
-      expect(github.requests.lastIndexOf(`GET /repos/${repository}/pulls/7`)).toBeGreaterThan(patchAt);
+      expect(github.requests.lastIndexOf(`GET /repos/${repository}/pulls/${prNumber}`)).toBeGreaterThan(patchAt);
 
       // --- 4. The re-review approves (what its publish tool writes: the check and the verdict). ---
       await reviewHost.completeCheck(repository, {
         checkId: reReviewCheck.checkId,
         conclusion: "success",
         title: "Approved",
-        summary: "The description now resolves #12.",
+        summary: "The description now carries the issue's checklist and resolves #12.",
       });
       await db.runHostCheck.update({
         where: { runId: reReview },
@@ -601,7 +694,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
 
       // --- 5. markReadyWhenPassing marks the PR ready, once. ---
       await expect(markReadyAfterRun({ db, hosts: { github: reviewHost } }, reReview)).resolves.toBe("marked");
-      expect(github.markReadyMutations).toEqual([{ id: "PR_node_7" }]);
+      expect(github.markReadyMutations).toEqual([{ id: `PR_node_${prNumber}` }]);
       expect(github.pr.draft).toBe(false);
       const root = await db.codingRun.findUniqueOrThrow({
         where: { runId: rootRunId },
@@ -610,6 +703,14 @@ describe.skipIf(!process.env.DATABASE_URL)(
       expect(root.markedReadyAt).toBeInstanceOf(Date);
       // The description mark-ready saw is the rewritten one.
       expect(github.body).toBe(patched);
+    });
+
+    it("control: without the linked issue the fix round cannot write the checklist, and the description stays incomplete", async () => {
+      const { github, jobs } = await fixRound("control", 8, false);
+      expect(github.issueReads).toBe(0);
+      expect(jobs.task).not.toContain("<untrusted_issue>");
+      expect(github.body).not.toContain("## Acceptance");
+      expect(github.body).not.toContain("Resolves #12");
     });
   },
 );
