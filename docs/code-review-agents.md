@@ -279,8 +279,9 @@ Every coding run's final message is the full pull request description: what
 changed, the checklist, how to try it, and any closing line such as
 `Resolves #N`. That holds for follow-ups too: review fix rounds, mention
 follow-ups, and continuations. Agents launched for a follow-up receive the
-pull request's current description as quoted, untrusted context, so they can
-carry forward what still applies.
+description text wardby last wrote (its agent-written part, not the live pull
+request body) as quoted, untrusted context, so they can carry forward what
+still applies.
 
 A continuation updates the description of the pull request it continues, even
 when it changes no code. The run's final message replaces the agent-written
@@ -296,7 +297,8 @@ hand…", inside a collapsed section, and updates that same comment on retries.
 Pull requests opened before this version have no record of what wardby wrote,
 so they are always treated as edited and get the comment.
 
-If the final message is empty, very short (under 80 characters), or drops a
+If the final message is empty, very short (fewer than 80 non-whitespace
+characters), or drops a
 closing keyword (such as `Resolves #N`) that the previous description had,
 wardby keeps the previous agent text and refreshes only its own sections.
 
@@ -307,12 +309,21 @@ pushed commit.
 
 - `written`: the first description of a new pull request.
 - `replaced`: a continuation replaced the agent-written part.
-- `refreshed:<reason>`: the final message was invalid, so only wardby's
-  sections were refreshed.
+- `refreshed:<reason>`: the final message was invalid, so the previous agent
+  text was kept and only wardby's sections were refreshed. The reason is
+  `empty`, `too_short` (fewer than 80 non-whitespace characters), or
+  `missing_closing_keyword`.
 - `unchanged`: nothing needed to change.
-- `edited_by_hand`: the description was edited by hand, so the proposal went
-  into a comment.
-- `skipped:<reason>`: no update was attempted.
+- `edited_by_hand`: the description was edited by a person, no longer starts
+  with wardby's marker, or (for pull requests opened before this version) has
+  no record of what wardby wrote. wardby posts or updates the proposal comment
+  when it can.
+- `skipped:<reason>`: the description was not updated. The reason is
+  `not_open` (the pull request is not open or was not found), `too_long` (the
+  description is still over 65,536 characters after dropping **Packages**), or
+  `error` (any failure, including a failed update request, a failed load of
+  wardby's last-written text, a failed hash record or access re-check, or the
+  60-second timeout; the update may still have landed).
 
 If a repository already forwards wardby's reviews to a webhook through a
 hand-written CI workflow to fix them automatically, replace that workflow

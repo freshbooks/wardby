@@ -3,7 +3,7 @@ id: review-fix-rounds
 title: Automatic review fix rounds
 summary: Let wardby fix its own review's findings on pull requests its coding runs opened, with a round cap.
 audience: operator
-tags: [github, code-review, review_fix, autofix, fix-round, pull-requests]
+tags: [github, code-review, review_fix, autofix, fix-round, pull-requests, pr-description, description]
 appliesTo: ">=0.4.2"
 ---
 

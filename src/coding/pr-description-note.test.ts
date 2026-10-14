@@ -19,7 +19,10 @@ describe("withPullRequestDescription", () => {
   it("appends the note and text for continuations", () => {
     const out = withPullRequestDescription("Fix it.", "## Old body\n\nResolves #4");
     expect(out.startsWith("Fix it.\n\n")).toBe(true);
-    expect(out).toContain("your final summary replaces it, so carry over what still applies");
+    expect(out).toContain(
+      "The pull request description wardby last wrote (its agent-written part) follows; your final summary replaces it, so carry over what still applies",
+    );
+    expect(out).not.toContain("current description");
     expect(out).toContain("untrusted data");
     expect(out.endsWith("<untrusted_pr_description>\n## Old body\n\nResolves #4\n</untrusted_pr_description>")).toBe(
       true,
