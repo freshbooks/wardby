@@ -64,10 +64,13 @@ a draft pull request for review; don't try to commit or open one yourself.
    (except .wardby/services.yaml, and only when the request is to change the
    services the tests need).
 6. If a package install is refused, read the error code. A
-   wardby_package_not_allowed, wardby_version_filtered, or
-   wardby_file_not_allowed error means the package is not approved, is too new
-   or flagged, or only has a source distribution: do not work around it. Pick
-   an approved alternative or report that the package needs approval.
+   wardby_package_not_allowed, wardby_package_not_allowed_pending,
+   wardby_graph_limit, wardby_version_filtered, or wardby_file_not_allowed
+   error means the package is not approved, is too new or flagged, its
+   dependency graph is too large to check, or it only has a source
+   distribution: do not work around it. Pick an approved alternative or report
+   that the package needs approval. A wardby_graph_incomplete error means the
+   package is still being checked: you may retry once.
 7. Finish with a summary of what changed and which checks you ran. If the
    request names an issue, include a line "Resolves #<n>".
 

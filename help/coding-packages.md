@@ -39,6 +39,18 @@ if its own checks failed. A package reachable only through a refused one is
 refused too, so a high-severity advisory deep in a toolchain blocks every run
 that installs it.
 
+## Allowlist refusals
+
+Four codes say a package could not be reached through the allowlist. The agent
+should stop on all of them except `wardby_graph_incomplete`; the owner fixes
+them by allowlisting the package directly (`update_agent`,
+`codingProfile.packageAllowlist`). Each code has an article under `errors/` (for example `errors/package-not-allowed-pending`), available from release 0.6.1.
+
+- `wardby_package_not_allowed`: not on the allowlist, or only reachable through a refused package.
+- `wardby_package_not_allowed_pending`: the dependency walk stopped before reaching it; retrying rarely helps.
+- `wardby_graph_limit`: the dependency graph is over `REGISTRY_MAX_GRAPH_PACKAGES`.
+- `wardby_graph_incomplete`: still being checked; retry shortly.
+
 ## PyPI extras
 
 A PyPI entry may name extras, as pip does: `psycopg[binary]`,

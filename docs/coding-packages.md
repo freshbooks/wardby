@@ -407,14 +407,37 @@ try again" error (`502 wardby_upstream_error`, or
 `503 wardby_audit_unavailable` if it was the audit), not with
 `wardby_package_not_allowed`.
 
-Likewise, if the walk is cut short before it reaches the requested package,
-the package isn't proven absent, so the answer is never
-`wardby_package_not_allowed`. After `REGISTRY_GRAPH_TIMEOUT_MS` the answer is
-`503 wardby_graph_incomplete`: the next request resumes the walk where it
-stopped (npm retries a 5xx on its own), so a retry can succeed. After
-`REGISTRY_MAX_GRAPH_PACKAGES` trips, the bound is permanent for the run, so
-the answer is a definitive `403 wardby_graph_limit` that clients don't retry:
-allowlist the package directly or raise the bound.
+The walk expands the requested name first, so a request is answered as soon as
+the walk reaches it. It groups all of a package's ranges together, so each
+package is expanded once however many dependents ask for it, and it reuses
+already expanded packages through a bounded per-run memo (32 MiB, kept for 15
+minutes). Because it follows every kept version inside each range, plus
+optional and peer dependencies, its graph is usually several times larger than
+the graph of one install. The walk runs only while a request waits for it; its
+state is per run, so it resumes within the run and starts again in a new run.
+Each time a walk ends, the proxy logs `registry.graph_walk` with how far it
+got.
+
+A request the walk could not settle gets one of four answers:
+
+- `403 wardby_package_not_allowed`: final. The walk finished and the package is
+  not on the allowlist, or is only reachable through a refused package. The
+  agent's owner must allowlist it.
+- `403 wardby_package_not_allowed_pending`: the walk stopped (at
+  `REGISTRY_GRAPH_TIMEOUT_MS`) before reaching the name, so it may still be
+  reachable. The message shows how many packages were walked and how many were
+  queued. It is not transient: the agent should stop, because retrying rarely
+  helps, and the owner should allowlist the package directly.
+- `403 wardby_graph_limit`: the graph is over `REGISTRY_MAX_GRAPH_PACKAGES`
+  (counting package names). The bound is permanent for the run: allowlist the
+  package directly, or ask the operator to raise the limit.
+- `503 wardby_graph_incomplete`: only for a name that is still being checked,
+  because an upstream failed while part of the graph was read. Retry shortly
+  (npm retries a 5xx on its own).
+
+Large frameworks (for example Expo) can exceed the graph limit, because the
+walk follows every in-range version plus optional and peer dependencies.
+Allowlist the packages the project needs directly.
 
 The walk reads full npm packuments (the largest are tens of MB) but keeps
 only what it needs from each: per version, its dependency specs, publish
@@ -814,22 +837,28 @@ as what's already been recorded, so parallel downloads (for example npm's
 default concurrent connections) can't add up to more than the limit before any
 one of them finishes:
 
-| Setting                        | Default | Meaning                                                       |
-| ------------------------------ | ------- | ------------------------------------------------------------- |
-| `REGISTRY_MAX_FILE_MB`         | 200     | Largest single downloaded file.                               |
-| `REGISTRY_MAX_TOTAL_MB`        | 2048    | Total bytes downloaded in one run.                            |
-| `REGISTRY_MAX_FILES`           | 5000    | Total files served in one run.                                |
-| `REGISTRY_IDLE_TIMEOUT_MS`     | 120000  | Idle time allowed on one download.                            |
-| `REGISTRY_AUDIT_FAIL_OPEN`     | `false` | Allow-and-report instead of refusing when OSV is unreachable. |
-| `REGISTRY_METADATA_TIMEOUT_MS` | 30000   | Time allowed for one metadata or OSV request, body included.  |
-| `REGISTRY_MAX_METADATA_MB`     | 64      | Largest metadata or OSV response the proxy reads.             |
-| `REGISTRY_MAX_GRAPH_PACKAGES`  | 3000    | Packages the on-demand graph walk may expand in one run.      |
-| `REGISTRY_GRAPH_TIMEOUT_MS`    | 180000  | Time allowed for one on-demand graph walk.                    |
-| `REGISTRY_DB_POOL_MAX`         | 3       | Database connections for the registry's own pool.             |
-| `CODING_PROXY_DB_POOL_MAX`     | 5       | Database connections for the budget ledger (model requests).  |
-| `REGISTRY_PLAN_MAX_ENTRIES`    | 5000    | Entries a lockfile plan (`POST /-/plan`) may have.            |
-| `REGISTRY_PLAN_TIMEOUT_MS`     | 120000  | Time allowed for one lockfile plan.                           |
-| `REGISTRY_PLAN_MAX_PER_RUN`    | 20      | Lockfile plans one run may make.                              |
+| Setting                        | Default | Meaning                                                        |
+| ------------------------------ | ------- | -------------------------------------------------------------- |
+| `REGISTRY_MAX_FILE_MB`         | 200     | Largest single downloaded file.                                |
+| `REGISTRY_MAX_TOTAL_MB`        | 2048    | Total bytes downloaded in one run.                             |
+| `REGISTRY_MAX_FILES`           | 5000    | Total files served in one run.                                 |
+| `REGISTRY_IDLE_TIMEOUT_MS`     | 120000  | Idle time allowed on one download.                             |
+| `REGISTRY_AUDIT_FAIL_OPEN`     | `false` | Allow-and-report instead of refusing when OSV is unreachable.  |
+| `REGISTRY_METADATA_TIMEOUT_MS` | 30000   | Time allowed for one metadata or OSV request, body included.   |
+| `REGISTRY_MAX_METADATA_MB`     | 64      | Largest metadata or OSV response the proxy reads.              |
+| `REGISTRY_MAX_GRAPH_PACKAGES`  | 3000    | Package names the graph walk may expand per run and ecosystem. |
+| `REGISTRY_GRAPH_TIMEOUT_MS`    | 180000  | Time one request's graph walk may take.                        |
+| `REGISTRY_DB_POOL_MAX`         | 3       | Database connections for the registry's own pool.              |
+| `CODING_PROXY_DB_POOL_MAX`     | 5       | Database connections for the budget ledger (model requests).   |
+| `REGISTRY_PLAN_MAX_ENTRIES`    | 5000    | Entries a lockfile plan (`POST /-/plan`) may have.             |
+| `REGISTRY_PLAN_TIMEOUT_MS`     | 120000  | Time allowed for one lockfile plan.                            |
+| `REGISTRY_PLAN_MAX_PER_RUN`    | 20      | Lockfile plans one run may make.                               |
+
+A large allowlist can reach the package bound: the walk follows every kept
+version in each range plus optional and peer dependencies, so a graph is
+usually several times larger than one install. Allowlist the packages a
+project needs directly, or raise `REGISTRY_MAX_GRAPH_PACKAGES` (which costs
+proxy memory and walk time).
 
 Metadata is cached for five minutes in a bounded cache (500 packages and
 64 MiB of trimmed metadata, least recently used evicted first), and
@@ -863,10 +892,19 @@ one package):
     { "ecosystem": "npm", "name": "@heroui/react", "version": "3.2.6", "size": 482113 },
     { "ecosystem": "pypi", "name": "flask", "version": "3.0.0", "size": 101817 }
   ],
-  "packageRefusals": [{ "ecosystem": "npm", "name": "left-pad", "reason": "wardby_package_not_allowed" }]
+  "packageRefusals": [
+    {
+      "ecosystem": "npm",
+      "name": "left-pad",
+      "reason": "wardby_package_not_allowed",
+      "hint": "The package is not on the agent's allowlist and not reachable from it. The agent's owner must allowlist the package; retrying will not help."
+    }
+  ]
 }
 ```
 
+`hint` says what the refusal code means and what to do about it; it is
+present for the allowlist codes below and omitted for codes without guidance.
 `size` is the number of bytes served, or `null` if none was recorded.
 `get_run` also returns `packagePlan: { "approved": <n>, "refused": <n> }`:
 the exact versions lockfile plans approved for the run, and the distinct
@@ -882,7 +920,7 @@ rendered, the section is left out and the pull request is still opened.
 When the registry refused anything during the run, the pull request also
 opens with a **Dependency install incomplete** warning, above the agent's
 summary. It names the refused packages grouped by refusal code, says what
-each code means, and notes that failed checks under **Tests** may come from
+each code means (in the same terms as `hint`), and notes that failed checks under **Tests** may come from
 the sandbox rather than the change. If the run changed a lock file
 (`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`,
 `poetry.lock`, `uv.lock` or `Pipfile.lock`), the warning names it: the lock
@@ -907,15 +945,16 @@ see on a failed install:
 
 | Code                                 | Status | Meaning / what to do                                                                                                                                                                                                                                                                                                               |
 | ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `wardby_package_not_allowed`         | 403    | The package isn't on the allowlist and isn't reachable from an allowlisted package's dependency graph. Add it (or its top-level dependent) to `packageAllowlist`. For a PyPI package an extra pulls in (`psycopg-binary` for `psycopg[binary]`), name the extra on the entry instead.                                              |
+| `wardby_package_not_allowed`         | 403    | The package isn't on the allowlist, or is only reachable through a refused package. Final: the agent's owner must allowlist it (add it, or its top-level dependent, to `packageAllowlist`). For a PyPI package an extra pulls in (`psycopg-binary` for `psycopg[binary]`), name the extra on the entry instead.                    |
+| `wardby_package_not_allowed_pending` | 403    | The dependency walk stopped before reaching the package, so it may still be reachable. Not transient and retrying rarely helps: the owner should allowlist the package directly.                                                                                                                                                   |
 | `wardby_file_not_allowed`            | 403    | The specific file type is never served for this ecosystem (for example a PyPI sdist). Nothing to configure; use a wheel.                                                                                                                                                                                                           |
 | `wardby_version_filtered`            | 404    | Every matching version is too new (younger than `minReleaseAgeDays`) or withheld by the vulnerability audit. Wait for it to age past the threshold, or lower `minReleaseAgeDays` if you understand the risk.                                                                                                                       |
 | `wardby_package_not_found`           | 404    | The upstream registry has no such package name. Check the spelling (npm names are case-sensitive).                                                                                                                                                                                                                                 |
 | `wardby_package_too_large`           | 413    | The file exceeds `REGISTRY_MAX_FILE_MB`. Ask the operator to raise it if the file is legitimately larger.                                                                                                                                                                                                                          |
 | `wardby_package_limit`               | 429    | The run hit `REGISTRY_MAX_FILES` or `REGISTRY_MAX_TOTAL_MB`. Trim what the run installs, or ask the operator to raise the limit.                                                                                                                                                                                                   |
 | `wardby_audit_unavailable`           | 503    | OSV couldn't be reached and `REGISTRY_AUDIT_FAIL_OPEN` isn't set. Retry, or have the operator set that flag if the outage is expected to be long. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the audit failed while resolving a lockfile install's dependency graph. |
-| `wardby_graph_incomplete`            | 503    | A lockfile install requested a package the on-demand dependency-graph walk hadn't reached when it was cut short by `REGISTRY_GRAPH_TIMEOUT_MS`. Retry: the walk resumes where it stopped (npm retries 5xx on its own). Never means the package is outside the graph.                                                               |
-| `wardby_graph_limit`                 | 403    | The walk hit `REGISTRY_MAX_GRAPH_PACKAGES` for this run before reaching the package. Permanent for the run, so retrying won't help: allowlist the package directly, or ask the operator to raise the limit. Never means the package is outside the graph.                                                                          |
+| `wardby_graph_incomplete`            | 503    | A dependency the walk is still checking (typically after an upstream failure). Retry shortly; npm retries 5xx on its own. Never means the package is outside the graph.                                                                                                                                                            |
+| `wardby_graph_limit`                 | 403    | The dependency graph is over `REGISTRY_MAX_GRAPH_PACKAGES` for this run. Permanent for the run, so retrying won't help: allowlist the package directly, or ask the operator to raise the limit.                                                                                                                                    |
 | `wardby_lockfile_unsupported`        | 400    | The lockfile sent to `POST /-/plan` isn't lockfileVersion 2 or 3 (or has no `packages`). Regenerate it with npm 7 or later. The install still runs, through the walk.                                                                                                                                                              |
 | `wardby_lockfile_too_large`          | 413    | The lockfile is over 20 MiB or has more than `REGISTRY_PLAN_MAX_ENTRIES` entries. The install still runs, through the walk.                                                                                                                                                                                                        |
 | `wardby_lockfile_integrity_mismatch` | —      | A plan refusal: the lockfile's `integrity` for this entry isn't the registry's own (or the registry publishes none). Regenerate the lockfile entry; never edit integrity by hand.                                                                                                                                                  |
