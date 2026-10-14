@@ -94,6 +94,19 @@ const GRAPH_WALK_CONCURRENCY = 2;
  *  expired a ledger transaction). The walk is only the fallback now; lockfile
  *  verification answers most installs without it. */
 export const DEFAULT_MAX_GRAPH_CONCURRENCY = 3;
+/** Byte budget of the graph walk's memo of expanded packages (kept
+ *  versions and their declared dependencies), across every run. */
+export const DEFAULT_GRAPH_MEMO_BYTES = 32 * 1024 * 1024;
+/** How long a memoized expansion is reused. Safe for that long: a kept
+ *  version depends on the release-age cutoff, which only moves forward (a
+ *  stale entry can only omit a version that has since become old enough,
+ *  which fails closed), and on the OSV audit, which is itself cached for an
+ *  hour (audit.ts), so a 15-minute memo changes no advisory decision the
+ *  audit cache would not. A version published upstream within the TTL is
+ *  too new to be kept under any non-zero minReleaseAgeDays; with
+ *  minReleaseAgeDays 0 it is omitted until the entry expires (fails
+ *  closed). */
+export const GRAPH_MEMO_TTL_MS = 15 * 60_000;
 /** A node whose metadata or audit fails transiently is retried once more
  *  in the same walk, then parked; a later miss retries it again, up to
  *  this many attempts per node per run. */
@@ -131,12 +144,23 @@ interface GraphEdge {
 type SelectedVersion = { version: string; dependencies: readonly DependencySpec[] };
 type NodeResult = { ok: true; selected: SelectedVersion[] } | { ok: false; cause: NodeFailure };
 /** One package's kept versions and each one's declared dependencies,
- *  computed once per walk and shared by every edge that reaches it (a
- *  popular package is reached under many distinct ranges). Deliberately
- *  not the PackageMetadata: a walk may reach thousands of packages, and
- *  holding each one's metadata for the walk's lifetime would bypass the
- *  metadata cache's bounds. */
+ *  computed once and shared by every edge that reaches it (a popular
+ *  package is reached under many distinct ranges, over many requests).
+ *  Deliberately not the PackageMetadata: a walk may reach thousands of
+ *  packages, and holding each one's metadata would bypass the metadata
+ *  cache's bounds. */
 type KeptPackage = ReadonlyMap<string, readonly DependencySpec[]>;
+
+/** Approximate retained size of a memoized expansion, for the memo's byte
+ *  budget. Deliberately generous. */
+function keptBytes(key: string, kept: KeptPackage): number {
+  let bytes = 128 + 2 * key.length;
+  for (const [version, dependencies] of kept) {
+    bytes += 64 + 2 * version.length;
+    for (const spec of dependencies) bytes += 48 + 2 * (spec.name.length + spec.range.length);
+  }
+  return bytes;
+}
 
 /** A small counting semaphore. */
 class Slots {
@@ -159,23 +183,36 @@ class Slots {
 /** Why a graph walk stopped: it found the name it was started for, it
  *  expanded every reachable package, or a bound tripped. */
 type WalkEnd = "found" | "complete" | "limit" | "timeout";
+/** How a walk ended, with its progress and (on a timeout) the names with an
+ *  unexpanded edge, both taken the moment it stopped: a request waiting on
+ *  this walk reads them from here, because by the time it resumes another
+ *  miss may already have started the next walk and taken its first batch
+ *  off the queue. */
+interface WalkResult {
+  end: WalkEnd;
+  progress: WalkProgress;
+  frontier?: ReadonlySet<string>;
+}
 
 /** One run's on-demand walk of its approved dependency graph for one
- *  ecosystem, range-aware: breadth first from the allowlist's exact roots,
- *  following each declared dependency `name@range` only into that
- *  dependency's kept versions satisfying the range, and from those
+ *  ecosystem, range-aware: breadth first (by package) from the allowlist's
+ *  exact roots, following each declared dependency `name@range` only into
+ *  that dependency's kept versions satisfying the range, and from those
  *  versions only. It is resumable (a walk stops as soon as it finds the
  *  name it was started for, and a later miss continues from where it
  *  stopped), single-flight (`running`), and memoized for the run (a miss
- *  once `queue` is empty needs no upstream call). */
+ *  once nothing is pending needs no upstream call). */
 interface GraphWalk {
   /** Every name proven part of the graph: the exact roots, plus each
    *  package with at least one kept version inside a range an expanded
    *  version declared. Every non-root name here has been written to the
    *  store as an allowance. */
   found: Set<string>;
-  /** Edges not yet expanded, in breadth-first order. */
-  queue: GraphEdge[];
+  /** Names with pending edges, in breadth-first order (each once). */
+  order: string[];
+  /** Edges not yet expanded, per name: a package's node takes all of them
+   *  at once. A name is in `order` exactly when it is here. */
+  pending: Map<string, GraphEdge[]>;
   /** Every edge ever queued (`name\0range`), so each is expanded once. */
   seen: Set<string>;
   /** Versions whose dependencies were already followed, per package, so
@@ -184,44 +221,75 @@ interface GraphWalk {
   expandedVersions: Map<string, Set<string>>;
   /** The package bound tripped: the graph is incomplete for good. */
   exhausted: boolean;
-  /** Failed attempts per edge, across the run. */
+  /** Failed attempts per package (a node's metadata and audit are the
+   *  package's, whatever range reached it), across the run. */
   attempts: Map<string, number>;
-  /** Edges that could not be expanded (transient upstream or audit
-   *  failure), retried by a later walk while attempts remain. While any
-   *  is here, a name not found is "unavailable", never "not allowed". */
-  failed: Map<string, { edge: GraphEdge; cause: NodeFailure }>;
-  running?: Promise<WalkEnd>;
+  /** Packages whose node could not be expanded (transient upstream or
+   *  audit failure), with the edges waiting on them, retried by a later
+   *  walk while attempts remain. While any is here, a name not found is
+   *  "unavailable", never "not allowed". */
+  failed: Map<string, { edges: GraphEdge[]; cause: NodeFailure }>;
+  running?: Promise<WalkResult>;
   /** Set when the run's state is released (its deadline passed): a walk
    *  still running stops at its next batch instead of holding its state
    *  until the graph timeout. */
   released?: boolean;
+  /** Packument loads the run's walks made (memo misses). */
+  loads?: number;
 }
 
 const edgeKey = (edge: GraphEdge) => `${edge.name}\0${edge.range}`;
 
-/** Edges the walk has not expanded yet: queued, or parked in `failed` with
- *  attempts left. Read only between walks (a running walk has its batch
- *  off the queue). */
-function unexpandedEdges(walk: GraphWalk): GraphEdge[] {
-  const retriable = [...walk.failed.entries()]
-    .filter(([key]) => (walk.attempts.get(key) ?? 0) < MAX_GRAPH_NODE_ATTEMPTS)
-    .map(([, entry]) => entry.edge);
-  return [...walk.queue, ...retriable];
+/** Whether a parked failure may be retried. */
+function retriable(walk: GraphWalk, name: string): boolean {
+  return (walk.attempts.get(name) ?? 0) < MAX_GRAPH_NODE_ATTEMPTS;
+}
+
+/** Names with an edge the walk has not expanded yet: pending, or parked in
+ *  `failed` with attempts left. Read only between batches (a running
+ *  batch is off the queue). */
+function unexpandedNames(walk: GraphWalk): Set<string> {
+  const names = new Set(walk.pending.keys());
+  for (const name of walk.failed.keys()) if (retriable(walk, name)) names.add(name);
+  return names;
 }
 
 /** Packages walked so far, and the distinct names with an unexpanded edge
  *  that are not yet expanded themselves (a further edge to an expanded
  *  package adds no new package). */
 function walkProgress(walk: GraphWalk): WalkProgress {
-  const queued = new Set(unexpandedEdges(walk).map((edge) => edge.name));
+  const queued = unexpandedNames(walk);
   for (const name of walk.expandedVersions.keys()) queued.delete(name);
   return { walked: walk.expandedVersions.size, queued: queued.size };
 }
 
-/** Whether `name` has an unexpanded edge: a kept version of an expanded
- *  package declares it, so only its own versions remain to be checked. */
-function inFrontier(walk: GraphWalk, name: string): boolean {
-  return unexpandedEdges(walk).some((edge) => edge.name === name);
+/** Unexpanded edges, for the progress log. */
+function unexpandedEdgeCount(walk: GraphWalk): number {
+  let count = 0;
+  for (const edges of walk.pending.values()) count += edges.length;
+  for (const [name, entry] of walk.failed) if (retriable(walk, name)) count += entry.edges.length;
+  return count;
+}
+
+/** Adds edges to `name`'s pending group (at the end of the order, or at
+ *  the front with `first`). */
+function addPending(walk: GraphWalk, name: string, edges: readonly GraphEdge[], first = false): void {
+  const group = walk.pending.get(name);
+  if (group) {
+    group.push(...edges);
+    if (first) moveToFront(walk, name);
+    return;
+  }
+  walk.pending.set(name, [...edges]);
+  if (first) walk.order.unshift(name);
+  else walk.order.push(name);
+}
+
+function moveToFront(walk: GraphWalk, name: string): void {
+  const index = walk.order.indexOf(name);
+  if (index <= 0) return;
+  walk.order.splice(index, 1);
+  walk.order.unshift(name);
 }
 
 /** `cutShort`: the walk stopped (its time ran out, or the package bound
@@ -408,6 +476,17 @@ export class RegistryService {
    *  across replicas. */
   private readonly inFlight = new Map<string, { files: number; bytes: number }>();
   private readonly tallies = new Map<string, RunTally>();
+  /** Expanded packages of the graph walks (`runId\0ecosystem\0name`),
+   *  least recently used first, so a package reached again under a new
+   *  range, in a later request of the same run, is not read again.
+   *  Run-scoped by key: a package's kept versions depend on the run's
+   *  policy and allowlist range. Bounded to `graphMemoBytes`; entries
+   *  expire GRAPH_MEMO_TTL_MS after they are computed, and a run's entries
+   *  are dropped when the run is released. */
+  private readonly graphMemo = new Map<string, { expires: number; bytes: number; kept: KeptPackage }>();
+  /** Sum of the memo entries' `bytes`. */
+  private graphMemoTotal = 0;
+  private readonly graphMemoBytes = DEFAULT_GRAPH_MEMO_BYTES;
   private readonly walkSlots: Slots;
   private readonly planSlots: Slots;
   private readonly versionUpstream: UpstreamFetch;
@@ -436,7 +515,7 @@ export class RegistryService {
       /** Time one on-demand graph walk may take (default 180 s). */
       graphTimeoutMs?: number;
       /** Graph-walk expansions in flight at once across every run
-       *  (default 16). */
+       *  (default 3). */
       maxGraphConcurrency?: number;
       /** Entries a lockfile plan may have (default 5000). */
       planMaxEntries?: number;
@@ -891,13 +970,15 @@ export class RegistryService {
       const edges = roots.map((root) => ({ name: root, range: "*" }));
       walk = {
         found: new Set(roots),
-        queue: edges,
+        order: [],
+        pending: new Map(),
         seen: new Set(edges.map(edgeKey)),
         expandedVersions: new Map(),
         exhausted: false,
         attempts: new Map(),
         failed: new Map(),
       };
+      for (const edge of edges) addPending(walk, edge.name, [edge]);
       tally.graphs.set(adapter.id, walk);
     }
     const current = walk;
@@ -918,18 +999,18 @@ export class RegistryService {
       // starts at most one walk of its own, so it spends at most one
       // round of retries on failed nodes.
       if (!current.running) {
-        const retriable = [...current.failed.keys()].some(
-          (key) => (current.attempts.get(key) ?? 0) < MAX_GRAPH_NODE_ATTEMPTS,
-        );
-        if (started || (current.queue.length === 0 && !retriable)) return this.graphMiss(current);
+        const anyRetriable = [...current.failed.keys()].some((key) => retriable(current, key));
+        if (started || (current.pending.size === 0 && !anyRetriable)) return this.graphMiss(current);
         started = true;
         current.running = this.walkGraph(adapter, context, entries, current, name).finally(() => {
           current.running = undefined;
         });
       }
-      const end = await current.running;
-      if (end === "timeout" && !current.found.has(name))
-        return { cutShort: "timeout", progress: walkProgress(current), frontier: inFrontier(current, name) };
+      const result = await current.running;
+      // Read from the walk's own snapshot, never from the live walk: a
+      // miss in the meantime may have started the next walk already.
+      if (result.end === "timeout" && !current.found.has(name))
+        return { cutShort: "timeout", progress: result.progress, frontier: result.frontier?.has(name) ?? false };
     }
   }
 
@@ -941,7 +1022,37 @@ export class RegistryService {
     return { unavailable: [...walk.failed.values()].some((entry) => entry.cause === "audit") ? "audit" : "upstream" };
   }
 
+  /** One walk, logged once when it stops, with its progress (and, on a
+   *  timeout, its frontier) taken before `running` is cleared. */
   private async walkGraph(
+    adapter: RegistryAdapter,
+    context: RegistryRunContext,
+    entries: readonly AllowlistEntry[],
+    walk: GraphWalk,
+    target: string,
+  ): Promise<WalkResult> {
+    const startedAt = this.now().getTime();
+    const loadsBefore = walk.loads ?? 0;
+    const end = await this.expandGraph(adapter, context, entries, walk, target);
+    const progress = walkProgress(walk);
+    registryLog.info(
+      {
+        event: "registry.graph_walk",
+        runId: context.runId,
+        ecosystem: adapter.id,
+        end,
+        walked: progress.walked,
+        queued: progress.queued,
+        queuedEdges: unexpandedEdgeCount(walk),
+        loads: (walk.loads ?? 0) - loadsBefore,
+        durationMs: this.now().getTime() - startedAt,
+      },
+      "coding registry graph walk stopped",
+    );
+    return end === "timeout" ? { end, progress, frontier: unexpandedNames(walk) } : { end, progress };
+  }
+
+  private async expandGraph(
     adapter: RegistryAdapter,
     context: RegistryRunContext,
     entries: readonly AllowlistEntry[],
@@ -950,17 +1061,16 @@ export class RegistryService {
   ): Promise<WalkEnd> {
     const maxPackages = this.options.maxGraphPackages ?? DEFAULT_MAX_GRAPH_PACKAGES;
     const deadline = this.now().getTime() + (this.options.graphTimeoutMs ?? DEFAULT_GRAPH_TIMEOUT_MS);
-    // Parked failures with attempts left go first: a later miss is this
-    // walk's retry of them.
-    const retry = [...walk.failed.entries()].filter(([key]) => (walk.attempts.get(key) ?? 0) < MAX_GRAPH_NODE_ATTEMPTS);
-    for (const [key] of retry) walk.failed.delete(key);
-    walk.queue.unshift(...retry.map(([, entry]) => entry.edge));
+    // Parked failures with attempts left go first (a later miss is this
+    // walk's retry of them), and the requested name before everything:
+    // order changes only how soon an answer comes, never which edges are
+    // followed or what they allow.
+    const retry = [...walk.failed.entries()].filter(([name]) => retriable(walk, name));
+    for (const [name] of retry) walk.failed.delete(name);
+    for (const [name, entry] of retry.reverse()) addPending(walk, name, entry.edges, true);
+    if (walk.pending.has(target)) moveToFront(walk, target);
     const attemptsThisWalk = new Map<string, number>();
-    // Per-walk memo: a walk lasts at most the graph timeout, well inside
-    // the metadata and audit cache lifetimes, so this changes no decision.
-    // A failed computation is not memoized, so its retry really retries.
-    const kept = new Map<string, Promise<KeptPackage>>();
-    while (walk.queue.length > 0) {
+    while (walk.pending.size > 0) {
       if (walk.found.has(target)) return "found";
       if (walk.released) return "timeout";
       const remaining = deadline - this.now().getTime();
@@ -970,64 +1080,63 @@ export class RegistryService {
         walk.exhausted = true;
         return "limit";
       }
-      // Each edge adds at most one new package, so a batch no larger than
-      // the room left can never overshoot the bound.
-      const batch = walk.queue.splice(0, Math.min(GRAPH_WALK_CONCURRENCY, room));
-      const expansions = Promise.all(batch.map((edge) => this.graphNode(adapter, context, entries, edge, kept)));
+      // Each name adds at most one new package, so a batch no larger than
+      // the room left can never overshoot the bound. A name's node takes
+      // every edge pending for it.
+      const batch = walk.order.splice(0, Math.min(GRAPH_WALK_CONCURRENCY, room)).map((name) => {
+        const edges = walk.pending.get(name) ?? [];
+        walk.pending.delete(name);
+        return { name, edges };
+      });
+      const expansions = Promise.all(
+        batch.map(({ name, edges }) => this.graphNode(adapter, context, entries, name, edges, walk)),
+      );
       let timer: NodeJS.Timeout | undefined;
       const timedOut = new Promise<"timeout">((resolve) => {
         timer = setTimeout(() => resolve("timeout"), remaining);
       });
       const results = await Promise.race([expansions, timedOut]).finally(() => clearTimeout(timer));
       if (results === "timeout") {
-        // Not expanded: put the batch back so a later miss retries it (its
-        // metadata is likely cached by then).
-        walk.queue.unshift(...batch);
+        // Not expanded: put the whole batch back, in order, so a later
+        // miss retries it (its node is likely memoized by then).
+        for (const { name, edges } of [...batch].reverse()) addPending(walk, name, edges, true);
         return "timeout";
       }
-      const expanded: { edge: GraphEdge; selected: SelectedVersion[] }[] = [];
-      batch.forEach((edge, index) => {
+      const expanded: { name: string; edges: GraphEdge[]; selected: SelectedVersion[] }[] = [];
+      batch.forEach(({ name, edges }, index) => {
         const result = results[index];
         if (result.ok) {
-          expanded.push({ edge, selected: result.selected });
+          expanded.push({ name, edges, selected: result.selected });
           return;
         }
-        // A transient failure is never counted as expanded: the edge is
+        // A transient failure is never counted as expanded: the node is
         // retried (once more in this walk, then by later misses) instead
         // of silently closing its whole subtree for the run.
-        const key = edgeKey(edge);
-        walk.attempts.set(key, (walk.attempts.get(key) ?? 0) + 1);
-        attemptsThisWalk.set(key, (attemptsThisWalk.get(key) ?? 0) + 1);
-        if (
-          (attemptsThisWalk.get(key) ?? 0) < GRAPH_NODE_ATTEMPTS_PER_WALK &&
-          (walk.attempts.get(key) ?? 0) < MAX_GRAPH_NODE_ATTEMPTS
-        )
-          walk.queue.push(edge);
-        else walk.failed.set(key, { edge, cause: result.cause });
+        walk.attempts.set(name, (walk.attempts.get(name) ?? 0) + 1);
+        attemptsThisWalk.set(name, (attemptsThisWalk.get(name) ?? 0) + 1);
+        if ((attemptsThisWalk.get(name) ?? 0) < GRAPH_NODE_ATTEMPTS_PER_WALK && retriable(walk, name))
+          addPending(walk, name, edges);
+        else walk.failed.set(name, { edges, cause: result.cause });
       });
       // A package joins the graph (and gets its allowance) only when some
       // kept version of it satisfies a range that reached it. Recorded
       // before it counts as found, so `found` never holds a name the store
       // would refuse.
-      const discovered = [
-        ...new Set(
-          expanded
-            .filter(({ edge, selected }) => selected.length > 0 && !walk.found.has(edge.name))
-            .map(({ edge }) => edge.name),
-        ),
-      ];
+      const discovered = expanded
+        .filter(({ name, selected }) => selected.length > 0 && !walk.found.has(name))
+        .map(({ name }) => name);
       try {
         if (discovered.length > 0) await this.options.store.addAllowances(context.runId, adapter.id, discovered);
       } catch (error) {
-        // The store write failed: put the expanded edges back so a later
+        // The store write failed: put the expanded groups back so a later
         // miss re-expands them, rather than leaving the graph silently short.
-        walk.queue.unshift(...expanded.map(({ edge }) => edge));
+        for (const { name, edges } of [...expanded].reverse()) addPending(walk, name, edges, true);
         throw error;
       }
       for (const name of discovered) walk.found.add(name);
-      for (const { edge, selected } of expanded) {
-        let versions = walk.expandedVersions.get(edge.name);
-        if (!versions) walk.expandedVersions.set(edge.name, (versions = new Set()));
+      for (const { name, selected } of expanded) {
+        let versions = walk.expandedVersions.get(name);
+        if (!versions) walk.expandedVersions.set(name, (versions = new Set()));
         for (const { version, dependencies } of selected) {
           if (versions.has(version)) continue;
           versions.add(version);
@@ -1035,7 +1144,11 @@ export class RegistryService {
             const key = edgeKey(dependency);
             if (walk.seen.has(key)) continue;
             walk.seen.add(key);
-            walk.queue.push(dependency);
+            // A package parked after failing waits with its edges and is
+            // retried with them.
+            const parked = walk.failed.get(dependency.name);
+            if (parked) parked.edges.push(dependency);
+            else addPending(walk, dependency.name, [dependency], dependency.name === target);
           }
         }
       }
@@ -1043,42 +1156,36 @@ export class RegistryService {
     return walk.found.has(target) ? "found" : "complete";
   }
 
-  /** The kept versions of one package inside the edge's range, and each
-   *  one's declared dependencies, through the same metadata cache and
-   *  `keptVersions` filter the metadata path uses (a root's allowlist range
-   *  applies there), within the process-wide walk concurrency cap. `"*"`
-   *  selects every kept version; a range no kept version satisfies selects
-   *  none. A package npm doesn't have, or whose metadata is too large,
-   *  definitively selects nothing; any other failure (upstream error or
-   *  timeout, audit unavailable) is transient and reported for retry. */
+  /** The kept versions of one package inside any of the ranges that reached
+   *  it, and each one's declared dependencies, through the same metadata
+   *  cache and `keptVersions` filter the metadata path uses (a root's
+   *  allowlist range applies there), within the process-wide walk
+   *  concurrency cap. A `"*"` edge selects every kept version; a range no
+   *  kept version satisfies selects none. A package npm doesn't have, or
+   *  whose metadata is too large, definitively selects nothing; any other
+   *  failure (upstream error or timeout, audit unavailable) is transient
+   *  and reported for retry. */
   private graphNode(
     adapter: RegistryAdapter,
     context: RegistryRunContext,
     entries: readonly AllowlistEntry[],
-    edge: GraphEdge,
-    memo: Map<string, Promise<KeptPackage>>,
+    name: string,
+    edges: readonly GraphEdge[],
+    walk?: GraphWalk,
   ): Promise<NodeResult> {
     return this.walkSlots.run(async (): Promise<NodeResult> => {
       try {
-        let load = memo.get(edge.name);
-        if (!load) {
-          load = (async (): Promise<KeptPackage> => {
-            const meta = await this.metadata(adapter, edge.name, false);
-            const { keep } = await this.keptVersions(adapter, context, meta, matchRoot(entries, edge.name));
-            return new Map([...keep].map((version) => [version, versionDependencies(adapter, meta, version)]));
-          })();
-          memo.set(edge.name, load);
-          load.catch(() => memo.delete(edge.name));
-        }
-        const keep = await load;
-        const inRange = (version: string) => {
-          if (edge.range === "*") return true;
-          try {
-            return adapter.satisfies(version, edge.range);
-          } catch {
-            return false;
-          }
-        };
+        const keep = await this.keptForGraph(adapter, context, entries, name, walk);
+        const ranges = [...new Set(edges.map((edge) => edge.range))];
+        const inRange = (version: string) =>
+          ranges.some((range) => {
+            if (range === "*") return true;
+            try {
+              return adapter.satisfies(version, range);
+            } catch {
+              return false;
+            }
+          });
         const selected: SelectedVersion[] = [];
         for (const [version, dependencies] of keep) if (inRange(version)) selected.push({ version, dependencies });
         return { ok: true, selected };
@@ -1088,6 +1195,62 @@ export class RegistryService {
         return { ok: false, cause: audit ? "audit" : "upstream" };
       }
     });
+  }
+
+  /** A package's kept versions for the run's walk, from the memo or
+   *  computed (and memoized). A failed computation is not memoized, so its
+   *  retry really retries. */
+  private async keptForGraph(
+    adapter: RegistryAdapter,
+    context: RegistryRunContext,
+    entries: readonly AllowlistEntry[],
+    name: string,
+    walk?: GraphWalk,
+  ): Promise<KeptPackage> {
+    const key = `${context.runId}\0${adapter.id}\0${name}`;
+    const now = this.now().getTime();
+    const memoized = this.graphMemo.get(key);
+    if (memoized) {
+      this.dropMemo(key);
+      if (memoized.expires > now) {
+        this.putMemo(key, memoized); // most recently used
+        return memoized.kept;
+      }
+    }
+    if (walk) walk.loads = (walk.loads ?? 0) + 1;
+    const meta = await this.metadata(adapter, name, false);
+    const { keep } = await this.keptVersions(adapter, context, meta, matchRoot(entries, name));
+    const kept: KeptPackage = new Map(
+      [...keep].map((version) => [version, versionDependencies(adapter, meta, version)]),
+    );
+    // A run released meanwhile (its walk stopped) keeps nothing here.
+    if (this.tallies.has(context.runId)) this.memoize(key, kept);
+    return kept;
+  }
+
+  private dropMemo(key: string): void {
+    const entry = this.graphMemo.get(key);
+    if (!entry) return;
+    this.graphMemo.delete(key);
+    this.graphMemoTotal -= entry.bytes;
+  }
+
+  private putMemo(key: string, entry: { expires: number; bytes: number; kept: KeptPackage }): void {
+    this.graphMemo.set(key, entry);
+    this.graphMemoTotal += entry.bytes;
+  }
+
+  /** Memoizes an expansion, least recently used evicted first, within the
+   *  byte budget. An entry larger than the whole budget is not kept. */
+  private memoize(key: string, kept: KeptPackage): void {
+    const now = this.now().getTime();
+    for (const [memoKey, entry] of this.graphMemo) if (entry.expires <= now) this.dropMemo(memoKey);
+    this.dropMemo(key);
+    const bytes = keptBytes(key, kept);
+    if (bytes > this.graphMemoBytes) return;
+    while (this.graphMemo.size > 0 && this.graphMemoTotal + bytes > this.graphMemoBytes)
+      this.dropMemo(this.graphMemo.keys().next().value as string);
+    this.putMemo(key, { expires: now + GRAPH_MEMO_TTL_MS, bytes, kept });
   }
 
   /** A package's metadata, cached. `render` asks for the form
@@ -1225,6 +1388,8 @@ export class RegistryService {
     clearTimeout(tally.timer);
     for (const walk of tally.graphs?.values() ?? []) walk.released = true;
     tally.graphs?.clear();
+    const prefix = `${runId}\0`;
+    for (const key of [...this.graphMemo.keys()]) if (key.startsWith(prefix)) this.dropMemo(key);
   }
 
   /** Releases every run's in-process state (timers included), e.g. when the

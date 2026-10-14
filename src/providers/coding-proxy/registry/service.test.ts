@@ -1262,6 +1262,13 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       versions: { "1.0.0": version("tagged", "1.0.0", { mid: "latest" }) },
     },
     leaf: { name: "leaf", time: { "1.0.0": old }, versions: { "1.0.0": version("leaf", "1.0.0") } },
+    // A root whose dependency (aliaser) reaches mid under ^2 one level
+    // deeper than app reaches it under ^1.
+    grand: {
+      name: "grand",
+      time: { "1.0.0": old },
+      versions: { "1.0.0": version("grand", "1.0.0", { aliaser: "^1" }) },
+    },
     "ranged-out": {
       name: "ranged-out",
       time: { "1.0.0": old },
@@ -1290,6 +1297,8 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       /** Other runs sharing the same service: token -> npm allowlist. */
       otherRuns?: Record<string, string[]>;
       upstreamDelayMs?: number;
+      /** Upstream metadata held per package name until the promise settles. */
+      held?: Record<string, Promise<void>>;
     } = {},
   ) {
     const store = overrides.store ?? new MemoryRegistryStore();
@@ -1346,6 +1355,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
             init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error)),
           );
         if (overrides.gate) await overrides.gate;
+        if (overrides.held?.[name]) await overrides.held[name];
         inFlight += 1;
         concurrency.max = Math.max(concurrency.max, inFlight);
         try {
@@ -1372,7 +1382,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     });
     const get = (subpath: string, token = "rrg_token") =>
       registry.handle({ ...request(subpath, token), ecosystem: "npm" });
-    return { get, urls, audited, store, concurrency };
+    return { get, urls, audited, store, concurrency, registry };
   }
 
   it("serves a transitive dependency's tarball, two levels deep, with no prior metadata request", async () => {
@@ -1505,20 +1515,21 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
   });
 
   it("the pending answer counts only names not yet expanded as queued", async () => {
-    // The first walk stops once it finds mid, leaving edges queued for mid
-    // (by dist-tag) and leaf (by range), both already expanded under
-    // another spec, and for leaf-new. Then mid stops answering.
+    // The first walk stops once it finds mid (expanded under ^1 and its
+    // dist-tag together), leaving edges queued for leaf (by range), already
+    // expanded as a root, and for leaf-new and mid-two-only. Then leaf-new
+    // stops answering (leaf is memoized, so it needs no upstream call).
     const options: Parameters<typeof graphService>[0] = { allowlist: ["app@^1", "leaf", "tagged"], graphTimeoutMs: 30 };
     const { get } = graphService(options);
     await expect(get("mid")).resolves.toMatchObject({ status: 200 });
-    options.hang = "mid";
+    options.hang = "leaf-new";
     const response = await get("stranger");
     expect(response).toMatchObject({ status: 403 });
     const body = "body" in response ? response.body : "";
     expect(body).toContain("wardby_package_not_allowed_pending:");
     // app, leaf, tagged and mid were expanded; of the three queued edges
-    // (mid@latest, leaf@^1, leaf-new@^1) only leaf-new is a new package.
-    expect(body).toContain("after 4 packages, at least 1 more queued");
+    // (leaf@^1, leaf-new@^1, mid-two-only@^1) leaf is not a new package.
+    expect(body).toContain("after 4 packages, at least 2 more queued");
   });
 
   it("serves a name on retry once a timed-out walk resumes and reaches it", async () => {
@@ -1708,9 +1719,150 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
   it("expands each version of a package once, however many ranges reach it", async () => {
     const { get, audited } = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
     await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
-    // mid is reached under ^1, latest and ^2: three edges, but its node is
-    // expanded (and audited) once per range and its versions never twice.
     expect(audited.filter((name) => name === "leaf")).toHaveLength(1);
+  });
+
+  it("expands all of a package's pending ranges in one node", async () => {
+    // mid is reached under ^1 (app), latest (tagged) and ^2 (aliaser).
+    const { get, urls, registry } = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
+    const internals = registry as unknown as { graphNode: (...args: unknown[]) => Promise<unknown> };
+    const graphNode = internals.graphNode.bind(registry);
+    const midRanges: string[][] = [];
+    internals.graphNode = (...args: unknown[]) => {
+      // (adapter, context, entries, name, edges); an edge object before grouping.
+      const [name, edges] =
+        typeof args[3] === "string"
+          ? [args[3], args[4] as { range: string }[]]
+          : [(args[3] as { name: string }).name, [args[3] as { range: string }]];
+      if (name === "mid") midRanges.push(edges.map((edge) => edge.range));
+      return graphNode(...args);
+    };
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    // The ranges pending together when mid's node runs share it.
+    expect(midRanges.some((ranges) => ranges.length > 1)).toBe(true);
+    // (A dist-tag is followed as "*", every kept version.)
+    expect(midRanges.flat().sort()).toEqual(["*", "^1", "^2"]);
+    // One packument load for mid in the walk (metadataTtlMs is 0 here).
+    expect(urls.filter((url) => url.endsWith("/mid"))).toHaveLength(1);
+  });
+
+  it("expands the requested name's pending edges before the rest of the queue", async () => {
+    // app is the first of 31 roots; mid, its dependency, is the target.
+    // Breadth first, mid would wait behind 30 roots; target first, it is
+    // the next node after app.
+    const others = Array.from({ length: 30 }, (_, index) => `root-${index}`);
+    // A clock that moves with real time, so the walk's deadline is real.
+    const start = Date.now();
+    const { get } = graphService({
+      now: () => new Date(NOW.getTime() + Date.now() - start),
+      allowlist: ["app@^1", ...others],
+      maxGraphConcurrency: 1,
+      upstreamDelayMs: 20,
+      graphTimeoutMs: 300,
+    });
+    const response = await get("mid");
+    expect(response, JSON.stringify(response)).toMatchObject({ status: 200 });
+  });
+
+  it("answers a waiting request from its own walk's end, even if another miss starts a walk in the same tick", async () => {
+    // leaf is in the frontier when the walk times out (leaf never answers).
+    // A second miss starts the next walk before the first request reads
+    // the answer, and that walk takes leaf off the queue at once.
+    const { get, registry } = graphService({ hang: "leaf", graphTimeoutMs: 30 });
+    const internals = registry as unknown as {
+      walkGraph: (...args: unknown[]) => Promise<unknown>;
+      resolveInGraph: (...args: unknown[]) => Promise<unknown>;
+    };
+    const walkGraph = internals.walkGraph.bind(registry);
+    let second: Promise<unknown> | undefined;
+    let interleaved = false;
+    internals.walkGraph = (...args: unknown[]) => {
+      const walk = walkGraph(...args);
+      if (!interleaved) {
+        interleaved = true;
+        void walk.then(() =>
+          // Queued behind the walk's own `.finally`: runs once `running` is
+          // cleared, before the waiting request resumes.
+          queueMicrotask(() => {
+            const [adapter, context, entries] = args;
+            second = internals.resolveInGraph(adapter, context, entries, "leaf");
+          }),
+        );
+      }
+      return walk;
+    };
+    const response = await get("leaf");
+    expect(second).toBeDefined();
+    await second;
+    expect(response).toMatchObject({ status: 503 });
+    expect("body" in response && response.body).toContain("wardby_graph_incomplete:");
+  });
+
+  it("reuses an expanded package across requests within the memo's lifetime", async () => {
+    // Walk 1 expands app, grand, mid (^1) and aliaser, then times out on
+    // leaf; mid@^2 (from aliaser) is still queued. Walk 2 expands it from
+    // the memo, with no metadata cache to help (metadataTtlMs is 0).
+    let release: () => void = () => {};
+    const leaf = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { get, urls, store } = graphService({ allowlist: ["app@^1", "grand"], held: { leaf }, graphTimeoutMs: 30 });
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    expect(urls.filter((url) => url.endsWith("/mid"))).toHaveLength(1);
+    release();
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    expect(urls.filter((url) => url.endsWith("/mid"))).toHaveLength(1);
+    // mid@^2's own dependency joined the graph from the memoized versions.
+    expect(await store.isAllowedDependency("run-1", "npm", "mid-two-only")).toBe(true);
+  });
+
+  it("re-reads a package after the memo TTL", async () => {
+    let clock = NOW;
+    let release: () => void = () => {};
+    const leaf = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { get, urls } = graphService({
+      allowlist: ["app@^1", "grand"],
+      held: { leaf },
+      graphTimeoutMs: 30,
+      now: () => clock,
+    });
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    expect(urls.filter((url) => url.endsWith("/mid"))).toHaveLength(1);
+    release();
+    clock = new Date(NOW.getTime() + 15 * 60_000 + 1);
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    expect(urls.filter((url) => url.endsWith("/mid"))).toHaveLength(2);
+  });
+
+  it("bounds the memo by bytes and drops a run's entries when the run is released", async () => {
+    type Memo = Map<string, { bytes: number }>;
+    const { get, registry } = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
+    const internals = registry as unknown as { graphMemo: Memo; graphMemoBytes: number; graphMemoTotal: number };
+    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    expect(internals.graphMemo.size).toBeGreaterThan(0);
+    for (const key of internals.graphMemo.keys()) expect(key.startsWith("run-1\0npm\0")).toBe(true);
+    expect(internals.graphMemoTotal).toBe([...internals.graphMemo.values()].reduce((sum, e) => sum + e.bytes, 0));
+    registry.close();
+    expect(internals.graphMemo.size).toBe(0);
+    expect(internals.graphMemoTotal).toBe(0);
+
+    // A budget smaller than any entry keeps nothing, and the walk still
+    // reaches the same answers.
+    const small = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
+    const smallInternals = small.registry as unknown as { graphMemo: Memo; graphMemoBytes: number };
+    smallInternals.graphMemoBytes = 1;
+    await expect(small.get("leaf")).resolves.toMatchObject({ status: 200 });
+    await expect(small.get("stranger")).resolves.toMatchObject({ status: 403 });
+    expect(smallInternals.graphMemo.size).toBe(0);
+    // A budget for about one entry keeps the total within it.
+    const one = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
+    const oneInternals = one.registry as unknown as { graphMemo: Memo; graphMemoBytes: number; graphMemoTotal: number };
+    oneInternals.graphMemoBytes = 400;
+    await expect(one.get("stranger")).resolves.toMatchObject({ status: 403 });
+    expect(oneInternals.graphMemoTotal).toBeLessThanOrEqual(400);
+    expect(oneInternals.graphMemo.size).toBeGreaterThan(0);
   });
 
   it("PyPI, which does not walk, answers the final wording", async () => {
@@ -1967,5 +2119,203 @@ describe("RegistryService memory: nothing retains a parsed packument, and run st
     await expect(get("app")).resolves.toMatchObject({ status: 200 });
     // One entry is larger than the whole budget: it is served, not cached.
     expect(internals.metadataCache.size).toBe(0);
+  });
+});
+
+describe("RegistryService graph walk at scale", () => {
+  // A synthetic npm registry: 1,200 packages p0..p1199, 20 versions each
+  // (1.0.0..1.19.0, all old enough). Each package depends on 6 others a
+  // little further on (so the graph is deep, not a star), and each version
+  // declares them under its own range. Four roots. The injected clock
+  // advances 350 ms per packument and 300 ms per audit, so a request's
+  // default 180 s walk covers a few hundred packages.
+  const SIZE = 1200;
+  const VERSIONS = 20;
+  const FANOUT = 6;
+  const WINDOW = 60;
+  const POPULAR_FANOUT = 2;
+  const ROOTS = ["p0", "p1", "p2", "p3"];
+  /** Measured with ~20% headroom (see the scale test below). */
+  const REQUESTS_BOUND = 6;
+  const LOADS_BOUND = 1_650;
+  const old = new Date(NOW.getTime() - 30 * DAY).toISOString();
+  const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
+  let seed = 330;
+  const random = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  /** Per package: dependencies a little further on (the graph's depth),
+   *  then dependencies on popular packages (p4..p103), which edges keep
+   *  reaching under new ranges from every depth, as utility packages do. */
+  const children: number[][] = [];
+  const popular: number[][] = [];
+  for (let index = 0; index < SIZE; index += 1) {
+    const targets = new Set<number>();
+    for (let tries = 0; targets.size < FANOUT - POPULAR_FANOUT && tries < 100; tries += 1) {
+      const target = index + 1 + Math.floor(random() * WINDOW);
+      if (target < SIZE) targets.add(target);
+    }
+    const shared = new Set<number>();
+    while (shared.size < POPULAR_FANOUT) {
+      const target = 4 + Math.floor(random() * 100);
+      if (target !== index && !targets.has(target)) shared.add(target);
+    }
+    children.push([...targets]);
+    popular.push([...shared]);
+  }
+  const bodies = new Map<string, string>();
+  const packumentBody = (index: number): string => {
+    const name = `p${index}`;
+    let body = bodies.get(name);
+    if (body) return body;
+    const time: Record<string, string> = {};
+    const versions: Record<string, unknown> = {};
+    for (let minor = 0; minor < VERSIONS; minor += 1) {
+      const version = `1.${minor}.0`;
+      time[version] = old;
+      const dependencies: Record<string, string> = {};
+      for (const child of children[index]) dependencies[`p${child}`] = `^1.${4 * Math.floor(random() * 5)}.0`;
+      for (const child of popular[index])
+        dependencies[`p${child}`] = `^1.${Math.floor(random() * VERSIONS)}.${Math.floor(random() * 10)}`;
+      versions[version] = {
+        name,
+        version,
+        dependencies,
+        dist: { tarball: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`, integrity },
+      };
+    }
+    body = JSON.stringify({ name, time, versions });
+    bodies.set(name, body);
+    return body;
+  };
+  for (let index = 0; index < SIZE; index += 1) packumentBody(index);
+  // Breadth-first depth of every reachable package from the roots.
+  const depth = new Map<string, number>(ROOTS.map((root) => [root, 0]));
+  for (const queue = [0, 1, 2, 3]; queue.length > 0;) {
+    const index = queue.shift() as number;
+    for (const child of [...children[index], ...popular[index]]) {
+      if (depth.has(`p${child}`)) continue;
+      depth.set(`p${child}`, (depth.get(`p${index}`) ?? 0) + 1);
+      queue.push(child);
+    }
+  }
+
+  function scaleService(overrides: { maxGraphPackages?: number } = {}) {
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { npm: ROOTS },
+      policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
+    });
+    const clock = { ms: NOW.getTime() };
+    const counts = { loads: 0 };
+    const registry = new RegistryService({
+      adapters: new Map([["npm", npmAdapter]]),
+      store,
+      audit: {
+        audit: async () => {
+          clock.ms += 300;
+          return NO_ADVISORIES;
+        },
+      },
+      upstream: async (url) => {
+        const name = decodeURIComponent(url.slice("https://registry.npmjs.org/".length));
+        const match = name.match(/^p(\d+)$/);
+        if (!match) return new Response("not found", { status: 404 });
+        clock.ms += 350;
+        counts.loads += 1;
+        return new Response(packumentBody(Number(match[1])), { headers: { "content-type": "application/json" } });
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => new Date(clock.ms),
+      maxGraphPackages: overrides.maxGraphPackages,
+    });
+    const get = async (subpath: string) => {
+      const response = await registry.handle({ ...request(subpath), ecosystem: "npm" });
+      return { status: response.status, body: "body" in response ? response.body : "" };
+    };
+    const walk = () =>
+      (
+        registry as unknown as {
+          tallies: Map<string, { graphs?: Map<string, unknown> }>;
+        }
+      ).tallies
+        .get("run-1")
+        ?.graphs?.get("npm");
+    return { get, clock, counts, registry, walk };
+  }
+
+  const walkedIn = (body: string) => Number(body.match(/after ([\d,]+) packages?/)?.[1].replace(/,/g, "") ?? NaN);
+
+  /** Requests `name` until the answer is no longer pending, `gapMs` apart. */
+  async function untilSettled(scale: ReturnType<typeof scaleService>, name: string, gapMs: number) {
+    const progress: number[] = [];
+    for (let requests = 1; requests <= 60; requests += 1) {
+      const answer = await scale.get(name);
+      if (!answer.body.includes("wardby_package_not_allowed_pending:")) return { requests, progress, answer };
+      progress.push(walkedIn(answer.body));
+      scale.clock.ms += gapMs;
+    }
+    throw new Error(`still pending after 60 requests: ${JSON.stringify(progress)}`);
+  }
+
+  it("reaches the final answer for an absent name within a bounded number of requests, reporting growing progress", async () => {
+    const scale = scaleService();
+    const { requests, progress, answer } = await untilSettled(scale, "not-a-dep", 5 * 60_000);
+    const numbers = `requests=${requests} loads=${scale.counts.loads} progress=${JSON.stringify(progress)}`;
+    expect(answer.status, numbers).toBe(403);
+    expect(answer.body, numbers).toContain("wardby_package_not_allowed:");
+    expect(progress.length, numbers).toBeGreaterThan(0);
+    for (let index = 1; index < progress.length; index += 1)
+      expect(progress[index], numbers).toBeGreaterThan(progress[index - 1]);
+    expect(requests, numbers).toBeLessThanOrEqual(REQUESTS_BOUND);
+    expect(scale.counts.loads, numbers).toBeLessThanOrEqual(LOADS_BOUND);
+    scale.registry.close();
+  });
+
+  it("ends in wardby_graph_limit, not pending, when the bound trips first", async () => {
+    const scale = scaleService({ maxGraphPackages: 600 });
+    const { progress, answer } = await untilSettled(scale, "not-a-dep", 5 * 60_000);
+    expect(answer.status).toBe(403);
+    expect(answer.body).toContain("wardby_graph_limit:");
+    expect(answer.body).toContain("needs more than 600 packages");
+    for (let index = 1; index < progress.length; index += 1)
+      expect(progress[index]).toBeGreaterThan(progress[index - 1]);
+    expect(Math.max(...progress)).toBeLessThan(600);
+    scale.registry.close();
+  });
+
+  it("finds a deep dependency in one request once it is in the frontier", async () => {
+    const scale = scaleService();
+    const first = await scale.get("not-a-dep");
+    expect(first.body).toContain("wardby_package_not_allowed_pending:");
+    // The deepest package the first walk reached but did not expand.
+    const walk = scale.walk() as {
+      pending?: Map<string, unknown>;
+      queue?: { name: string }[];
+      expandedVersions: Map<string, unknown>;
+    };
+    const frontier = [...(walk.pending?.keys() ?? (walk.queue ?? []).map((edge) => edge.name))].filter(
+      (name) => !walk.expandedVersions.has(name),
+    );
+    const target = frontier.reduce((deepest, name) =>
+      (depth.get(name) ?? 0) > (depth.get(deepest) ?? 0) ? name : deepest,
+    );
+    expect(depth.get(target)).toBeGreaterThanOrEqual(6);
+    scale.clock.ms += 5 * 60_000;
+    const before = scale.counts.loads;
+    const found = await scale.get(target);
+    expect(found.status, found.body).toBe(200);
+    // Its own node, then its document fetched again to be served.
+    expect(scale.counts.loads - before).toBeLessThanOrEqual(2);
+    scale.registry.close();
   });
 });
