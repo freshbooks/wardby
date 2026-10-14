@@ -59,7 +59,7 @@ export async function normalizeRegistryLockfiles(input: {
     const lockfiles = adapter.lockfiles;
     if (!lockfiles) continue;
     const registryUrl = registryUrlFor(input.proxyBaseUrl, adapter.id);
-    for (const name of lockfiles.names) byName.set(name, (content) => lockfiles.normalize(content, registryUrl));
+    for (const name of lockfiles.names) byName.set(name, (content) => lockfiles.normalize(content, registryUrl, name));
   }
   const rewritten: string[] = [];
   const walk = async (relative: string, depth: number): Promise<void> => {

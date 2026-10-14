@@ -34,7 +34,7 @@ function unscoped(name: string): string {
  *  `-/tarball/<encoded name>/<version>` (the proxy's own route) or the
  *  standard `<name>/-/<unscoped>-<version>.tgz`, with the scope separator
  *  literal or percent-encoded. Null for anything else. */
-function parseProxyPath(path: string): { name: string; version: string } | null {
+export function parseProxyPath(path: string): { name: string; version: string } | null {
   let name: string | null;
   let version: string | null;
   const own = path.match(/^-\/tarball\/([^/]+)\/([^/]+)$/);
@@ -67,8 +67,3 @@ export function normalizeNpmLockfile(content: string, registryUrl: string): stri
     return target ? `${open}${publicNpmTarballUrl(target.name, target.version)}${close}` : match;
   });
 }
-
-export const npmLockfiles = {
-  names: ["package-lock.json", "npm-shrinkwrap.json"],
-  normalize: normalizeNpmLockfile,
-} as const;

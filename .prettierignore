@@ -6,3 +6,4 @@ src/viewer/schemas
 coverage
 package-lock.json
 apps/
+src/coding/registry/fixtures/lockfiles

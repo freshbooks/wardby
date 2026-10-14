@@ -6,8 +6,8 @@
  * the sandboxed worker to use the proxy with install-time scripts disabled.
  */
 import semver from "semver";
-import { npmLockfiles } from "./npm-lockfile.js";
-import { npmLockfilePlan, registryDependencyEdges } from "./npm-plan.js";
+import { npmClientLockfilePlan, npmClientLockfiles } from "./npm-lockfile-formats.js";
+import { registryDependencyEdges } from "./npm-plan.js";
 import {
   AllowlistEntryError,
   RegistryError,
@@ -182,8 +182,8 @@ export const npmAdapter: RegistryAdapter = {
   upstreamHosts: ["registry.npmjs.org"],
   collectExclude: ["node_modules"],
   dependenciesInMetadata: true,
-  lockfiles: npmLockfiles,
-  lockfilePlan: npmLockfilePlan,
+  lockfiles: npmClientLockfiles,
+  lockfilePlan: npmClientLockfilePlan,
 
   parseAllowlistEntry(raw: string): AllowlistEntry {
     const value = raw.trim();

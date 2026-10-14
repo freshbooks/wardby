@@ -48,4 +48,22 @@ describe("normalizeRegistryLockfiles", () => {
     expect(await normalizeRegistryLockfiles({ workspace, proxyBaseUrl: PROXY_BASE })).toEqual([]);
     expect(await readFile(join(workspace, "package-lock.json"), "utf8")).toBe(lock(PUBLIC));
   });
+
+  it("rewrites pnpm and yarn lockfiles too, so a committed one never names the proxy", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "wardby-lockfiles-"));
+    const npmBase = `${PROXY_BASE}/registry/npm/`;
+    await write(
+      workspace,
+      "pnpm-lock.yaml",
+      `packages:\n  a@1.0.0:\n    resolution: {integrity: sha512-a, tarball: ${npmBase}-/tarball/a/1.0.0}\n`,
+    );
+    await write(
+      workspace,
+      "web/yarn.lock",
+      `# yarn lockfile v1\n\na@^1:\n  version "1.0.0"\n  resolved "${npmBase}-/tarball/a/1.0.0#abc"\n`,
+    );
+    const rewritten = await normalizeRegistryLockfiles({ workspace, proxyBaseUrl: PROXY_BASE });
+    expect(rewritten).toEqual(["pnpm-lock.yaml", "web/yarn.lock"]);
+    for (const path of rewritten) expect(await readFile(join(workspace, path), "utf8")).not.toContain(PROXY_BASE);
+  });
 });

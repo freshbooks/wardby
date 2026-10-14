@@ -179,6 +179,13 @@ export interface LockfileEntry {
 export interface ParsedLockfile {
   entries: readonly LockfileEntry[];
   projects: readonly { path: string; dependencies: readonly DeclaredDependency[] }[];
+  /** What an entry's integrity is checked against. `lockfile` (the
+   *  default): the entry's own `integrity` must equal the registry's, and
+   *  one without any is refused. `registry`: the lockfile records no npm
+   *  integrity at all (yarn Berry's `checksum` is yarn's hash of its own
+   *  cache archive), so entries are approved as exact name@version pairs
+   *  and each download is checked against the registry's integrity alone. */
+  integrity?: "lockfile" | "registry";
   /** The entry that `key`, declared by the package at `fromPath`, resolves
    *  to (npm: the nearest ancestor `node_modules/<key>`), or undefined
    *  (not installed, or a local project). */
@@ -268,7 +275,11 @@ export interface RegistryAdapter {
   readonly dependenciesInMetadata: boolean;
   /** Lockfile names this ecosystem's client writes, and a rewrite of the proxy download URLs it records in one back to
    *  public URLs, applied before the workspace is collected (lockfiles.ts). Omitted when the client records none. */
-  readonly lockfiles?: { names: readonly string[]; normalize(content: string, registryUrl: string): string };
+  readonly lockfiles?: {
+    names: readonly string[];
+    /** `name` is the lockfile's file name (one of `names`). */
+    normalize(content: string, registryUrl: string, name: string): string;
+  };
   /** Lockfile verification (`POST /registry/<id>/-/plan`); omitted when the
    *  ecosystem has none. */
   readonly lockfilePlan?: LockfilePlanSupport;
