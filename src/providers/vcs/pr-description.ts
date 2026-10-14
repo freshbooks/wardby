@@ -86,9 +86,11 @@ export function assessFinalMessage(next: string | undefined, previous: string | 
 
 /**
  * Whether the PR description is still what wardby last wrote. It must start
- * with the root run's marker. With a recorded hash, the normalized body's hash
- * must match it; without one (written before hashes were recorded), the body
- * must still contain the previous agent text.
+ * with the root run's marker, and its normalized hash must match the recorded
+ * one. Without a recorded hash (a description written before hashes were
+ * recorded) it always counts as edited: containing the previous agent text
+ * doesn't rule out a person's additions, and those are never overwritten.
+ * `previousAgentText` does not decide edit status; it is carried for callers.
  */
 export function isUneditedDescription(input: {
   currentBody: string;
@@ -98,10 +100,8 @@ export function isUneditedDescription(input: {
 }): boolean {
   const body = input.currentBody.replace(/\r\n/g, "\n");
   if (!body.startsWith(`${RUN_MARKER_PREFIX}${input.rootRunId} -->`)) return false;
-  if (input.recordedSha256 !== null) return descriptionSha256(body) === input.recordedSha256;
-  const previous = normalizeDescriptionForHash(input.previousAgentText ?? "");
-  if (!previous) return false;
-  return normalizeDescriptionForHash(body).includes(previous);
+  if (input.recordedSha256 === null) return false;
+  return descriptionSha256(body) === input.recordedSha256;
 }
 
 /** A backtick fence one longer than the longest backtick run in `text` (at least three). */

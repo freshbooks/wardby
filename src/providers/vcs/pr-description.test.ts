@@ -158,24 +158,13 @@ describe("isUneditedDescription", () => {
     ).toBe(false);
   });
 
-  it("legacy (no hash) body containing the root summary is unedited", () => {
+  it("legacy (no hash) body is always treated as edited", () => {
     const legacy = pullRequestBody({ ...base, summary: SUMMARY });
     const withRelated = upsertRelatedSection(legacy, relatedBlock("- openai/other#4 (open)"))!;
+    // Contains the previous agent text, untouched: still edited, since a person may have added text.
     expect(
       isUneditedDescription({
         currentBody: withRelated.replace(/\n/g, "\r\n"),
-        rootRunId: "run-root",
-        recordedSha256: null,
-        previousAgentText: `${SUMMARY}\n`,
-      }),
-    ).toBe(true);
-  });
-
-  it("legacy body missing it is edited", () => {
-    const legacy = pullRequestBody({ ...base, summary: "A hand-rewritten description of the change." });
-    expect(
-      isUneditedDescription({
-        currentBody: legacy,
         rootRunId: "run-root",
         recordedSha256: null,
         previousAgentText: SUMMARY,
@@ -183,7 +172,25 @@ describe("isUneditedDescription", () => {
     ).toBe(false);
     expect(
       isUneditedDescription({
-        currentBody: legacy,
+        currentBody: `${legacy}\n\nA reviewer's added note.`,
+        rootRunId: "run-root",
+        recordedSha256: null,
+        previousAgentText: SUMMARY,
+      }),
+    ).toBe(false);
+    // Missing it, or no previous text at all: edited.
+    const rewritten = pullRequestBody({ ...base, summary: "A hand-rewritten description of the change." });
+    expect(
+      isUneditedDescription({
+        currentBody: rewritten,
+        rootRunId: "run-root",
+        recordedSha256: null,
+        previousAgentText: SUMMARY,
+      }),
+    ).toBe(false);
+    expect(
+      isUneditedDescription({
+        currentBody: rewritten,
         rootRunId: "run-root",
         recordedSha256: null,
         previousAgentText: undefined,
