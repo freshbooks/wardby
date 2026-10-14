@@ -1,0 +1,6 @@
+[bumpver]
+current_version = "2610.0.0"
+version_pattern = "YY0M.MINOR.PATCH"
+commit = false
+tag = false
+push = false
