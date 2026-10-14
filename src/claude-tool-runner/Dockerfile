@@ -16,12 +16,15 @@ WORKDIR /opt/wardby/claude-tool-runner
 COPY --from=dependencies /runner/node_modules ./node_modules
 COPY src/claude-tool-runner/main.mjs ./main.mjs
 COPY src/claude-tool-runner/command.mjs ./command.mjs
-# The npm shim (src/coding-worker/npm-shim.mjs): verifies a project's lockfile with the registry
-# proxy before an install, then runs the real npm. Commands run under `sh -l`, whose /etc/profile
-# resets PATH, so profile.d puts the shim back in front.
+# The package-manager shim (src/coding-worker/npm-shim.mjs), linked as npm, pnpm and yarn: verifies
+# a project's lockfile with the registry proxy before an install, then runs the real tool (pnpm, and
+# a pinned yarn 2+, through corepack). Commands run under `sh -l`, whose /etc/profile resets PATH,
+# so profile.d puts the shim back in front.
 COPY src/coding-worker/npm-shim.mjs /opt/wardby/bin/npm-shim.mjs
 RUN chmod 0755 /opt/wardby/bin/npm-shim.mjs \
     && ln -s npm-shim.mjs /opt/wardby/bin/npm \
+    && ln -s npm-shim.mjs /opt/wardby/bin/pnpm \
+    && ln -s npm-shim.mjs /opt/wardby/bin/yarn \
     && printf '%s\n' 'case ":$PATH:" in *:/opt/wardby/bin:*) ;; *) PATH="/opt/wardby/bin:$PATH" ;; esac' > /etc/profile.d/wardby-shims.sh \
     && PATH="/opt/wardby/bin:$PATH" npm --version \
     && test "$(sh -lc 'command -v npm')" = /opt/wardby/bin/npm

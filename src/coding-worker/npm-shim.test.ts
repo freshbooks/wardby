@@ -163,3 +163,178 @@ describe("npm shim", () => {
     expect(await calls()).toHaveLength(2);
   });
 });
+
+/** The shim linked as `tool` (pnpm or yarn), with fake real binaries for
+ *  the names in `real` (each records its name, arguments, the yarn.lock it
+ *  saw, and may rewrite yarn.lock from FAKE_WRITE_LOCK). */
+async function toolLayout(tool: "pnpm" | "yarn", real: string[]) {
+  const base = await layout();
+  const shimDir = join(root, "shim");
+  await symlink("npm-shim.mjs", join(shimDir, tool));
+  const realDir = join(root, "real-tools");
+  await mkdir(realDir);
+  const record = join(root, "tool-calls.jsonl");
+  for (const name of real) {
+    await writeFile(
+      join(realDir, name),
+      [
+        "#!/usr/bin/env node",
+        'const fs = require("node:fs");',
+        'let lock; try { lock = fs.readFileSync("yarn.lock", "utf8"); } catch {}',
+        `fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({ name: ${JSON.stringify(name)}, args: process.argv.slice(2), active: process.env.WARDBY_NPM_SHIM_ACTIVE, lock }) + "\\n");`,
+        'if (process.env.FAKE_WRITE_LOCK) fs.writeFileSync("yarn.lock", process.env.FAKE_WRITE_LOCK);',
+        "process.exit(Number(process.env.FAKE_EXIT ?? 0));",
+      ].join("\n"),
+    );
+    await chmod(join(realDir, name), 0o755);
+  }
+  const calls = async () =>
+    (await readFile(record, "utf8").catch(() => ""))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { name: string; args: string[]; active?: string; lock?: string });
+  // Only node and the fake tools: no real pnpm, yarn or corepack from the host.
+  const nodeDir = join(root, "node-only");
+  await mkdir(nodeDir);
+  await symlink(process.execPath, join(nodeDir, "node"));
+  const env = { ...base.env, PATH: [shimDir, realDir, nodeDir, "/usr/bin", "/bin"].join(":") };
+  return { shim: join(shimDir, tool), project: base.project, env, calls };
+}
+
+describe("package-manager shim for pnpm", () => {
+  it("plans the workspace's pnpm-lock.yaml before install, add and i, from a package below it", async () => {
+    const { shim, project, env, calls } = await toolLayout("pnpm", ["pnpm"]);
+    await writeFile(join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    await mkdir(join(project, "packages", "web"), { recursive: true });
+    await writeFile(join(project, "packages", "web", "package.json"), "{}");
+    for (const args of [["install", "--frozen-lockfile"], ["add", "zod"], ["i"]]) {
+      const result = await run(shim, args, { cwd: join(project, "packages", "web"), env });
+      expect(result.code).toBe(0);
+      expect(result.stderr).toContain("wardby: verified ../../pnpm-lock.yaml: 2 approved, 0 refused");
+    }
+    expect(plans.map((plan) => [plan.url, plan.authorization, plan.body])).toEqual(
+      Array(3).fill(["POST /registry/npm/-/plan", "Bearer rrg_shim_token", "lockfileVersion: '9.0'\n"]),
+    );
+    expect((await calls()).map((call) => [call.name, call.args, call.active])).toEqual([
+      ["pnpm", ["install", "--frozen-lockfile"], "1"],
+      ["pnpm", ["add", "zod"], "1"],
+      ["pnpm", ["i"], "1"],
+    ]);
+  });
+
+  it("just runs pnpm for other commands and without a lockfile", async () => {
+    const { shim, project, env, calls } = await toolLayout("pnpm", ["pnpm"]);
+    expect((await run(shim, ["install"], { cwd: project, env })).code).toBe(0);
+    await writeFile(join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    expect((await run(shim, ["run", "build"], { cwd: project, env })).code).toBe(0);
+    expect(plans).toEqual([]);
+    expect(await calls()).toHaveLength(2);
+  });
+
+  it("runs pnpm through corepack when no pnpm is installed", async () => {
+    const missing = await toolLayout("pnpm", ["corepack"]);
+    await writeFile(join(missing.project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    expect((await run(missing.shim, ["install"], { cwd: missing.project, env: missing.env })).code).toBe(0);
+    expect((await missing.calls()).map((call) => [call.name, call.args])).toEqual([["corepack", ["pnpm", "install"]]]);
+    expect(plans).toHaveLength(1);
+  });
+
+  it("runs pnpm through corepack when the project pins a release", async () => {
+    const pinned = await toolLayout("pnpm", ["pnpm", "corepack"]);
+    await writeFile(join(pinned.project, "package.json"), JSON.stringify({ packageManager: "pnpm@10.4.1" }));
+    expect((await run(pinned.shim, ["install"], { cwd: pinned.project, env: pinned.env })).code).toBe(0);
+    expect((await pinned.calls()).map((call) => [call.name, call.args])).toEqual([["corepack", ["pnpm", "install"]]]);
+  });
+
+  it("reports a missing pnpm with no corepack", async () => {
+    const { shim, project, env } = await toolLayout("pnpm", []);
+    const result = await run(shim, ["install"], { cwd: project, env });
+    expect(result.code).toBe(127);
+    expect(result.stderr).toContain("wardby: pnpm is not installed");
+  });
+});
+
+describe("package-manager shim for yarn", () => {
+  const classic = (host: string) =>
+    [
+      "# yarn lockfile v1",
+      "",
+      '"@s/a@^1.0.0":',
+      '  version "1.0.0"',
+      `  resolved "${host}@s/a/-/a-1.0.0.tgz#0123456789abcdef0123456789abcdef01234567"`,
+      "  integrity sha512-a",
+      "",
+    ].join("\n");
+
+  it("plans yarn.lock for a bare yarn, install and add; not for other commands", async () => {
+    const { shim, project, env, calls } = await toolLayout("yarn", ["yarn"]);
+    await writeFile(join(project, "yarn.lock"), "__metadata:\n  version: 8\n");
+    for (const args of [[], ["install", "--immutable"], ["--immutable"], ["add", "zod"], ["test"]]) {
+      expect((await run(shim, args, { cwd: project, env })).code).toBe(0);
+    }
+    expect(plans).toHaveLength(4);
+    expect(plans[0].body).toBe("__metadata:\n  version: 8\n");
+    expect((await calls()).map((call) => call.args)).toEqual([
+      [],
+      ["install", "--immutable"],
+      ["--immutable"],
+      ["add", "zod"],
+      ["test"],
+    ]);
+  });
+
+  it("points a classic lockfile's registry URLs at the proxy for the install, then restores it unchanged", async () => {
+    const { shim, project, env, calls } = await toolLayout("yarn", ["yarn"]);
+    const original = classic("https://registry.yarnpkg.com/");
+    await writeFile(join(project, "yarn.lock"), original);
+    const result = await run(shim, ["install", "--frozen-lockfile"], { cwd: project, env });
+    expect(result.code).toBe(0);
+    // yarn classic downloads from the URLs the lockfile records, never from
+    // its configured registry: it saw the proxy's.
+    expect((await calls())[0].lock).toBe(classic(env.npm_config_registry));
+    expect(plans[0].body).toBe(original);
+    expect(await readFile(join(project, "yarn.lock"), "utf8")).toBe(original);
+  });
+
+  it("maps a lockfile yarn rewrote back to the host the original used", async () => {
+    const { shim, project, env } = await toolLayout("yarn", ["yarn"]);
+    await writeFile(join(project, "yarn.lock"), classic("https://registry.npmjs.org/"));
+    const written = [
+      classic(env.npm_config_registry),
+      'b@^2.0.0:\n  version "2.0.0"',
+      `  resolved "${env.npm_config_registry}-/tarball/b/2.0.0#ab"`,
+      "",
+    ].join("\n");
+    const result = await run(shim, ["add", "b"], { cwd: project, env: { ...env, FAKE_WRITE_LOCK: written } });
+    expect(result.code).toBe(0);
+    expect(await readFile(join(project, "yarn.lock"), "utf8")).toBe(
+      [
+        classic("https://registry.npmjs.org/"),
+        'b@^2.0.0:\n  version "2.0.0"',
+        '  resolved "https://registry.npmjs.org/b/-/b-2.0.0.tgz#ab"',
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("runs yarn through corepack when the project pins yarn 2 or later, and the installed yarn otherwise", async () => {
+    const { shim, project, env, calls } = await toolLayout("yarn", ["yarn", "corepack"]);
+    await writeFile(join(project, "package.json"), JSON.stringify({ packageManager: "yarn@4.18.1" }));
+    expect((await run(shim, ["install"], { cwd: project, env })).code).toBe(0);
+    await writeFile(join(project, "package.json"), JSON.stringify({ packageManager: "yarn@1.22.19+sha512.abc" }));
+    expect((await run(shim, ["install"], { cwd: project, env })).code).toBe(0);
+    expect((await calls()).map((call) => [call.name, call.args])).toEqual([
+      ["corepack", ["yarn", "install"]],
+      ["yarn", ["install"]],
+    ]);
+  });
+
+  it("passes yarn's exit code through and still restores the lockfile", async () => {
+    const { shim, project, env } = await toolLayout("yarn", ["yarn"]);
+    const original = classic("https://registry.yarnpkg.com/");
+    await writeFile(join(project, "yarn.lock"), original);
+    const result = await run(shim, ["install"], { cwd: project, env: { ...env, FAKE_EXIT: "4" } });
+    expect(result.code).toBe(4);
+    expect(await readFile(join(project, "yarn.lock"), "utf8")).toBe(original);
+  });
+});
