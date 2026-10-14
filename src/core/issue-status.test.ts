@@ -9,6 +9,7 @@ import {
   postIssueWorkingStatus,
   toJiraMarkdown,
 } from "./issue-status.js";
+import { JIRA_REPLY_MAX_CHARS } from "./host-status.js";
 
 function tracker(): IssueTracker {
   return {
@@ -313,6 +314,84 @@ describe("completeIssueStatus", () => {
       completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: null }, { jira: t }),
     ).resolves.toBeUndefined();
     expect((d as any).runIssueStatus.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("completeIssueStatus with a long reply", () => {
+  const row = { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null };
+  const long = Array.from({ length: 400 }, (_, i) => `Paragraph ${i} ${"x".repeat(200)}`).join("\n\n");
+
+  it("points to the follow-up comments and posts the full reply in order", async () => {
+    const t = tracker();
+    const d = db(row);
+    await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: long }, { jira: t });
+    const { markdown } = (t.editComment as any).mock.calls[0][2];
+    expect(markdown).toContain("The full reply follows in the next comment(s).");
+    expect(markdown).not.toContain("Paragraph 399");
+    const calls = (t.comment as any).mock.calls;
+    expect(calls.length).toBeGreaterThan(1);
+    expect(calls.length).toBeLessThanOrEqual(4);
+    calls.forEach((c: any[], i: number) => {
+      expect(c[0]).toBe("PROJ-1");
+      expect(c[1].markdown.length).toBeLessThanOrEqual(JIRA_REPLY_MAX_CHARS * 1.2);
+      if (i === 0) expect(c[1].markdown).toContain("Paragraph 0 ");
+    });
+    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
+      where: { runId: "r1" },
+      data: { commentId: "c-1", completedAt: expect.any(Date) },
+    });
+  });
+  it("keeps a short reply in the status comment alone", async () => {
+    const t = tracker();
+    await completeIssueStatus(db(row), { id: "r1", status: "succeeded", finalText: "Short answer" }, { jira: t });
+    expect(t.comment).not.toHaveBeenCalled();
+    expect((t.editComment as any).mock.calls[0][2].markdown).not.toContain("follows");
+  });
+  it("posts no reply for a read-only or missing link", async () => {
+    for (const link of [{ access: "read", commentVisibilityRole: null }, null]) {
+      const t = tracker();
+      await completeIssueStatus(
+        db(row, undefined, {}, link),
+        { id: "r1", status: "succeeded", finalText: long },
+        { jira: t },
+      );
+      expect(t.comment).not.toHaveBeenCalled();
+      expect((t.editComment as any).mock.calls[0][2].markdown).toContain("Stopped reporting");
+    }
+  });
+  it("posts each part once, skips the rest after a failure, and still completes without throwing", async () => {
+    const t = tracker();
+    (t.comment as any).mockResolvedValueOnce({ id: "p1", url: "u" }).mockRejectedValueOnce(new Error("boom"));
+    const d = db(row);
+    await expect(
+      completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: long }, { jira: t }),
+    ).resolves.toBeUndefined();
+    expect(t.comment).toHaveBeenCalledTimes(2);
+    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
+      where: { runId: "r1" },
+      data: { commentId: "c-1", completedAt: expect.any(Date) },
+    });
+  });
+  it("saves a newly created status comment's id before posting any part", async () => {
+    const t = tracker();
+    const d = db({ ...row, commentId: null });
+    const order: string[] = [];
+    (d as any).runIssueStatus.update.mockImplementation(async (a: any) => {
+      order.push(a.data.completedAt ? "complete" : "save");
+    });
+    (t.comment as any).mockImplementation(async () => {
+      order.push("comment");
+      return { id: "c-new", url: "u" };
+    });
+    await completeIssueStatus(
+      d,
+      { id: "r1", status: "succeeded", finalText: long },
+      { jira: t },
+      { postIfMissing: true },
+    );
+    expect(order.slice(0, 3)).toEqual(["comment", "save", "comment"]);
+    expect(order.at(-1)).toBe("complete");
+    expect((d as any).runIssueStatus.update.mock.calls[0][0].data).toEqual({ commentId: "c-new" });
   });
 });
 
