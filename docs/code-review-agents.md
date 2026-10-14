@@ -64,6 +64,15 @@ comment with the outcome:
 - the agent's final reply, quoted, when no pull request came out (for
   example, a question back to the requester). `@`-mentions in the reply are
   defused so nobody is pinged;
+- when that reply is longer than about 2,000 characters, the comment says
+  "✅ Finished without opening a pull request. The full reply follows in the
+  next comment(s)." (in a review thread: "...follows in this pull request's
+  conversation."), and the reply follows in up to four numbered comments
+  ("Reply, part i of n") of about 60,000 characters each, split at headings,
+  paragraphs or lines. Anything beyond four parts is cut with a note that the
+  full text is on the run (`get_run`, `finalText`); each part is posted once,
+  and if one cannot be posted the rest are skipped. Runs that opened a pull
+  request or had a failed sub-run keep the quoted excerpt;
 - a failure when a coding sub-run it started did not succeed, even though
   the mention agent itself finished (with the agent's reply quoted);
 - that the request was **interrupted** and should be repeated, when the run
