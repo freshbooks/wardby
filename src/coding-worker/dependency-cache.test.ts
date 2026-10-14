@@ -779,6 +779,23 @@ describe("untrusted archives", () => {
     expect(await readdir(outside)).toEqual([]);
   });
 
+  it("a restore verifies the links it extracted: one changed before the check rejects the hit", async () => {
+    hitWith(await realTarSnapshot(LOCKFILE));
+    const outside = join(root, "outside-link");
+    await writeFile(outside, "x");
+    const reason = await prepareRefusedHit({
+      testHooks: {
+        beforeVerifyLinks: async (temp) => {
+          const link = join(temp, "node_modules/.bin/beta");
+          expect(await readlink(link)).toBe("../beta/index.js");
+          await rm(link);
+          await symlink(outside, link);
+        },
+      },
+    });
+    expect(reason).toBe("unsafe_archive");
+  });
+
   it("restores files over 1 MiB (streamed) and up to 1 MiB (buffered) byte for byte", async () => {
     const { randomBytes } = await import("node:crypto");
     const large = randomBytes(1024 * 1024 + 4097);

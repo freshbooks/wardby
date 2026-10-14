@@ -109,6 +109,8 @@ export interface DependencyCacheTestHooks {
   readonly beforeNpmCacheMove?: () => Promise<void>;
   /** After npm's `_cacache` was moved to the module's own temp, before it is removed. */
   readonly beforeNpmCacheRemove?: () => Promise<void>;
+  /** After a restore's extraction, before its symlinks are verified (the temp folder it wrote). */
+  readonly beforeVerifyLinks?: (temp: string) => Promise<void>;
   /** After an archive that outgrew the budget was stopped and removed. */
   readonly afterArchiveAborted?: (archive: string) => Promise<void>;
 }

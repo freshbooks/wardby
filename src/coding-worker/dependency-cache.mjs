@@ -434,6 +434,9 @@ export async function scanArchive(file, { budgetBytes, maxEntries = MAX_ARCHIVE_
 const streamCap = (budgetBytes, maxEntries) => budgetBytes + (maxEntries + 2) * 2048 + MAX_PAX_BYTES;
 
 // "wx" plus O_NOFOLLOW where the platform has it: never follows, creates or replaces.
+// O_EXCL alone already refuses any existing name, a planted link included (and
+// makes every written file a new one with a single link: see verifyLinks);
+// O_NOFOLLOW is a second guard where the platform has it.
 const CREATE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
 
 /** Each folder from `destination` down through `segments`, made if missing;
@@ -561,11 +564,16 @@ export async function extractArchive(file, destination, { budgetBytes, maxEntrie
  * is slow under gVisor):
  * - it creates only files, folders and symlinks (EntryRules), so no other
  *   kind of entry exists;
- * - each file is created with O_CREAT | O_EXCL | O_NOFOLLOW (CREATE_FLAGS) in
- *   a folder it made itself (safeDirectory, never through a link), so a file
- *   is always new and has one link: a hard link cannot appear (tar hard-link
+ * - each file is created with O_CREAT | O_EXCL (CREATE_FLAGS) in a folder it
+ *   made or checked (safeDirectory, never through a link), so a file is
+ *   always new and has one link: a hard link cannot appear (tar hard-link
  *   entries are refused) and nothing else writes to the tree before the
  *   restore finishes.
+ *
+ * So this is only a complete check for a tree extractArchive wrote alone:
+ * `links` must be every link it reported, and nothing else may have written
+ * to `root` since. Each listed path is lstat'ed through its parent folders,
+ * which extraction guarantees are real folders.
  *
  * A dangling link (no realpath) is accepted only on the target rule: its
  * folder is a real folder (safeDirectory never makes or follows a link), its
@@ -1004,6 +1012,7 @@ async function restore(context, project, id, maxBytes, { consistency, manifest }
     refused,
   );
   await removeTemp(context.workspace, archive);
+  await context.testHooks?.beforeVerifyLinks?.(temp);
   await measure("verify_links", () => verifyLinks(temp, links, signal));
   context.known = measured;
   // A sanity check that this is the tree for this lockfile, not an
