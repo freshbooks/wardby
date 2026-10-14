@@ -772,13 +772,74 @@ describe("full replies", () => {
       expect(body).not.toMatch(/@(?!\u200b)\w/);
     });
 
-    it("never throws when posting a part fails, and leaves the row open", async () => {
+    /** A status row that remembers each update, so a second call sees what the first one wrote. */
+    const statefulDb = (initial: StatusRow) => {
+      const d = db({ row: initial });
+      let current: StatusRow = { ...initial };
+      d.runHostStatus.findUnique.mockImplementation(async () => ({ ...current }));
+      const update = vi.fn((args: { data: Partial<StatusRow> }) => {
+        current = { ...current, ...args.data };
+        return Promise.resolve(undefined);
+      });
+      return { d: { ...d, runHostStatus: { ...d.runHostStatus, update } }, current: () => current };
+    };
+
+    it("posts each part once: a failed part is logged, the row completed, and a retry posts nothing", async () => {
       const h = host();
-      h.comment.mockRejectedValueOnce(new Error("boom"));
-      const d = db({ row: row() });
-      await expect(completeHostStatus(d as never, succeeded(plan(150_000)), { github: h })).resolves.toBeUndefined();
-      expect(h.comment).toHaveBeenCalledTimes(1);
-      expect(d.runHostStatus.update).not.toHaveBeenCalled();
+      h.comment.mockResolvedValueOnce({ url: "https://x/p1", id: "601" }).mockRejectedValueOnce(new Error("boom"));
+      const { d, current } = statefulDb(row());
+      const run = succeeded(plan(150_000));
+      await expect(completeHostStatus(d as never, run, { github: h })).resolves.toBeUndefined();
+      // Stops at the failed part: part 3 without part 2 would read as a gap.
+      expect(h.comment).toHaveBeenCalledTimes(2);
+      expect((h.comment.mock.calls[1][1] as { body: string }).body).toMatch(/^\*\*Reply, part 2 of 3\*\*/);
+      expect(current().completedAt).toBeInstanceOf(Date);
+
+      await completeHostStatus(d as never, run, { github: h }, { postIfMissing: true });
+      expect(h.comment).toHaveBeenCalledTimes(2);
+      expect(h.editComment).toHaveBeenCalledTimes(1);
+    });
+
+    it("posts a missing status comment, saves its id at once, then posts the parts", async () => {
+      const h = host();
+      h.comment.mockResolvedValueOnce({ url: "https://x/s", id: "700" });
+      const { d, current } = statefulDb(row({ commentId: null }));
+      const reply = plan(11_000);
+      await completeHostStatus(d as never, succeeded(reply), { github: h }, { postIfMissing: true });
+      expect(h.comment).toHaveBeenCalledTimes(2);
+      expect((h.comment.mock.calls[0][1] as { body: string }).body).toMatch(/^✅ .*The full reply follows/);
+      expect(h.comment.mock.calls[1][1]).toEqual({ number: 71, body: `**Reply, part 1 of 1**\n\n${reply}` });
+      expect(d.runHostStatus.update).toHaveBeenNthCalledWith(1, { where: { runId: "r1" }, data: { commentId: "700" } });
+      expect(current()).toMatchObject({ commentId: "700", completedAt: expect.any(Date) });
+    });
+
+    it("keeps a posted status comment's id when its first part fails, so it is never posted twice", async () => {
+      const h = host();
+      h.comment.mockResolvedValueOnce({ url: "https://x/s", id: "700" }).mockRejectedValueOnce(new Error("boom"));
+      const { d, current } = statefulDb(row({ commentId: null }));
+      const run = succeeded(plan(11_000));
+      await expect(
+        completeHostStatus(d as never, run, { github: h }, { postIfMissing: true }),
+      ).resolves.toBeUndefined();
+      expect(current().commentId).toBe("700");
+      await completeHostStatus(d as never, run, { github: h }, { postIfMissing: true });
+      expect(h.comment).toHaveBeenCalledTimes(2);
+      const statusPosts = h.comment.mock.calls.filter((c) => /^✅/.test((c[1] as { body: string }).body));
+      expect(statusPosts).toHaveLength(1);
+    });
+
+    it("says the reply follows in the pull request's conversation for a review-thread status", async () => {
+      const h = host();
+      const d = db({ row: row({ commentKind: "inline", replyToReviewCommentId: "88" }) });
+      await completeHostStatus(d as never, succeeded(plan(11_000)), { github: h });
+      expect(h.editComment.mock.calls[0][1]).toMatchObject({
+        kind: "inline",
+        body: "✅ Finished without opening a pull request. The full reply follows in this pull request's conversation.\n\n<sub>wardby run `r1`</sub>",
+      });
+      expect(h.comment).toHaveBeenCalledWith(REPO, {
+        number: 71,
+        body: expect.stringMatching(/^\*\*Reply, part 1 of 1/),
+      });
     });
   });
 });

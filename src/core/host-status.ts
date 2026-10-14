@@ -34,6 +34,8 @@ export const GITHUB_REPLY_MAX_CHARS = 60_000;
 export const REPLY_MAX_PARTS = 4;
 /** The status comment's line when the full reply follows. */
 const FULL_REPLY_FOLLOWS = "The full reply follows in the next comment(s).";
+/** The same, for a status in a review thread: the follow-ups go to the pull request's conversation. */
+const FULL_REPLY_FOLLOWS_IN_CONVERSATION = "The full reply follows in this pull request's conversation.";
 /** Ends the last follow-up when the reply did not fit in REPLY_MAX_PARTS comments. */
 const REPLY_CUT_NOTE =
   "\n\n---\n\n*The rest of the reply was cut: it was too long to post in full. The full text is on the run (`get_run` → `finalText`).*";
@@ -184,6 +186,8 @@ export function outcomeBody(
      * completeHostStatus): the ✅ no-pull-request body then points to them instead of quoting the reply.
      */
     fullReplyFollows?: boolean;
+    /** The status comment is in a review thread, so the follow-ups land in the conversation instead. */
+    statusInThread?: boolean;
   } = {},
 ): string {
   const links = pullRequests.map((pr) => {
@@ -268,9 +272,10 @@ export function outcomeBody(
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
   if (opts.fullReplyFollows && fullReplyOf(run, pullRequests, failedChildren) !== null) {
+    const follows = opts.statusInThread ? FULL_REPLY_FOLLOWS_IN_CONVERSATION : FULL_REPLY_FOLLOWS;
     return opts.replyAsAnswer
-      ? `✅ ${FULL_REPLY_FOLLOWS}\n\n${footer}`
-      : `✅ Finished without opening a pull request. ${FULL_REPLY_FOLLOWS}\n\n${footer}`;
+      ? `✅ ${follows}\n\n${footer}`
+      : `✅ Finished without opening a pull request. ${follows}\n\n${footer}`;
   }
   if (opts.replyAsAnswer && reply) return `✅ ${cutReply(reply)}\n\n${footer}`;
   return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}\n\n${footer}`;
@@ -342,6 +347,7 @@ export async function completeHostStatus(
     const body = outcomeBody(run, status.repository, pullRequests, failedChildren, {
       budgetSentence,
       fullReplyFollows: true,
+      statusInThread: status.commentKind === "inline",
     });
     let commentId = status.commentId;
     if (commentId) {
@@ -358,19 +364,38 @@ export async function completeHostStatus(
           ...(status.replyToReviewCommentId ? { replyToReviewCommentId: status.replyToReviewCommentId } : {}),
         })
       ).id;
+      // Saved at once, so a retry edits this comment instead of posting a second one.
+      await db.runHostStatus.update({ where: { runId: run.id }, data: { commentId } });
     }
-    // In order, before completedAt: a failed part leaves the row open for the reconciler to retry.
-    if (fullReply !== null) {
-      for (const partBody of fullReplyComments(fullReply, {
-        maxChars: GITHUB_REPLY_MAX_CHARS,
-        maxParts: REPLY_MAX_PARTS,
-      })) {
-        await host.comment(status.repository, { number: status.number, body: partBody });
-      }
-    }
+    if (fullReply !== null) await postFullReply(host, status, run.id, fullReply);
     await db.runHostStatus.update({ where: { runId: run.id }, data: { commentId, completedAt: new Date() } });
   } catch (err) {
     log.warn({ err, runId: run.id }, "could not complete the run's status comment");
+  }
+}
+
+/**
+ * Posts the full reply's parts in order, each at most once: the status comment already points to them,
+ * so a failed part is logged and the rest skipped (a gap would misnumber the reply), and the row is still
+ * completed. The full text stays on the run (`get_run` → `finalText`). Never throws.
+ */
+async function postFullReply(
+  host: CodeReviewHost,
+  status: { repository: string; number: number },
+  runId: string,
+  reply: string,
+): Promise<void> {
+  const bodies = fullReplyComments(reply, { maxChars: GITHUB_REPLY_MAX_CHARS, maxParts: REPLY_MAX_PARTS });
+  for (const [i, body] of bodies.entries()) {
+    try {
+      await host.comment(status.repository, { number: status.number, body });
+    } catch (err) {
+      log.warn(
+        { err, runId, part: i + 1, parts: bodies.length },
+        "could not post a part of the run's full reply; the rest is skipped, the full text stays on the run",
+      );
+      return;
+    }
   }
 }
 
