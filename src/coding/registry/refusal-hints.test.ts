@@ -44,6 +44,7 @@ describe("refusal wording", () => {
 
   it("incomplete message says try again and never 'not on this agent's allowlist'", () => {
     const message = graphIncompleteMessage("expo", "npm", { walked: 10, queued: 2 });
+    expect(message).toContain("is still being checked against the allowed packages' dependency graph");
     expect(message).toContain("try again");
     expect(message).not.toContain("not on this agent's allowlist");
     expect(message).not.toContain("owner must allowlist");
@@ -68,7 +69,9 @@ describe("refusal wording", () => {
     );
     expect(refusalMeaning("wardby_upstream_error")).toBe("the upstream registry failed (transient)");
     expect(refusalMeaning("wardby_audit_unavailable")).toBe("the advisory check was unavailable (transient)");
-    expect(refusalMeaning(GRAPH_INCOMPLETE)).toBe("its dependencies could not be confirmed (usually transient)");
+    expect(refusalMeaning(GRAPH_INCOMPLETE)).toBe(
+      "still being checked against the allowed packages' dependency graph; retry shortly",
+    );
   });
 
   it("unknown codes have no hint or meaning", () => {

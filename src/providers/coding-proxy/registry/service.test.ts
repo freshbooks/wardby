@@ -1471,7 +1471,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     expect(response).toMatchObject({ status: 503 });
     const body = "body" in response ? response.body : "";
     expect(body).toContain("wardby_graph_incomplete:");
-    expect(body).toContain("could not be fully checked after 2 packages");
+    expect(body).toContain("is still being checked against the allowed packages' dependency graph after 2 packages");
     expect(body).toContain("Please try again");
     expect(body).not.toContain("wardby_package_not_allowed");
     expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_graph_incomplete" }]);

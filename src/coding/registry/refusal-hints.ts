@@ -42,8 +42,8 @@ export function graphLimitMessage(name: string, ecosystem: string, limit: number
 
 export function graphIncompleteMessage(name: string, ecosystem: string, progress: WalkProgress): string {
   return (
-    `The dependencies of ${name} (${ecosystem}) could not be fully checked after ${packages(progress.walked)}, ` +
-    `${progress.queued.toLocaleString("en-US")} still queued (usually a transient registry problem). Please try again.`
+    `${name} (${ecosystem}) is still being checked against the allowed packages' dependency graph after ${packages(progress.walked)}, ` +
+    `${progress.queued.toLocaleString("en-US")} still queued (usually a transient registry problem). Please try again shortly.`
   );
 }
 
@@ -53,7 +53,8 @@ const HINTS: Record<string, string> = {
   [PACKAGE_NOT_ALLOWED]: `The package is not on the agent's allowlist and not reachable from it. ${OWNER}`,
   [PACKAGE_NOT_ALLOWED_PENDING]: `The dependency walk ended before reaching the package. Retrying rarely helps. ${OWNER}`,
   [GRAPH_LIMIT]: `Resolving the package exceeds REGISTRY_MAX_GRAPH_PACKAGES. ${OWNER}`,
-  [GRAPH_INCOMPLETE]: "The dependencies could not be fully checked, usually a transient problem. Try again.",
+  [GRAPH_INCOMPLETE]:
+    "The package is still being checked against the allowed packages' dependency graph, usually a transient problem. Try again shortly.",
 };
 
 /** What each refusal code means to someone reading the PR, without the registry's internals. */
@@ -62,7 +63,7 @@ const MEANINGS: Record<string, string> = {
     "not on the allowlist, or only reachable through a refused package; the owner must allowlist it",
   [PACKAGE_NOT_ALLOWED_PENDING]: "not reached before the dependency walk stopped; the owner must allowlist it",
   [GRAPH_LIMIT]: "its dependency graph is over the package limit; the owner must allowlist it directly",
-  [GRAPH_INCOMPLETE]: "its dependencies could not be confirmed (usually transient)",
+  [GRAPH_INCOMPLETE]: "still being checked against the allowed packages' dependency graph; retry shortly",
   wardby_version_filtered: "withheld: newer than the release-age limit, or a high-severity advisory",
   wardby_lockfile_integrity_mismatch: "the lock file's integrity does not match the registry's",
   wardby_upstream_error: "the upstream registry failed (transient)",
