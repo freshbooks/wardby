@@ -2,8 +2,9 @@
  * npm registry adapter: parses npm allowlist syntax and semver ranges,
  * routes proxy requests against the npm HTTP protocol (packuments,
  * `-/tarball/<name>/<version>` downloads, and the standard
- * `<name>/-/<unscoped>-<version>.tgz` path lockfiles record), and configures npm/npmrc for
- * the sandboxed worker to use the proxy with install-time scripts disabled.
+ * `<name>/-/<unscoped>-<version>.tgz` path lockfiles record), and configures npm, pnpm,
+ * yarn (classic and Berry) and corepack in the sandboxed worker to use the proxy with
+ * install-time scripts disabled.
  */
 import semver from "semver";
 import { npmClientLockfilePlan, npmClientLockfiles } from "./npm-lockfile-formats.js";
@@ -274,8 +275,12 @@ export const npmAdapter: RegistryAdapter = {
 
   workerConfig({ registryUrl, token, cacheDir }) {
     const npmrc = `${cacheDir}/npmrc`;
+    // yarn Berry and corepack append paths to a registry without a trailing slash.
+    const registryServer = registryUrl.replace(/\/+$/, "");
+    const proxy = new URL(registryUrl);
     return {
       env: {
+        // npm, and pnpm (which reads the same npm_config_* settings and npmrc).
         npm_config_registry: registryUrl,
         npm_config_userconfig: npmrc,
         npm_config_ignore_scripts: "true",
@@ -283,7 +288,32 @@ export const npmAdapter: RegistryAdapter = {
         npm_config_audit: "false",
         npm_config_fund: "false",
         npm_config_update_notifier: "false",
-        // The only registry the npm shim (npm-shim.mjs) sends a lockfile to.
+        npm_config_store_dir: `${cacheDir}/pnpm-store`,
+        npm_config_cache_dir: `${cacheDir}/pnpm-cache`,
+        // yarn classic (1.x): the registry and token from the npm settings
+        // above; its own cache folder (an npm_config_ name, which yarn Berry
+        // never reads) and its own switch for install scripts. Nothing here
+        // is a YARN_ setting yarn Berry would reject as unknown.
+        npm_config_cache_folder: `${cacheDir}/yarn-classic`,
+        YARN_IGNORE_SCRIPTS: "true",
+        // yarn Berry (2+) ignores npm's settings. Its global folder holds its
+        // shared cache; the per-project cacheFolder is left alone, so a
+        // repository that commits its cache (zero-install) keeps it.
+        YARN_NPM_REGISTRY_SERVER: registryServer,
+        YARN_NPM_AUTH_TOKEN: token,
+        YARN_NPM_ALWAYS_AUTH: "true",
+        ...(proxy.protocol === "http:" ? { YARN_UNSAFE_HTTP_WHITELIST: proxy.hostname } : {}),
+        YARN_ENABLE_TELEMETRY: "0",
+        YARN_ENABLE_SCRIPTS: "false",
+        YARN_GLOBAL_FOLDER: `${cacheDir}/yarn-berry`,
+        // corepack, which downloads the pnpm or yarn release a project pins.
+        COREPACK_NPM_REGISTRY: registryServer,
+        COREPACK_NPM_TOKEN: token,
+        COREPACK_HOME: `${cacheDir}/corepack`,
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+        COREPACK_ENABLE_AUTO_PIN: "0",
+        COREPACK_DEFAULT_TO_LATEST: "0",
+        // The only registry the package-manager shim (npm-shim.mjs) sends a lockfile to.
         WARDBY_NPM_PLAN_REGISTRY: registryUrl,
       },
       files: [{ path: npmrc, content: `${registryUrl.replace(/^https?:/, "")}:_authToken=${token}\n`, mode: 0o600 }],

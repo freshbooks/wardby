@@ -98,6 +98,9 @@ const RESERVED_SERVICE_ENV_PREFIXES = [
   "ANTHROPIC_",
   "PIP_",
   "NPM_CONFIG_",
+  "YARN_",
+  "PNPM_",
+  "COREPACK_",
   "UV_",
   "GIT_",
 ];

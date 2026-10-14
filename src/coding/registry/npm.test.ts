@@ -119,6 +119,65 @@ describe("npmAdapter protocol", () => {
   });
 });
 
+describe("npmAdapter worker config for pnpm, yarn and corepack", () => {
+  const config = npmAdapter.workerConfig({
+    registryUrl: "http://wardby-proxy:8787/registry/npm/",
+    token: "rrg_example",
+    cacheDir: "/workspace/.cache/npm",
+  });
+
+  it("points pnpm at the proxy through npm's settings, with its store and cache under the cache folder", () => {
+    // pnpm reads npm_config_* (registry, userconfig with the token,
+    // ignore-scripts, update-notifier) like npm does.
+    expect(config.env.npm_config_registry).toBe("http://wardby-proxy:8787/registry/npm/");
+    expect(config.env.npm_config_update_notifier).toBe("false");
+    expect(config.env.npm_config_store_dir).toBe("/workspace/.cache/npm/pnpm-store");
+    expect(config.env.npm_config_cache_dir).toBe("/workspace/.cache/npm/pnpm-cache");
+  });
+
+  it("gives yarn classic its cache folder and turns its install scripts off", () => {
+    // yarn classic ignores npm_config_ignore_scripts; YARN_IGNORE_SCRIPTS is its own.
+    expect(config.env.YARN_IGNORE_SCRIPTS).toBe("true");
+    expect(config.env.npm_config_cache_folder).toBe("/workspace/.cache/npm/yarn-classic");
+  });
+
+  it("points yarn Berry at the proxy with the token, allows its http host, and turns off telemetry and scripts", () => {
+    expect(config.env).toMatchObject({
+      YARN_NPM_REGISTRY_SERVER: "http://wardby-proxy:8787/registry/npm",
+      YARN_NPM_AUTH_TOKEN: "rrg_example",
+      YARN_NPM_ALWAYS_AUTH: "true",
+      YARN_UNSAFE_HTTP_WHITELIST: "wardby-proxy",
+      YARN_ENABLE_TELEMETRY: "0",
+      YARN_ENABLE_SCRIPTS: "false",
+      YARN_GLOBAL_FOLDER: "/workspace/.cache/npm/yarn-berry",
+    });
+    // Never a setting yarn Berry rejects as unknown, or one that would move
+    // a zero-install repository's committed cache.
+    expect(Object.keys(config.env)).not.toContain("YARN_DISABLE_SELF_UPDATE_CHECK");
+    expect(Object.keys(config.env)).not.toContain("YARN_CACHE_FOLDER");
+  });
+
+  it("allows no plain-http host for an https proxy", () => {
+    const https = npmAdapter.workerConfig({
+      registryUrl: "https://proxy.example/registry/npm/",
+      token: "rrg_example",
+      cacheDir: "/workspace/.cache/npm",
+    });
+    expect(https.env.YARN_UNSAFE_HTTP_WHITELIST).toBeUndefined();
+  });
+
+  it("lets corepack fetch pnpm and yarn from the proxy, without prompting or editing package.json", () => {
+    expect(config.env).toMatchObject({
+      COREPACK_NPM_REGISTRY: "http://wardby-proxy:8787/registry/npm",
+      COREPACK_NPM_TOKEN: "rrg_example",
+      COREPACK_HOME: "/workspace/.cache/npm/corepack",
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+      COREPACK_ENABLE_AUTO_PIN: "0",
+      COREPACK_DEFAULT_TO_LATEST: "0",
+    });
+  });
+});
+
 describe("npmAdapter standard tarball path (lockfile resolved URLs)", () => {
   const route = (subpath: string) => npmAdapter.route("GET", subpath, new Headers());
 

@@ -105,18 +105,18 @@ caller's principal id).
 
 An entry has:
 
-| Field             | Meaning                                                                                                                                                  |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`, `version` | What a repository declares. Unique together.                                                                                                             |
-| `kind`            | `sidecar`: a fresh instance next to each run.                                                                                                            |
-| `image`           | The image, pinned by digest.                                                                                                                             |
-| `port`            | The port it listens on.                                                                                                                                  |
-| `serviceEnv`      | Environment for the service container. Per-run throwaway values only; never put a secret here.                                                           |
-| `testEnv`         | Variables the agent's shells receive. Upper-case names; names wardby uses itself (`PATH`, `HOME`, `PIP_*`, `WARDBY_*`, proxy settings, ...) are refused. |
-| `readiness`       | A command in the image that succeeds once the service accepts connections on `127.0.0.1`, with its period, timeout and failure threshold.                |
-| `resources`       | CPU (millicores), memory (MiB) and disk (MiB). Requests equal limits.                                                                                    |
-| `dataPath`        | The directory the service writes its data to; an empty volume in every run (memory-backed on Docker).                                                    |
-| `writablePaths`   | Other directories the image writes to (a socket directory, `/tmp`). The service's root filesystem is read-only.                                          |
+| Field             | Meaning                                                                                                                                                                          |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`, `version` | What a repository declares. Unique together.                                                                                                                                     |
+| `kind`            | `sidecar`: a fresh instance next to each run.                                                                                                                                    |
+| `image`           | The image, pinned by digest.                                                                                                                                                     |
+| `port`            | The port it listens on.                                                                                                                                                          |
+| `serviceEnv`      | Environment for the service container. Per-run throwaway values only; never put a secret here.                                                                                   |
+| `testEnv`         | Variables the agent's shells receive. Upper-case names; names wardby uses itself (`PATH`, `HOME`, `PIP_*`, `YARN_*`, `COREPACK_*`, `WARDBY_*`, proxy settings, ...) are refused. |
+| `readiness`       | A command in the image that succeeds once the service accepts connections on `127.0.0.1`, with its period, timeout and failure threshold.                                        |
+| `resources`       | CPU (millicores), memory (MiB) and disk (MiB). Requests equal limits.                                                                                                            |
+| `dataPath`        | The directory the service writes its data to; an empty volume in every run (memory-backed on Docker).                                                                            |
+| `writablePaths`   | Other directories the image writes to (a socket directory, `/tmp`). The service's root filesystem is read-only.                                                                  |
 
 ### Built-in services
 
