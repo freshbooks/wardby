@@ -426,6 +426,8 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
     });
     expect(result.code, `npm stderr:\n${result.stderr}`).toBe(0);
     expect(result.stderr).toContain("wardby: verified package-lock.json: 2 approved, 0 refused");
+    // Every setting the worker gives npm is one npm knows: no warning on every command.
+    expect(result.stderr).not.toContain("Unknown env config");
 
     for (const name of ["wardby-lock-root", "wardby-lock-child"]) {
       const installed = JSON.parse(await readFile(join(projectDir, "node_modules", name, "package.json"), "utf8"));

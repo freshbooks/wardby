@@ -181,7 +181,7 @@ async function toolLayout(tool: "pnpm" | "yarn", real: string[]) {
         "#!/usr/bin/env node",
         'const fs = require("node:fs");',
         'let lock; try { lock = fs.readFileSync("yarn.lock", "utf8"); } catch {}',
-        `fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({ name: ${JSON.stringify(name)}, args: process.argv.slice(2), active: process.env.WARDBY_NPM_SHIM_ACTIVE, alwaysAuth: process.env.npm_config_always_auth, lock }) + "\\n");`,
+        `fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({ name: ${JSON.stringify(name)}, args: process.argv.slice(2), active: process.env.WARDBY_NPM_SHIM_ACTIVE, alwaysAuth: process.env.npm_config_always_auth, storeDir: process.env.npm_config_store_dir, cacheDir: process.env.npm_config_cache_dir, cacheFolder: process.env.npm_config_cache_folder, lock }) + "\\n");`,
         'if (process.env.FAKE_WRITE_LOCK) fs.writeFileSync("yarn.lock", process.env.FAKE_WRITE_LOCK);',
         "if (process.env.FAKE_SLEEP_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_SLEEP_MS));",
         "process.exit(Number(process.env.FAKE_EXIT ?? 0));",
@@ -195,7 +195,16 @@ async function toolLayout(tool: "pnpm" | "yarn", real: string[]) {
       .filter(Boolean)
       .map(
         (line) =>
-          JSON.parse(line) as { name: string; args: string[]; active?: string; alwaysAuth?: string; lock?: string },
+          JSON.parse(line) as {
+            name: string;
+            args: string[];
+            active?: string;
+            alwaysAuth?: string;
+            storeDir?: string;
+            cacheDir?: string;
+            cacheFolder?: string;
+            lock?: string;
+          },
       );
   // Only node and the fake tools: no real pnpm, yarn or corepack from the host.
   const nodeDir = join(root, "node-only");
@@ -248,6 +257,19 @@ describe("package-manager shim for pnpm", () => {
     await writeFile(join(pinned.project, "package.json"), JSON.stringify({ packageManager: "pnpm@10.4.1" }));
     expect((await run(pinned.shim, ["install"], { cwd: pinned.project, env: pinned.env })).code).toBe(0);
     expect((await pinned.calls()).map((call) => [call.name, call.args])).toEqual([["corepack", ["pnpm", "install"]]]);
+  });
+
+  it("gives pnpm alone its store and cache under the worker's npm cache folder", async () => {
+    const { shim, project, env, calls } = await toolLayout("pnpm", ["pnpm"]);
+    const cache = join(root, "npm-cache");
+    expect((await run(shim, ["run", "build"], { cwd: project, env: { ...env, npm_config_cache: cache } })).code).toBe(
+      0,
+    );
+    expect((await calls())[0]).toMatchObject({
+      storeDir: join(cache, "pnpm-store"),
+      cacheDir: join(cache, "pnpm-cache"),
+    });
+    expect((await calls())[0].cacheFolder).toBeUndefined();
   });
 
   it("reports a missing pnpm with no corepack", async () => {
@@ -331,6 +353,14 @@ describe("package-manager shim for yarn", () => {
       ["corepack", ["yarn", "install"]],
       ["yarn", ["install"]],
     ]);
+  });
+
+  it("gives yarn alone its cache folder under the worker's npm cache folder", async () => {
+    const { shim, project, env, calls } = await toolLayout("yarn", ["yarn"]);
+    const cache = join(root, "npm-cache");
+    expect((await run(shim, ["test"], { cwd: project, env: { ...env, npm_config_cache: cache } })).code).toBe(0);
+    expect((await calls())[0]).toMatchObject({ cacheFolder: join(cache, "yarn-classic") });
+    expect((await calls())[0].storeDir).toBeUndefined();
   });
 
   it("has yarn classic send the token with every registry request, not only for scoped packages", async () => {

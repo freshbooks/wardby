@@ -126,19 +126,25 @@ describe("npmAdapter worker config for pnpm, yarn and corepack", () => {
     cacheDir: "/workspace/.cache/npm",
   });
 
-  it("points pnpm at the proxy through npm's settings, with its store and cache under the cache folder", () => {
-    // pnpm reads npm_config_* (registry, userconfig with the token,
-    // ignore-scripts, update-notifier) like npm does.
-    expect(config.env.npm_config_registry).toBe("http://wardby-proxy:8787/registry/npm/");
-    expect(config.env.npm_config_update_notifier).toBe("false");
-    expect(config.env.npm_config_store_dir).toBe("/workspace/.cache/npm/pnpm-store");
-    expect(config.env.npm_config_cache_dir).toBe("/workspace/.cache/npm/pnpm-cache");
+  it("sets only npm_config_* settings npm itself knows: npm warns about any other on every command", () => {
+    // pnpm's store and cache and yarn classic's cache folder are set by the
+    // shim, for that tool only (npm-shim.mjs).
+    const NPM_KNOWN = [
+      "npm_config_registry",
+      "npm_config_userconfig",
+      "npm_config_ignore_scripts",
+      "npm_config_cache",
+      "npm_config_audit",
+      "npm_config_fund",
+      "npm_config_update_notifier",
+    ];
+    const npmSettings = Object.keys(config.env).filter((name) => name.toLowerCase().startsWith("npm_config_"));
+    expect(npmSettings.sort()).toEqual([...NPM_KNOWN].sort());
   });
 
-  it("gives yarn classic its cache folder and turns its install scripts off", () => {
+  it("turns yarn classic's install scripts off with its own switch", () => {
     // yarn classic ignores npm_config_ignore_scripts; YARN_IGNORE_SCRIPTS is its own.
     expect(config.env.YARN_IGNORE_SCRIPTS).toBe("true");
-    expect(config.env.npm_config_cache_folder).toBe("/workspace/.cache/npm/yarn-classic");
   });
 
   it("points yarn Berry at the proxy with the token, allows its http host, and turns off telemetry and scripts", () => {

@@ -305,7 +305,11 @@ export const npmAdapter: RegistryAdapter = {
     const proxy = new URL(registryUrl);
     return {
       env: {
-        // npm, and pnpm (which reads the same npm_config_* settings and npmrc).
+        // npm, and pnpm (which reads the same npm_config_* settings and
+        // npmrc). Only settings npm knows: npm warns about any other on
+        // every command, so pnpm's store and cache and yarn classic's cache
+        // folder are set by the shim for that tool alone (npm-shim.mjs),
+        // under npm_config_cache.
         npm_config_registry: registryUrl,
         npm_config_userconfig: npmrc,
         npm_config_ignore_scripts: "true",
@@ -313,13 +317,9 @@ export const npmAdapter: RegistryAdapter = {
         npm_config_audit: "false",
         npm_config_fund: "false",
         npm_config_update_notifier: "false",
-        npm_config_store_dir: `${cacheDir}/pnpm-store`,
-        npm_config_cache_dir: `${cacheDir}/pnpm-cache`,
         // yarn classic (1.x): the registry and token from the npm settings
-        // above; its own cache folder (an npm_config_ name, which yarn Berry
-        // never reads) and its own switch for install scripts. Nothing here
-        // is a YARN_ setting yarn Berry would reject as unknown.
-        npm_config_cache_folder: `${cacheDir}/yarn-classic`,
+        // above, and its own switch for install scripts. Nothing here is a
+        // YARN_ setting yarn Berry would reject as unknown.
         YARN_IGNORE_SCRIPTS: "true",
         // yarn Berry (2+) ignores npm's settings. Its global folder holds its
         // shared cache; the per-project cacheFolder is left alone, so a

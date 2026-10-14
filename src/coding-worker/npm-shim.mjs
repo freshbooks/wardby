@@ -340,6 +340,25 @@ function routeClassicLockfile(lockfile, base) {
   };
 }
 
+/** npm_config_* settings only one tool reads: npm warns about each one on
+ *  every command, so the driver can't set them for the whole worker. They
+ *  go under the worker's npm cache folder (npm_config_cache). */
+function toolSettings(tool) {
+  const cache = process.env.npm_config_cache ?? process.env.NPM_CONFIG_CACHE;
+  if (tool === "pnpm")
+    return cache
+      ? { npm_config_store_dir: join(cache, "pnpm-store"), npm_config_cache_dir: join(cache, "pnpm-cache") }
+      : {};
+  if (tool === "yarn")
+    return {
+      // yarn classic sends the npmrc's token only with always-auth (or for
+      // a scoped package). yarn Berry reads none of npm's settings.
+      npm_config_always_auth: "true",
+      ...(cache ? { npm_config_cache_folder: join(cache, "yarn-classic") } : {}),
+    };
+  return {};
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const tool = toolName();
@@ -363,10 +382,7 @@ async function main() {
     env: {
       ...process.env,
       [ACTIVE]: "1",
-      // yarn classic sends the npmrc's token only with always-auth (or for
-      // a scoped package); npm warns about that setting, so only yarn gets
-      // it. yarn Berry reads none of npm's settings.
-      ...(tool === "yarn" ? { npm_config_always_auth: "true" } : {}),
+      ...toolSettings(tool),
     },
   });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
