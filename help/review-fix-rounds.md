@@ -69,6 +69,15 @@ open right before it pushes; one merged or closed in the time the round was
 working fails with no push made — see
 [Continuation's pull request is no longer open](errors/continuation-closed.md).
 
+## Description updates
+
+Every run's final message is the full pull request description, fix rounds
+included, so a round that changes no code can still update it. If the
+description was edited by hand, wardby doesn't overwrite it: it posts the
+proposed text in a comment instead. A description update doesn't trigger an
+extra review. `get_run` shows what happened as `prDescriptionOutcome`. See
+[`docs/code-review-agents.md`](../docs/code-review-agents.md#how-the-pull-request-description-is-kept-current).
+
 If a repository already forwards reviews to a webhook through a
 hand-written CI workflow to fix them automatically, turn on `review_fix` and
 then remove that workflow and its webhook, so a review doesn't trigger two
