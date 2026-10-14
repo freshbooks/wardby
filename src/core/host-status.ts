@@ -9,6 +9,8 @@
  * comment. Best effort throughout: nothing here throws.
  */
 import type { Prisma, PrismaClient, Run, RunStatus } from "#prisma";
+import { summarizeRegistryFetches, type RegistryRefusalSummary } from "../coding/registry/report.js";
+import { packageRefusalWording } from "../coding/registry/refusal-wording.js";
 import { CODING_CODE_PROVIDER } from "../coding/protocol.js";
 import { storedServiceNames } from "../coding/services/catalog.js";
 import {
@@ -56,7 +58,7 @@ export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
 ];
 const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
 
-export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run">;
+export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run" | "registryFetch">;
 
 export type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
 
@@ -177,12 +179,36 @@ export function fullReplyComments(reply: string, opts: { maxChars: number; maxPa
   );
 }
 
+/**
+ * Whether package refusals blocked the run: it succeeded, but nothing reached a pull request, a coding
+ * sub-run made no changes or failed, and packages were refused. The GitHub and Jira status comments and
+ * the Slack `run_blocked` event all use it, so they always agree.
+ */
+export function isBlockedByRefusals(
+  run: Pick<FinishedRun, "status">,
+  outcome: {
+    pullRequests: readonly PullRequestOutcome[];
+    failedChildren: readonly FailedChild[];
+    packageRefusals?: readonly RegistryRefusalSummary[];
+    noChanges?: boolean;
+  },
+): boolean {
+  return (
+    run.status === "succeeded" &&
+    outcome.pullRequests.length === 0 &&
+    (outcome.noChanges === true || outcome.failedChildren.length > 0) &&
+    (outcome.packageRefusals?.length ?? 0) > 0
+  );
+}
+
 export function outcomeBody(
   run: FinishedRun,
   repository: string,
   pullRequests: PullRequestOutcome[],
   failedChildren: FailedChild[] = [],
   opts: {
+    packageRefusals?: RegistryRefusalSummary[];
+    noChanges?: boolean;
     budgetSentence?: string;
     noPullRequestText?: string;
     /** The agent's reply IS the answer (no separate reply comment): shown as written, not quoted. */
@@ -204,7 +230,19 @@ export function outcomeBody(
     return pr.outcome === "pull_request_opened" ? `Opened ${ref}` : `Pushed changes to ${ref}`;
   });
   const partial = links.length > 0 ? `\n\n${links.join(", ")}.` : "";
-  const footer = runLine(run.id);
+  const refusals = opts.packageRefusals ?? [];
+  const blocked = isBlockedByRefusals(run, {
+    pullRequests,
+    failedChildren,
+    packageRefusals: refusals,
+    noChanges: opts.noChanges,
+  });
+  const warning =
+    !blocked && (links.length > 0 || run.status === "succeeded") && refusals.length > 0
+      ? packageRefusalWording(refusals, { blocked: false })
+      : "";
+  const footer = warning + (warning ? "\n\n" : "") + runLine(run.id);
+  if (blocked) return packageRefusalWording(refusals) + "\n\n" + footer;
   if (run.status === "lost") {
     return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
   }
@@ -288,13 +326,19 @@ export function outcomeBody(
 }
 
 /** What collectRunOutcome reads: a run's children and, when out of budget, its budget facts. */
-export type RunOutcomeDb = Pick<PrismaClient, "run">;
+export type RunOutcomeDb = Pick<PrismaClient, "run" | "registryFetch">;
 
 /** The parts of a finished run's outcome a status comment reports; shared by GitHub and Jira status comments. */
 export async function collectRunOutcome(
   db: RunOutcomeDb,
   run: FinishedRun,
-): Promise<{ pullRequests: PullRequestOutcome[]; failedChildren: FailedChild[]; budgetSentence?: string }> {
+): Promise<{
+  pullRequests: PullRequestOutcome[];
+  failedChildren: FailedChild[];
+  packageRefusals: RegistryRefusalSummary[];
+  noChanges: boolean;
+  budgetSentence?: string;
+}> {
   const children = await db.run.findMany({
     where: { parentRunId: run.id },
     select: {
@@ -320,11 +364,29 @@ export async function collectRunOutcome(
       error: c.error ?? null,
       services: storedServiceNames(c.codingRun?.services),
     }));
+  let packageRefusals: RegistryRefusalSummary[] = [];
+  const codingIds = children.filter((c) => c.codingRun).map((c) => c.id);
+  if (codingIds.length > 0) {
+    try {
+      const fetches = await db.registryFetch.findMany({
+        where: { runId: { in: codingIds } },
+        select: { ecosystem: true, name: true, version: true, outcome: true, reason: true, sizeBytes: true },
+        orderBy: { createdAt: "asc" },
+      });
+      packageRefusals = summarizeRegistryFetches(fetches).packageRefusals;
+    } catch {
+      // Registry reporting is best effort; keep the existing status on read failure.
+    }
+  }
   const budgetSentence =
     run.status === "budget_exhausted" || run.status === "refused"
       ? await loadBudgetSentence(db, run.id, run.status)
       : undefined;
-  return { pullRequests, failedChildren, ...(budgetSentence ? { budgetSentence } : {}) };
+  const noChanges = children.some((c) => {
+    const result = c.codingRun?.result;
+    return result && typeof result === "object" && !Array.isArray(result) && result.outcome === "no_changes";
+  });
+  return { pullRequests, failedChildren, packageRefusals, noChanges, ...(budgetSentence ? { budgetSentence } : {}) };
 }
 
 /**
@@ -349,10 +411,18 @@ export async function completeHostStatus(
     if (!status.commentId && !opts.postIfMissing) return;
     const host = hosts[status.provider as ReviewHostProvider];
     if (!host) return;
-    const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
-    const fullReply = fullReplyOf(run, pullRequests, failedChildren);
+    const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges } = await collectRunOutcome(
+      db,
+      run,
+    );
+    // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
+    const fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
+      ? null
+      : fullReplyOf(run, pullRequests, failedChildren);
     const body = outcomeBody(run, status.repository, pullRequests, failedChildren, {
       budgetSentence,
+      packageRefusals,
+      noChanges,
       fullReplyFollows: true,
       statusInThread: status.commentKind === "inline",
     });

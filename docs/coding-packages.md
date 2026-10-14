@@ -1115,6 +1115,12 @@ Review agents see the pull request's CI results through `repo_pr_read`
 failure; see
 [code-review-agents.md](code-review-agents.md#the-repo_-tools).
 
+GitHub and Jira status comments show a package-registry blocked message only
+when no pull request resulted and a coding child reported no changes or failed.
+Otherwise, recorded refusals add a dependency install warning while preserving
+the agent's reply or answer, or the pull request link. A recorded refusal alone
+does not mean the final install or the run failed.
+
 A package that is only reachable through a refused one is refused too, as
 `wardby_package_not_allowed`. When a dependency deep in a toolchain has a
 high-severity advisory and no fixed version, every run that installs that

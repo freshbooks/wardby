@@ -15,6 +15,7 @@ import {
   collectRunOutcome,
   fullReplyComments,
   fullReplyOf,
+  isBlockedByRefusals,
   JIRA_REPLY_MAX_CHARS,
   outcomeBody,
   REPLY_MAX_PARTS,
@@ -33,7 +34,7 @@ const ORPHAN_BATCH = 20;
 
 export type IssueStatusDb = Pick<
   PrismaClient,
-  "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest" | "codingRun" | "$queryRaw"
+  "registryFetch" | "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest" | "codingRun" | "$queryRaw"
 >;
 
 export function toJiraMarkdown(text: string): string {
@@ -218,7 +219,10 @@ export async function completeIssueStatus(
     let body: string;
     let fullReply: string | null = null;
     if (writable) {
-      const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
+      const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges } = await collectRunOutcome(
+        db,
+        run,
+      );
       const foreign = await continuedForAnotherIssue(
         db,
         pullRequests.flatMap((pr) => (pr.pullRequestUrl && pr.runId ? [pr.runId] : [])),
@@ -254,9 +258,14 @@ export async function completeIssueStatus(
               pullRequests: bridged,
             })
           : { notes: [] };
-      fullReply = fullReplyOf(run, pullRequests, failedChildren);
+      // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
+      fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
+        ? null
+        : fullReplyOf(run, pullRequests, failedChildren);
       const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
         budgetSentence,
+        packageRefusals,
+        noChanges,
         fullReplyFollows: true,
         noPullRequestText: "Done.",
         // One comment per request: this status comment carries the agent's answer.

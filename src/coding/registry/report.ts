@@ -64,13 +64,13 @@ export interface RegistryPackageSummary {
   acceptedAdvisories?: string[];
 }
 
-export interface RegistryRefusalSummary {
+export type RegistryRefusalSummary = {
   ecosystem: string;
   name: string;
   reason: string;
   /** Static guidance for the code (shared with the proxy message and the PR banner); absent for unknown codes. */
   hint?: string;
-}
+};
 
 export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
   packages: RegistryPackageSummary[];

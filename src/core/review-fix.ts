@@ -47,6 +47,7 @@ export type ReviewFixDb = DispatchDb &
     PrismaClient,
     | "agentRepository"
     | "codingRun"
+    | "registryFetch"
     | "runHostStatus"
     | "runHostCheck"
     | "agentIssueProject"

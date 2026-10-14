@@ -28,11 +28,15 @@ per card. This is outbound only: nothing in Slack starts or affects a run.
 
 ## Events
 
-`issue_picked_up`, `run_failed` (top-level runs only), `pr_opened`,
+`issue_picked_up`, `run_failed` and `run_blocked` (top-level runs only), `pr_opened`,
 `review_posted` (approve / changes requested / comment), `review_fix` (round
 started, or stopped at the cap), and `pr_closed` (merged or closed, with any
 Jira status move). `events` on a link narrows which of these post; omitted
-means all six. `includeCost` appends the run's spend line.
+means all seven. `includeCost` appends the run's spend line.
+
+A `run_blocked` event uses the same ⛔ package registry wording and fixes as
+[Run status comments](status-comments.md). See [Package refusal errors](errors/package-refusals.md)
+for allowlist, release-age, advisory, and malware guidance.
 
 wardby never posts code, diffs, review text, or run output to Slack.
 
