@@ -932,7 +932,7 @@ one package):
       "ecosystem": "npm",
       "name": "left-pad",
       "reason": "wardby_package_not_allowed",
-      "hint": "The package is not on the agent's allowlist and not reachable from it. The agent's owner must allowlist the package directly; retrying will not help."
+      "hint": "The package is not on the agent's allowlist and no allowlisted package the run resolved depends on it. The agent's owner must allowlist the package directly; retrying will not help."
     }
   ]
 }

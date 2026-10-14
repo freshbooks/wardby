@@ -1442,7 +1442,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     expect(response).toMatchObject({ status: 403 });
     expect("body" in response && response.body).toContain("wardby_package_not_allowed:");
     expect("body" in response && response.body).toContain(
-      "stranger (npm) is not on this agent's allowlist, and is not reachable from an allowlisted package",
+      "stranger (npm) is not on this agent's allowlist, and no allowlisted package this run resolved depends on it",
     );
     expect("body" in response && response.body).toContain("owner must allowlist it; retrying will not help");
     expect("body" in response && response.body).not.toContain("cut short");

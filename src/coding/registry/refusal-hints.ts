@@ -19,7 +19,7 @@ function packages(count: number): string {
 
 export function notAllowedMessage(name: string, ecosystem: string, hasAllowlist: boolean): string {
   const why = hasAllowlist
-    ? `${name} (${ecosystem}) is not on this agent's allowlist, and is not reachable from an allowlisted package`
+    ? `${name} (${ecosystem}) is not on this agent's allowlist, and no allowlisted package this run resolved depends on it (a package added to the project directly must itself be allowlisted)`
     : `${name} (${ecosystem}) is not allowed: this agent has no allowlist for ${ecosystem}`;
   return `${why}. The agent's owner must allowlist it; retrying will not help.`;
 }
@@ -51,7 +51,7 @@ export function graphIncompleteMessage(name: string, ecosystem: string, progress
 const OWNER = "The agent's owner must allowlist the package directly; retrying will not help.";
 
 const HINTS: Record<string, string> = {
-  [PACKAGE_NOT_ALLOWED]: `The package is not on the agent's allowlist and not reachable from it. ${OWNER}`,
+  [PACKAGE_NOT_ALLOWED]: `The package is not on the agent's allowlist and no allowlisted package the run resolved depends on it. ${OWNER}`,
   [PACKAGE_NOT_ALLOWED_PENDING]: `The dependency walk ended before reaching the package. Retrying rarely helps. ${OWNER}`,
   [GRAPH_LIMIT]: `The run's dependency graph walk hit REGISTRY_MAX_GRAPH_PACKAGES before reaching the package, so it may not be in the graph at all. Retrying will not help. The agent's owner must allowlist the package directly, or the operator can raise the limit.`,
   [GRAPH_INCOMPLETE]:
