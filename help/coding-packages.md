@@ -17,8 +17,13 @@ and vulnerability filtering.
 
 An empty allowlist keeps registry mode off. Approve only top-level packages;
 Wardby validates and permits the required transitive dependency graph for the
-run. Changing a package allowlist or policy needs `packages:approve` (or
-`agents:admin`) and a Wardby `admin` or `package-approver` role.
+run. A package the project adds as a new top-level dependency must itself be
+approved (or already be in the verified lockfile), even if an approved
+package depends on it: when npm asks for a package that is not approved and
+was not declared by a package already resolved in the run, Wardby refuses it
+at once with `wardby_package_not_allowed`. Changing a package allowlist or
+policy needs `packages:approve` (or `agents:admin`) and a Wardby `admin` or
+`package-approver` role.
 
 If the repository uses npm `overrides`, also approve each overridden package:
 an override installs a version its parent doesn't ask for, so Wardby approves
@@ -46,10 +51,14 @@ should stop on all of them except `wardby_graph_incomplete`; the owner fixes
 them by allowlisting the package directly (`update_agent`,
 `codingProfile.packageAllowlist`). Each code has an article under `errors/` (for example `errors/package-not-allowed-pending`), available from release 0.6.1.
 
-- `wardby_package_not_allowed`: not on the allowlist, or only reachable through a refused package.
+- `wardby_package_not_allowed`: not on the allowlist and not declared by a package already resolved in the run, or only reachable through a refused package.
 - `wardby_package_not_allowed_pending`: the dependency walk stopped before reaching it; retrying rarely helps.
 - `wardby_graph_limit`: the dependency graph is over `REGISTRY_MAX_GRAPH_PACKAGES`.
 - `wardby_graph_incomplete`: still being checked; retry shortly.
+
+The last three arise only for tarball downloads in a lockfile install that the
+lockfile plan did not approve, where the proxy walks the dependency graph to
+check the package. A metadata request (resolving a package) never walks.
 
 ## PyPI extras
 

@@ -13,7 +13,10 @@ appliesTo: ">=0.6.1"
 dependency-graph walk ended before it reached the requested package. The
 package may still be reachable from an allowlisted one, but the walk was cut
 short (by `REGISTRY_GRAPH_TIMEOUT_MS`), so it was not proven allowed. The error message shows
-how many packages were walked and how many were still queued.
+how many packages were walked and how many were still queued. It arises only
+for a tarball download in a lockfile install that the lockfile plan did not
+approve; a metadata request never walks the graph, and gets
+`wardby_package_not_allowed` at once instead.
 
 The answer is final for the agent and is not transient: the walk resumes
 within the run, but each request continues the walk for at most

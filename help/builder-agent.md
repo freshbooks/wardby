@@ -69,8 +69,10 @@ a draft pull request for review; don't try to commit or open one yourself.
    error means the package is not approved, is too new or flagged, its
    dependency graph is too large to check, or it only has a source
    distribution: do not work around it. Pick an approved alternative or report
-   that the package needs approval. A wardby_graph_incomplete error means the
-   package is still being checked: you may retry once.
+   that the package needs approval. A new top-level package must itself be
+   approved, even if an approved package depends on it. A
+   wardby_graph_incomplete error means the package is still being checked:
+   you may retry once.
 7. Finish with a summary of what changed and which checks you ran. If the
    request names an issue, include a line "Resolves #<n>".
 

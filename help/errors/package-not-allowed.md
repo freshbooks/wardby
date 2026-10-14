@@ -10,10 +10,19 @@ appliesTo: ">=0.6.1"
 # Package not allowed
 
 `wardby_package_not_allowed` (HTTP 403) is a final answer from the package
-registry: the package is not on the agent's `packageAllowlist`, and the
-dependency-graph walk found no allowlisted package that reaches it. It is also
-returned for a package reachable only through a package that was itself refused
-(for example one with a high-severity advisory).
+registry: the package is not on the agent's `packageAllowlist`, and nothing
+the run has resolved allows it. It is also returned for a package reachable
+only through a package that was itself refused (for example one with a
+high-severity advisory).
+
+- When npm resolves a package (a metadata request), the package is refused at
+  once unless it is allowlisted, was declared as a dependency by a package
+  already resolved in the run, or was approved by the run's lockfile plan. So
+  a new top-level package must be allowlisted, even if an allowlisted
+  package's dependency graph contains it.
+- When npm downloads a tarball the run has not resolved (a lockfile install),
+  it is refused once the dependency-graph walk finds no allowlisted package
+  that reaches it.
 
 ## What the agent should do
 
