@@ -46,6 +46,7 @@ import {
   parseCodingWorkerOutputJson,
   redactAndTruncate,
   restoredDependencyFolders,
+  sanitizeDependencyCacheReport,
   type ClaudeContextFile,
   type CodingAgentOutput,
   type CodingRunResult,
@@ -70,7 +71,13 @@ import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedE
 import { ISSUE_KEY, ISSUE_TRACKER_NAMES, type IssueTrackerProvider } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 import { collectRelatedPullRequests } from "../../core/related-pull-requests.js";
-import type { DescriptionBaseline, RelatedPullRequestEntry, RelatedPullRequestsInput } from "../vcs/github.js";
+import {
+  pullRequestBody,
+  type DescriptionBaseline,
+  type RelatedPullRequestEntry,
+  type RelatedPullRequestsInput,
+} from "../vcs/github.js";
+import { descriptionSha256 } from "../vcs/pr-description.js";
 
 const containerLog = logger.child({ module: "container-executor" });
 /** A logged context skip path is cut to this many characters: a refused import is reported as written. */
@@ -152,6 +159,28 @@ export function descriptionOutcomeLabel(outcome: DescriptionWriteOutcome): strin
 function hasPullRequestDescription(run: { repository: string }): boolean {
   return !isLocalRepository(run.repository);
 }
+
+/**
+ * What the root run of a legacy pull request (no recorded description hash)
+ * stored, from which the description it wrote is rebuilt. Raw stored values:
+ * the executor validates them.
+ */
+export interface LegacyDescriptionSource {
+  repository: string;
+  baseRef: string;
+  headRef: string;
+  /** The root run's final message (CodingRun.result.summary); absent = nothing to rebuild. */
+  summary?: string;
+  /** CodingRun.result.tests, as stored. */
+  tests?: unknown;
+  /** CodingRun.dependencyCacheResult, as stored. */
+  dependencyCache?: unknown;
+  issueProvider?: string | null;
+  issueKey?: string | null;
+}
+
+/** The store's description baseline; `legacySource` only on a legacy pull request. */
+export type StoredDescriptionBaseline = DescriptionBaseline & { legacySource?: LegacyDescriptionSource };
 
 /** A fix round's description state: the baseline to update against, or that it could not be loaded. */
 type DescriptionState = { baseline: DescriptionBaseline } | { failed: true } | null;
@@ -252,7 +281,13 @@ export interface ContainerExecutionStore {
    * round's description update. Optional: without it fix rounds leave the
    * description alone.
    */
-  pullRequestDescriptionBaseline?(rootRunId: string): Promise<DescriptionBaseline>;
+  pullRequestDescriptionBaseline?(rootRunId: string): Promise<StoredDescriptionBaseline>;
+  /**
+   * The runs that pushed to the root run's pull request (the root, then its
+   * continuations whose result pushed, oldest first), for the cumulative
+   * Packages section. Optional: without it the section lists this run's only.
+   */
+  pullRequestRunIds?(rootRunId: string): Promise<string[]>;
   /**
    * Compare-and-set of the root run's description hash and author run: writes
    * only while the root still records `expectedSha256` (null = none). False
@@ -380,10 +415,20 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     }));
   }
 
-  async pullRequestDescriptionBaseline(rootRunId: string): Promise<DescriptionBaseline> {
+  async pullRequestDescriptionBaseline(rootRunId: string): Promise<StoredDescriptionBaseline> {
     const root = await this.db.codingRun.findUnique({
       where: { runId: rootRunId },
-      select: { prDescriptionSha256: true, prDescriptionRunId: true, result: true },
+      select: {
+        prDescriptionSha256: true,
+        prDescriptionRunId: true,
+        result: true,
+        repository: true,
+        baseRef: true,
+        headRef: true,
+        dependencyCacheResult: true,
+        issueProvider: true,
+        issueKey: true,
+      },
     });
     if (!root) throw new Error("coding_run_not_found");
     // Legacy pull requests (no recorded author run) carry the root run's own text.
@@ -393,11 +438,42 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         ? root.result
         : (await this.db.codingRun.findUnique({ where: { runId: agentTextRunId }, select: { result: true } }))?.result;
     const previousAgentText = storedSummary(source);
+    const rootSummary = storedSummary(root.result);
+    const legacySource: LegacyDescriptionSource | undefined =
+      root.prDescriptionSha256 === null
+        ? {
+            repository: root.repository,
+            baseRef: root.baseRef,
+            headRef: root.headRef,
+            ...(rootSummary !== undefined ? { summary: rootSummary } : {}),
+            ...(storedField(root.result, "tests") !== undefined ? { tests: storedField(root.result, "tests") } : {}),
+            ...(root.dependencyCacheResult != null ? { dependencyCache: root.dependencyCacheResult } : {}),
+            issueProvider: root.issueProvider,
+            issueKey: root.issueKey,
+          }
+        : undefined;
     return {
       recordedSha256: root.prDescriptionSha256,
       ...(previousAgentText !== undefined ? { previousAgentText } : {}),
       agentTextRunId,
+      ...(legacySource ? { legacySource } : {}),
     };
+  }
+
+  async pullRequestRunIds(rootRunId: string): Promise<string[]> {
+    const rows = await this.db.codingRun.findMany({
+      where: { OR: [{ runId: rootRunId }, { rootCodingRunId: rootRunId }] },
+      select: { runId: true, result: true },
+      orderBy: { run: { startedAt: "asc" } },
+    });
+    const pushed = rows.filter((row) => {
+      const outcome = storedField(row.result, "outcome");
+      return outcome === "pull_request_opened" || outcome === "pull_request_updated";
+    });
+    // The root first, whatever the clock says.
+    return [...pushed.filter((row) => row.runId === rootRunId), ...pushed.filter((row) => row.runId !== rootRunId)].map(
+      (row) => row.runId,
+    );
   }
 
   async recordPullRequestDescription(input: {
@@ -1037,7 +1113,9 @@ export class ContainerExecutor implements Executor {
   }
 
   /** The originating issue for the PR title/body: control-plane data from the CodingRun row, key re-validated. */
-  private issueFor(run: ContainerRunSnapshot): { issue?: { key: string; url?: string; trackerName?: string } } {
+  private issueFor(run: Pick<ContainerRunSnapshot, "issueProvider" | "issueKey">): {
+    issue?: { key: string; url?: string; trackerName?: string };
+  } {
     const { issueProvider, issueKey } = run;
     if (!issueProvider || !issueKey || !ISSUE_KEY.test(issueKey)) return {};
     let url: string | undefined;
@@ -1238,7 +1316,7 @@ export class ContainerExecutor implements Executor {
       // One more (usually cached) check right before anything is pushed: access
       // revoked while the run was working stops the push.
       await this.authorizeRepository(current, { inFlight: true });
-      const report = await this.loadRegistryReport(run.runId);
+      const report = await this.pullRequestRegistryReport(current);
       const descriptionState = await this.descriptionStateFor(current);
       const finalized = await this.options.vcs.finalizeChanges(workspace, {
         summary: output.summary,
@@ -1344,12 +1422,85 @@ export class ContainerExecutor implements Executor {
   private async descriptionStateFor(run: ContainerRunSnapshot): Promise<DescriptionState> {
     const store = this.options.store;
     if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestDescriptionBaseline) return null;
+    let stored: StoredDescriptionBaseline;
     try {
-      return { baseline: await store.pullRequestDescriptionBaseline(run.rootCodingRunId) };
+      stored = await store.pullRequestDescriptionBaseline(run.rootCodingRunId);
     } catch (err) {
       containerLog.warn({ err, runId: run.runId }, "could not load the pull request description baseline");
       return { failed: true };
     }
+    const { legacySource, ...baseline } = stored;
+    if (baseline.recordedSha256 !== null || !legacySource) return { baseline };
+    const legacySha256 = await this.legacyDescriptionSha256(run.rootCodingRunId, legacySource);
+    return { baseline: legacySha256 ? { ...baseline, legacySha256 } : baseline };
+  }
+
+  /**
+   * A legacy pull request's description as its root run wrote it, rebuilt from
+   * stored records (the final message, tests, packages, dependency cache line
+   * and issue line; the Related section is not hashed), and hashed. Undefined
+   * when the root stored no final message, or on any failure: the description
+   * then counts as edited, the safe direction. A lock file line the root's
+   * refusal warning may have carried is not stored, so such a description
+   * never matches.
+   */
+  private async legacyDescriptionSha256(
+    rootRunId: string,
+    source: LegacyDescriptionSource,
+  ): Promise<string | undefined> {
+    if (!source.summary) return undefined;
+    try {
+      const tests = storedTests(source.tests);
+      const restored =
+        source.dependencyCache === undefined
+          ? []
+          : restoredDependencyFolders(sanitizeDependencyCacheReport(source.dependencyCache));
+      const body = pullRequestBody({
+        repository: source.repository,
+        baseRef: source.baseRef,
+        headRef: source.headRef,
+        runId: rootRunId,
+        summary: source.summary,
+        ...(tests.length > 0 ? { tests } : {}),
+        ...(await this.loadRegistryReport(rootRunId)),
+        ...(restored.length > 0 ? { restoredDependencies: restored } : {}),
+        ...this.issueFor({ issueProvider: source.issueProvider ?? null, issueKey: source.issueKey ?? null }),
+      });
+      return descriptionSha256(body);
+    } catch (err) {
+      containerLog.debug({ err, rootRunId }, "could not rebuild a legacy pull request description");
+      return undefined;
+    }
+  }
+
+  /**
+   * The Packages section's input: on a continuation, every package installed
+   * by the runs that pushed to the pull request plus this run (merged in run
+   * order); refusals are this run's only, since they describe the current
+   * state. A fresh run, or a failed listing, reports this run's alone.
+   */
+  private async pullRequestRegistryReport(
+    run: ContainerRunSnapshot,
+  ): Promise<{ packages?: RegistryReport["packages"]; packageRefusals?: RegistryReport["packageRefusals"] }> {
+    const own = await this.loadRegistryReport(run.runId);
+    const store = this.options.store;
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestRunIds) return own;
+    let earlier: string[];
+    try {
+      earlier = (await store.pullRequestRunIds(run.rootCodingRunId)).filter((id) => id !== run.runId);
+    } catch (err) {
+      containerLog.warn(
+        { err, runId: run.runId },
+        "could not list the pull request's runs; listing this run's packages",
+      );
+      return own;
+    }
+    const reports = await Promise.all(earlier.map((id) => this.loadRegistryReport(id)));
+    const packages = mergePackages([...reports.map((report) => report.packages ?? []), own.packages ?? []]);
+    return {
+      ...(packages.length > 0 ? { packages } : {}),
+      ...(own.packageRefusals ? { packageRefusals: own.packageRefusals } : {}),
+    };
   }
 
   /**
@@ -1448,7 +1599,7 @@ export class ContainerExecutor implements Executor {
         summary: output.summary,
         tests: output.tests,
         tag: output.tag,
-        ...(await this.loadRegistryReport(run.runId)),
+        ...(await this.pullRequestRegistryReport(run)),
         ...restoredDependenciesFor(output),
         ...this.issueFor(run),
         description: { baseline: state.baseline },
@@ -2086,9 +2237,51 @@ function failureCategory(error: unknown): string {
 
 /** A stored CodingRun result's summary (the agent-written description text), when it has one. */
 function storedSummary(result: unknown): string | undefined {
-  if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
-  const summary = (result as { summary?: unknown }).summary;
+  const summary = storedField(result, "summary");
   return typeof summary === "string" ? summary : undefined;
+}
+
+/** One field of a stored JSON object; undefined when it isn't an object. */
+function storedField(value: unknown, key: string): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return (value as Record<string, unknown>)[key];
+}
+
+/** Stored test results the PR body can list (command + outcome); anything else is dropped. */
+function storedTests(value: unknown): Array<{ command: string; outcome: "passed" | "failed" | "skipped" }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((test) => {
+    const command = storedField(test, "command");
+    const outcome = storedField(test, "outcome");
+    return typeof command === "string" && (outcome === "passed" || outcome === "failed" || outcome === "skipped")
+      ? [{ command, outcome }]
+      : [];
+  });
+}
+
+/**
+ * Packages from several runs' reports, in order: one entry per ecosystem +
+ * name + version, first appearance first, accepted advisories merged.
+ */
+function mergePackages(lists: ReadonlyArray<RegistryReport["packages"]>): RegistryReport["packages"] {
+  const merged = new Map<string, RegistryReport["packages"][number]>();
+  for (const list of lists) {
+    for (const pkg of list) {
+      const key = `${pkg.ecosystem}\0${pkg.name}\0${pkg.version}`;
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, {
+          ...pkg,
+          ...(pkg.acceptedAdvisories ? { acceptedAdvisories: [...pkg.acceptedAdvisories] } : {}),
+        });
+        continue;
+      }
+      if (pkg.acceptedAdvisories?.length) {
+        existing.acceptedAdvisories = [...new Set([...(existing.acceptedAdvisories ?? []), ...pkg.acceptedAdvisories])];
+      }
+    }
+  }
+  return [...merged.values()];
 }
 
 function stableJson(value: unknown): string {

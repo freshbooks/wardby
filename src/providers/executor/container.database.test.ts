@@ -256,10 +256,76 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
         recordedSha256: null,
         previousAgentText: "Legacy text.",
         agentTextRunId: legacy,
+        // What rebuilds the description the legacy root wrote.
+        legacySource: {
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${legacy}`,
+          summary: "Legacy text.",
+          issueProvider: null,
+          issueKey: null,
+        },
       });
     } finally {
       await db.codingRun.deleteMany({ where: { runId: { in: [root, author, legacy] } } });
       await db.run.deleteMany({ where: { id: { in: [root, author, legacy] } } });
+    }
+  });
+
+  it("pullRequestDescriptionBaseline's legacy source carries the root's stored tests, cache report and issue", async () => {
+    const legacy = `container-desc-legacy-src-${randomUUID()}`;
+    try {
+      await codingRunWith(legacy, "Legacy text.", {
+        result: {
+          outcome: "pull_request_opened",
+          summary: "Legacy text.",
+          tests: [{ command: "npm test", outcome: "passed" }],
+        },
+        dependencyCacheResult: { projects: [{ path: ".", result: "hit" }] },
+        issueProvider: "jira",
+        issueKey: "ABC-12",
+      });
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.pullRequestDescriptionBaseline(legacy)).resolves.toMatchObject({
+        legacySource: {
+          summary: "Legacy text.",
+          tests: [{ command: "npm test", outcome: "passed" }],
+          dependencyCache: { projects: [{ path: ".", result: "hit" }] },
+          issueProvider: "jira",
+          issueKey: "ABC-12",
+        },
+      });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: legacy } });
+      await db.run.deleteMany({ where: { id: legacy } });
+    }
+  });
+
+  it("pullRequestRunIds lists the root, then continuations that pushed, oldest first", async () => {
+    const root = `container-desc-runs-root-${randomUUID()}`;
+    const pushedLater = `container-desc-runs-b-${randomUUID()}`;
+    const pushedEarlier = `container-desc-runs-a-${randomUUID()}`;
+    const noChange = `container-desc-runs-c-${randomUUID()}`;
+    const ids = [root, pushedLater, pushedEarlier, noChange];
+    try {
+      await codingRunWith(root, "Root text.");
+      const continuation = async (runId: string, outcome: string, startedAt: Date) => {
+        await codingRunWith(runId, "Round text.", {
+          rootCodingRunId: root,
+          result: { outcome, summary: "Round text." },
+        });
+        await db.run.update({ where: { id: runId }, data: { startedAt } });
+      };
+      // The root started last here: it is still listed first.
+      await db.run.update({ where: { id: root }, data: { startedAt: new Date("2026-01-03T00:00:00Z") } });
+      await continuation(pushedLater, "pull_request_updated", new Date("2026-01-02T00:00:00Z"));
+      await continuation(pushedEarlier, "pull_request_updated", new Date("2026-01-01T00:00:00Z"));
+      await continuation(noChange, "no_changes", new Date("2026-01-01T12:00:00Z"));
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.pullRequestRunIds(root)).resolves.toEqual([root, pushedEarlier, pushedLater]);
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: ids } } });
+      await db.run.deleteMany({ where: { id: { in: ids } } });
     }
   });
 

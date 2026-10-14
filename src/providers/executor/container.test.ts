@@ -25,11 +25,13 @@ import type {
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
-import type { DescriptionBaseline, RelatedPullRequestEntry } from "../vcs/github.js";
+import { pullRequestBody, type DescriptionBaseline, type RelatedPullRequestEntry } from "../vcs/github.js";
+import { descriptionSha256 } from "../vcs/pr-description.js";
 import {
   ContainerExecutor,
   DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
+  type StoredDescriptionBaseline,
   describeFailure,
   normalizeCollectedLockfiles,
   type CodingSessionController,
@@ -174,7 +176,8 @@ class FakeStore implements ContainerExecutionStore {
   }
 
   /** Fix-round description store methods; tests that need them assign them. */
-  pullRequestDescriptionBaseline?: (rootRunId: string) => Promise<DescriptionBaseline>;
+  pullRequestDescriptionBaseline?: (rootRunId: string) => Promise<StoredDescriptionBaseline>;
+  pullRequestRunIds?: (rootRunId: string) => Promise<string[]>;
   recordPullRequestDescription?: (input: {
     rootRunId: string;
     expectedSha256: string | null;
@@ -1370,6 +1373,169 @@ describe("ContainerExecutor", () => {
         expect(created.recorded).toEqual([]);
         expect(created.store.completions[0]?.record).not.toHaveProperty("prDescriptionOutcome");
       }
+    });
+
+    it("lists every package installed across the pull request's runs, refusals from this run only", async () => {
+      const reports: Record<string, { packages: unknown[]; packageRefusals: unknown[] }> = {
+        "root-run": {
+          packages: [
+            { ecosystem: "npm", name: "zod", version: "4.0.0" },
+            { ecosystem: "npm", name: "vitest", version: "3.2.0", acceptedAdvisories: ["GHSA-aaaa-bbbb-cccc"] },
+          ],
+          packageRefusals: [{ ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" }],
+        },
+        "round-1": {
+          packages: [
+            { ecosystem: "npm", name: "zod", version: "4.0.0" },
+            { ecosystem: "pypi", name: "zod", version: "4.0.0" },
+          ],
+          packageRefusals: [{ ecosystem: "npm", name: "is-odd", reason: "wardby_version_filtered" }],
+        },
+        "run-1": {
+          packages: [
+            { ecosystem: "npm", name: "vitest", version: "3.2.0", acceptedAdvisories: ["GHSA-dddd-eeee-ffff"] },
+            { ecosystem: "npm", name: "zod", version: "4.1.0" },
+          ],
+          packageRefusals: [{ ecosystem: "npm", name: "is-even", reason: "wardby_package_not_allowed" }],
+        },
+      };
+      const created = await fixRound({}, { registryReport: async (runId) => reports[runId] as never });
+      created.store.pullRequestRunIds = async () => ["root-run", "round-1", "run-1"];
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      expect(created.vcs.lastFinalizeDetails?.packages).toEqual([
+        { ecosystem: "npm", name: "zod", version: "4.0.0" },
+        {
+          ecosystem: "npm",
+          name: "vitest",
+          version: "3.2.0",
+          acceptedAdvisories: ["GHSA-aaaa-bbbb-cccc", "GHSA-dddd-eeee-ffff"],
+        },
+        { ecosystem: "pypi", name: "zod", version: "4.0.0" },
+        { ecosystem: "npm", name: "zod", version: "4.1.0" },
+      ]);
+      expect(created.vcs.lastFinalizeDetails?.packageRefusals).toEqual([
+        { ecosystem: "npm", name: "is-even", reason: "wardby_package_not_allowed" },
+      ]);
+    });
+
+    it("a no-change round's refresh lists the pull request's packages too", async () => {
+      const created = await fixRound(
+        {},
+        {
+          registryReport: async (runId) => ({
+            packages: [{ ecosystem: "npm", name: `pkg-${runId}`, version: "1.0.0" }],
+            packageRefusals: [],
+          }),
+        },
+      );
+      created.store.pullRequestRunIds = async () => ["root-run"];
+      noChanges(created);
+      let refreshed: FinalizeChangesDetails | undefined;
+      created.vcs.refreshPullRequestDescription = async (_workspace, details) => {
+        refreshed = details;
+        return { kind: "unchanged", sha256: RECORDED, agentTextRunId: "root-run" };
+      };
+      await created.executor.start("run-1");
+      expect(refreshed?.packages).toEqual([
+        { ecosystem: "npm", name: "pkg-root-run", version: "1.0.0" },
+        { ecosystem: "npm", name: "pkg-run-1", version: "1.0.0" },
+      ]);
+      expect(refreshed).not.toHaveProperty("packageRefusals");
+    });
+
+    it("a failed run listing falls back to this run's packages", async () => {
+      const created = await fixRound(
+        {},
+        {
+          registryReport: async (runId) => ({
+            packages: [{ ecosystem: "npm", name: `pkg-${runId}`, version: "1.0.0" }],
+            packageRefusals: [],
+          }),
+        },
+      );
+      created.store.pullRequestRunIds = async () => {
+        throw new Error("db down");
+      };
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.lastFinalizeDetails?.packages).toEqual([
+        { ecosystem: "npm", name: "pkg-run-1", version: "1.0.0" },
+      ]);
+    });
+
+    it("a legacy pull request's baseline carries the hash of the rebuilt root description", async () => {
+      const rootReport = {
+        packages: [{ ecosystem: "npm", name: "zod", version: "4.0.0" }],
+        packageRefusals: [],
+      };
+      const created = await fixRound(
+        {},
+        {
+          registryReport: async (runId) => (runId === "root-run" ? rootReport : { packages: [], packageRefusals: [] }),
+          issueUrl: (_provider, key) => `https://acme.atlassian.net/browse/${key}`,
+        },
+      );
+      const legacySource = {
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-root-run",
+        summary: "The original description text.",
+        tests: [{ command: "npm test", outcome: "passed" as const }],
+        dependencyCache: { projects: [{ path: ".", result: "hit" }] },
+        issueProvider: "jira",
+        issueKey: "ABC-12",
+      };
+      created.store.pullRequestDescriptionBaseline = async () => ({
+        recordedSha256: null,
+        previousAgentText: "The original description text.",
+        agentTextRunId: "root-run",
+        legacySource: legacySource,
+      });
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      const expected = pullRequestBody({
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: "wardby/run-root-run",
+        runId: "root-run",
+        summary: "The original description text.",
+        tests: [{ command: "npm test", outcome: "passed" }],
+        packages: rootReport.packages,
+        restoredDependencies: ["."],
+        issue: { key: "ABC-12", url: "https://acme.atlassian.net/browse/ABC-12", trackerName: "Jira" },
+      });
+      expect(expected).toContain("Resolves Jira issue");
+      expect(expected).toContain("Dependency cache: restored");
+      expect(created.vcs.lastFinalizeDetails?.description).toEqual({
+        baseline: {
+          recordedSha256: null,
+          legacySha256: descriptionSha256(expected),
+          previousAgentText: "The original description text.",
+          agentTextRunId: "root-run",
+        },
+      });
+      // The compare-and-set expects no hash yet (the legacy row has none).
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: null, sha256: NEW_SHA, agentTextRunId: "run-1" },
+      ]);
+    });
+
+    it("a legacy pull request whose root run stored no summary gets no rebuilt hash", async () => {
+      const created = await fixRound();
+      created.store.pullRequestDescriptionBaseline = async () => ({
+        recordedSha256: null,
+        agentTextRunId: "root-run",
+        legacySource: { repository: "openai/example", baseRef: "main", headRef: "wardby/run-root-run" },
+      });
+      created.vcs.finalizeDescription = { kind: "edited_by_hand", commentPosted: true };
+      await created.executor.start("run-1");
+      expect(created.vcs.lastFinalizeDetails?.description).toEqual({
+        baseline: { recordedSha256: null, agentTextRunId: "root-run" },
+      });
     });
 
     it("a fresh no_changes run never refreshes a description", async () => {
