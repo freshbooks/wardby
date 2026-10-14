@@ -181,7 +181,7 @@ async function toolLayout(tool: "pnpm" | "yarn", real: string[]) {
         "#!/usr/bin/env node",
         'const fs = require("node:fs");',
         'let lock; try { lock = fs.readFileSync("yarn.lock", "utf8"); } catch {}',
-        `fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({ name: ${JSON.stringify(name)}, args: process.argv.slice(2), active: process.env.WARDBY_NPM_SHIM_ACTIVE, lock }) + "\\n");`,
+        `fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({ name: ${JSON.stringify(name)}, args: process.argv.slice(2), active: process.env.WARDBY_NPM_SHIM_ACTIVE, alwaysAuth: process.env.npm_config_always_auth, lock }) + "\\n");`,
         'if (process.env.FAKE_WRITE_LOCK) fs.writeFileSync("yarn.lock", process.env.FAKE_WRITE_LOCK);',
         "process.exit(Number(process.env.FAKE_EXIT ?? 0));",
       ].join("\n"),
@@ -192,7 +192,10 @@ async function toolLayout(tool: "pnpm" | "yarn", real: string[]) {
     (await readFile(record, "utf8").catch(() => ""))
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as { name: string; args: string[]; active?: string; lock?: string });
+      .map(
+        (line) =>
+          JSON.parse(line) as { name: string; args: string[]; active?: string; alwaysAuth?: string; lock?: string },
+      );
   // Only node and the fake tools: no real pnpm, yarn or corepack from the host.
   const nodeDir = join(root, "node-only");
   await mkdir(nodeDir);
@@ -327,6 +330,14 @@ describe("package-manager shim for yarn", () => {
       ["corepack", ["yarn", "install"]],
       ["yarn", ["install"]],
     ]);
+  });
+
+  it("has yarn classic send the token with every registry request, not only for scoped packages", async () => {
+    // yarn classic reads the token from the npmrc but sends it only with
+    // always-auth, a setting npm itself warns about: so only yarn gets it.
+    const { shim, project, env, calls } = await toolLayout("yarn", ["yarn"]);
+    expect((await run(shim, ["install"], { cwd: project, env })).code).toBe(0);
+    expect((await calls())[0].alwaysAuth).toBe("true");
   });
 
   it("passes yarn's exit code through and still restores the lockfile", async () => {

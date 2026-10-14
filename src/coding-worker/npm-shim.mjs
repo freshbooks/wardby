@@ -360,7 +360,14 @@ async function main() {
   }
   const child = spawn(real.file, [...real.prefix, ...args], {
     stdio: "inherit",
-    env: { ...process.env, [ACTIVE]: "1" },
+    env: {
+      ...process.env,
+      [ACTIVE]: "1",
+      // yarn classic sends the npmrc's token only with always-auth (or for
+      // a scoped package); npm warns about that setting, so only yarn gets
+      // it. yarn Berry reads none of npm's settings.
+      ...(tool === "yarn" ? { npm_config_always_auth: "true" } : {}),
+    },
   });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
   child.on("error", (error) => {
