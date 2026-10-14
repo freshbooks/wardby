@@ -5,9 +5,13 @@ import { CONTINUATION_CLOSED_HOST_LINE } from "../coding/continuation-wording.js
 import {
   collectRunOutcome,
   completeHostStatus,
+  fullReplyComments,
+  fullReplyOf,
+  GITHUB_REPLY_MAX_CHARS,
   mentionStatusRow,
   outcomeBody,
   postMentionStatus,
+  REPLY_MAX_PARTS,
   workingBody,
 } from "./host-status.js";
 
@@ -596,5 +600,185 @@ describe("collectRunOutcome", () => {
     } as never;
     const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
     expect(out.pullRequests[0].failedChecks).toBe(2);
+  });
+});
+
+describe("full replies", () => {
+  const POINTER = "✅ Finished without opening a pull request. The full reply follows in the next comment(s).";
+  const pr = {
+    outcome: "pull_request_opened" as const,
+    repository: REPO,
+    pullRequestNumber: 73,
+    codeProvider: "github",
+  };
+  /** A plan-shaped reply: Markdown sections of paragraphs, `chars` long. */
+  const plan = (chars: number): string => {
+    const section = (i: number) => `## Step ${i}\n\n${"Do the thing carefully. ".repeat(40).trim()}\n\n`;
+    let text = "";
+    for (let i = 1; text.length < chars; i++) text += section(i);
+    return text.slice(0, chars).trim();
+  };
+  const succeeded = (finalText: string) => ({ id: "r1", status: "succeeded" as const, finalText });
+
+  describe("fullReplyOf", () => {
+    it("is the trimmed reply only for a succeeded run with no PR, no failed child and a reply over the quote limit", () => {
+      const long = plan(2500);
+      expect(fullReplyOf(succeeded(`  ${long}\n`), [], [])).toBe(long);
+      expect(fullReplyOf(succeeded("x".repeat(2000)), [], [])).toBeNull();
+      expect(fullReplyOf(succeeded(long), [pr], [])).toBeNull();
+      expect(fullReplyOf(succeeded(long), [], [{ id: "c9", status: "failed" }])).toBeNull();
+      expect(fullReplyOf({ id: "r1", status: "failed", finalText: long }, [], [])).toBeNull();
+      expect(fullReplyOf({ id: "r1", status: "succeeded", finalText: null }, [], [])).toBeNull();
+    });
+  });
+
+  describe("fullReplyComments", () => {
+    const opts = { maxChars: GITHUB_REPLY_MAX_CHARS, maxParts: REPLY_MAX_PARTS };
+
+    it("numbers the parts and keeps every comment within the limit, header included", () => {
+      const reply = plan(150_000);
+      const bodies = fullReplyComments(reply, opts);
+      expect(bodies).toHaveLength(3);
+      bodies.forEach((body, i) => {
+        expect(body.startsWith(`**Reply, part ${i + 1} of 3**\n\n`)).toBe(true);
+        expect(body.length).toBeLessThanOrEqual(60_000);
+      });
+      const text = bodies.map((b) => b.replace(/^\*\*Reply, part \d of 3\*\*\n\n/, "")).join("");
+      expect(text).toBe(reply);
+      expect(bodies.join("")).not.toContain("was cut");
+    });
+
+    it("stops at four parts and ends the last with the cut note", () => {
+      const bodies = fullReplyComments(plan(300_000), opts);
+      expect(bodies).toHaveLength(4);
+      for (const body of bodies) expect(body.length).toBeLessThanOrEqual(60_000);
+      expect(bodies[3]).toMatch(/^\*\*Reply, part 4 of 4\*\*\n\n/);
+      expect(bodies[3]).toMatch(/The rest of the reply was cut.*`get_run`.*`finalText`/s);
+      for (const body of bodies.slice(0, 3)) expect(body).not.toContain("was cut");
+    });
+
+    it("keeps the header and cut note within a small limit too", () => {
+      const bodies = fullReplyComments("y".repeat(10_000), { maxChars: 1000, maxParts: 2 });
+      expect(bodies).toHaveLength(2);
+      for (const body of bodies) expect(body.length).toBeLessThanOrEqual(1000);
+      expect(bodies[1]).toContain("The rest of the reply was cut");
+    });
+  });
+
+  describe("outcomeBody", () => {
+    it("points to the follow-up comments instead of quoting a long reply", () => {
+      const body = outcomeBody(succeeded(plan(11_000)), REPO, [], [], { fullReplyFollows: true });
+      expect(body).toBe(`${POINTER}\n\n<sub>wardby run \`r1\`</sub>`);
+    });
+
+    it("points to the follow-ups for a long reply that is the answer (Jira)", () => {
+      const body = outcomeBody(succeeded(plan(11_000)), "", [], [], {
+        replyAsAnswer: true,
+        noPullRequestText: "Done.",
+        fullReplyFollows: true,
+      });
+      expect(body).toBe("✅ The full reply follows in the next comment(s).\n\n<sub>wardby run `r1`</sub>");
+    });
+
+    it("leaves a short reply, a PR link and a failed child as they were", () => {
+      const opts = { fullReplyFollows: true };
+      expect(outcomeBody(succeeded("Which file?"), REPO, [], [], opts)).toBe(
+        outcomeBody(succeeded("Which file?"), REPO, []),
+      );
+      const long = plan(11_000);
+      expect(outcomeBody(succeeded(long), REPO, [pr], [], opts)).toBe(`✅ Opened #73.\n\n<sub>wardby run \`r1\`</sub>`);
+      const failed = outcomeBody(succeeded(long), REPO, [], [{ id: "c9", status: "failed" }], opts);
+      expect(failed).toMatch(/^❌ A sub-run did not succeed/);
+      expect(failed).toContain("…");
+      expect(failed.length).toBeLessThan(2300);
+    });
+  });
+
+  describe("completeHostStatus", () => {
+    it("edits the status to the pointer and posts the whole plan as one follow-up", async () => {
+      const h = host();
+      const d = db({ row: row() });
+      const reply = plan(11_000);
+      await completeHostStatus(d as never, succeeded(reply), { github: h });
+      const status = h.editComment.mock.calls[0][1].body as string;
+      expect(status).toMatch(/^✅ Finished without opening a pull request\. The full reply follows/);
+      expect(status).not.toContain("> ");
+      expect(h.comment).toHaveBeenCalledTimes(1);
+      expect(h.comment).toHaveBeenCalledWith(REPO, { number: 71, body: `**Reply, part 1 of 1**\n\n${reply}` });
+      expect(d.runHostStatus.update).toHaveBeenCalledWith({
+        where: { runId: "r1" },
+        data: { commentId: "501", completedAt: expect.any(Date) },
+      });
+    });
+
+    it("posts a 150,000-character reply as three parts, in order, each within GitHub's limit", async () => {
+      const h = host();
+      const d = db({ row: row() });
+      await completeHostStatus(d as never, succeeded(plan(150_000)), { github: h });
+      const bodies = h.comment.mock.calls.map((c) => (c[1] as { body: string }).body);
+      expect(bodies).toHaveLength(3);
+      bodies.forEach((body, i) => {
+        expect(body).toMatch(new RegExp(`^\\*\\*Reply, part ${i + 1} of 3\\*\\*`));
+        expect(body.length).toBeLessThanOrEqual(60_000);
+      });
+    });
+
+    it("posts at most four parts of a 300,000-character reply, the last with the cut note", async () => {
+      const h = host();
+      const d = db({ row: row() });
+      await completeHostStatus(d as never, succeeded(plan(300_000)), { github: h });
+      const bodies = h.comment.mock.calls.map((c) => (c[1] as { body: string }).body);
+      expect(bodies).toHaveLength(4);
+      expect(bodies[3]).toContain("The rest of the reply was cut");
+    });
+
+    it("posts no follow-up for a short reply, a PR link, or a failed child", async () => {
+      const long = plan(11_000);
+      const cases = [
+        {
+          finalText: "Which file?",
+          children: [] as unknown[],
+          expected: /^✅ Finished without opening a pull request\.\n\n> Which file\?/,
+        },
+        { finalText: long, children: [child(pr)], expected: /^✅ Opened #73\.\n\n<sub>/ },
+        { finalText: long, children: [child(null, "failed", "c9")], expected: /^❌ A sub-run did not succeed: `c9`/ },
+      ];
+      for (const { finalText, children, expected } of cases) {
+        const h = host();
+        const d = db({ row: row(), children });
+        await completeHostStatus(d as never, succeeded(finalText), { github: h });
+        const status = h.editComment.mock.calls[0][1].body as string;
+        expect(status).toMatch(expected);
+        expect(status).not.toContain("follows in the next comment");
+        expect(h.comment).not.toHaveBeenCalled();
+      }
+    });
+
+    it("keeps the 2,000-character quote for a failed child", async () => {
+      const h = host();
+      const d = db({ row: row(), children: [child(null, "failed", "c9")] });
+      await completeHostStatus(d as never, succeeded("z".repeat(5000)), { github: h });
+      expect(h.editComment.mock.calls[0][1].body).toContain(`> ${"z".repeat(2000)}…`);
+    });
+
+    it("defuses @-mentions in the follow-ups", async () => {
+      const h = host();
+      const d = db({ row: row() });
+      await completeHostStatus(d as never, succeeded(`${plan(3000)}\n\nThanks @chfields and @wardby/team.`), {
+        github: h,
+      });
+      const body = (h.comment.mock.calls[0][1] as { body: string }).body;
+      expect(body).toContain("Thanks @\u200bchfields and @\u200bwardby/team.");
+      expect(body).not.toMatch(/@(?!\u200b)\w/);
+    });
+
+    it("never throws when posting a part fails, and leaves the row open", async () => {
+      const h = host();
+      h.comment.mockRejectedValueOnce(new Error("boom"));
+      const d = db({ row: row() });
+      await expect(completeHostStatus(d as never, succeeded(plan(150_000)), { github: h })).resolves.toBeUndefined();
+      expect(h.comment).toHaveBeenCalledTimes(1);
+      expect(d.runHostStatus.update).not.toHaveBeenCalled();
+    });
   });
 });

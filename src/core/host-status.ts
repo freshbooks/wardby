@@ -22,12 +22,21 @@ import type { CodeReviewHost, ReviewHostProvider, ReviewHostRegistry } from "../
 import { loadBudgetSentence } from "./budget-wording.js";
 import { logger } from "./logger.js";
 import { providerClassOfCategory, providerSentence, type ProviderFailureClass } from "./provider-wording.js";
-import { defuseMentions } from "./reply-parts.js";
+import { defuseMentions, splitReply } from "./reply-parts.js";
 
 const log = logger.child({ module: "host-status" });
 
-/** Keeps the edited comment readable; the full reply stays on the run. */
+/** Keeps the edited comment readable; a longer reply goes out in full as follow-up comments (fullReplyOf). */
 const MAX_REPLY_CHARS = 2000;
+/** The most a GitHub follow-up comment holds, header and cut note included (GitHub's limit is 65,536). */
+export const GITHUB_REPLY_MAX_CHARS = 60_000;
+/** The most follow-up comments a full reply is posted as; the rest is cut, and stays on the run. */
+export const REPLY_MAX_PARTS = 4;
+/** The status comment's line when the full reply follows. */
+const FULL_REPLY_FOLLOWS = "The full reply follows in the next comment(s).";
+/** Ends the last follow-up when the reply did not fit in REPLY_MAX_PARTS comments. */
+const REPLY_CUT_NOTE =
+  "\n\n---\n\n*The rest of the reply was cut: it was too long to post in full. The full text is on the run (`get_run` → `finalText`).*";
 /** The run statuses a run never leaves. */
 export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
   "succeeded",
@@ -128,6 +137,38 @@ function quoteReply(text: string): string {
     .join("\n");
 }
 
+/**
+ * The reply to post in full as follow-up comments, or null when the ordinary quote applies: only for a
+ * run that succeeded with no pull request and no failed sub-run, whose trimmed reply is longer than the
+ * status comment's quote holds.
+ */
+export function fullReplyOf(
+  run: FinishedRun,
+  pullRequests: PullRequestOutcome[],
+  failedChildren: FailedChild[],
+): string | null {
+  if (run.status !== "succeeded" || pullRequests.length > 0 || failedChildren.length > 0) return null;
+  const reply = run.finalText?.trim();
+  return reply && reply.length > MAX_REPLY_CHARS ? reply : null;
+}
+
+const partHeader = (i: number, n: number): string => `**Reply, part ${i} of ${n}**\n\n`;
+
+/**
+ * Numbered comment bodies for a full reply: "**Reply, part i of n**" then the part, the last ending with
+ * the cut note when the reply did not fit in `maxParts`. Each body, header and note included, is at most
+ * `maxChars`. @-mentions are defused (splitReply).
+ */
+export function fullReplyComments(reply: string, opts: { maxChars: number; maxParts: number }): string[] {
+  const maxParts = Math.max(1, Math.floor(opts.maxParts));
+  const reserve = partHeader(maxParts, maxParts).length + REPLY_CUT_NOTE.length;
+  const { parts, truncated } = splitReply(reply, { maxChars: opts.maxChars - reserve, maxParts });
+  return parts.map(
+    (part, i) =>
+      `${partHeader(i + 1, parts.length)}${part}${truncated && i === parts.length - 1 ? REPLY_CUT_NOTE : ""}`,
+  );
+}
+
 export function outcomeBody(
   run: FinishedRun,
   repository: string,
@@ -138,6 +179,11 @@ export function outcomeBody(
     noPullRequestText?: string;
     /** The agent's reply IS the answer (no separate reply comment): shown as written, not quoted. */
     replyAsAnswer?: boolean;
+    /**
+     * The caller posts the full reply as follow-up comments when fullReplyOf is not null (see
+     * completeHostStatus): the ✅ no-pull-request body then points to them instead of quoting the reply.
+     */
+    fullReplyFollows?: boolean;
   } = {},
 ): string {
   const links = pullRequests.map((pr) => {
@@ -221,6 +267,11 @@ export function outcomeBody(
     return `⚠️ ${links.join(", ")}, but ${checks} failed in the run: see the pull request's description before merging.\n\n${footer}`;
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
+  if (opts.fullReplyFollows && fullReplyOf(run, pullRequests, failedChildren) !== null) {
+    return opts.replyAsAnswer
+      ? `✅ ${FULL_REPLY_FOLLOWS}\n\n${footer}`
+      : `✅ Finished without opening a pull request. ${FULL_REPLY_FOLLOWS}\n\n${footer}`;
+  }
   if (opts.replyAsAnswer && reply) return `✅ ${cutReply(reply)}\n\n${footer}`;
   return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}\n\n${footer}`;
 }
@@ -287,7 +338,11 @@ export async function completeHostStatus(
     const host = hosts[status.provider as ReviewHostProvider];
     if (!host) return;
     const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
-    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, { budgetSentence });
+    const fullReply = fullReplyOf(run, pullRequests, failedChildren);
+    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, {
+      budgetSentence,
+      fullReplyFollows: true,
+    });
     let commentId = status.commentId;
     if (commentId) {
       await host.editComment(status.repository, {
@@ -303,6 +358,15 @@ export async function completeHostStatus(
           ...(status.replyToReviewCommentId ? { replyToReviewCommentId: status.replyToReviewCommentId } : {}),
         })
       ).id;
+    }
+    // In order, before completedAt: a failed part leaves the row open for the reconciler to retry.
+    if (fullReply !== null) {
+      for (const partBody of fullReplyComments(fullReply, {
+        maxChars: GITHUB_REPLY_MAX_CHARS,
+        maxParts: REPLY_MAX_PARTS,
+      })) {
+        await host.comment(status.repository, { number: status.number, body: partBody });
+      }
     }
     await db.runHostStatus.update({ where: { runId: run.id }, data: { commentId, completedAt: new Date() } });
   } catch (err) {
