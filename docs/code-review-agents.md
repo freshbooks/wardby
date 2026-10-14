@@ -61,6 +61,18 @@ thread) right after the reaction. When the run ends, the App edits that
 comment with the outcome:
 
 - the pull requests the run's coding sub-runs opened or pushed to;
+- ⛔ **Blocked by the package registry: no changes were made.** when coding
+  sub-runs recorded package refusals and no pull request or pushed changes
+  resulted. The comment lists up to ten distinct refusals, with reasons,
+  registry codes and fixes; use `get_run` for the full list. An approver updates
+  `codingProfile.packageAllowlist` or `codingProfile.packagePolicy` with
+  `update_agent` (needs `packages:approve` or `agents:admin`), then the
+  requester mentions `@wardby` again. See [Package policy](coding-packages.md)
+  and [Status comments help](../help/status-comments.md). Jira status comments
+  and Slack notifications use the same blocked guidance;
+- a ⚠️ dependency install warning listing refusals when changes were pushed,
+  while keeping the pull request link. Without refusals, the usual ✅ / ❌
+  wording remains;
 - the agent's final reply, quoted, when no pull request came out (for
   example, a question back to the requester). `@`-mentions in the reply are
   defused so nobody is pinged;

@@ -12,20 +12,22 @@ wardby exposes no new inbound endpoint for it.
 
 ### Events
 
-Six kinds of lifecycle event can post to a linked channel:
+Seven kinds of lifecycle event can post to a linked channel:
 
-| Kind              | Posts when                                                                           | Content                                                                      |
-| ----------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `issue_picked_up` | A Jira event starts a run on a linked issue                                          | Issue key, title, and link; agent name; trigger kind                         |
-| `run_failed`      | A top-level run ends `failed`, `refused`, `budget_exhausted`, `cancelled`, or `lost` | Agent name, status, a short first-line reason (never the full error)         |
-| `pr_opened`       | A coding run opens a pull request                                                    | Repository#number and link, the issue it is for, any Jira status move        |
-| `review_posted`   | wardby's own review check posts a verdict                                            | `APPROVE` / `CHANGES_REQUESTED` / `COMMENT`, the reviewer agent, the PR link |
-| `review_fix`      | An automatic [fix round](../help/review-fix-rounds.md) starts or hits the cap        | Round number of the cap, started or capped                                   |
-| `pr_closed`       | A pull request is merged or closed                                                   | Merged or closed, any Jira status move                                       |
+| Kind              | Posts when                                                                              | Content                                                                      |
+| ----------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `issue_picked_up` | A Jira event starts a run on a linked issue                                             | Issue key, title, and link; agent name; trigger kind                         |
+| `run_failed`      | A top-level run ends `failed`, `refused`, `budget_exhausted`, `cancelled`, or `lost`    | Agent name, status, a short first-line reason (never the full error)         |
+| `run_blocked`     | A top-level run has coding-child package refusals and no pull request or pushed changes | ⛔ Blocked status, refused packages, and code-specific fixes                 |
+| `pr_opened`       | A coding run opens a pull request                                                       | Repository#number and link, the issue it is for, any Jira status move        |
+| `review_posted`   | wardby's own review check posts a verdict                                               | `APPROVE` / `CHANGES_REQUESTED` / `COMMENT`, the reviewer agent, the PR link |
+| `review_fix`      | An automatic [fix round](../help/review-fix-rounds.md) starts or hits the cap           | Round number of the cap, started or capped                                   |
+| `pr_closed`       | A pull request is merged or closed                                                      | Merged or closed, any Jira status move                                       |
 
-A run finishing successfully is not its own event — on the workflow it shows
-up as `pr_opened` or `review_posted` already. Child coding runs started by a
-parent surface through the parent's own `run_failed`, not their own.
+A successful run normally shows up as `pr_opened` or `review_posted`. A run
+blocked by package refusals instead emits `run_blocked`, once per run, using
+the same guidance as [status comments](../help/status-comments.md). Child
+coding runs surface through their parent's events.
 
 Some runs do not post `run_failed` at all:
 
@@ -55,6 +57,7 @@ with a short status line. The statuses are:
 | `fix rounds exhausted` | fix rounds reaching the cap with changes still requested         |
 | `merged ✅`            | the pull request merged                                          |
 | `closed`               | the pull request closed without merging                          |
+| `blocked ⛔`           | `run_blocked`                                                    |
 | `failed ❌`            | `run_failed`                                                     |
 
 A `COMMENT` review leaves the status as it was. `merged ✅` and `closed` stick:
@@ -62,7 +65,7 @@ a late review, fix round, failure, or repeated close does not change them.
 Only a new start does — the card picked up again, or a new pull request
 opened for it — which sets `picked up` or `PR open` again.
 
-Most events only post as a thread reply. A merge and a top-level run failure
+Most events only post as a thread reply. A merge, a blocked run, and a top-level run failure
 also post to the channel itself, so they are visible without opening the
 thread.
 
@@ -104,7 +107,7 @@ is not paused up front. Delivery pauses when the first actual delivery fails
 authentication (see [Failure modes](#failure-modes)).
 
 With `WARDBY_SLACK_CUSTOMIZE=true`, a message about an event that names an
-agent (`issue_picked_up`, `run_failed`, `review_posted`) is posted under that
+agent (`issue_picked_up`, `run_failed`, `run_blocked`, `review_posted`) is posted under that
 agent's name; every other message, and every message when the option is off,
 posts as `wardby`. A thread's parent message uses the name of the event that
 started the thread. wardby sets no icon.

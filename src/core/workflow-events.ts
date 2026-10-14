@@ -1,8 +1,10 @@
+import type { RegistryRefusalSummary } from "../coding/registry/report.js";
 import { logger } from "./logger.js";
 
 export const WORKFLOW_EVENT_KINDS = [
   "issue_picked_up",
   "run_failed",
+  "run_blocked",
   "pr_opened",
   "review_posted",
   "review_fix",
@@ -12,6 +14,7 @@ export type WorkflowEventKind = (typeof WORKFLOW_EVENT_KINDS)[number];
 
 /** Template inputs per kind. Every string here may be shown in Slack (escaped). */
 export type WorkflowPayload =
+  | { kind: "run_blocked"; agentName: string; packageRefusals: RegistryRefusalSummary[] }
   | { kind: "issue_picked_up"; agentName: string; trigger: string }
   | {
       kind: "run_failed";
@@ -41,6 +44,7 @@ export interface ThreadSubject {
 
 export const dedupeKeys = {
   issuePickedUp: (runId: string) => `issue_picked_up:${runId}`,
+  runBlocked: (runId: string) => `run_blocked:${runId}`,
   runFailed: (runId: string) => `run_failed:${runId}`,
   prOpened: (codeProvider: string, repository: string, n: number) => `pr_opened:${codeProvider}:${repository}#${n}`,
   reviewPosted: (runId: string) => `review_posted:${runId}`,

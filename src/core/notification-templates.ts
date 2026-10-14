@@ -1,3 +1,4 @@
+import { packageRefusalWording } from "../coding/registry/refusal-wording.js";
 /**
  * Deterministic Slack text for workflow notifications. Pure functions: no
  * I/O, no model output. Every string that came from a person or a model
@@ -15,7 +16,8 @@ export type ThreadStatus =
   | "approved"
   | "merged ✅"
   | "closed"
-  | "failed ❌";
+  | "failed ❌"
+  | "blocked ⛔";
 
 const TERMINAL: ReadonlySet<ThreadStatus> = new Set(["merged ✅", "closed"]);
 /** Events that start a new attempt (a new pickup, a new PR) and so reopen a merged/closed thread. */
@@ -47,6 +49,8 @@ export function nextStatus(prev: ThreadStatus | null, p: WorkflowPayload): Threa
       return p.state === "started" ? "fixing" : "fix rounds exhausted";
     case "pr_closed":
       return p.merged ? "merged ✅" : "closed";
+    case "run_blocked":
+      return "blocked ⛔";
     case "run_failed":
       return "failed ❌";
   }
@@ -58,6 +62,18 @@ export function renderParent(subject: ThreadSubject, status: ThreadStatus): { te
   const head = link(subject.url, subject.label) + (subject.title ? ` · ${escapeMrkdwn(subject.title)}` : "");
   const text = `${head} — *${status}*`;
   return { text, blocks: [section(text)] };
+}
+
+/** Refusal lists can exceed Slack's 3,000-character section limit. Keep each line intact. */
+function refusalSections(text: string): ReturnType<typeof section>[] {
+  const parts = [""];
+  for (const line of text.split("\n")) {
+    const last = parts.length - 1;
+    const joined = parts[last] ? parts[last] + "\n" + line : line;
+    if (joined.length > 3000) parts.push(line);
+    else parts[last] = joined;
+  }
+  return parts.map(section);
 }
 
 export function renderEvent(p: WorkflowPayload, spend: string | null): { text: string; blocks: unknown[] } {
@@ -91,6 +107,9 @@ export function renderEvent(p: WorkflowPayload, spend: string | null): { text: s
         ? `🎉 ${link(p.prUrl, p.prLabel)} merged${p.movedTo ? ` — moved to ${escapeMrkdwn(p.movedTo)}` : ""}`
         : `⚪ ${link(p.prUrl, p.prLabel)} closed without merging`;
       break;
+    case "run_blocked":
+      line = escapeMrkdwn(packageRefusalWording(p.packageRefusals));
+      break;
     case "run_failed": {
       const who = `*${escapeMrkdwn(p.agentName)}*`;
       line =
@@ -105,7 +124,7 @@ export function renderEvent(p: WorkflowPayload, spend: string | null): { text: s
     }
   }
   const text = spend ? `${line}\n_${escapeMrkdwn(spend)}_` : line;
-  return { text, blocks: [section(text)] };
+  return { text, blocks: p.kind === "run_blocked" ? refusalSections(text) : [section(text)] };
 }
 
 /**
@@ -116,6 +135,7 @@ export function renderEvent(p: WorkflowPayload, spend: string | null): { text: s
 export function senderName(p: WorkflowPayload): string {
   switch (p.kind) {
     case "issue_picked_up":
+    case "run_blocked":
     case "run_failed":
     case "review_posted":
       return p.agentName;
@@ -125,5 +145,5 @@ export function senderName(p: WorkflowPayload): string {
 }
 
 export function broadcasts(p: WorkflowPayload): boolean {
-  return (p.kind === "pr_closed" && p.merged) || p.kind === "run_failed";
+  return (p.kind === "pr_closed" && p.merged) || p.kind === "run_failed" || p.kind === "run_blocked";
 }

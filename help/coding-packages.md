@@ -112,3 +112,16 @@ syntax (including [PyPI extras](../docs/coding-packages.md#pypi-extras)), packag
 From Wardby 0.6.1, a coding agent can start with `node_modules` already
 restored from a verified snapshot instead of running `npm ci`. Read the
 `dependency-cache` help article, "Dependency cache for coding runs".
+
+## Blocked status comments
+
+If a coding child records package refusals and no pull request or pushed
+changes result, GitHub and Jira status comments show ⛔ **Blocked by the package
+registry: no changes were made.** Slack uses the same guidance. If changes
+were pushed, the status keeps the pull request link and adds a ⚠️ dependency
+install warning. Refusal lists show at most ten distinct entries and a count
+of the rest; `get_run` has the full list.
+
+For next steps, see [Package refusal errors](errors/package-refusals.md) and
+[Run status comments](status-comments.md). After an approver updates the
+agent's allowlist or policy, mention `@wardby` again to start a new attempt.

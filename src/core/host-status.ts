@@ -9,6 +9,8 @@
  * comment. Best effort throughout: nothing here throws.
  */
 import type { Prisma, PrismaClient, Run, RunStatus } from "#prisma";
+import { summarizeRegistryFetches, type RegistryRefusalSummary } from "../coding/registry/report.js";
+import { packageRefusalWording } from "../coding/registry/refusal-wording.js";
 import { CODING_CODE_PROVIDER } from "../coding/protocol.js";
 import { storedServiceNames } from "../coding/services/catalog.js";
 import {
@@ -38,7 +40,7 @@ export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
 ];
 const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
 
-export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run">;
+export type HostStatusDb = Pick<PrismaClient, "runHostStatus" | "run" | "registryFetch">;
 
 export type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
 
@@ -134,6 +136,7 @@ export function outcomeBody(
   pullRequests: PullRequestOutcome[],
   failedChildren: FailedChild[] = [],
   opts: {
+    packageRefusals?: RegistryRefusalSummary[];
     budgetSentence?: string;
     noPullRequestText?: string;
     /** The agent's reply IS the answer (no separate reply comment): shown as written, not quoted. */
@@ -148,7 +151,10 @@ export function outcomeBody(
     return pr.outcome === "pull_request_opened" ? `Opened ${ref}` : `Pushed changes to ${ref}`;
   });
   const partial = links.length > 0 ? `\n\n${links.join(", ")}.` : "";
-  const footer = runLine(run.id);
+  const refusals = opts.packageRefusals ?? [];
+  const warning = links.length > 0 && refusals.length > 0 ? packageRefusalWording(refusals, false) : "";
+  const footer = warning + (warning ? "\n\n" : "") + runLine(run.id);
+  if (links.length === 0 && refusals.length > 0) return packageRefusalWording(refusals) + "\n\n" + footer;
   if (run.status === "lost") {
     return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
   }
@@ -226,13 +232,18 @@ export function outcomeBody(
 }
 
 /** What collectRunOutcome reads: a run's children and, when out of budget, its budget facts. */
-export type RunOutcomeDb = Pick<PrismaClient, "run">;
+export type RunOutcomeDb = Pick<PrismaClient, "run" | "registryFetch">;
 
 /** The parts of a finished run's outcome a status comment reports; shared by GitHub and Jira status comments. */
 export async function collectRunOutcome(
   db: RunOutcomeDb,
   run: FinishedRun,
-): Promise<{ pullRequests: PullRequestOutcome[]; failedChildren: FailedChild[]; budgetSentence?: string }> {
+): Promise<{
+  pullRequests: PullRequestOutcome[];
+  failedChildren: FailedChild[];
+  packageRefusals: RegistryRefusalSummary[];
+  budgetSentence?: string;
+}> {
   const children = await db.run.findMany({
     where: { parentRunId: run.id },
     select: {
@@ -258,11 +269,25 @@ export async function collectRunOutcome(
       error: c.error ?? null,
       services: storedServiceNames(c.codingRun?.services),
     }));
+  let packageRefusals: RegistryRefusalSummary[] = [];
+  const codingIds = children.filter((c) => c.codingRun).map((c) => c.id);
+  if (codingIds.length > 0) {
+    try {
+      const fetches = await db.registryFetch.findMany({
+        where: { runId: { in: codingIds } },
+        select: { ecosystem: true, name: true, version: true, outcome: true, reason: true, sizeBytes: true },
+        orderBy: { createdAt: "asc" },
+      });
+      packageRefusals = summarizeRegistryFetches(fetches).packageRefusals;
+    } catch {
+      // Registry reporting is best effort; keep the existing status on read failure.
+    }
+  }
   const budgetSentence =
     run.status === "budget_exhausted" || run.status === "refused"
       ? await loadBudgetSentence(db, run.id, run.status)
       : undefined;
-  return { pullRequests, failedChildren, ...(budgetSentence ? { budgetSentence } : {}) };
+  return { pullRequests, failedChildren, packageRefusals, ...(budgetSentence ? { budgetSentence } : {}) };
 }
 
 /**
@@ -286,8 +311,8 @@ export async function completeHostStatus(
     if (!status.commentId && !opts.postIfMissing) return;
     const host = hosts[status.provider as ReviewHostProvider];
     if (!host) return;
-    const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
-    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, { budgetSentence });
+    const { pullRequests, failedChildren, budgetSentence, packageRefusals } = await collectRunOutcome(db, run);
+    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, { budgetSentence, packageRefusals });
     let commentId = status.commentId;
     if (commentId) {
       await host.editComment(status.repository, {

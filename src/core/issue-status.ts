@@ -18,7 +18,7 @@ const ORPHAN_BATCH = 20;
 
 export type IssueStatusDb = Pick<
   PrismaClient,
-  "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest" | "codingRun" | "$queryRaw"
+  "registryFetch" | "runIssueStatus" | "run" | "agentIssueProject" | "issuePullRequest" | "codingRun" | "$queryRaw"
 >;
 
 export function toJiraMarkdown(text: string): string {
@@ -202,7 +202,7 @@ export async function completeIssueStatus(
     const project = projectOf(status.issueKey);
     let body: string;
     if (writable) {
-      const { pullRequests, failedChildren, budgetSentence } = await collectRunOutcome(db, run);
+      const { pullRequests, failedChildren, budgetSentence, packageRefusals } = await collectRunOutcome(db, run);
       const foreign = await continuedForAnotherIssue(
         db,
         pullRequests.flatMap((pr) => (pr.pullRequestUrl && pr.runId ? [pr.runId] : [])),
@@ -240,6 +240,7 @@ export async function completeIssueStatus(
           : { notes: [] };
       const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
         budgetSentence,
+        packageRefusals,
         noPullRequestText: "Done.",
         // One comment per request: this status comment carries the agent's answer.
         replyAsAnswer: true,

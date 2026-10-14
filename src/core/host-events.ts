@@ -55,6 +55,7 @@ export type HostEventDb = Pick<
   | "runHostCheck"
   | "runHostStatus"
   | "codingRun"
+  | "registryFetch"
   | "task"
   | "webhook"
   | "budgetGroup"
