@@ -19,7 +19,8 @@ export function linkedIssueReader(deps: {
     if (ref.provider === "github") {
       const host = deps.hosts.github;
       if (!host?.readIssue) return null;
-      const result = await host.readIssue(ref.repository, ref.number);
+      // Title and body only: the task carries the ticket, not its discussion.
+      const result = await host.readIssue(ref.repository, ref.number, { comments: false });
       return result.kind === "issue" ? { title: result.title, body: result.body } : null;
     }
     const tracker = deps.issueTrackers.jira;

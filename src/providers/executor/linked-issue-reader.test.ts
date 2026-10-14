@@ -14,7 +14,7 @@ describe("linkedIssueReader", () => {
       title: "Jokes",
       body: "- [ ] list",
     });
-    expect(readIssue).toHaveBeenCalledWith("openai/example", 12);
+    expect(readIssue).toHaveBeenCalledWith("openai/example", 12, { comments: false });
   });
 
   it("is null for a pull request number, a missing issue, or no GitHub host", async () => {

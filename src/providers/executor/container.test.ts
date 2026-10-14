@@ -626,7 +626,7 @@ describe("ContainerExecutor", () => {
         );
         expect(created.store.run.status).toBe("succeeded");
         expect(reads).toEqual([{ provider: "github", repository: "openai/example", number: 12 }]);
-        expect(task).toContain("acceptance criteria are the contract");
+        expect(task).toContain("acceptance criteria as written are what the description's checklist should reflect");
         expect(task).toContain("`Resolves #12`");
         expect(task).toContain(
           "<untrusted_issue>\nIssue #12: Jokes endpoint\n\n## Acceptance\n- [ ] GET /jokes lists jokes\n</untrusted_issue>",
@@ -1644,6 +1644,57 @@ describe("ContainerExecutor", () => {
       expect(created.recorded).toEqual([
         { rootRunId: "root-run", expectedSha256: null, sha256: NEW_SHA, agentTextRunId: "run-1" },
       ]);
+    });
+
+    it("a legacy rebuild matches a description written out by hand, as a fresh run's pull request carried it", async () => {
+      const created = await fixRound(
+        {},
+        {
+          registryReport: async (runId) =>
+            runId === "root-run"
+              ? { packages: [{ ecosystem: "npm", name: "zod", version: "4.0.0" }], packageRefusals: [] }
+              : { packages: [], packageRefusals: [] },
+          issueUrl: (_provider, key) => `https://acme.atlassian.net/browse/${key}`,
+        },
+      );
+      created.store.pullRequestDescriptionBaseline = async () => ({
+        recordedSha256: null,
+        previousAgentText: "The original description text.",
+        agentTextRunId: "root-run",
+        legacySource: {
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: "wardby/run-root-run",
+          summary: "The original description text.",
+          tests: [{ command: "npm test", outcome: "passed" }],
+          dependencyCache: { projects: [{ path: ".", result: "hit" }] },
+          issueProvider: "jira",
+          issueKey: "ABC-12",
+        },
+      });
+      created.vcs.finalizeDescription = { kind: "replaced", sha256: NEW_SHA, agentTextRunId: "run-1" };
+      await created.executor.start("run-1");
+
+      // Written independently of pullRequestBody: what such a pull request's description looked like.
+      const byHand = [
+        "<!-- wardby:root-run -->",
+        "",
+        "Resolves Jira issue [ABC-12](https://acme.atlassian.net/browse/ABC-12)",
+        "",
+        "The original description text.",
+        "",
+        "**Tests:**",
+        "- `npm test`: passed",
+        "",
+        "Dependency cache: restored `node_modules` for the repo root.",
+        "",
+        "<details>",
+        "<summary>Packages installed during this run (1)</summary>",
+        "",
+        "- npm `zod@4.0.0`",
+        "</details>",
+      ].join("\n");
+      expect(created.vcs.lastFinalizeDetails?.description?.baseline.legacySha256).toBe(descriptionSha256(byHand));
     });
 
     it("a legacy pull request whose root run stored no summary gets no rebuilt hash", async () => {
