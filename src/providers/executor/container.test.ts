@@ -89,6 +89,7 @@ const IMAGE = `registry.example/worker@sha256:${"a".repeat(64)}`;
 const CLAUDE_IMAGE = `registry.example/claude-worker@sha256:${"b".repeat(64)}`;
 const CLAUDE_TOOL_IMAGE = `registry.example/claude-tools@sha256:${"c".repeat(64)}`;
 const roots: string[] = [];
+const LOCAL_REPOSITORY = "local:/srv/repos/example";
 
 function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSnapshot {
   return {
@@ -337,6 +338,8 @@ class FakeVcs implements VcsProvider {
   lastPrepareInput?: VcsPrepareInput;
   /** Make finalize report a pushed branch (a local repository) instead of a pull request. */
   pushBranchOnly = false;
+  /** Make finalize report an empty diff (no_changes) even though the worker said changes_ready. */
+  finalizeEmpty = false;
   /** The description outcome finalize reports on a pull request, when set. */
   finalizeDescription?: DescriptionWriteOutcome;
   /** The no-push description refresh; tests that need it assign it. */
@@ -380,6 +383,9 @@ class FakeVcs implements VcsProvider {
     this.finalized += 1;
     this.lastFinalizeDetails = details;
     this.events.push("finalize");
+    if (this.finalizeEmpty) {
+      return { outcome: "no_changes", repository: workspace.repository, baseRef: "main", baseCommit: "a".repeat(40) };
+    }
     if (this.pushBranchOnly) {
       return {
         outcome: "branch_pushed",
@@ -1185,8 +1191,17 @@ describe("ContainerExecutor", () => {
     };
 
     /** A fix round on root-run's PR, with the description store methods and call order recorded in events. */
-    async function fixRound(overrides: Partial<ContainerRunSnapshot> = {}) {
-      const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run", ...overrides });
+    async function fixRound(
+      overrides: Partial<ContainerRunSnapshot> = {},
+      extra: Partial<ContainerExecutorOptions> = {},
+    ) {
+      const created = await harness(
+        { rootCodingRunId: "root-run", headRef: "wardby/run-root-run", ...overrides },
+        IMAGE,
+        undefined,
+        undefined,
+        extra,
+      );
       const recorded: unknown[] = [];
       created.store.pullRequestDescriptionBaseline = async (rootRunId) => {
         created.events.push(`baseline:${rootRunId}`);
@@ -1301,6 +1316,60 @@ describe("ContainerExecutor", () => {
       expect(
         created.events.filter((e) => ["baseline:root-run", "refresh", "record", "complete", "cleanup"].includes(e)),
       ).toEqual(["baseline:root-run", "baseline:root-run", "refresh", "record", "complete", "cleanup"]);
+    });
+
+    it("changes_ready continuation with an empty diff refreshes the description before store.complete", async () => {
+      const created = await fixRound();
+      created.vcs.finalizeEmpty = true;
+      let refreshed: FinalizeChangesDetails | undefined;
+      created.vcs.refreshPullRequestDescription = async (workspace, details) => {
+        created.events.push("refresh");
+        expect(workspace.runId).toBe("run-1");
+        refreshed = details;
+        return { kind: "refreshed", reason: "empty", sha256: NEW_SHA, agentTextRunId: "root-run" };
+      };
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "no_changes" });
+      expect(created.vcs.finalized).toBe(1);
+      expect(refreshed).toMatchObject({ description: { baseline } });
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: RECORDED, sha256: NEW_SHA, agentTextRunId: "root-run" },
+      ]);
+      expect(created.store.completions[0]?.record).toMatchObject({ prDescriptionOutcome: "refreshed:empty" });
+      expect(
+        created.events.filter((e) => ["finalize", "refresh", "record", "complete", "cleanup"].includes(e)),
+      ).toEqual(["finalize", "refresh", "record", "complete", "cleanup"]);
+    });
+
+    it("a local continuation gets no description note and records no outcome", async () => {
+      for (const empty of [false, true]) {
+        // A stand-in gate: the real one resolves local paths against LOCAL_REPO_ROOTS on disk.
+        const created = await fixRound(
+          { repository: LOCAL_REPOSITORY, profileRepository: LOCAL_REPOSITORY },
+          { repoAccess: { authorizeUse: async () => ({ ok: true }) } as never },
+        );
+        created.vcs.pushBranchOnly = true;
+        created.vcs.finalizeEmpty = empty;
+        let refreshes = 0;
+        created.vcs.refreshPullRequestDescription = async () => {
+          refreshes += 1;
+          return { kind: "refreshed", reason: "empty", sha256: NEW_SHA, agentTextRunId: "root-run" };
+        };
+        let input: Record<string, unknown> | undefined;
+        created.jobs.onLaunch = () => {
+          input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        };
+        await created.executor.start("run-1");
+
+        expect(created.store.run.status).toBe("succeeded");
+        expect(input!.task as string).not.toContain("your final summary replaces it");
+        expect(created.events.filter((e) => e.startsWith("baseline:"))).toEqual([]);
+        expect(refreshes).toBe(0);
+        expect(created.recorded).toEqual([]);
+        expect(created.store.completions[0]?.record).not.toHaveProperty("prDescriptionOutcome");
+      }
     });
 
     it("a fresh no_changes run never refreshes a description", async () => {

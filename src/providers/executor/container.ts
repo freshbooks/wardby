@@ -42,6 +42,7 @@ import {
   CodingRunResultSchema,
   CodingTaskInputSchema,
   MAX_CODING_INPUT_BYTES,
+  isLocalRepository,
   parseCodingWorkerOutputJson,
   redactAndTruncate,
   restoredDependencyFolders,
@@ -145,6 +146,11 @@ export interface CodingRunRecord {
 export function descriptionOutcomeLabel(outcome: DescriptionWriteOutcome): string {
   if (outcome.kind === "refreshed" || outcome.kind === "skipped") return `${outcome.kind}:${outcome.reason}`;
   return outcome.kind;
+}
+
+/** A local repository has no pull request: its runs get no description note and record no description outcome. */
+function hasPullRequestDescription(run: { repository: string }): boolean {
+  return !isLocalRepository(run.repository);
 }
 
 /** A fix round's description state: the baseline to update against, or that it could not be loaded. */
@@ -1246,13 +1252,18 @@ export class ContainerExecutor implements Executor {
           ? { description: { baseline: descriptionState.baseline } }
           : {}),
       });
-      const description = await this.recordDescription(
-        current,
-        descriptionState,
-        finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated"
-          ? finalized.description
-          : undefined,
-      );
+      // An empty diff pushes nothing, so it refreshes the description the way a
+      // worker no_changes does, before complete (the terminal hook reads the body).
+      const description =
+        finalized.outcome === "no_changes"
+          ? await this.refreshDescriptionInTime(current, output, workspace)
+          : await this.recordDescription(
+              current,
+              descriptionState,
+              finalized.outcome === "pull_request_opened" || finalized.outcome === "pull_request_updated"
+                ? finalized.description
+                : undefined,
+            );
       // A pushed branch (local repository) is a successful run with no pull
       // request; its branch is recorded on the run for the operator to merge.
       const result = this.resultFor(output, current, finalized.outcome, finalized);
@@ -1314,7 +1325,9 @@ export class ContainerExecutor implements Executor {
    */
   private async currentDescriptionText(run: ContainerRunSnapshot): Promise<string | undefined> {
     const store = this.options.store;
-    if (!run.rootCodingRunId || !store.pullRequestDescriptionBaseline) return undefined;
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestDescriptionBaseline) {
+      return undefined;
+    }
     try {
       return (await store.pullRequestDescriptionBaseline(run.rootCodingRunId)).previousAgentText;
     } catch (err) {
@@ -1330,7 +1343,7 @@ export class ContainerExecutor implements Executor {
    */
   private async descriptionStateFor(run: ContainerRunSnapshot): Promise<DescriptionState> {
     const store = this.options.store;
-    if (!run.rootCodingRunId || !store.pullRequestDescriptionBaseline) return null;
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !store.pullRequestDescriptionBaseline) return null;
     try {
       return { baseline: await store.pullRequestDescriptionBaseline(run.rootCodingRunId) };
     } catch (err) {
@@ -1349,6 +1362,7 @@ export class ContainerExecutor implements Executor {
     state: DescriptionState,
     outcome: DescriptionWriteOutcome | undefined,
   ): Promise<CodingRunRecord> {
+    if (!hasPullRequestDescription(run)) return {};
     if (!run.rootCodingRunId) {
       return outcome?.kind === "written"
         ? { prDescriptionOutcome: "written", prDescriptionSha256: outcome.sha256, prDescriptionRunId: run.runId }
@@ -1421,7 +1435,7 @@ export class ContainerExecutor implements Executor {
     existingWorkspace: PreparedWorkspace | null | undefined,
   ): Promise<CodingRunRecord> {
     const vcs = this.options.vcs;
-    if (!run.rootCodingRunId || !vcs.refreshPullRequestDescription) return {};
+    if (!run.rootCodingRunId || !hasPullRequestDescription(run) || !vcs.refreshPullRequestDescription) return {};
     const state = await this.descriptionStateFor(run);
     if (!state || "failed" in state) return this.recordDescription(run, state, undefined);
     try {
