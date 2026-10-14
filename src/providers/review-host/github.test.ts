@@ -1248,6 +1248,31 @@ describe("GitHubReviewHost.readPullRequest descriptionProposal", () => {
     expect(descriptionProposal?.note).toContain("couldn't confirm");
   });
 
+  it("still reads the pull request when the proposal lookup fails, and says the proposal is unavailable", async () => {
+    // Page 1 carries this agent's review marker, so the last-reviewed lookup stops there;
+    // only the proposal lookup reads page 2, which fails.
+    const page1 = Array.from({ length: 100 }, (_, i) => ({
+      id: 100 + i,
+      body: i === 0 ? `looks good <!-- wardby:review:agent1 sha=${OLD_SHA} -->` : `c${i}`,
+      user: { type: "Bot" },
+      ...BY_APP,
+    }));
+    const { client } = fakeGitHub(({ method, path }) => {
+      if (method === "GET" && path === `${BASE}/pulls/7`) return json(WARDBY_PR);
+      if (path.startsWith(`${BASE}/pulls/7/files`)) return json([]);
+      if (path.endsWith("/issues/7/comments?per_page=100&page=1")) return json(page1);
+      if (path.endsWith("/issues/7/comments?per_page=100&page=2")) return new Response("boom", { status: 500 });
+      return undefined;
+    });
+    const view = await new GitHubReviewHost(client).readPullRequest(REPO, 7, {
+      maxPatchChars: 100,
+      agentMarker: "agent1",
+    });
+    expect(view.number).toBe(7);
+    expect(view.descriptionProposal).toMatchObject({ state: "unavailable" });
+    expect(view.descriptionProposal?.note).toContain("review the live description");
+  });
+
   it("does not trust a proposal stamped with another head", async () => {
     const { descriptionProposal } = await read([ours(3, descriptionFallbackComment("run-9", proposal, OLD_SHA))]).view;
     expect(descriptionProposal).toMatchObject({ state: "not_for_this_head" });

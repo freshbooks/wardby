@@ -6,6 +6,7 @@
  */
 import { MAX_PULL_REQUEST_BODY_CHARS, upsertRelatedSection, type GitHubAppClient } from "../vcs/github.js";
 import { normalizeGitHubRepository } from "../../coding/protocol.js";
+import { logger } from "../../core/logger.js";
 import { findDescriptionComments } from "../vcs/pr-description.js";
 import { neutraliseWrapperTags } from "../../core/untrusted-content.js";
 import { MAX_CI_CHECKS, summarizeCi } from "./ci.js";
@@ -46,6 +47,8 @@ import {
   type StartCheckInput,
   type UpsertNamedCheckInput,
 } from "./types.js";
+
+const log = logger.child({ module: "github-review-host" });
 
 const READ = { contents: "read", pull_requests: "read" } as const;
 const SAFE_SHA = /^[0-9a-f]{40}$/;
@@ -533,8 +536,17 @@ export class GitHubReviewHost implements CodeReviewHost {
       const { slug } = await this.client.appIdentity();
       const openThreads = await ownOpenThreads(graphql, repository, prNumber, opts.agentMarker, slug);
       // Only on a pull request wardby opened: its description comment, read now (review run time).
+      // A failed lookup never fails the read: the reviewer then reviews the live description.
       const descriptionProposal = appMarkerRunId(pr, slug)
-        ? await this.descriptionProposalFor(get, base, prNumber, appId, headSha)
+        ? await this.descriptionProposalFor(get, base, prNumber, appId, headSha).catch(
+            (error: unknown): DescriptionProposalView => {
+              log.warn({ err: error, repository, prNumber }, "description proposal lookup failed");
+              return {
+                state: "unavailable",
+                note: "wardby's proposed description comment couldn't be read just now; review the live description.",
+              };
+            },
+          )
         : undefined;
 
       const user = pr.user && typeof pr.user === "object" ? record(pr.user) : null;

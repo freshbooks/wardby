@@ -162,11 +162,12 @@ export interface IssueView {
 /**
  * wardby's proposed description on a pull request whose description wardby
  * couldn't confirm as its own (from its description comment). `current`: the
- * proposal is for the head being read; `not_for_this_head`: it isn't yet.
+ * proposal is for the head being read; `not_for_this_head`: it isn't yet;
+ * `unavailable`: the comments couldn't be read.
  */
 export type DescriptionProposalView =
   | { state: "current"; forHead: string; runId?: string; text: string; truncated: boolean; note: string }
-  | { state: "not_for_this_head"; note: string };
+  | { state: "not_for_this_head" | "unavailable"; note: string };
 
 export type IssueReadResult =
   ({ kind: "issue" } & IssueView) | { kind: "pull_request"; number: number } | { kind: "not_found"; number: number };
