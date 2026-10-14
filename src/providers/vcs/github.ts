@@ -2,6 +2,7 @@ import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
+import { refusalMeaning } from "../../coding/registry/refusal-hints.js";
 import { DEPENDENCY_CACHE_PATH, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 import {
   LATEST_RUN_MARKER_PREFIX,
@@ -616,16 +617,6 @@ export function isLockfilePath(path: string): boolean {
   return LOCKFILE_NAMES.has(path.slice(path.lastIndexOf("/") + 1));
 }
 
-/** What each refusal code means to someone reading the PR, without the registry's internals. */
-const REFUSAL_MEANING: Record<string, string> = {
-  wardby_package_not_allowed: "not on the allowlist, or only reachable through a refused package",
-  wardby_version_filtered: "withheld: newer than the release-age limit, or a high-severity advisory",
-  wardby_graph_incomplete: "its dependencies could not be confirmed (usually transient)",
-  wardby_lockfile_integrity_mismatch: "the lock file's integrity does not match the registry's",
-  wardby_upstream_error: "the upstream registry failed (transient)",
-  wardby_audit_unavailable: "the advisory check was unavailable (transient)",
-};
-
 /** At most this many refused packages are named in the warning; the full list stays in the details. */
 const MAX_WARNING_NAMES = 8;
 
@@ -658,7 +649,7 @@ function refusalWarning(input: PullRequestInput): string | undefined {
     const listed = [...names];
     const shown = listed.slice(0, MAX_WARNING_NAMES).join(", ");
     const more = listed.length > MAX_WARNING_NAMES ? ` and ${listed.length - MAX_WARNING_NAMES} more` : "";
-    const meaning = REFUSAL_MEANING[reason];
+    const meaning = refusalMeaning(reason);
     lines.push(`> - ${shown}${more}: \`${reason}\`${meaning ? ` (${meaning})` : ""}`);
   }
   const lockfiles = (input.changedLockfiles ?? []).filter(isSafeMarkdownFragment);

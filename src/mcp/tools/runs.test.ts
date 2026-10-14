@@ -3,6 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerRunTools } from "./runs.js";
+import { refusalHint } from "../../coding/registry/refusal-hints.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
@@ -400,7 +401,7 @@ describe("run observability tools", () => {
     await client.close();
   });
 
-  it("get_run returns deduplicated served packages and refusals for a coding run", async () => {
+  it("get_run returns packageRefusals with hint, deduplicated, and served packages for a coding run", async () => {
     const now = new Date();
     const db = fakeDb(
       [{ id: "a1", ownerId: "p1" }],
@@ -497,17 +498,19 @@ describe("run observability tools", () => {
     const codingResult = await client.callTool({ name: "get_run", arguments: { runId: "r1" } });
     const codingBody = parseText(codingResult as never) as {
       packages: Array<{ ecosystem: string; name: string; version: string; size: number | null }>;
-      packageRefusals: Array<{ ecosystem: string; name: string; reason: string }>;
+      packageRefusals: Array<{ ecosystem: string; name: string; reason: string; hint?: string }>;
       packagePlan: { approved: number; refused: number };
     };
     expect(codingBody.packages).toEqual([
       { ecosystem: "npm", name: "@heroui/react", version: "3.2.6", size: 482_113 },
       { ecosystem: "pypi", name: "flask", version: "3.0.0", size: null },
     ]);
+    const hint = refusalHint("wardby_package_not_allowed");
+    expect(hint).toBeDefined();
     expect(codingBody.packageRefusals).toEqual([
-      { ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed" },
-      { ecosystem: "npm", name: "evil", reason: "wardby_package_not_allowed" },
-      { ecosystem: "npm", name: "stray", reason: "wardby_package_not_allowed" },
+      { ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed", hint },
+      { ecosystem: "npm", name: "evil", reason: "wardby_package_not_allowed", hint },
+      { ecosystem: "npm", name: "stray", reason: "wardby_package_not_allowed", hint },
     ]);
     expect(codingBody.packagePlan).toEqual({ approved: 42, refused: 2 });
 
