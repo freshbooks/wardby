@@ -154,7 +154,8 @@ export function outcomeBody(
   const refusals = opts.packageRefusals ?? [];
   const warning = links.length > 0 && refusals.length > 0 ? packageRefusalWording(refusals, false) : "";
   const footer = warning + (warning ? "\n\n" : "") + runLine(run.id);
-  if (links.length === 0 && refusals.length > 0) return packageRefusalWording(refusals) + "\n\n" + footer;
+  if (run.status === "succeeded" && links.length === 0 && refusals.length > 0)
+    return packageRefusalWording(refusals) + "\n\n" + footer;
   if (run.status === "lost") {
     return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
   }

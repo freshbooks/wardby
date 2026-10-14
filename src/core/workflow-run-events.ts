@@ -29,7 +29,7 @@ export async function emitRunFinishedEvents(
       try {
         // Only child outcomes are needed here, not the parent's budget sentence.
         const outcome = await collectRunOutcome(db, { id: run.id, status: "succeeded", finalText: null });
-        blocked = outcome.pullRequests.length === 0 && outcome.packageRefusals.length > 0;
+        blocked = run.status === "succeeded" && outcome.pullRequests.length === 0 && outcome.packageRefusals.length > 0;
         if (blocked) {
           await emitWorkflowEvent({
             dedupeKey: dedupeKeys.runBlocked(run.id),
@@ -41,7 +41,7 @@ export async function emitRunFinishedEvents(
       } catch {
         // A reporting read failure must not prevent other workflow events.
       }
-      if (!blocked && FAILED.has(run.status)) {
+      if (FAILED.has(run.status)) {
         await emitWorkflowEvent({
           dedupeKey: dedupeKeys.runFailed(run.id),
           runId: run.id,

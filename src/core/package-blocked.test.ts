@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { collectRunOutcome, outcomeBody } from "./host-status.js";
+import { collectRunOutcome, completeHostStatus, outcomeBody } from "./host-status.js";
+import { completeIssueStatus } from "./issue-status.js";
 import { renderEvent, nextStatus } from "./notification-templates.js";
 import { emitRunFinishedEvents } from "./workflow-run-events.js";
 import { setWorkflowEventSink } from "./workflow-events.js";
@@ -8,6 +9,102 @@ const run = { id: "r", status: "succeeded" as const, finalText: null };
 const refusals = (reason: string) => [{ ecosystem: "npm", name: "pkg", reason }];
 
 describe("package blocked status", () => {
+  it.each(["failed", "budget_exhausted", "cancelled", "lost", "refused"] as const)(
+    "preserves %s wording with refusals",
+    (status) => {
+      const body = outcomeBody({ ...run, status }, "repo", [], [], {
+        packageRefusals: refusals("wardby_graph_limit"),
+        budgetSentence: "Out of budget: this run's $2.00 budget was used up.",
+      });
+      const expected =
+        status === "lost"
+          ? "Interrupted before it finished"
+          : status === "budget_exhausted" || status === "refused"
+            ? "Out of budget: this run's $2.00 budget was used up."
+            : "Stopped: the run ended with status `" + status + "`.";
+      expect(body).toContain(expected);
+      expect(body).not.toContain("no changes were made");
+    },
+  );
+  it.each(["github", "jira"] as const)("completes %s status with collected refusals", async (provider) => {
+    const update = vi.fn(async () => undefined);
+    const editComment = vi.fn(async () => undefined);
+    const status = { provider, repository: "repo", issueKey: "PROJ-1", commentId: "comment", completedAt: null };
+    const db = {
+      runHostStatus: { findUnique: async () => status, update },
+      runIssueStatus: { findUnique: async () => status, update },
+      agentIssueProject: { findUnique: async () => ({ access: "write" }) },
+      $queryRaw: async () => [],
+      run: {
+        findUnique: async () => ({ agentId: "a" }),
+        findMany: async () => [{ id: "c", status: "succeeded", codingRun: { result: null } }],
+      },
+      registryFetch: {
+        findMany: vi.fn(async () => [
+          { ...refusals("wardby_graph_limit")[0], outcome: "refused", version: null, sizeBytes: null },
+        ]),
+      },
+    };
+    if (provider === "github") {
+      await completeHostStatus(db as never, run, { github: { editComment } } as never);
+      expect(editComment).toHaveBeenCalledWith(
+        "repo",
+        expect.objectContaining({
+          body: expect.stringContaining("no changes were made"),
+        }),
+      );
+    } else {
+      await completeIssueStatus(db as never, run, { jira: { editComment } } as never);
+      expect(editComment).toHaveBeenCalledWith(
+        "PROJ-1",
+        "comment",
+        expect.objectContaining({
+          markdown: expect.stringContaining("no changes were made"),
+        }),
+      );
+    }
+    expect(db.registryFetch.findMany).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { commentId: "comment", completedAt: expect.any(Date) },
+      }),
+    );
+  });
+  it.each(["failed", "budget_exhausted", "cancelled", "lost", "refused"])(
+    "emits run_failed with the reason for %s despite refusals",
+    async (status) => {
+      const sink = vi.fn();
+      setWorkflowEventSink(sink);
+      try {
+        const db = {
+          agent: { findUnique: async () => ({ name: "lead" }) },
+          runHostCheck: { findUnique: async () => null },
+          run: { findMany: async () => [{ id: "c", status: "succeeded", codingRun: { result: null } }] },
+          registryFetch: {
+            findMany: async () => [
+              { ...refusals("wardby_graph_limit")[0], outcome: "refused", version: null, sizeBytes: null },
+            ],
+          },
+        };
+        await emitRunFinishedEvents(db as never, {
+          ...run,
+          status,
+          agentId: "a",
+          parentRunId: null,
+          error: "failure reason",
+        });
+        expect(sink).toHaveBeenCalledTimes(1);
+        expect(sink).toHaveBeenCalledWith(
+          expect.objectContaining({
+            dedupeKey: "run_failed:r",
+            payload: { kind: "run_failed", agentName: "lead", status, reason: "failure reason" },
+          }),
+        );
+      } finally {
+        setWorkflowEventSink(null);
+      }
+    },
+  );
   it.each(["wardby_graph_incomplete", "wardby_graph_limit", "wardby_package_not_allowed"])(
     "explains %s and how to unblock",
     (code) => {
@@ -19,15 +116,12 @@ describe("package blocked status", () => {
       expect(body).toContain("`@wardby`");
     },
   );
-  it.each(["advisory", "release age", "malware"])(
-    "explains version filtering for %s without trusting free text",
-    () => {
-      const body = outcomeBody(run, "repo", [], [], { packageRefusals: refusals("wardby_version_filtered") });
-      expect(body).toContain("acceptedAdvisories");
-      expect(body).toContain("minReleaseAgeDays");
-      expect(body).toContain("Never bypass malware");
-    },
-  );
+  it("explains version filtering without trusting free text", () => {
+    const body = outcomeBody(run, "repo", [], [], { packageRefusals: refusals("wardby_version_filtered") });
+    expect(body).toContain("acceptedAdvisories");
+    expect(body).toContain("minReleaseAgeDays");
+    expect(body).toContain("Never bypass malware");
+  });
   it("keeps the PR and warns about refused packages", () => {
     const body = outcomeBody(
       run,
@@ -81,7 +175,7 @@ describe("package blocked status", () => {
       expect(block.text.text.length).toBeLessThanOrEqual(3000);
     }
   });
-  it.each(["succeeded", "failed"])(
+  it.each(["succeeded"])(
     "renders shared Slack wording and emits a deduplicated blocked event for %s",
     async (status) => {
       const payload = {

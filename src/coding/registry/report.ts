@@ -63,11 +63,11 @@ export interface RegistryPackageSummary {
   acceptedAdvisories?: string[];
 }
 
-export interface RegistryRefusalSummary {
+export type RegistryRefusalSummary = {
   ecosystem: string;
   name: string;
   reason: string;
-}
+};
 
 export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
   packages: RegistryPackageSummary[];
