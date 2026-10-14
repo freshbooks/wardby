@@ -50,6 +50,10 @@ jobs:
         pool: small-production-pool
         timeoutInMinutes: 100
         cancelTimeoutInMinutes: 1
+        variables:
+          # Job-level variables are where a runtime expression such as an output variable of an
+          # earlier job is evaluated; a step's env: would pass it through as literal text.
+          imageVersion: ${{ parameters.version }}
         steps:
           - checkout: self
             fetchDepth: 1
@@ -102,6 +106,4 @@ jobs:
               echo "##vso[build.addbuildtag]${VERSION}-${NAME}"
             displayName: Build Image ${{ image.name }}
             env:
-              # Mapped here, not inlined, so a runtime expression such as an output variable of an
-              # earlier job also works.
-              VERSION: ${{ parameters.version }}
+              VERSION: $(imageVersion)
