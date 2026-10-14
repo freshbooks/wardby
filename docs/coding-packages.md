@@ -279,11 +279,20 @@ with npm 7 or later):
   nearest enclosing package's `node_modules/<name>`), and counts only when
   that entry is the declared package at a version inside the declared range
   (strict semver, as the walk matches).
-- **Reachability.** It starts from the project's own dependencies (and
-  workspaces') that are allowlist entries, at a version inside the
-  allowlisted range; a scope wildcard such as `@heroui/*` counts here, since
-  the lockfile names the exact package. From there it follows only verified
-  edges. An entry nothing reaches is refused with `wardby_package_not_allowed`.
+- **Reachability.** It starts from every lockfile entry that is an allowlist
+  entry, at a version inside the allowlisted range, wherever it sits in the
+  lockfile and whether or not a project declares it; a scope wildcard such as
+  `@heroui/*` counts here, since the lockfile names the exact package. From
+  there it follows only verified edges, each inside the declared range. An
+  entry nothing reaches is refused with `wardby_package_not_allowed`.
+- **Overrides.** An npm `overrides` entry can install a version that its parent's
+  declared range doesn't allow, so the plan can't reach it through that
+  parent. It's approved, with its own dependencies, when the overridden
+  package's name is on the allowlist (and the version is inside the
+  allowlisted range); otherwise it's refused with
+  `wardby_package_not_allowed`. Allowlist the target of each override your
+  repository uses. Release age, advisories and integrity are checked as for
+  any other entry.
 - **Release age and advisories.** Each version's publish time (read once by
   streaming the package's full document for its `time` field, never holding
   it) must be older than `minReleaseAgeDays`, and one OSV `querybatch`

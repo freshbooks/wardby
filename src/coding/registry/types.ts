@@ -172,9 +172,10 @@ export interface LockfileEntry {
   unsupportedReason?: string;
 }
 
-/** A parsed lockfile: its entries, the projects whose declared
- *  dependencies are where reachability starts (the root, workspaces), and
- *  the client's own rule for which entry a declared dependency uses. */
+/** A parsed lockfile: its entries, the projects it declares (the root and
+ *  workspaces; kept for parsing and diagnostics, no longer where plan
+ *  reachability starts), and the client's own rule for which entry a
+ *  declared dependency uses. */
 export interface ParsedLockfile {
   entries: readonly LockfileEntry[];
   projects: readonly { path: string; dependencies: readonly DeclaredDependency[] }[];
