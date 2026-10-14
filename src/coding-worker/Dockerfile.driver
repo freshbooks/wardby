@@ -31,16 +31,22 @@ COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 COPY --from=build /build/dist/coding/registry ./coding/registry
 # The lockfile normaliser (coding/registry/lockfiles.js) skips the folders collection excludes.
 COPY --from=build /build/dist/coding/collect-exclude.js ./coding/collect-exclude.js
-# The npm shim (npm-shim.mjs): verifies a project's lockfile with the registry
-# proxy (POST /registry/npm/-/plan) before an install, then runs the real npm.
-# The driver puts /opt/wardby/bin first on the agent's PATH; a login shell
-# (bash -l) resets PATH from /etc/profile, so profile.d puts it back.
+# The package-manager shim (npm-shim.mjs), linked as npm, pnpm and yarn:
+# verifies a project's lockfile with the registry proxy
+# (POST /registry/npm/-/plan) before an install, then runs the real tool
+# (pnpm, and a pinned yarn 2+, through corepack). The driver puts
+# /opt/wardby/bin first on the agent's PATH; a login shell (bash -l) resets
+# PATH from /etc/profile, so profile.d puts it back.
 COPY src/coding-worker/npm-shim.mjs ./bin/npm-shim.mjs
 RUN chmod 0755 /opt/wardby/bin/npm-shim.mjs \
     && ln -s npm-shim.mjs /opt/wardby/bin/npm \
+    && ln -s npm-shim.mjs /opt/wardby/bin/pnpm \
+    && ln -s npm-shim.mjs /opt/wardby/bin/yarn \
     && printf '%s\n' 'case ":$PATH:" in *:/opt/wardby/bin:*) ;; *) PATH="/opt/wardby/bin:$PATH" ;; esac' > /etc/profile.d/wardby-shims.sh \
     && PATH="/opt/wardby/bin:$PATH" npm --version \
-    && test "$(bash -lc 'command -v npm')" = /opt/wardby/bin/npm
+    && PATH="/opt/wardby/bin:$PATH" yarn --version \
+    && test "$(bash -lc 'command -v npm')" = /opt/wardby/bin/npm \
+    && test "$(bash -lc 'command -v yarn')" = /opt/wardby/bin/yarn
 # The dependency cache (dependency-cache.mjs): restores or installs a run's npm
 # dependencies before the agent starts, when the run asks for it. driver.js
 # imports it from next to itself; plain JavaScript, so it is copied, not built.

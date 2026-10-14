@@ -19,6 +19,10 @@ describe("coding worker image policy", () => {
     // agent's PATH, login shells included, and runs the real npm.
     expect(dockerfile).toContain("COPY src/coding-worker/npm-shim.mjs ./bin/npm-shim.mjs");
     expect(dockerfile).toContain("ln -s npm-shim.mjs /opt/wardby/bin/npm");
+    // The same shim acts as pnpm and yarn (lockfile plans for theirs too).
+    expect(dockerfile).toContain("ln -s npm-shim.mjs /opt/wardby/bin/pnpm");
+    expect(dockerfile).toContain("ln -s npm-shim.mjs /opt/wardby/bin/yarn");
+    expect(dockerfile).toContain("test \"$(bash -lc 'command -v yarn')\" = /opt/wardby/bin/yarn");
     expect(dockerfile).toContain("/etc/profile.d/wardby-shims.sh");
     // The dependency cache module, next to driver.js, which imports it on a run that asks for it;
     // the build fails, not the run, when it is missing.

@@ -102,6 +102,7 @@ function setup(
     upstream?: UpstreamFetch;
     planMaxEntries?: number;
     planTimeoutMs?: number;
+    planParseTimeoutMs?: number;
     now?: () => Date;
     planConcurrency?: number;
     planMaxPerRun?: number;
@@ -146,6 +147,7 @@ function setup(
     now: options.now ?? (() => NOW),
     planMaxEntries: options.planMaxEntries,
     planTimeoutMs: options.planTimeoutMs,
+    planParseTimeoutMs: options.planParseTimeoutMs,
     planConcurrency: options.planConcurrency,
     planMaxPerRun: options.planMaxPerRun,
   });
@@ -625,6 +627,18 @@ describe("downloads of approved versions", () => {
     expect(store.fetches.at(-1)).toMatchObject({ name: "c", version: "2.0.3", outcome: "served" });
   });
 
+  it("allows a metadata request for a name the plan approved, with no graph walk", async () => {
+    // npm re-reads the metadata of packages already in the lockfile (e.g.
+    // on `npm install <new package>`); c is reachable only through a and b.
+    const { plan, service, store, calls } = setup(chain);
+    await plan(chainLock);
+    calls.length = 0;
+    const response = await service.handle({ ...download("c", "2.0.3"), subpath: "c" });
+    expect(response.status).toBe(200);
+    expect(calls).toEqual(["https://registry.npmjs.org/c"]);
+    expect(await store.isAllowedDependency("run-1", "npm", "c")).toBe(true);
+  });
+
   it("checks the download against the approved integrity", async () => {
     const npm = fakeNpm(chain);
     let tamper = false;
@@ -653,7 +667,8 @@ describe("downloads of approved versions", () => {
       ]);
     }
     expect(calls).toEqual([]);
-    expect(store.allowances.size).toBe(0);
+    // Only the approved name became an allowance; nothing walked.
+    expect([...store.allowances].map((key) => key.split("\0")[2])).toEqual(["a"]);
     // Recorded as a download refusal, the retried one once.
     expect(store.fetches.slice(fetchesBefore).map((fetch) => [fetch.name, fetch.version, fetch.reason])).toEqual([
       ["b", "1.1.0", "wardby_version_filtered"],
@@ -770,17 +785,11 @@ describe("downloads of approved versions", () => {
     await plan(chainLock);
     calls.length = 0;
     const response = await service.handle(download("c", "3.0.0"));
-    // Not approved: the allowlist, the graph walk and the version filter
-    // decide it from metadata, as for any install without a plan (the walk
-    // approves names, so c's other kept versions are served).
+    // Not approved: the version filter decides it from metadata. The plan
+    // approved the name c, which made it an allowance (as a walk would), so
+    // c's other kept versions are served with no walk.
     expect(response.status).toBe(200);
-    expect(calls).toEqual(
-      expect.arrayContaining([
-        "https://registry.npmjs.org/a",
-        "https://registry.npmjs.org/c",
-        tarballUrl("c", "3.0.0"),
-      ]),
-    );
+    expect(calls).toEqual(["https://registry.npmjs.org/c", tarballUrl("c", "3.0.0")]);
   });
 });
 
@@ -909,5 +918,349 @@ describe("lockfile plans and the dependency cache", () => {
     full.cacheSessions.set("run-1", { lockHashes: [...eight], sealedAt: null, createdAt: NOW });
     await setup(chain, { dependencyCache: true, store: full }).plan(chainLock);
     expect(hashesOf(full)).toEqual(eight);
+  });
+});
+
+describe("metadata misses and the run's lockfile plans", () => {
+  // a also declares d, which no lockfile below installs: d is reachable in
+  // the approved graph but never approved by a plan.
+  const withD: FakeRegistry = { ...chain, a: { "1.0.0": { deps: { b: "^1.0.0", d: "^1.0.0" } } }, d: { "1.0.0": {} } };
+  const metadata = (name: string) => ({
+    method: "GET",
+    ecosystem: "npm",
+    subpath: name,
+    token: "rrg_token",
+    signal: new AbortController().signal,
+  });
+  const v1Lock = JSON.stringify({ lockfileVersion: 1, dependencies: {} });
+
+  it("with no plan, refuses a reachable name at once, with no walk", async () => {
+    const { service, store, calls } = setup(withD);
+    const response = await service.handle(metadata("d"));
+    expect([response.status, await drain(response)]).toEqual([
+      403,
+      expect.stringContaining("wardby_package_not_allowed:"),
+    ]);
+    expect(calls).toEqual([]);
+    expect(store.fetches).toMatchObject([{ name: "d", outcome: "refused", reason: "wardby_package_not_allowed" }]);
+  });
+
+  it("after a clean plan, refuses a reachable name the plan did not approve at once, with no walk", async () => {
+    const { plan, service, calls } = setup(withD);
+    expect((await plan(chainLock)).json).toEqual({ approved: 3, refused: [] });
+    calls.length = 0;
+    const response = await service.handle(metadata("d"));
+    expect(response.status).toBe(403);
+    expect(calls).toEqual([]);
+  });
+
+  it("after a plan with a refusal, walks for a metadata miss and finds a reachable name", async () => {
+    // overrides forced c to 3.0.0 under b's ~2.0.0: the plan refuses it.
+    const registry: FakeRegistry = { ...withD, c: { "2.0.3": {}, "3.0.0": {} } };
+    const lock = JSON.parse(chainLock);
+    lock.packages["node_modules/c"] = locked("c", "3.0.0");
+    const { plan, service, calls } = setup(registry);
+    expect(refusedOf((await plan(JSON.stringify(lock))).json)).toEqual({ "c@3.0.0": "wardby_package_not_allowed" });
+    calls.length = 0;
+    const response = await service.handle(metadata("d"));
+    expect(response.status).toBe(200);
+    // The walk read a (its trimmed packument) to find d.
+    expect(calls).toContain("https://registry.npmjs.org/a");
+  });
+
+  it("after a plan refused as an unsupported lockfile (400), walks for a metadata miss", async () => {
+    const { plan, service, calls } = setup(withD);
+    expect((await plan(v1Lock)).status).toBe(400);
+    const response = await service.handle(metadata("c"));
+    expect(response.status).toBe(200);
+    expect(calls).toContain("https://registry.npmjs.org/b");
+  });
+
+  it("after a plan that timed out, walks for a metadata miss", async () => {
+    const npm = fakeNpm(withD);
+    let hang = true;
+    const upstream: UpstreamFetch = async (url, init) =>
+      hang && url === "https://registry.npmjs.org/b/1.1.0"
+        ? new Promise<Response>((_, reject) =>
+            init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error), { once: true }),
+          )
+        : npm.upstream(url, init);
+    const { plan, service } = setup(withD, { upstream, planTimeoutMs: 50 });
+    expect((await plan(chainLock)).status).toBe(503);
+    hang = false;
+    await expect(service.handle(metadata("d"))).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("keeps the fallback for the run: a clean plan after a failed one does not reset it", async () => {
+    const { plan, service } = setup(withD);
+    expect((await plan(v1Lock)).status).toBe(400);
+    expect((await plan(chainLock)).json).toEqual({ approved: 3, refused: [] });
+    await expect(service.handle(metadata("d"))).resolves.toMatchObject({ status: 200 });
+  });
+});
+
+const sri = (name: string, version: string) => sriOf(tarballOf(name, version));
+
+describe("pnpm and yarn lockfiles", () => {
+  // The chain (a -> b -> c) as each client writes it; `integrity` overrides
+  // one entry's lockfile integrity, `extraEdge` adds a dependency the
+  // registry's b@1.1.0 does not declare.
+  const pnpmV9 = (integrity: Record<string, string> = {}) => `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      a:
+        specifier: ^1.0.0
+        version: 1.0.0
+
+packages:
+
+  a@1.0.0:
+    resolution: {integrity: ${integrity.a ?? sri("a", "1.0.0")}}
+
+  b@1.1.0:
+    resolution: {integrity: ${integrity.b ?? sri("b", "1.1.0")}}
+
+  c@2.0.3:
+    resolution: {integrity: ${integrity.c ?? sri("c", "2.0.3")}}
+
+snapshots:
+
+  a@1.0.0:
+    dependencies:
+      b: 1.1.0
+
+  b@1.1.0:
+    dependencies:
+      c: 2.0.3
+
+  c@2.0.3: {}
+`;
+  const pnpmV6 = () => `lockfileVersion: '6.0'
+
+dependencies:
+  a:
+    specifier: ^1.0.0
+    version: 1.0.0
+
+packages:
+
+  /a@1.0.0:
+    resolution: {integrity: ${sri("a", "1.0.0")}}
+    dependencies:
+      b: 1.1.0
+    dev: false
+
+  /b@1.1.0:
+    resolution: {integrity: ${sri("b", "1.1.0")}}
+    dependencies:
+      c: 2.0.3
+    dev: false
+
+  /c@2.0.3:
+    resolution: {integrity: ${sri("c", "2.0.3")}}
+    dev: false
+`;
+  const yarnClassic = (
+    integrity: Record<string, string> = {},
+  ) => `# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.
+# yarn lockfile v1
+
+
+a@^1.0.0:
+  version "1.0.0"
+  resolved "https://registry.yarnpkg.com/a/-/a-1.0.0.tgz"
+  integrity ${integrity.a ?? sri("a", "1.0.0")}
+  dependencies:
+    b "^1.0.0"
+
+b@^1.0.0:
+  version "1.1.0"
+  resolved "https://registry.yarnpkg.com/b/-/b-1.1.0.tgz"
+  integrity ${integrity.b ?? sri("b", "1.1.0")}
+  dependencies:
+    c "~2.0.0"
+
+c@~2.0.0:
+  version "2.0.3"
+  resolved "http://wardby-proxy:8787/registry/npm/c/-/c-2.0.3.tgz"
+  integrity ${integrity.c ?? sri("c", "2.0.3")}
+`;
+  const yarnBerry = (extraEdge = false) => `# This file is generated by running "yarn install" inside your project.
+# Manual changes might be lost - proceed with caution!
+
+__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"a@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "a@npm:1.0.0"
+  dependencies:
+    b: "npm:^1.0.0"
+  checksum: 10c0/0000
+  languageName: node
+  linkType: hard
+
+"app@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "app@workspace:."
+  dependencies:
+    a: "npm:^1.0.0"
+  languageName: unknown
+  linkType: soft
+
+"b@npm:^1.0.0":
+  version: 1.1.0
+  resolution: "b@npm:1.1.0"
+  dependencies:
+    c: "npm:~2.0.0"${extraEdge ? '\n    evil: "npm:^1.0.0"' : ""}
+  checksum: 10c0/1111
+  languageName: node
+  linkType: hard
+
+"c@npm:~2.0.0":
+  version: 2.0.3
+  resolution: "c@npm:2.0.3"
+  checksum: 10c0/2222
+  languageName: node
+  linkType: hard
+${extraEdge ? '\n"evil@npm:^1.0.0":\n  version: 1.0.0\n  resolution: "evil@npm:1.0.0"\n  checksum: 10c0/3333\n  languageName: node\n  linkType: hard\n' : ""}`;
+
+  for (const [format, body] of [
+    ["pnpm-lock.yaml v9", pnpmV9()],
+    ["pnpm-lock.yaml v6", pnpmV6()],
+    ["yarn.lock (classic)", yarnClassic()],
+    ["yarn.lock (Berry)", yarnBerry()],
+  ] as const) {
+    it(`approves a ${format}'s exact versions through the same route, with the registry's integrity`, async () => {
+      const { plan, store } = setup(chain);
+      const { status, json } = await plan(body);
+      expect(status).toBe(200);
+      expect(json).toEqual({ approved: 3, refused: [] });
+      expect(approvedOf(store)).toEqual(["a@1.0.0", "b@1.1.0", "c@2.0.3"]);
+      for (const approval of store.approvals.values())
+        expect(approval.integrity).toBe(sri(approval.name, approval.version));
+    });
+  }
+
+  for (const [format, forged] of [
+    ["pnpm-lock.yaml", pnpmV9({ b: sriOf(new TextEncoder().encode("evil bytes")) })],
+    ["classic yarn.lock", yarnClassic({ b: sriOf(new TextEncoder().encode("evil bytes")) })],
+  ] as const) {
+    it(`refuses a forged integrity in a ${format}, and what is reachable only through it`, async () => {
+      const { plan, store } = setup(chain);
+      const { json } = await plan(forged);
+      expect(refusedOf(json)).toEqual({
+        "b@1.1.0": "wardby_lockfile_integrity_mismatch",
+        "c@2.0.3": "wardby_package_not_allowed",
+      });
+      expect(approvedOf(store)).toEqual(["a@1.0.0"]);
+      expect(store.fetches.map((fetch) => [fetch.name, fetch.reason, fetch.filename])).toEqual([
+        ["b", "wardby_lockfile_integrity_mismatch", "-/plan"],
+        ["c", "wardby_package_not_allowed", "-/plan"],
+      ]);
+    });
+  }
+
+  it("refuses an entry a Berry lockfile links only by a dependency the registry does not declare", async () => {
+    const { plan, store } = setup({ ...chain, evil: { "1.0.0": {} } });
+    const { json } = await plan(yarnBerry(true));
+    expect(refusedOf(json)).toEqual({ "evil@1.0.0": "wardby_package_not_allowed" });
+    expect(approvedOf(store)).toEqual(["a@1.0.0", "b@1.1.0", "c@2.0.3"]);
+  });
+
+  it("checks a Berry-approved download against the registry's integrity", async () => {
+    const npm = fakeNpm(chain);
+    let tamper = false;
+    const upstream: UpstreamFetch = async (url, init) =>
+      tamper && url.endsWith(".tgz") ? new Response("tampered") : npm.upstream(url, init);
+    const { plan, service, store } = setup(chain, { upstream });
+    await plan(yarnBerry());
+    tamper = true;
+    const response = await service.handle({
+      method: "GET",
+      ecosystem: "npm",
+      subpath: "c/-/c-2.0.3.tgz",
+      token: "rrg_token",
+      signal: new AbortController().signal,
+    });
+    await expect(drain(response)).rejects.toThrow();
+    expect(store.fetches.at(-1)).toMatchObject({ name: "c", outcome: "refused", reason: "wardby_integrity_mismatch" });
+  });
+
+  it("reads a pnpm or yarn lockfile off the event loop, answering a slow read as incomplete and falling back", async () => {
+    const { plan, service } = setup(
+      { ...chain, a: { "1.0.0": { deps: { b: "^1.0.0", d: "^1.0.0" } } }, d: { "1.0.0": {} } },
+      { planParseTimeoutMs: 1 },
+    );
+    const { status, json } = await plan(pnpmV9());
+    expect(status).toBe(503);
+    expect(json).toMatchObject({ error: expect.stringContaining("wardby_plan_incomplete") as unknown });
+    const response = await service.handle({
+      method: "GET",
+      ecosystem: "npm",
+      subpath: "d",
+      token: "rrg_token",
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it("refuses text that is no supported lockfile as unsupported, and falls back for the run", async () => {
+    const { plan, service } = setup({
+      ...chain,
+      a: { "1.0.0": { deps: { b: "^1.0.0", d: "^1.0.0" } } },
+      d: { "1.0.0": {} },
+    });
+    const { status, json } = await plan("some: yaml\n");
+    expect(status).toBe(400);
+    expect(json).toMatchObject({ error: expect.stringContaining("wardby_lockfile_unsupported") as unknown });
+    const response = await service.handle({
+      method: "GET",
+      ecosystem: "npm",
+      subpath: "d",
+      token: "rrg_token",
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(200);
+  });
+});
+
+describe("version documents (corepack's /<name>/<version>)", () => {
+  const get = (subpath: string) => ({
+    method: "GET",
+    ecosystem: "npm",
+    subpath,
+    token: "rrg_token",
+    signal: new AbortController().signal,
+  });
+
+  it("serves an allowlisted version's manifest with a proxy download, and only a kept version", async () => {
+    const { service } = setup({ ...chain, a: { "1.0.0": { deps: { b: "^1.0.0" } }, "1.1.0": { published: NEW } } });
+    const response = await service.handle(get("a/1.0.0"));
+    expect(response.status).toBe(200);
+    const manifest = JSON.parse((response as { body: string }).body) as Record<string, unknown>;
+    expect(manifest).toMatchObject({
+      name: "a",
+      version: "1.0.0",
+      dependencies: { b: "^1.0.0" },
+      dist: { tarball: "http://wardby-proxy:8787/registry/npm/a/-/a-1.0.0.tgz", integrity: sri("a", "1.0.0") },
+    });
+    // Too new for the release age, and not published at all.
+    for (const subpath of ["a/1.1.0", "a/9.9.9"]) {
+      const refused = await service.handle(get(subpath));
+      expect(refused.status).toBe(404);
+      expect((refused as { body: string }).body).toContain("wardby_version_filtered");
+    }
+  });
+
+  it("refuses a name that is not allowed, as a metadata request would be", async () => {
+    const { service } = setup({ ...chain, stranger: { "1.0.0": {} } });
+    const response = await service.handle(get("stranger/1.0.0"));
+    expect(response.status).toBe(403);
+    expect((response as { body: string }).body).toContain("wardby_package_not_allowed");
   });
 });

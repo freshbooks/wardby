@@ -34,7 +34,7 @@ function unscoped(name: string): string {
  *  `-/tarball/<encoded name>/<version>` (the proxy's own route) or the
  *  standard `<name>/-/<unscoped>-<version>.tgz`, with the scope separator
  *  literal or percent-encoded. Null for anything else. */
-function parseProxyPath(path: string): { name: string; version: string } | null {
+export function parseProxyPath(path: string): { name: string; version: string } | null {
   let name: string | null;
   let version: string | null;
   const own = path.match(/^-\/tarball\/([^/]+)\/([^/]+)$/);
@@ -50,7 +50,10 @@ function parseProxyPath(path: string): { name: string; version: string } | null 
     const prefix = `${unscoped(name)}-`;
     version = file.startsWith(prefix) ? file.slice(prefix.length) : null;
   }
-  if (!name || !version || !PACKAGE_NAME.test(name) || semver.valid(version) !== version) return null;
+  // A valid semver version, build metadata allowed (the proxy serves such a
+  // version on its own route), made only of version characters.
+  if (!name || !version || !PACKAGE_NAME.test(name) || !semver.valid(version) || !/^[0-9A-Za-z.+-]+$/.test(version))
+    return null;
   return { name, version };
 }
 
@@ -67,8 +70,3 @@ export function normalizeNpmLockfile(content: string, registryUrl: string): stri
     return target ? `${open}${publicNpmTarballUrl(target.name, target.version)}${close}` : match;
   });
 }
-
-export const npmLockfiles = {
-  names: ["package-lock.json", "npm-shrinkwrap.json"],
-  normalize: normalizeNpmLockfile,
-} as const;
