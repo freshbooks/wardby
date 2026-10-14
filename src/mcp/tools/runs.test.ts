@@ -36,6 +36,7 @@ interface FakeRunRow {
     resultBranch?: string | null;
     baseSha?: string | null;
     dependencyCacheResult?: unknown;
+    prDescriptionOutcome?: string | null;
     failureCategory?: string | null;
     diagnosticId?: string | null;
     debugTrace?: boolean;
@@ -551,6 +552,39 @@ describe("run observability tools", () => {
     expect((await get("r1")).dependencyCache).toEqual(report);
     expect(await get("r2")).not.toHaveProperty("dependencyCache");
     expect((await get("r3")).dependencyCache).toEqual({ projects: [], reason: "report_invalid" });
+    await client.close();
+  });
+
+  it("get_run returns coding.prDescriptionOutcome when set and omits it when null", async () => {
+    const now = new Date();
+    const base = {
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costUsd: 0,
+      finalText: "x",
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+    };
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        { ...base, id: "r1", codingRun: { result: null, prDescriptionOutcome: "refreshed:no_marker" } },
+        { ...base, id: "r2", codingRun: { result: null, prDescriptionOutcome: null } },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    const get = async (runId: string) =>
+      parseText((await client.callTool({ name: "get_run", arguments: { runId } })) as never) as any;
+    expect((await get("r1")).prDescriptionOutcome).toBe("refreshed:no_marker");
+    expect(await get("r2")).not.toHaveProperty("prDescriptionOutcome");
     await client.close();
   });
 

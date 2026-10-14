@@ -268,6 +268,25 @@ describe("reReviewAfterNoChangeFix", () => {
     expect(startReviews).not.toHaveBeenCalled();
   });
 
+  it("after a no_changes fix round that rewrote the description, the single no-change re-review starts once", async () => {
+    // The description PATCH fires a pull_request `edited` event, which starts no review; only this path does.
+    const { deps, claim } = setup();
+    await reReviewAfterNoChangeFix("coding-1", deps);
+    expect(startReviews).toHaveBeenCalledTimes(1);
+    // A replayed terminal write loses the claim and starts nothing more.
+    claim.mockResolvedValueOnce({ count: 0 });
+    await reReviewAfterNoChangeFix("coding-1", deps);
+    expect(startReviews).toHaveBeenCalledTimes(1);
+  });
+
+  it("a fix-round push still yields exactly one review for the new head", async () => {
+    // A pushed fix is reviewed by the pull_request synchronize event alone; this path adds none.
+    const { deps, addLabel } = setup({ outcome: "pull_request_updated" });
+    await reReviewAfterNoChangeFix("coding-1", deps);
+    expect(startReviews).not.toHaveBeenCalled();
+    expect(addLabel).not.toHaveBeenCalled();
+  });
+
   it("starts nothing when the claim was already taken (a replay or a duplicate terminal write)", async () => {
     const { deps, addLabel } = setup({ claimCount: 0 });
     await reReviewAfterNoChangeFix("coding-1", deps);
