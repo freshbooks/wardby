@@ -126,18 +126,21 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
       });
   }
 
-  // Starting points: what the projects themselves declare, when it is an
-  // allowlist root at a version inside the root's range.
+  // Starting points: every registry entry that is an allowlist root at a
+  // version inside the root's range, wherever it sits in the lockfile and
+  // whether or not a project declares it. An allowlisted name may be
+  // installed by name anyway (the download path's `authorize` matches roots
+  // the same way), so an `overrides`-forced version of it, which no parent's
+  // declared range reaches, is a start in its own right. Every start still
+  // passes the fact checks below (integrity, release age, advisories), and
+  // edges are still followed only inside declared ranges.
   const starts = new Set<LockfileEntry>();
-  for (const project of lockfile.projects) {
-    for (const dependency of project.dependencies) {
-      const entry = lockfile.resolve(project.path, dependency.key);
-      if (!entry || entry.kind !== "registry" || entry.name !== dependency.name) continue;
-      const root = matchRoot(input.roots, adapter.normalizeName(entry.name));
-      if (!root) continue;
-      if (root.range && !safeSatisfies(adapter, entry.version, root.range)) continue;
-      starts.add(entry);
-    }
+  for (const entry of lockfile.entries) {
+    if (entry.kind !== "registry") continue;
+    const root = matchRoot(input.roots, adapter.normalizeName(entry.name));
+    if (!root) continue;
+    if (root.range && !safeSatisfies(adapter, entry.version, root.range)) continue;
+    starts.add(entry);
   }
 
   // Breadth first over verified edges, fetching facts one layer at a time

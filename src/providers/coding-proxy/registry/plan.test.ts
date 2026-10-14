@@ -250,14 +250,23 @@ describe("lockfile plan verification", () => {
     });
   });
 
-  it("does not start from a project dependency whose folder holds a different package", async () => {
-    // The project declares q, but q's folder holds the allowlisted a.
+  it("starts from an allowlisted package whatever folder holds it; its integrity is still checked", async () => {
+    // The project declares q, but q's folder holds the allowlisted a: a is a
+    // start by name, verified against the registry's a@1.0.0.
     const lock = JSON.parse(chainLock);
     lock.packages[""].dependencies = { q: "^1.0.0" };
     lock.packages["node_modules/q"] = { name: "a", ...lock.packages["node_modules/a"] };
     delete lock.packages["node_modules/a"];
     const { json } = await setup(chain).plan(JSON.stringify(lock));
-    expect(json.approved).toBe(0);
+    expect(json.approved).toBe(3);
+
+    lock.packages["node_modules/q"].integrity = sriOf(new TextEncoder().encode("evil bytes"));
+    const forged = await setup(chain).plan(JSON.stringify(lock));
+    expect(refusedOf(forged.json)).toEqual({
+      "a@1.0.0": "wardby_lockfile_integrity_mismatch",
+      "b@1.1.0": "wardby_package_not_allowed",
+      "c@2.0.3": "wardby_package_not_allowed",
+    });
   });
 
   it("refuses a version whose registry download is hosted outside npm", async () => {
@@ -307,6 +316,101 @@ describe("lockfile plan verification", () => {
     );
     const { json } = await setup(registry, { allowlist: ["@s/*"] }).plan(lock);
     expect(json).toEqual({ approved: 2, refused: [] });
+  });
+
+  describe("allowlisted entries no project declares (npm overrides)", () => {
+    // p asks for exactly m@1.0.0; an override installs m@1.5.0, which depends on x.
+    const overrides: FakeRegistry = {
+      p: { "1.0.0": { deps: { m: "1.0.0" } } },
+      m: { "1.0.0": {}, "1.5.0": { deps: { x: "^1.0.0" } } },
+      x: { "1.2.0": {}, "2.0.0": { deps: { y: "^1.0.0" } } },
+      y: { "1.0.0": {} },
+    };
+    const overridesLock = (xVersion = "1.2.0", extra: Record<string, unknown> = {}) =>
+      lockfileOf(
+        { p: "^1.0.0" },
+        {
+          "node_modules/p": locked("p", "1.0.0"),
+          "node_modules/m": locked("m", "1.5.0"),
+          "node_modules/x": locked("x", xVersion),
+          ...extra,
+        },
+      );
+
+    it("starts from an allowlisted override version and walks its dependencies", async () => {
+      const { plan, store } = setup(overrides, { allowlist: ["p", "m"] });
+      const { json } = await plan(overridesLock());
+      expect(json).toEqual({ approved: 3, refused: [] });
+      expect(approvedOf(store)).toEqual(["m@1.5.0", "p@1.0.0", "x@1.2.0"]);
+    });
+
+    it("keeps refusing an override whose name is not allowlisted, and what hangs off it", async () => {
+      const { json } = await setup(overrides, { allowlist: ["p"] }).plan(overridesLock());
+      expect(refusedOf(json)).toEqual({
+        "m@1.5.0": "wardby_package_not_allowed",
+        "x@1.2.0": "wardby_package_not_allowed",
+      });
+    });
+
+    it("follows a nested override when its name is allowlisted too", async () => {
+      // m@1.5.0 asks for x ^1.0.0; a second override installs x@2.0.0, which depends on y.
+      const lock = overridesLock("2.0.0", { "node_modules/y": locked("y", "1.0.0") });
+      const allowed = setup(overrides, { allowlist: ["p", "m", "x"] });
+      expect((await allowed.plan(lock)).json).toEqual({ approved: 4, refused: [] });
+      expect(approvedOf(allowed.store)).toEqual(["m@1.5.0", "p@1.0.0", "x@2.0.0", "y@1.0.0"]);
+
+      const notAllowed = await setup(overrides, { allowlist: ["p", "m"] }).plan(lock);
+      expect(refusedOf(notAllowed.json)).toEqual({
+        "x@2.0.0": "wardby_package_not_allowed",
+        "y@1.0.0": "wardby_package_not_allowed",
+      });
+    });
+
+    it("starts only from versions inside the allowlisted range", async () => {
+      const { json } = await setup(overrides, { allowlist: ["p", "m@^2"] }).plan(overridesLock());
+      expect(refusedOf(json)).toEqual({
+        "m@1.5.0": "wardby_package_not_allowed",
+        "x@1.2.0": "wardby_package_not_allowed",
+      });
+    });
+
+    it("still refuses a start that is too new, or carries a blocking advisory or malware", async () => {
+      const tooNew: FakeRegistry = {
+        ...overrides,
+        m: { ...overrides.m, "1.5.0": { deps: { x: "^1.0.0" }, published: NEW } },
+      };
+      const young = await setup(tooNew, { allowlist: ["p", "m", "x"] }).plan(overridesLock());
+      expect(refusedOf(young.json)).toEqual({ "m@1.5.0": "wardby_version_filtered" });
+
+      const advisory = await setup(overrides, { allowlist: ["p", "m"], withheld: { "m@1.5.0": ["GHSA-high"] } }).plan(
+        overridesLock(),
+      );
+      expect(refusedOf(advisory.json)).toEqual({
+        "m@1.5.0": "wardby_version_filtered",
+        "x@1.2.0": "wardby_package_not_allowed",
+      });
+
+      const malware = await setup(overrides, {
+        allowlist: ["p", "m"],
+        // As in "never approves malware…": MAL- ids can't be listed in a policy at all.
+        advisories: { "m@1.5.0": [{ id: "GHSA-mal", malware: true, aliases: ["MAL-2026-1"] }] },
+        policy: { acceptedAdvisories: ["GHSA-mal"] },
+      }).plan(overridesLock());
+      expect(refusedOf(malware.json)).toEqual({
+        "m@1.5.0": "wardby_version_filtered",
+        "x@1.2.0": "wardby_package_not_allowed",
+      });
+    });
+
+    it("still refuses a forged integrity on a start", async () => {
+      const lock = JSON.parse(overridesLock());
+      lock.packages["node_modules/m"].integrity = sriOf(new TextEncoder().encode("evil bytes"));
+      const { json } = await setup(overrides, { allowlist: ["p", "m"] }).plan(JSON.stringify(lock));
+      expect(refusedOf(json)).toEqual({
+        "m@1.5.0": "wardby_lockfile_integrity_mismatch",
+        "x@1.2.0": "wardby_package_not_allowed",
+      });
+    });
   });
 
   it("follows nesting, aliases and peer dependencies, and ignores declared dependencies not installed", async () => {
@@ -607,7 +711,8 @@ describe("downloads of approved versions", () => {
     };
     const { plan, service, store } = setup(registry, { allowlist: ["a", "react"] });
     const { json } = await plan(JSON.stringify(lock));
-    expect(refusedOf(json)["react@18.3.1"]).toBe("wardby_package_not_allowed");
+    // react is allowlisted, so the forged entry is a start and its forged integrity is caught.
+    expect(refusedOf(json)["react@18.3.1"]).toBe("wardby_lockfile_integrity_mismatch");
     expect(store.planRefusals.size).toBe(0);
     const response = await service.handle(download("react", "18.3.1"));
     expect([response.status, await drain(response)]).toEqual([200, "tarball react@18.3.1"]);
