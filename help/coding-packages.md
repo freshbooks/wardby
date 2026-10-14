@@ -115,11 +115,11 @@ restored from a verified snapshot instead of running `npm ci`. Read the
 
 ## Blocked status comments
 
-If a coding child records package refusals and no pull request or pushed
-changes result, GitHub and Jira status comments show ⛔ **Blocked by the package
-registry: no changes were made.** Slack uses the same guidance. If changes
-were pushed, the status keeps the pull request link and adds a ⚠️ dependency
-install warning. Refusal lists show at most ten distinct entries and a count
+If a coding child records package refusals, reports no changes or fails, and no
+pull request or pushed changes result, GitHub and Jira status comments show
+⛔ **Blocked by the package registry: no changes were made.** Otherwise, the
+status keeps the agent's reply or answer, or the pull request link, and adds a
+⚠️ dependency install warning. Refusal lists show at most ten distinct entries and a count
 of the rest; `get_run` has the full list.
 
 For next steps, see [Package refusal errors](errors/package-refusals.md) and

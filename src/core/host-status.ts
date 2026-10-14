@@ -137,6 +137,7 @@ export function outcomeBody(
   failedChildren: FailedChild[] = [],
   opts: {
     packageRefusals?: RegistryRefusalSummary[];
+    noChanges?: boolean;
     budgetSentence?: string;
     noPullRequestText?: string;
     /** The agent's reply IS the answer (no separate reply comment): shown as written, not quoted. */
@@ -152,10 +153,17 @@ export function outcomeBody(
   });
   const partial = links.length > 0 ? `\n\n${links.join(", ")}.` : "";
   const refusals = opts.packageRefusals ?? [];
-  const warning = links.length > 0 && refusals.length > 0 ? packageRefusalWording(refusals, false) : "";
+  const blocked =
+    run.status === "succeeded" &&
+    links.length === 0 &&
+    (opts.noChanges || failedChildren.length > 0) &&
+    refusals.length > 0;
+  const warning =
+    !blocked && (links.length > 0 || run.status === "succeeded") && refusals.length > 0
+      ? packageRefusalWording(refusals, false)
+      : "";
   const footer = warning + (warning ? "\n\n" : "") + runLine(run.id);
-  if (run.status === "succeeded" && links.length === 0 && refusals.length > 0)
-    return packageRefusalWording(refusals) + "\n\n" + footer;
+  if (blocked) return packageRefusalWording(refusals) + "\n\n" + footer;
   if (run.status === "lost") {
     return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
   }
@@ -243,6 +251,7 @@ export async function collectRunOutcome(
   pullRequests: PullRequestOutcome[];
   failedChildren: FailedChild[];
   packageRefusals: RegistryRefusalSummary[];
+  noChanges: boolean;
   budgetSentence?: string;
 }> {
   const children = await db.run.findMany({
@@ -288,7 +297,11 @@ export async function collectRunOutcome(
     run.status === "budget_exhausted" || run.status === "refused"
       ? await loadBudgetSentence(db, run.id, run.status)
       : undefined;
-  return { pullRequests, failedChildren, packageRefusals, ...(budgetSentence ? { budgetSentence } : {}) };
+  const noChanges = children.some((c) => {
+    const result = c.codingRun?.result;
+    return result && typeof result === "object" && !Array.isArray(result) && result.outcome === "no_changes";
+  });
+  return { pullRequests, failedChildren, packageRefusals, noChanges, ...(budgetSentence ? { budgetSentence } : {}) };
 }
 
 /**
@@ -312,8 +325,15 @@ export async function completeHostStatus(
     if (!status.commentId && !opts.postIfMissing) return;
     const host = hosts[status.provider as ReviewHostProvider];
     if (!host) return;
-    const { pullRequests, failedChildren, budgetSentence, packageRefusals } = await collectRunOutcome(db, run);
-    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, { budgetSentence, packageRefusals });
+    const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges } = await collectRunOutcome(
+      db,
+      run,
+    );
+    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, {
+      budgetSentence,
+      packageRefusals,
+      noChanges,
+    });
     let commentId = status.commentId;
     if (commentId) {
       await host.editComment(status.repository, {

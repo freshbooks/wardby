@@ -202,7 +202,10 @@ export async function completeIssueStatus(
     const project = projectOf(status.issueKey);
     let body: string;
     if (writable) {
-      const { pullRequests, failedChildren, budgetSentence, packageRefusals } = await collectRunOutcome(db, run);
+      const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges } = await collectRunOutcome(
+        db,
+        run,
+      );
       const foreign = await continuedForAnotherIssue(
         db,
         pullRequests.flatMap((pr) => (pr.pullRequestUrl && pr.runId ? [pr.runId] : [])),
@@ -241,6 +244,7 @@ export async function completeIssueStatus(
       const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
         budgetSentence,
         packageRefusals,
+        noChanges,
         noPullRequestText: "Done.",
         // One comment per request: this status comment carries the agent's answer.
         replyAsAnswer: true,

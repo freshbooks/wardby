@@ -9,6 +9,16 @@ const run = { id: "r", status: "succeeded" as const, finalText: null };
 const refusals = (reason: string) => [{ ecosystem: "npm", name: "pkg", reason }];
 
 describe("package blocked status", () => {
+  it.each([false, true])("preserves a succeeded run's reply despite refusals (replyAsAnswer=%s)", (replyAsAnswer) => {
+    const body = outcomeBody({ ...run, finalText: "The answer is ready." }, "repo", [], [], {
+      packageRefusals: refusals("wardby_graph_limit"),
+      replyAsAnswer,
+    });
+    expect(body).toMatch(/^✅/);
+    expect(body).toContain(replyAsAnswer ? "✅ The answer is ready." : "> The answer is ready.");
+    expect(body).toContain("⚠️ **Dependency install incomplete.**");
+    expect(body).not.toContain("no changes were made");
+  });
   it.each(["failed", "budget_exhausted", "cancelled", "lost", "refused"] as const)(
     "preserves %s wording with refusals",
     (status) => {
@@ -37,7 +47,7 @@ describe("package blocked status", () => {
       $queryRaw: async () => [],
       run: {
         findUnique: async () => ({ agentId: "a" }),
-        findMany: async () => [{ id: "c", status: "succeeded", codingRun: { result: null } }],
+        findMany: async () => [{ id: "c", status: "succeeded", codingRun: { result: { outcome: "no_changes" } } }],
       },
       registryFetch: {
         findMany: vi.fn(async () => [
@@ -108,7 +118,7 @@ describe("package blocked status", () => {
   it.each(["wardby_graph_incomplete", "wardby_graph_limit", "wardby_package_not_allowed"])(
     "explains %s and how to unblock",
     (code) => {
-      const body = outcomeBody(run, "repo", [], [], { packageRefusals: refusals(code) });
+      const body = outcomeBody(run, "repo", [], [], { packageRefusals: refusals(code), noChanges: true });
       expect(body).toMatch(/^⛔/);
       expect(body).toContain("not on this agent's allowlist");
       expect(body).toContain(code);
