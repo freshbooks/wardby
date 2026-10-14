@@ -340,8 +340,9 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
     // The worker's npm is the driver image's shim (npm-shim.mjs, linked as
     // npm ahead of the real one on PATH): `npm ci` first sends the lockfile
     // to POST /-/plan, which checks every entry against the (fake) registry
-    // and approves its exact versions, so the tarball requests that follow
-    // are served from the approvals, with no graph walk (no allowances).
+    // and approves its exact versions (and their names as allowances), so
+    // the tarball requests that follow are served from the approvals, with
+    // no graph walk.
     const fixtureDir = new URL("./fixtures/npm-lockfile/", import.meta.url);
     const lock = JSON.parse(await readFile(new URL("package-lock.json", fixtureDir), "utf8"));
     const routes = new Map<string, () => Response>();
@@ -417,15 +418,17 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
         .map((fetch) => fetch.name)
         .sort(),
     ).toEqual(["wardby-lock-child", "wardby-lock-root"]);
-    // No graph walk ran: it would have recorded the child as an allowance.
-    expect(store.allowances.size).toBe(0);
+    // The only allowances are the plan's approved names.
+    expect([...store.allowances].map((key) => key.split("\0")[2]).sort()).toEqual([
+      "wardby-lock-child",
+      "wardby-lock-root",
+    ]);
   });
 
   it("refuses a package not on the allowlist and surfaces the reason to npm", async () => {
-    // The root's metadata must be reachable: before refusing, the proxy
-    // resolves the approved graph from it, and an unreadable graph is
-    // answered "unavailable, try again" (502), never "not allowed". The
-    // fixture's dependencies are dropped so the graph is just the root.
+    // npm asks for the name's metadata, which is refused at once: a
+    // metadata request never walks the graph. The root is served anyway in
+    // case npm reads it; its dependencies are dropped.
     const npmDoc = JSON.parse(
       await readFile(new URL("../../../coding/registry/fixtures/npm-left-pad.json", import.meta.url), "utf8"),
     );
@@ -472,9 +475,10 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
     expect(result.stderr).toContain("wardby_package_not_allowed");
   });
 
-  it("real npm prints the pending wording and does not retry a 403", async () => {
-    // The root's metadata answers, but its one dependency's never does, so
-    // the walk is cut short before it can prove anything about the name.
+  it("real npm gets the final refusal for an unreached name at once, with no walk, and does not retry a 403", async () => {
+    // The root's one dependency never answers: a graph walk would be cut
+    // short. A metadata request never starts one, so npm gets the final
+    // answer at once.
     const npmDoc = JSON.parse(
       await readFile(new URL("../../../coding/registry/fixtures/npm-left-pad.json", import.meta.url), "utf8"),
     );
@@ -523,13 +527,16 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
       { cwd: projectDir, env: process.env },
     );
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain("wardby_package_not_allowed_pending");
-    expect(result.stderr).toContain("owner must allowlist not-allowed-package directly");
+    expect(result.stderr).toContain("wardby_package_not_allowed:");
+    expect(result.stderr).not.toContain("wardby_package_not_allowed_pending");
+    expect(result.stderr).toContain("owner must allowlist it");
     // A 403 is final to npm: one request for the name, no retries.
     const refused = (await store.listFetches("client-integration-run")).filter(
       (fetch) => fetch.name === "not-allowed-package",
     );
-    expect(refused).toMatchObject([{ outcome: "refused", reason: "wardby_package_not_allowed_pending" }]);
+    expect(refused).toMatchObject([{ outcome: "refused", reason: "wardby_package_not_allowed" }]);
+    // No walk: nothing was recorded as an allowance.
+    expect(store.allowances.size).toBe(0);
   });
 
   it.skipIf(!hasPip)("installs a real pip package end to end through the proxy", async () => {

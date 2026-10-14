@@ -625,6 +625,18 @@ describe("downloads of approved versions", () => {
     expect(store.fetches.at(-1)).toMatchObject({ name: "c", version: "2.0.3", outcome: "served" });
   });
 
+  it("allows a metadata request for a name the plan approved, with no graph walk", async () => {
+    // npm re-reads the metadata of packages already in the lockfile (e.g.
+    // on `npm install <new package>`); c is reachable only through a and b.
+    const { plan, service, store, calls } = setup(chain);
+    await plan(chainLock);
+    calls.length = 0;
+    const response = await service.handle({ ...download("c", "2.0.3"), subpath: "c" });
+    expect(response.status).toBe(200);
+    expect(calls).toEqual(["https://registry.npmjs.org/c"]);
+    expect(await store.isAllowedDependency("run-1", "npm", "c")).toBe(true);
+  });
+
   it("checks the download against the approved integrity", async () => {
     const npm = fakeNpm(chain);
     let tamper = false;
@@ -653,7 +665,8 @@ describe("downloads of approved versions", () => {
       ]);
     }
     expect(calls).toEqual([]);
-    expect(store.allowances.size).toBe(0);
+    // Only the approved name became an allowance; nothing walked.
+    expect([...store.allowances].map((key) => key.split("\0")[2])).toEqual(["a"]);
     // Recorded as a download refusal, the retried one once.
     expect(store.fetches.slice(fetchesBefore).map((fetch) => [fetch.name, fetch.version, fetch.reason])).toEqual([
       ["b", "1.1.0", "wardby_version_filtered"],
@@ -770,17 +783,11 @@ describe("downloads of approved versions", () => {
     await plan(chainLock);
     calls.length = 0;
     const response = await service.handle(download("c", "3.0.0"));
-    // Not approved: the allowlist, the graph walk and the version filter
-    // decide it from metadata, as for any install without a plan (the walk
-    // approves names, so c's other kept versions are served).
+    // Not approved: the version filter decides it from metadata. The plan
+    // approved the name c, which made it an allowance (as a walk would), so
+    // c's other kept versions are served with no walk.
     expect(response.status).toBe(200);
-    expect(calls).toEqual(
-      expect.arrayContaining([
-        "https://registry.npmjs.org/a",
-        "https://registry.npmjs.org/c",
-        tarballUrl("c", "3.0.0"),
-      ]),
-    );
+    expect(calls).toEqual(["https://registry.npmjs.org/c", tarballUrl("c", "3.0.0")]);
   });
 });
 

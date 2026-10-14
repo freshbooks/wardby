@@ -91,7 +91,7 @@ describe("RegistryService failure logging", () => {
       metadataTimeoutMs: 1_000,
       graphTimeoutMs: 20,
     });
-    const response = await registry.handle({ ...request, subpath: "stranger" });
+    const response = await registry.handle({ ...request, subpath: "stranger/-/stranger-1.0.0.tgz" });
     registry.close();
 
     expect(response).toMatchObject({ status: 403 });
@@ -130,7 +130,7 @@ describe("RegistryService failure logging", () => {
       graphTimeoutMs: 20,
     });
     log.info.mockClear();
-    await registry.handle({ ...request, subpath: "stranger" });
+    await registry.handle({ ...request, subpath: "stranger/-/stranger-1.0.0.tgz" });
     expect(log.info).toHaveBeenCalledTimes(1);
     expect(log.info).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -147,7 +147,7 @@ describe("RegistryService failure logging", () => {
       "coding registry graph walk stopped",
     );
     release();
-    await registry.handle({ ...request, subpath: "stranger" });
+    await registry.handle({ ...request, subpath: "stranger/-/stranger-1.0.0.tgz" });
     registry.close();
     expect(log.info).toHaveBeenCalledTimes(2);
     expect(log.info).toHaveBeenLastCalledWith(

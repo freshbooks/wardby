@@ -951,17 +951,17 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
     const { get, urls } = npmService(["JSONStream"]);
     await expect(get("jsonstream")).resolves.toMatchObject({ status: 403 });
     await expect(get("JSONStream")).resolves.toMatchObject({ status: 200 });
-    // Fetched twice, never as jsonstream: once trimmed by the graph walk
-    // that refused jsonstream, then again with render data to serve it.
-    expect(urls).toEqual(["https://registry.npmjs.org/JSONStream", "https://registry.npmjs.org/JSONStream"]);
+    // jsonstream is refused without any upstream call; JSONStream is
+    // fetched once, to serve it.
+    expect(urls).toEqual(["https://registry.npmjs.org/JSONStream"]);
   });
 
   it("allowing jsonstream does not allow JSONStream", async () => {
     const { get, urls } = npmService(["jsonstream"]);
     await expect(get("JSONStream")).resolves.toMatchObject({ status: 403 });
     await expect(get("jsonstream")).resolves.toMatchObject({ status: 200 });
-    // Walk (trimmed) then render fetch, both of jsonstream only.
-    expect(urls).toEqual(["https://registry.npmjs.org/jsonstream", "https://registry.npmjs.org/jsonstream"]);
+    // Only jsonstream is ever fetched.
+    expect(urls).toEqual(["https://registry.npmjs.org/jsonstream"]);
   });
 
   it("a JSONStream dependency is allowed exactly and fetched from /JSONStream", async () => {
@@ -970,13 +970,8 @@ describe("RegistryService with the npm adapter: names are case-exact", () => {
     expect(await store.isAllowedDependency("run-1", "npm", "JSONStream")).toBe(true);
     await expect(get("jsonstream")).resolves.toMatchObject({ status: 403 });
     await expect(get("JSONStream")).resolves.toMatchObject({ status: 200 });
-    // JSONStream is fetched trimmed by the walk that refused jsonstream,
-    // then with render data to serve it; never as jsonstream.
-    expect(urls).toEqual([
-      "https://registry.npmjs.org/app",
-      "https://registry.npmjs.org/JSONStream",
-      "https://registry.npmjs.org/JSONStream",
-    ]);
+    // jsonstream is refused without any upstream call; never fetched.
+    expect(urls).toEqual(["https://registry.npmjs.org/app", "https://registry.npmjs.org/JSONStream"]);
   });
 });
 
@@ -1384,6 +1379,9 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       registry.handle({ ...request(subpath, token), ecosystem: "npm" });
     return { get, urls, audited, store, concurrency, registry };
   }
+  /** A version's tarball path: only a download (a lockfile install's
+   *  request) walks the graph; a metadata miss is refused at once. */
+  const tgz = (name: string) => `${name}/-/${name}-1.0.0.tgz`;
 
   it("serves a transitive dependency's tarball, two levels deep, with no prior metadata request", async () => {
     const { get, store } = graphService();
@@ -1393,6 +1391,49 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     expect(await store.isAllowedDependency("run-1", "npm", "mid")).toBe(true);
     expect(await store.isAllowedDependency("run-1", "npm", "leaf")).toBe(true);
     expect(store.fetches).toMatchObject([{ name: "leaf", version: "1.0.0", outcome: "served" }]);
+  });
+
+  it("refuses a metadata request for a reachable name with no allowance at once, without walking", async () => {
+    // leaf is in the approved graph, but nothing declaring it was resolved
+    // yet: a package manager resolving top-down never asks for it first.
+    const { get, store, urls, audited, registry } = graphService();
+    const response = await get("leaf");
+    expect(response).toMatchObject({ status: 403 });
+    const body = "body" in response ? response.body : "";
+    expect(body).toContain("wardby_package_not_allowed:");
+    expect(body).not.toContain("pending");
+    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_package_not_allowed" }]);
+    expect(urls).toEqual([]);
+    expect(audited).toEqual([]);
+    const internals = registry as unknown as { tallies: Map<string, { graphs?: Map<string, unknown> }> };
+    expect(internals.tallies.get("run-1")?.graphs).toBeUndefined();
+    expect(await store.isAllowedDependency("run-1", "npm", "leaf")).toBe(false);
+  });
+
+  it("resolves top-down through metadata (app, then mid, then leaf) with no walk", async () => {
+    const { get, urls, registry } = graphService();
+    await expect(get("app")).resolves.toMatchObject({ status: 200 });
+    await expect(get("mid")).resolves.toMatchObject({ status: 200 });
+    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    // One render fetch per document served; nothing fetched by a walk.
+    expect(urls).toEqual([
+      "https://registry.npmjs.org/app",
+      "https://registry.npmjs.org/mid",
+      "https://registry.npmjs.org/leaf",
+    ]);
+    const internals = registry as unknown as { tallies: Map<string, { graphs?: Map<string, unknown> }> };
+    expect(internals.tallies.get("run-1")?.graphs).toBeUndefined();
+  });
+
+  it("still walks for a tarball download of a reachable version with no allowance (a lockfile install)", async () => {
+    const { get, urls, store } = graphService();
+    const response = await get("leaf/-/leaf-1.0.0.tgz");
+    if (!("stream" in response)) throw new Error(`expected a stream, got ${JSON.stringify(response)}`);
+    await new Response(response.stream).arrayBuffer();
+    // The walk read app and mid to prove leaf is in the graph.
+    expect(urls).toEqual(expect.arrayContaining(["https://registry.npmjs.org/app", "https://registry.npmjs.org/mid"]));
+    expect(await store.isAllowedDependency("run-1", "npm", "leaf")).toBe(true);
+    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "served" }]);
   });
 
   it('answers the final 403 wardby_package_not_allowed, with "the owner must allowlist it", only once the walk has completed', async () => {
@@ -1440,7 +1481,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
 
   it("answers 403 wardby_package_not_allowed_pending, never a retryable 503, for a name the timed-out walk has not reached", async () => {
     const { get, store } = graphService({ hang: "mid", graphTimeoutMs: 30 });
-    const response = await get("stranger");
+    const response = await get(tgz("stranger"));
     expect(response).toMatchObject({ status: 403 });
     const body = "body" in response ? response.body : "";
     expect(body).toContain("wardby_package_not_allowed_pending:");
@@ -1458,7 +1499,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     // leaf is in the graph, but mid (its parent) never answers: the walk
     // has not seen leaf, so it gets the pending answer, not the final one.
     const { get } = graphService({ hang: "mid", graphTimeoutMs: 30 });
-    const response = await get("leaf");
+    const response = await get(tgz("leaf"));
     expect(response).toMatchObject({ status: 403 });
     expect("body" in response && response.body).toContain("wardby_package_not_allowed_pending:");
     expect("body" in response && response.body).not.toContain("wardby_package_not_allowed:");
@@ -1467,7 +1508,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
 
   it("keeps 503 wardby_graph_incomplete for a name an expanded version declares while its own versions are still being checked", async () => {
     const { get, store } = graphService({ hang: "leaf", graphTimeoutMs: 30 });
-    const response = await get("leaf");
+    const response = await get(tgz("leaf"));
     expect(response).toMatchObject({ status: 503 });
     const body = "body" in response ? response.body : "";
     expect(body).toContain("wardby_graph_incomplete:");
@@ -1483,9 +1524,9 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       open = resolve;
     });
     const { get, store } = graphService({ gate, graphTimeoutMs: 30 });
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     open();
-    const final = await get("stranger");
+    const final = await get(tgz("stranger"));
     expect(final).toMatchObject({ status: 403 });
     expect("body" in final && final.body).toContain("wardby_package_not_allowed:");
     expect(store.fetches).toMatchObject([
@@ -1496,8 +1537,8 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
 
   it("resumes across requests: the second request continues the first walk without re-fetching packages it already expanded", async () => {
     const { get, urls } = graphService({ hang: "mid", graphTimeoutMs: 30 });
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
-    const retry = await get("stranger");
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
+    const retry = await get(tgz("stranger"));
     expect(retry).toMatchObject({ status: 403 });
     expect(urls.filter((url) => url.endsWith("/app"))).toHaveLength(1);
     // The retry went on from where the first walk stopped (app expanded,
@@ -1509,8 +1550,8 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     // Walks are per run on purpose: another run's allowlist must never
     // widen this one's graph, so the second run fetches app again.
     const { get, urls } = graphService({ hang: "mid", graphTimeoutMs: 30, otherRuns: { rrg_other: ["app@^1"] } });
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
-    await expect(get("stranger", "rrg_other")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"), "rrg_other")).resolves.toMatchObject({ status: 403 });
     expect(urls.filter((url) => url.endsWith("/app"))).toHaveLength(2);
   });
 
@@ -1521,9 +1562,9 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     // stops answering (leaf is memoized, so it needs no upstream call).
     const options: Parameters<typeof graphService>[0] = { allowlist: ["app@^1", "leaf", "tagged"], graphTimeoutMs: 30 };
     const { get } = graphService(options);
-    await expect(get("mid")).resolves.toMatchObject({ status: 200 });
+    await expect(get(tgz("mid"))).resolves.toMatchObject({ status: 200 });
     options.hang = "leaf-new";
-    const response = await get("stranger");
+    const response = await get(tgz("stranger"));
     expect(response).toMatchObject({ status: 403 });
     const body = "body" in response ? response.body : "";
     expect(body).toContain("wardby_package_not_allowed_pending:");
@@ -1556,7 +1597,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       open = resolve;
     });
     const { get, audited } = graphService({ gate });
-    const both = Promise.all([get("stranger"), get("stranger"), get("leaf")]);
+    const both = Promise.all([get(tgz("stranger")), get(tgz("stranger")), get(tgz("leaf"))]);
     await new Promise((resolve) => setTimeout(resolve, 10));
     open();
     const [first, second, third] = await both;
@@ -1571,28 +1612,28 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
 
   it("memoizes the walk: a second miss makes no upstream calls", async () => {
     const { get, urls } = graphService();
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     const before = urls.length;
     expect(before).toBeGreaterThan(0);
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     await expect(get("other-stranger/-/other-stranger-1.0.0.tgz")).resolves.toMatchObject({ status: 403 });
     expect(urls).toHaveLength(before);
   });
 
   it("does not start a walk from a scoped wildcard root", async () => {
     const { get, urls } = graphService({ allowlist: ["@scope/*"] });
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     expect(urls).toEqual([]);
   });
 
   it("retries a node whose metadata fails once, and finds the name", async () => {
     const { get } = graphService({ upstreamFailures: { mid: 1 } });
-    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 200 });
   });
 
   it("retries a node whose audit fails once, and finds the name", async () => {
     const { get } = graphService({ auditFailures: { mid: 1 } });
-    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 200 });
   });
 
   it("answers 502 wardby_upstream_error, not package_not_allowed, when a node's metadata stays unavailable", async () => {
@@ -1608,7 +1649,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
 
   it("answers 503 wardby_audit_unavailable when a node's audit stays unavailable", async () => {
     const { get, store } = graphService({ auditFailures: { mid: Infinity } });
-    const response = await get("leaf");
+    const response = await get(tgz("leaf"));
     expect(response).toMatchObject({ status: 503 });
     expect("body" in response && response.body).toContain("wardby_audit_unavailable");
     expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_audit_unavailable" }]);
@@ -1617,25 +1658,25 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
   it("retries a failed node on a later miss, with a per-run cap on attempts", async () => {
     const { get, urls } = graphService({ upstreamFailures: { mid: 2 } });
     // Two attempts in the first walk both fail; the next miss retries and finds it.
-    await expect(get("leaf")).resolves.toMatchObject({ status: 502 });
-    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 502 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 200 });
     const always = graphService({ upstreamFailures: { mid: Infinity } });
-    for (let i = 0; i < 5; i += 1) await always.get("leaf");
+    for (let i = 0; i < 5; i += 1) await always.get(tgz("leaf"));
     expect(always.urls.filter((url) => url.endsWith("/mid")).length).toBeLessThanOrEqual(4);
     expect(urls.filter((url) => url.endsWith("/mid")).length).toBe(3);
   });
 
   it("does not follow the dependencies of a version withheld by the audit", async () => {
     const { get, store } = graphService({ withheld: { mid: ["1.0.0"] } });
-    await expect(get("leaf")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 403 });
     expect(await store.isAllowedDependency("run-1", "npm", "leaf")).toBe(false);
   });
 
   it("keeps walk state per run: another run's allowlist does not widen this one", async () => {
     const { get } = graphService({ allowlist: ["stranger"], otherRuns: { rrg_other: ["app@^1"] } });
-    await expect(get("leaf", "rrg_other")).resolves.toMatchObject({ status: 200 });
-    await expect(get("leaf")).resolves.toMatchObject({ status: 403 });
-    await expect(get("mid")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("leaf"), "rrg_other")).resolves.toMatchObject({ status: 200 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("mid"))).resolves.toMatchObject({ status: 403 });
   });
 
   it("re-queues the batch and returns the error when an allowance write fails", async () => {
@@ -1647,10 +1688,10 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       return addAllowances(...args);
     };
     const { get } = graphService({ store });
-    const failed = await get("leaf");
+    const failed = await get(tgz("leaf"));
     expect(failed).toMatchObject({ status: 502 });
     failWrites = false;
-    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 200 });
     expect(await store.isAllowedDependency("run-1", "npm", "mid")).toBe(true);
   });
 
@@ -1660,7 +1701,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       graphTimeoutMs: 1_000,
       now: () => new Date(NOW.getTime() + (tick += 5_000)),
     });
-    const response = await get("leaf");
+    const response = await get(tgz("leaf"));
     // The deadline passed before anything was expanded: leaf was never
     // reached, so the answer is the pending 403, with app still queued.
     expect(response).toMatchObject({ status: 403 });
@@ -1676,7 +1717,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       maxGraphConcurrency: 2,
       upstreamDelayMs: 5,
     });
-    await Promise.all([get("stranger"), get("stranger", "rrg_other")]);
+    await Promise.all([get(tgz("stranger")), get(tgz("stranger"), "rrg_other")]);
     expect(concurrency.max).toBeLessThanOrEqual(2);
   });
 
@@ -1696,29 +1737,29 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
 
   it("follows an alias to its target under the alias's own range", async () => {
     const { get, store } = graphService({ allowlist: ["aliaser"] });
-    await expect(get("mid-two-only")).resolves.toMatchObject({ status: 200 });
+    await expect(get(tgz("mid-two-only"))).resolves.toMatchObject({ status: 200 });
     // ^2 excludes mid 1.x, so their dependencies are not in this graph.
-    await expect(get("leaf")).resolves.toMatchObject({ status: 403 });
-    await expect(get("leaf-new")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("leaf-new"))).resolves.toMatchObject({ status: 403 });
     expect(await store.isAllowedDependency("run-1", "npm", "mid")).toBe(true);
     expect(await store.isAllowedDependency("run-1", "npm", "mid-alias")).toBe(false);
   });
 
   it("contributes nothing for a range no kept version satisfies", async () => {
     const { get, store } = graphService({ allowlist: ["unsatisfied"] });
-    await expect(get("leaf")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 403 });
     expect(await store.isAllowedDependency("run-1", "npm", "mid")).toBe(false);
   });
 
   it("treats a dist-tag (or any non-range spec) as every kept version", async () => {
     const { get } = graphService({ allowlist: ["tagged"] });
-    await expect(get("mid-two-only")).resolves.toMatchObject({ status: 200 });
-    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    await expect(get(tgz("mid-two-only"))).resolves.toMatchObject({ status: 200 });
+    await expect(get(tgz("leaf"))).resolves.toMatchObject({ status: 200 });
   });
 
   it("expands each version of a package once, however many ranges reach it", async () => {
     const { get, audited } = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     expect(audited.filter((name) => name === "leaf")).toHaveLength(1);
   });
 
@@ -1737,7 +1778,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       if (name === "mid") midRanges.push(edges.map((edge) => edge.range));
       return graphNode(...args);
     };
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     // The ranges pending together when mid's node runs share it.
     expect(midRanges.some((ranges) => ranges.length > 1)).toBe(true);
     // (A dist-tag is followed as "*", every kept version.)
@@ -1760,7 +1801,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       upstreamDelayMs: 20,
       graphTimeoutMs: 300,
     });
-    const response = await get("mid");
+    const response = await get(tgz("mid"));
     expect(response, JSON.stringify(response)).toMatchObject({ status: 200 });
   });
 
@@ -1791,7 +1832,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       }
       return walk;
     };
-    const response = await get("leaf");
+    const response = await get(tgz("leaf"));
     expect(second).toBeDefined();
     await second;
     expect(response).toMatchObject({ status: 503 });
@@ -1807,10 +1848,10 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       release = resolve;
     });
     const { get, urls, store } = graphService({ allowlist: ["app@^1", "grand"], held: { leaf }, graphTimeoutMs: 30 });
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     expect(urls.filter((url) => url.endsWith("/mid"))).toHaveLength(1);
     release();
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     expect(urls.filter((url) => url.endsWith("/mid"))).toHaveLength(1);
     // mid@^2's own dependency joined the graph from the memoized versions.
     expect(await store.isAllowedDependency("run-1", "npm", "mid-two-only")).toBe(true);
@@ -1828,11 +1869,11 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
       graphTimeoutMs: 30,
       now: () => clock,
     });
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     expect(urls.filter((url) => url.endsWith("/mid"))).toHaveLength(1);
     release();
     clock = new Date(NOW.getTime() + 15 * 60_000 + 1);
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     expect(urls.filter((url) => url.endsWith("/mid"))).toHaveLength(2);
   });
 
@@ -1840,7 +1881,7 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     type Memo = Map<string, { bytes: number }>;
     const { get, registry } = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
     const internals = registry as unknown as { graphMemo: Memo; graphMemoBytes: number; graphMemoTotal: number };
-    await expect(get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     expect(internals.graphMemo.size).toBeGreaterThan(0);
     for (const key of internals.graphMemo.keys()) expect(key.startsWith("run-1\0npm\0")).toBe(true);
     expect(internals.graphMemoTotal).toBe([...internals.graphMemo.values()].reduce((sum, e) => sum + e.bytes, 0));
@@ -1853,14 +1894,14 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     const small = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
     const smallInternals = small.registry as unknown as { graphMemo: Memo; graphMemoBytes: number };
     smallInternals.graphMemoBytes = 1;
-    await expect(small.get("leaf")).resolves.toMatchObject({ status: 200 });
-    await expect(small.get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(small.get(tgz("leaf"))).resolves.toMatchObject({ status: 200 });
+    await expect(small.get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     expect(smallInternals.graphMemo.size).toBe(0);
     // A budget for about one entry keeps the total within it.
     const one = graphService({ allowlist: ["app@^1", "tagged", "aliaser"] });
     const oneInternals = one.registry as unknown as { graphMemo: Memo; graphMemoBytes: number; graphMemoTotal: number };
     oneInternals.graphMemoBytes = 400;
-    await expect(one.get("stranger")).resolves.toMatchObject({ status: 403 });
+    await expect(one.get(tgz("stranger"))).resolves.toMatchObject({ status: 403 });
     expect(oneInternals.graphMemoTotal).toBeLessThanOrEqual(400);
     expect(oneInternals.graphMemo.size).toBeGreaterThan(0);
   });
@@ -1935,9 +1976,10 @@ describe("RegistryService graph walk hardening", () => {
       limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
       now: () => NOW,
     });
-    await expect(registry.handle({ ...request("stranger"), ecosystem: "npm" })).resolves.toMatchObject({
-      status: 403,
-    });
+    // A download walks the graph (a metadata request would not).
+    await expect(
+      registry.handle({ ...request("stranger/-/stranger-1.0.0.tgz"), ecosystem: "npm" }),
+    ).resolves.toMatchObject({ status: 403 });
     expect(urls).toEqual(["https://registry.npmjs.org/app"]);
   });
 });
@@ -2037,11 +2079,14 @@ describe("RegistryService memory: nothing retains a parsed packument, and run st
       now,
     });
     const get = (subpath: string) => registry.handle({ ...request(subpath), ecosystem: "npm" });
+    // A HEAD of a tarball walks the graph (only a download does) without
+    // fetching the tarball itself.
+    const head = (subpath: string) => registry.handle({ ...request(subpath), method: "HEAD", ecosystem: "npm" });
     const internals = registry as unknown as {
       metadataCache: Map<string, { bytes: number; meta: PackageMetadata }>;
       tallies: Map<string, { graphs?: Map<string, { released?: boolean }> }>;
     };
-    return { registry, get, internals };
+    return { registry, get, head, internals };
   }
 
   it("lets every object of each parsed packument be collected after a walk and a metadata request", async () => {
@@ -2063,10 +2108,11 @@ describe("RegistryService memory: nothing retains a parsed packument, and run st
       return doc;
     };
     try {
-      const { get, internals } = memoryService();
-      // Serving leaf's document walks the graph (trimmed fetches of app and
-      // mid, then a render fetch of leaf); serving app's re-fetches it to
-      // render.
+      const { get, head, internals } = memoryService();
+      // A HEAD of leaf's tarball walks the graph (trimmed fetches of app
+      // and mid, then of leaf); serving leaf's and app's documents re-fetches
+      // them to render.
+      await expect(head("leaf/-/leaf-1.0.0.tgz")).resolves.toMatchObject({ status: 200 });
       await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
       await expect(get("app")).resolves.toMatchObject({ status: 200 });
       expect(internals.metadataCache.size).toBe(3);
@@ -2096,12 +2142,12 @@ describe("RegistryService memory: nothing retains a parsed packument, and run st
 
   it("releases a run's walk state when its deadline passes, with no other request", async () => {
     let clock = NOW;
-    const { get, internals } = memoryService(new Date(NOW.getTime() + 50), () => clock);
+    const { head, internals } = memoryService(new Date(NOW.getTime() + 50), () => clock);
     // No real-time race: while the injected clock stays at NOW, a timer that
     // fires early only re-arms (scheduleRelease checks this.now() against the
     // deadline), so the walk below cannot be released mid-walk however slow
     // the machine is.
-    await expect(get("leaf")).resolves.toMatchObject({ status: 200 });
+    await expect(head("leaf/-/leaf-1.0.0.tgz")).resolves.toMatchObject({ status: 200 });
     const walk = internals.tallies.get("run-1")?.graphs?.get("npm");
     expect(walk).toBeDefined();
     clock = new Date(NOW.getTime() + 60);
@@ -2226,6 +2272,7 @@ describe("RegistryService graph walk at scale", () => {
         },
       },
       upstream: async (url) => {
+        if (url.endsWith(".tgz")) return new Response(tarball);
         const name = decodeURIComponent(url.slice("https://registry.npmjs.org/".length));
         const match = name.match(/^p(\d+)$/);
         if (!match) return new Response("not found", { status: 404 });
@@ -2238,8 +2285,11 @@ describe("RegistryService graph walk at scale", () => {
       now: () => new Date(clock.ms),
       maxGraphPackages: overrides.maxGraphPackages,
     });
-    const get = async (subpath: string) => {
-      const response = await registry.handle({ ...request(subpath), ecosystem: "npm" });
+    // Each request is a download of the name's 1.0.0 tarball: only a
+    // download walks the graph.
+    const get = async (name: string) => {
+      const response = await registry.handle({ ...request(`${name}/-/${name}-1.0.0.tgz`), ecosystem: "npm" });
+      if ("stream" in response) await new Response(response.stream).arrayBuffer();
       return { status: response.status, body: "body" in response ? response.body : "" };
     };
     const walk = () =>
@@ -2314,7 +2364,7 @@ describe("RegistryService graph walk at scale", () => {
     const before = scale.counts.loads;
     const found = await scale.get(target);
     expect(found.status, found.body).toBe(200);
-    // Its own node, then its document fetched again to be served.
+    // Its own node, then (if not cached) its document for the download.
     expect(scale.counts.loads - before).toBeLessThanOrEqual(2);
     scale.registry.close();
   });
