@@ -434,6 +434,9 @@ export async function scanArchive(file, { budgetBytes, maxEntries = MAX_ARCHIVE_
 const streamCap = (budgetBytes, maxEntries) => budgetBytes + (maxEntries + 2) * 2048 + MAX_PAX_BYTES;
 
 // "wx" plus O_NOFOLLOW where the platform has it: never follows, creates or replaces.
+// O_EXCL alone already refuses any existing name, a planted link included (and
+// makes every written file a new one with a single link: see verifyLinks);
+// O_NOFOLLOW is a second guard where the platform has it.
 const CREATE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
 
 /** Each folder from `destination` down through `segments`, made if missing;
@@ -483,16 +486,20 @@ function writeNewFileSync(target, mode, data) {
 }
 
 /** Writes the checked entries under `destination` (the same walk and rules,
- *  so what is written is exactly what was checked). No owner, no setuid. */
+ *  so what is written is exactly what was checked). No owner, no setuid.
+ *  Returns the symlinks it made (absolute paths, in archive order), for
+ *  verifyLinks once the whole tree is written. */
 export async function extractArchive(file, destination, { budgetBytes, maxEntries = MAX_ARCHIVE_ENTRIES, signal }) {
   const rules = new EntryRules(budgetBytes, maxEntries);
   const verified = new Set();
+  const links = [];
   let openHandle;
   try {
     await extractEntries();
   } finally {
     await openHandle?.close().catch(() => undefined);
   }
+  return { links };
   async function extractEntries() {
     await walkTar(file, { signal, maxStreamBytes: streamCap(budgetBytes, maxEntries) }, async (entry) => {
       const { kind, path } = rules.check(entry);
@@ -506,6 +513,7 @@ export async function extractArchive(file, destination, { budgetBytes, maxEntrie
       await safeDirectory(destination, segments.slice(0, -1), verified);
       if (kind === "link") {
         await symlink(entry.linkname, target);
+        links.push(target);
         return undefined;
       }
       const mode = entry.mode & 0o111 ? 0o755 : 0o644;
@@ -545,47 +553,56 @@ export async function extractArchive(file, destination, { budgetBytes, maxEntrie
 }
 
 /**
- * After extraction: only files, folders and symlinks that resolve inside
- * `<root>/node_modules`. Each link must pass the same target rule as the
- * scan, and its native realpath (the kernel's resolution, following every
- * link on the way) must be inside the real node_modules folder.
+ * After extraction: every symlink extractArchive made must pass the same
+ * target rule as the scan, and its native realpath (the kernel's resolution,
+ * following every link on the way) must be inside the real node_modules
+ * folder. Run once the whole tree is written, since a link's resolution can
+ * depend on links written after it.
+ *
+ * Only the links need checking on disk; extraction itself guarantees the
+ * rest, so the tree is not walked again (a walk is one call per file, which
+ * is slow under gVisor):
+ * - it creates only files, folders and symlinks (EntryRules), so no other
+ *   kind of entry exists;
+ * - each file is created with O_CREAT | O_EXCL (CREATE_FLAGS) in a folder it
+ *   made or checked (safeDirectory, never through a link), so a file is
+ *   always new and has one link: a hard link cannot appear (tar hard-link
+ *   entries are refused) and nothing else writes to the tree before the
+ *   restore finishes.
+ *
+ * So this is only a complete check for a tree extractArchive wrote alone:
+ * `links` must be every link it reported, and nothing else may have written
+ * to `root` since. Each listed path is lstat'ed through its parent folders,
+ * which extraction guarantees are real folders.
  *
  * A dangling link (no realpath) is accepted only on the target rule: its
- * folder is a real folder (the walk never descends through links), its
+ * folder is a real folder (safeDirectory never makes or follows a link), its
  * leading `..` segments are therefore resolved exactly as written, and every
  * later segment only descends, through real folders or through links that
  * are themselves checked here. So whatever later fills the gap is inside.
  * npm leaves such links for optional packages it skipped.
  */
-export async function verifyTree(root, signal) {
-  const top = join(root, ROOT);
-  const realTop = await realpath(top);
-  const stack = [top];
-  while (stack.length) {
+export async function verifyLinks(root, links, signal) {
+  const realTop = await realpath(join(root, ROOT));
+  for (const path of links) {
     signal?.throwIfAborted();
-    const directory = stack.pop();
-    // Types from the folder listing (no lstat per entry); a regular file is
-    // still lstat'ed, for its link count (a hard link is refused): synchronously,
-    // since one async round trip per file costs more than the call itself.
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) stack.push(path);
-      else if (entry.isFile()) {
-        const info = lstatSync(path);
-        if (!info.isFile() || info.nlink > 1) throw new Skip("unsafe_archive");
-      } else if (entry.isSymbolicLink()) {
-        const target = await readlink(path);
-        if (!plainLinkTarget(toPosix(path.slice(root.length + 1)), target)) throw new Skip("unsafe_archive");
-        let real;
-        try {
-          real = await realpath(path); // native: resolves `..` after each link, like open() will
-        } catch (error) {
-          if (error?.code === "ENOENT") continue;
-          throw new Skip("unsafe_archive"); // ELOOP and the like
-        }
-        if (real !== realTop && !real.startsWith(realTop + sep)) throw new Skip("unsafe_archive");
-      } else throw new Skip("unsafe_archive");
+    let info;
+    try {
+      info = lstatSync(path);
+    } catch {
+      throw new Skip("unsafe_archive");
     }
+    if (!info.isSymbolicLink()) throw new Skip("unsafe_archive");
+    const target = await readlink(path);
+    if (!plainLinkTarget(toPosix(path.slice(root.length + 1)), target)) throw new Skip("unsafe_archive");
+    let real;
+    try {
+      real = await realpath(path); // native: resolves `..` after each link, like open() will
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw new Skip("unsafe_archive"); // ELOOP and the like
+    }
+    if (real !== realTop && !real.startsWith(realTop + sep)) throw new Skip("unsafe_archive");
   }
 }
 
@@ -991,9 +1008,12 @@ async function restore(context, project, id, maxBytes, { consistency, manifest }
     throw new Skip("budget_too_small");
   }
   await mkdir(temp, { mode: 0o700 });
-  await measure("extract", () => extractArchive(archive, temp, { budgetBytes: limit, signal })).catch(refused);
+  const { links } = await measure("extract", () => extractArchive(archive, temp, { budgetBytes: limit, signal })).catch(
+    refused,
+  );
   await removeTemp(context.workspace, archive);
-  await measure("verify_tree", () => verifyTree(temp, signal));
+  await context.testHooks?.beforeVerifyLinks?.(temp);
+  await measure("verify_links", () => verifyLinks(temp, links, signal));
   context.known = measured;
   // A sanity check that this is the tree for this lockfile, not an
   // integrity control: integrity is the sha256 the proxy recorded in its

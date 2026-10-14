@@ -109,6 +109,8 @@ export interface DependencyCacheTestHooks {
   readonly beforeNpmCacheMove?: () => Promise<void>;
   /** After npm's `_cacache` was moved to the module's own temp, before it is removed. */
   readonly beforeNpmCacheRemove?: () => Promise<void>;
+  /** After a restore's extraction, before its symlinks are verified (the temp folder it wrote). */
+  readonly beforeVerifyLinks?: (temp: string) => Promise<void>;
   /** After an archive that outgrew the budget was stopped and removed. */
   readonly afterArchiveAborted?: (archive: string) => Promise<void>;
 }
@@ -203,9 +205,9 @@ export declare function extractArchive(
   file: string,
   destination: string,
   options: { budgetBytes: number; maxEntries?: number; signal?: AbortSignal },
-): Promise<void>;
+): Promise<{ links: string[] }>;
 
-export declare function verifyTree(root: string, signal?: AbortSignal): Promise<void>;
+export declare function verifyLinks(root: string, links: readonly string[], signal?: AbortSignal): Promise<void>;
 
 export declare function checkConsistency(
   projectRoot: string,

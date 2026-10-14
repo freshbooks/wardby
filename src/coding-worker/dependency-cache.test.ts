@@ -34,7 +34,7 @@ import {
   readRegularFile,
   scanArchive,
   sealUploadWindow,
-  verifyTree,
+  verifyLinks,
   type DependencyCacheEvent,
   type PrepareDependenciesResult,
   type PrepareResult,
@@ -779,6 +779,23 @@ describe("untrusted archives", () => {
     expect(await readdir(outside)).toEqual([]);
   });
 
+  it("a restore verifies the links it extracted: one changed before the check rejects the hit", async () => {
+    hitWith(await realTarSnapshot(LOCKFILE));
+    const outside = join(root, "outside-link");
+    await writeFile(outside, "x");
+    const reason = await prepareRefusedHit({
+      testHooks: {
+        beforeVerifyLinks: async (temp) => {
+          const link = join(temp, "node_modules/.bin/beta");
+          expect(await readlink(link)).toBe("../beta/index.js");
+          await rm(link);
+          await symlink(outside, link);
+        },
+      },
+    });
+    expect(reason).toBe("unsafe_archive");
+  });
+
   it("restores files over 1 MiB (streamed) and up to 1 MiB (buffered) byte for byte", async () => {
     const { randomBytes } = await import("node:crypto");
     const large = randomBytes(1024 * 1024 + 4097);
@@ -824,47 +841,109 @@ describe("untrusted archives", () => {
     expect(await readdir(outside)).toEqual([]);
   });
 
-  it("verifyTree still refuses a hard link and a fifo in the written tree", async () => {
-    const tree = join(root, "tree-types");
-    await mkdir(join(tree, "node_modules/a"), { recursive: true });
-    await writeFile(join(tree, "node_modules/a/f"), "x");
-    await expect(verifyTree(tree)).resolves.toBeUndefined();
-    const { link } = await import("node:fs/promises");
-    await link(join(tree, "node_modules/a/f"), join(tree, "node_modules/a/g"));
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
-    await rm(join(tree, "node_modules/a/g"));
-    expect(spawnSync("mkfifo", [join(tree, "node_modules/a/pipe")]).status).toBe(0);
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+  it("extraction returns the links it made, and never writes over or beside an existing entry", async () => {
+    const destination = join(root, "dest-links");
+    await mkdir(destination);
+    const archive = join(root, "links.tgz");
+    await writeFile(
+      archive,
+      rawTar([
+        { name: "node_modules/a/f", body: "x" },
+        { name: "node_modules/.bin/a", type: "2", link: "../a/f" },
+        { name: "node_modules/b", type: "2", link: "a" },
+      ]),
+    );
+    const { links } = await extractArchive(archive, destination, { budgetBytes: 1024 * 1024 });
+    expect(links).toEqual([join(destination, "node_modules/.bin/a"), join(destination, "node_modules/b")]);
+    await expect(verifyLinks(destination, links)).resolves.toBeUndefined();
+
+    // A file is only ever created (O_EXCL): a planted file where one goes is refused, never replaced,
+    // so every written file is new and has a single link.
+    const again = join(root, "dest-planted");
+    await mkdir(join(again, "node_modules/a"), { recursive: true });
+    await writeFile(join(again, "node_modules/a/f"), "planted");
+    await expect(extractArchive(archive, again, { budgetBytes: 1024 * 1024 })).rejects.toBeDefined();
+    expect(await readFile(join(again, "node_modules/a/f"), "utf8")).toBe("planted");
   });
 
-  it("verifyTree rejects a written tree with a link out of node_modules, even through a linked folder", async () => {
+  it("an archive of files only reports no links and writes each file with a single link", async () => {
+    // Extraction refuses tar hard-link entries (see the table above) and creates every file with O_EXCL,
+    // so verifyLinks only needs the links extraction reports.
+    const destination = join(root, "dest-nolinks");
+    await mkdir(destination);
+    const archive = join(root, "files.tgz");
+    await writeFile(archive, rawTar([{ name: "node_modules/a/f", body: "x" }]));
+    const { links } = await extractArchive(archive, destination, { budgetBytes: 1024 * 1024 });
+    expect(links).toEqual([]);
+    const { stat } = await import("node:fs/promises");
+    expect((await stat(join(destination, "node_modules/a/f"))).nlink).toBe(1);
+  });
+
+  it("verifyLinks refuses a listed path that is no longer a link", async () => {
+    const tree = join(root, "tree-kinds");
+    await mkdir(join(tree, "node_modules/a"), { recursive: true });
+    await writeFile(join(tree, "node_modules/a/f"), "x");
+    await expect(verifyLinks(tree, [join(tree, "node_modules/a/f")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+    await expect(verifyLinks(tree, [join(tree, "node_modules/missing")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+  });
+
+  it("verifyLinks rejects a written tree with a link out of node_modules, even through a linked folder", async () => {
     const tree = join(root, "tree");
     await mkdir(join(tree, "node_modules/p"), { recursive: true });
     await symlink("..", join(tree, "node_modules/p/q"));
-    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    const links = [join(tree, "node_modules/p/q")];
+    await expect(verifyLinks(tree, links)).resolves.toBeUndefined();
     await symlink("../..", join(tree, "node_modules/r")); // what p/q/r -> ../.. really is
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
-    await rm(join(tree, "node_modules/r"));
+    await expect(verifyLinks(tree, [...links, join(tree, "node_modules/r")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
     await symlink("/etc", join(tree, "node_modules/abs"));
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+    await expect(verifyLinks(tree, [...links, join(tree, "node_modules/abs")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
   });
 
-  it("verifyTree rejects a written link that escapes once the kernel follows the links before it", async () => {
+  it("verifyLinks rejects a written link that escapes once the kernel follows the links before it", async () => {
     const tree = join(root, "tree");
     await mkdir(join(tree, "node_modules/a/b"), { recursive: true });
     await symlink("../..", join(tree, "node_modules/a/b/s")); // -> node_modules: inside
-    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    const links = [join(tree, "node_modules/a/b/s")];
+    await expect(verifyLinks(tree, links)).resolves.toBeUndefined();
     await symlink("a/b/s/../..", join(tree, "node_modules/t")); // lexically node_modules/a; really tree's parent
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+    await expect(verifyLinks(tree, [...links, join(tree, "node_modules/t")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
   });
 
-  it("verifyTree allows a dangling link only when its target is plainly inside", async () => {
+  it("verifyLinks resolves each link on disk: a target the text rule accepts still fails if it lands outside", async () => {
+    // Extraction never makes a folder that is a link (safeDirectory), so this can't come from an archive;
+    // it's the realpath check alone that refuses it.
+    const tree = join(root, "tree-swapped");
+    const outside = join(root, "outside-swapped");
+    await mkdir(join(tree, "node_modules"), { recursive: true });
+    await mkdir(outside);
+    await writeFile(join(outside, "y"), "x");
+    await symlink("y", join(outside, "x"));
+    await symlink(outside, join(tree, "node_modules/p"));
+    await expect(verifyLinks(tree, [join(tree, "node_modules/p/x")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+  });
+
+  it("verifyLinks allows a dangling link only when its target is plainly inside", async () => {
     const tree = join(root, "tree");
     await mkdir(join(tree, "node_modules/.bin"), { recursive: true });
     await symlink("../missing/cli.js", join(tree, "node_modules/.bin/tool"));
-    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    const links = [join(tree, "node_modules/.bin/tool")];
+    await expect(verifyLinks(tree, links)).resolves.toBeUndefined();
     await symlink("nothere/../.bin", join(tree, "node_modules/odd"));
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+    await expect(verifyLinks(tree, [...links, join(tree, "node_modules/odd")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
   });
 
   it("scanArchive accepts a real tar snapshot and counts its bytes", async () => {
@@ -918,7 +997,7 @@ describe("archive manifest (scan recorded at upload)", () => {
   it("logs each restore stage with its duration", async () => {
     hitWith(await realTarSnapshot(LOCKFILE));
     expect(await prepare()).toMatchObject({ result: "hit" });
-    expect(restoreStages()).toEqual(["download", "scan", "extract", "verify_tree", "check_consistency"]);
+    expect(restoreStages()).toEqual(["download", "scan", "extract", "verify_links", "check_consistency"]);
     for (const event of events.filter((entry) => entry.event === "restore_phase"))
       expect(typeof event.ms).toBe("number");
   });
@@ -974,7 +1053,7 @@ describe("archive manifest (scan recorded at upload)", () => {
       body: { key: "c".repeat(64), hit: false, nearest: { id: "b".repeat(64), manifest }, maxBytes: 64 * 1024 * 1024 },
     });
     expect(await prepare()).toMatchObject({ result: "nearest" });
-    expect(restoreStages()).toEqual(["download", "extract", "verify_tree"]);
+    expect(restoreStages()).toEqual(["download", "extract", "verify_links"]);
   });
 
   it("a manifest understating unpackedBytes does not lift the bound: extraction still refuses over_budget", async () => {
