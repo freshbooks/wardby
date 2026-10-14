@@ -13,9 +13,10 @@ appliesTo: ">=0.6.1"
 its limit of `REGISTRY_MAX_GRAPH_PACKAGES` package names (default 3000, counted
 per run and ecosystem) before it reached the requested package, so the package
 may not be in the graph at all. The bound is permanent for the run, so
-retrying does not help. It arises only for a tarball download in a lockfile
-install that the lockfile plan did not approve; a metadata request never walks
-the graph.
+retrying does not help. It arises only when the
+registry walks the graph: for a tarball download the run hasn't resolved (a
+lockfile install), or for a metadata request after a lockfile plan of the run
+failed or refused an entry.
 
 Large frameworks (for example Expo) can exceed the limit, because the walk
 follows every in-range kept version plus optional and peer dependencies, so its

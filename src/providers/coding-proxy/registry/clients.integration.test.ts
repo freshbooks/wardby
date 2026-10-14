@@ -127,6 +127,8 @@ interface TestRegistry {
   store: MemoryRegistryStore;
   token: string;
   registryUrl: (ecosystem: string) => string;
+  /** Whether any graph walk ran for the run (its walk state exists). */
+  walked: () => boolean;
 }
 
 /** Starts a real coding-proxy HTTP server backed by a real RegistryService,
@@ -177,7 +179,16 @@ async function startTestRegistry(
   });
   const proxy = new CodingProxy({ ledger: new MemoryProxyLedger(), credentials: { resolve: async () => "UNUSED" } });
   const server = await startCodingProxyServer(proxy, { host: "127.0.0.1", port, registry });
-  return { server, store, token, registryUrl: (ecosystem) => `http://127.0.0.1:${port}/registry/${ecosystem}/` };
+  const walked = () =>
+    ((registry as unknown as { tallies: Map<string, { graphs?: Map<string, unknown> }> }).tallies.get(context.runId)
+      ?.graphs?.size ?? 0) > 0;
+  return {
+    server,
+    store,
+    token,
+    registryUrl: (ecosystem) => `http://127.0.0.1:${port}/registry/${ecosystem}/`,
+    walked,
+  };
 }
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -286,6 +297,7 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
       store,
       token,
       registryUrl: registryUrlFor,
+      walked,
     } = await startTestRegistry({ npm: ["wardby-lock-root"] }, routes);
     cleanups.push(() => server.close());
 
@@ -334,6 +346,8 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
         .sort(),
     ).toEqual(["wardby-lock-child", "wardby-lock-root"]);
     expect(await store.isAllowedDependency("client-integration-run", "npm", "wardby-lock-child")).toBe(true);
+    // Without a plan, the child's tarball was found by a graph walk.
+    expect(walked()).toBe(true);
   });
 
   it("verifies a committed package-lock.json through the npm shim, then installs the approved versions without a walk", async () => {
@@ -375,6 +389,7 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
       store,
       token,
       registryUrl: registryUrlFor,
+      walked,
     } = await startTestRegistry({ npm: ["wardby-lock-root"] }, routes);
     cleanups.push(() => server.close());
 
@@ -418,7 +433,8 @@ describe.skipIf(!RUN)("registry proxy with real npm and pip clients", () => {
         .map((fetch) => fetch.name)
         .sort(),
     ).toEqual(["wardby-lock-child", "wardby-lock-root"]);
-    // The only allowances are the plan's approved names.
+    // No graph walk ran, and the only allowances are the plan's approved names.
+    expect(walked()).toBe(false);
     expect([...store.allowances].map((key) => key.split("\0")[2]).sort()).toEqual([
       "wardby-lock-child",
       "wardby-lock-root",

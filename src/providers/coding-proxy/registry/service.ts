@@ -91,9 +91,10 @@ const GRAPH_WALK_CONCURRENCY = 2;
  *  walk cannot starve the others' upstream fetches -- or the proxy's event
  *  loop: parsing packuments is CPU work on the same loop that carries model
  *  traffic (per-walk 2 and global 3 since a live install at 4/6 on 500m
- *  expired a ledger transaction). The walk is only the fallback now: only a
- *  download of a version the run has not resolved starts one, and lockfile
- *  verification answers most of those without it. */
+ *  expired a ledger transaction). The walk is only the fallback now: a
+ *  download of a version the run has not resolved starts one (and a
+ *  metadata miss, only after a failed or partial lockfile plan), and
+ *  lockfile verification answers most of those without it. */
 export const DEFAULT_MAX_GRAPH_CONCURRENCY = 3;
 /** Byte budget of the graph walk's memo of expanded packages (kept
  *  versions and their declared dependencies), across every run. */
@@ -198,7 +199,8 @@ interface WalkResult {
 }
 
 /** One run's on-demand walk of its approved dependency graph for one
- *  ecosystem, started only by a download (a metadata request never walks),
+ *  ecosystem, started by a download (or, after a failed or partial lockfile
+ *  plan, by a metadata miss),
  *  range-aware: breadth first (by package) from the allowlist's
  *  exact roots, following each declared dependency `name@range` only into
  *  that dependency's kept versions satisfying the range, and from those
@@ -350,6 +352,13 @@ interface RunTally {
   /** Plan refusals already recorded (`ecosystem\0name@version\0code`), so
    *  a lockfile planned again records each refusal once. */
   planRefusals?: Set<string>;
+  /** Ecosystems where a lockfile plan of this run failed (any error
+   *  answer) or refused an entry. There, the lockfile's packages may have
+   *  no allowance (npm re-reads their metadata, or inflates an old
+   *  lockfile, in no top-down order), so a metadata miss walks the graph
+   *  like a download does. Never cleared for the run. Per proxy process,
+   *  like the graph walks. */
+  planFallback?: Set<string>;
 }
 export type RegistryResponse =
   | { status: number; contentType: string; body: string }
@@ -570,6 +579,22 @@ export class RegistryService {
     if (!support || !auditVersions)
       throw new RegistryError(404, "wardby_plan_unsupported", `the ${adapter.id} registry does not verify lockfiles`);
     const tally = this.tally(context);
+    try {
+      return await this.runPlan(request, adapter, support, auditVersions, context, tally);
+    } catch (error) {
+      (tally.planFallback ??= new Set()).add(adapter.id);
+      throw error;
+    }
+  }
+
+  private async runPlan(
+    request: RegistryPlanRequest,
+    adapter: RegistryAdapter,
+    support: LockfilePlanSupport,
+    auditVersions: OsvAudit["auditVersions"],
+    context: RegistryRunContext,
+    tally: RunTally,
+  ): Promise<RegistryResponse> {
     if (tally.planning)
       throw new RegistryError(
         429,
@@ -648,12 +673,16 @@ export class RegistryService {
           : `the lockfile was not verified within ${Math.round(timeoutMs / 1000)} s (REGISTRY_PLAN_TIMEOUT_MS); what was verified is kept, so try again`,
       );
     }
-    await store.approveVersions(context.runId, adapter.id, result.approved);
     // An approved name is proven part of the approved graph, so it is an
     // allowance too: its metadata (which npm re-reads for packages already
-    // in the lockfile) is served without a graph walk, which a metadata
-    // request never starts.
+    // in the lockfile) is served without a graph walk. Written before the
+    // approvals: a name allowance left behind by a failed approval write is
+    // only what a walk would conclude.
     await store.addAllowances(context.runId, adapter.id, [...new Set(result.approved.map((v) => v.name))]);
+    await store.approveVersions(context.runId, adapter.id, result.approved);
+    // A plan that refused anything leaves some lockfile packages without an
+    // allowance: metadata misses walk for the rest of the run.
+    if (result.refused.length > 0) (this.tally(context).planFallback ??= new Set()).add(adapter.id);
     // Only verdicts about the registry's name@version itself answer later
     // downloads; a lockfile-dependent one (unreachable, an integrity or
     // source the lockfile claims) must not block the same version reached
@@ -910,15 +939,18 @@ export class RegistryService {
     // A package manager resolves top-down: it reads a parent's metadata,
     // which records the parent's declared dependencies as allowances,
     // before it asks for a child. A metadata request for a name that is
-    // neither a root nor an allowance is therefore refused at once.
-    if (kind !== "download") {
+    // neither a root nor an allowance is therefore refused at once, unless
+    // a lockfile plan of this run failed or refused an entry (then the
+    // lockfile's packages may lack allowances, and the miss walks).
+    if (kind !== "download" && !this.tally(context).planFallback?.has(adapter.id)) {
       await this.refuse(context, adapter, name, PACKAGE_NOT_ALLOWED);
       throw new RegistryError(403, PACKAGE_NOT_ALLOWED, notAllowedMessage(name, adapter.id, entries.length > 0));
     }
-    // A download that is not yet an allowance: the version may still be in
-    // the approved graph, unrecorded only because the client never asked
-    // for its parent's metadata (a lockfile install requests tarballs
-    // directly). Resolve the graph before refusing.
+    // A download (or, after a failed or partial plan, a metadata request)
+    // that is not yet an allowance: the name may still be in the approved
+    // graph, unrecorded only because the client never asked for its
+    // parent's metadata (a lockfile install requests tarballs directly).
+    // Resolve the graph before refusing.
     const graph = await this.resolveInGraph(adapter, context, entries, name);
     if (graph === "found") return undefined;
     if (typeof graph === "object" && "cutShort" in graph) {
@@ -971,9 +1003,10 @@ export class RegistryService {
    *  version (the same filter the metadata path applies: root range,
    *  release age, advisories), transitively. Each newly found name is
    *  recorded as an allowance as the walk goes, exactly as if its
-   *  parent's metadata had been served. Only a download asks (`authorize`
-   *  refuses a metadata miss without it). A scoped wildcard root cannot be
-   *  enumerated, so it is never a starting point. */
+   *  parent's metadata had been served. Only a download asks, or a
+   *  metadata miss after a failed or partial lockfile plan (see
+   *  `authorize`). A scoped wildcard root cannot be enumerated, so it is
+   *  never a starting point. */
   private async resolveInGraph(
     adapter: RegistryAdapter,
     context: RegistryRunContext,

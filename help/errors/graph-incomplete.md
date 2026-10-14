@@ -10,9 +10,10 @@ appliesTo: ">=0.6.1"
 # Package still being checked
 
 `wardby_graph_incomplete` (HTTP 503) means the requested package is still
-being checked against the allowed packages' dependency graph. It arises only
-for a tarball download in a lockfile install that the lockfile plan did not
-approve; a metadata request never walks the graph. The walk reached
+being checked against the allowed packages' dependency graph. It arises only when the
+registry walks the graph: for a tarball download the run hasn't resolved (a
+lockfile install), or for a metadata request after a lockfile plan of the run
+failed or refused an entry. The walk reached
 the name (an expanded version declares it) but timed out
 (`REGISTRY_GRAPH_TIMEOUT_MS`) before the name's own versions were checked. That
 is usually a slow or failing upstream for that package, or another request's

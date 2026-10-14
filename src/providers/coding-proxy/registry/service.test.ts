@@ -411,6 +411,55 @@ describe("RegistryService", () => {
   });
 });
 
+describe("RegistryService file-metadata misses", () => {
+  it("refuses a file-metadata request for a reachable name at once, without walking", async () => {
+    // An adapter that walks (dependencies in metadata) and serves per-file
+    // metadata: dep is reachable through the root app.
+    const fetched: string[] = [];
+    const adapter: RegistryAdapter = {
+      ...fakeAdapter,
+      route: (method, subpath, headers) => {
+        const match = subpath.match(/^fm\/([^/]+)\/([^/]+)$/);
+        return match
+          ? { kind: "file-metadata", name: match[1], filename: match[2] }
+          : fakeAdapter.route(method, subpath, headers);
+      },
+      fetchMetadata: async (name) => {
+        fetched.push(name);
+        return catalog[name];
+      },
+    };
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { fake: ["app"] },
+      policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
+    });
+    const registry = new RegistryService({
+      adapters: new Map([["fake", adapter]]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async () => new Response(tarball),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    const response = await registry.handle(request("fm/dep/1.0.0.tgz"));
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed:");
+    expect(fetched).toEqual([]);
+    // A download of the same name still walks (through app) and is served.
+    const download = await registry.handle(request("dl/dep/1.0.0"));
+    expect(download).toMatchObject({ status: 200 });
+    if ("stream" in download) await download.stream.cancel();
+    expect(fetched).toContain("app");
+  });
+});
+
 describe("RegistryService accepted advisories (packagePolicy.acceptedAdvisories)", () => {
   /** An advisory index over fixed blocking advisories per `name@version`,
    *  waiving through audit.ts's own splitWaived (malware never waived). */
@@ -1408,6 +1457,15 @@ describe("RegistryService resolves the approved graph on demand (npm lockfile in
     const internals = registry as unknown as { tallies: Map<string, { graphs?: Map<string, unknown> }> };
     expect(internals.tallies.get("run-1")?.graphs).toBeUndefined();
     expect(await store.isAllowedDependency("run-1", "npm", "leaf")).toBe(false);
+  });
+
+  it("refuses a HEAD on a metadata route for a reachable name at once, without walking", async () => {
+    const { registry, store, urls } = graphService();
+    const response = await registry.handle({ ...request("leaf"), method: "HEAD", ecosystem: "npm" });
+    expect(response).toMatchObject({ status: 403 });
+    expect("body" in response && response.body).toContain("wardby_package_not_allowed:");
+    expect(urls).toEqual([]);
+    expect(store.fetches).toMatchObject([{ name: "leaf", outcome: "refused", reason: "wardby_package_not_allowed" }]);
   });
 
   it("resolves top-down through metadata (app, then mid, then leaf) with no walk", async () => {

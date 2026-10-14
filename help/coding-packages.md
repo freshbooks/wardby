@@ -56,9 +56,12 @@ them by allowlisting the package directly (`update_agent`,
 - `wardby_graph_limit`: the dependency graph is over `REGISTRY_MAX_GRAPH_PACKAGES`.
 - `wardby_graph_incomplete`: still being checked; retry shortly.
 
-The last three arise only for tarball downloads in a lockfile install that the
-lockfile plan did not approve, where the proxy walks the dependency graph to
-check the package. A metadata request (resolving a package) never walks.
+The last three arise only when the proxy walks the dependency graph: for a
+tarball download the run hasn't resolved (a lockfile install the plan did not
+approve), or for a metadata request after a lockfile plan of the run failed
+or refused an entry. Otherwise a metadata request never walks. A
+lockfileVersion 1 lockfile can't be planned, so regenerate it with a current
+npm to avoid the slower walk.
 
 ## PyPI extras
 
