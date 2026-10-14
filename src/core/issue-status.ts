@@ -310,11 +310,15 @@ async function postFullReply(
   issueKeyProjects: string[],
   visibilityRole: string | null | undefined,
 ): Promise<void> {
-  const bodies = fullReplyComments(reply, { maxChars: JIRA_REPLY_MAX_CHARS, maxParts: REPLY_MAX_PARTS });
+  // Converted first, then split: the conversion lengthens `owner/repo#N` references, and the parts must fit after it.
+  const bodies = fullReplyComments(toJiraMarkdown(reply), {
+    maxChars: JIRA_REPLY_MAX_CHARS,
+    maxParts: REPLY_MAX_PARTS,
+  });
   for (const [i, body] of bodies.entries()) {
     try {
       await tracker.comment(issueKey, {
-        markdown: toJiraMarkdown(body),
+        markdown: body,
         issueKeyProjects,
         ...(visibilityRole ? { visibilityRole } : {}),
       });

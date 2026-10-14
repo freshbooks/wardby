@@ -32,7 +32,7 @@ const MAX_REPLY_CHARS = 2000;
 export const GITHUB_REPLY_MAX_CHARS = 60_000;
 /** The most follow-up comments a full reply is posted as; the rest is cut, and stays on the run. */
 export const REPLY_MAX_PARTS = 4;
-/** The most a Jira follow-up comment holds, header and cut note included (Jira's limit is about 32,000). */
+/** The most a Jira follow-up comment holds, header and cut note included (Jira's limit is exactly 32,767 characters). */
 export const JIRA_REPLY_MAX_CHARS = 30_000;
 /** The status comment's line when the full reply follows. */
 const FULL_REPLY_FOLLOWS = "The full reply follows in the next comment(s).";

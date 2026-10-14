@@ -333,13 +333,26 @@ describe("completeIssueStatus with a long reply", () => {
     expect(calls.length).toBeLessThanOrEqual(4);
     calls.forEach((c: any[], i: number) => {
       expect(c[0]).toBe("PROJ-1");
-      expect(c[1].markdown.length).toBeLessThanOrEqual(JIRA_REPLY_MAX_CHARS * 1.2);
+      expect(c[1].markdown.length).toBeLessThanOrEqual(JIRA_REPLY_MAX_CHARS);
       if (i === 0) expect(c[1].markdown).toContain("Paragraph 0 ");
     });
     expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
       where: { runId: "r1" },
       data: { commentId: "c-1", completedAt: expect.any(Date) },
     });
+  });
+  it("sizes parts after the reference conversion, converting once", async () => {
+    const t = tracker();
+    const dense = "org/repo#1234 ".repeat(7200);
+    await completeIssueStatus(db(row), { id: "r1", status: "succeeded", finalText: dense }, { jira: t });
+    const calls = (t.comment as any).mock.calls;
+    expect(calls.length).toBeGreaterThan(1);
+    expect(calls.length).toBeLessThanOrEqual(4);
+    for (const c of calls) {
+      expect(c[1].markdown.length).toBeLessThanOrEqual(JIRA_REPLY_MAX_CHARS);
+      expect(c[1].markdown).toContain("[org/repo#1234](https://github.com/org/repo/pull/1234)");
+      expect(c[1].markdown).not.toContain("](https://github.com/[");
+    }
   });
   it("keeps a short reply in the status comment alone", async () => {
     const t = tracker();
