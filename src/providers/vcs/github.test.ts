@@ -14,6 +14,7 @@ import {
   upsertRelatedSection,
   type PullRequestInput,
 } from "./github.js";
+import { descriptionSha256 } from "./pr-description.js";
 
 const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 const NOW = new Date("2026-09-06T12:00:00.000Z");
@@ -1315,5 +1316,397 @@ describe("related pull requests section", () => {
     expect(parts[2].startsWith(RELATED_SECTION_START)).toBe(true);
     expect(body).toContain("1. [acme/bff#3](https://github.com/acme/bff/pull/3)\n2. **This pull request**");
     expect(body.indexOf(RELATED_SECTION_END)).toBeLessThan(body.indexOf(`**${DEPENDENCY_INSTALL_INCOMPLETE}**`));
+  });
+});
+
+describe("GitHubAppClient.updatePullRequestDescription", () => {
+  const ROOT = "run-1";
+  const RUN = "run-2";
+  const OLD_SUMMARY = "Adds the knock-knock joke endpoint with a seeded list of jokes and a handler test. Resolves #12";
+  const NEW_SUMMARY =
+    "Adds the knock-knock joke endpoint, and now also validates the joke id parameter after review. Resolves #12";
+  const base = { repository: "openai/example", baseRef: "main", headRef: `wardby/run-${ROOT}` };
+  const OLD_TESTS = [{ command: "npm test", outcome: "failed" as const }];
+  const NEW_TESTS = [{ command: "npm test", outcome: "passed" as const }];
+
+  function originalBody(extra: Partial<PullRequestInput> = {}): string {
+    return pullRequestBody({ ...base, runId: ROOT, summary: OLD_SUMMARY, tests: OLD_TESTS, ...extra });
+  }
+
+  function fake(opts: {
+    prBody?: string;
+    prs?: unknown[];
+    comments?: Array<{ id: number; body: string }>;
+    patchStatus?: number;
+    patchThrows?: boolean;
+  }) {
+    const pulls: string[] = [];
+    const commentPosts: string[] = [];
+    const commentPatches: Array<{ id: string; body: string }> = [];
+    let tokenMints = 0;
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) {
+        tokenMints += 1;
+        return tokenResponse();
+      }
+      if (url.includes("/pulls?"))
+        return json(
+          opts.prs ?? [
+            { number: 7, html_url: "https://github.com/openai/example/pull/7", body: opts.prBody, draft: false },
+          ],
+        );
+      if (url.endsWith("/pulls/7") && method === "PATCH") {
+        if (opts.patchThrows) throw new Error("connection reset");
+        const sent = JSON.parse(bodyText(init?.body)).body as string;
+        pulls.push(sent);
+        return json({ number: 7, body: sent }, opts.patchStatus ?? 200);
+      }
+      if (url.includes("/issues/7/comments") && method === "GET") return json(opts.comments ?? []);
+      if (url.includes("/issues/7/comments") && method === "POST") {
+        commentPosts.push(JSON.parse(bodyText(init?.body)).body);
+        return json({ id: 555 }, 201);
+      }
+      const commentPatch = /\/issues\/comments\/(\d+)$/.exec(url);
+      if (commentPatch && method === "PATCH") {
+        commentPatches.push({ id: commentPatch[1], body: JSON.parse(bodyText(init?.body)).body });
+        return json({ id: Number(commentPatch[1]) });
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${method} ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    return { client, pulls, commentPosts, commentPatches, tokenMints: () => tokenMints };
+  }
+
+  function baseline(body: string) {
+    return { recordedSha256: descriptionSha256(body), previousAgentText: OLD_SUMMARY, agentTextRunId: ROOT };
+  }
+
+  it("createOrFindDraftPullRequest returns descriptionSha256 of the created body, none when found", async () => {
+    const createdBody = "<!-- wardby:run-1 -->\n\nAs GitHub stored it.";
+    let found = false;
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/access_tokens")) return tokenResponse();
+      if (url.includes("/pulls?"))
+        return json(
+          found
+            ? [
+                {
+                  number: 10,
+                  html_url: "https://github.com/openai/example/pull/10",
+                  body: createdBody,
+                  draft: true,
+                },
+              ]
+            : [],
+        );
+      if (url.endsWith("/pulls") && init?.method === "POST") {
+        return json(
+          { number: 10, html_url: "https://github.com/openai/example/pull/10", draft: true, body: createdBody },
+          201,
+        );
+      }
+      if (url.endsWith("/installation/token")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    }) as typeof fetch;
+    const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
+    const input = { ...base, runId: ROOT, summary: "A summary that differs from the response body." };
+
+    await expect(client.createOrFindDraftPullRequest(input)).resolves.toEqual({
+      number: 10,
+      url: "https://github.com/openai/example/pull/10",
+      descriptionSha256: descriptionSha256(createdBody),
+    });
+    found = true;
+    await expect(client.createOrFindDraftPullRequest(input)).resolves.toEqual({
+      number: 10,
+      url: "https://github.com/openai/example/pull/10",
+    });
+  });
+
+  it("replaces agent text and refreshes Tests/Packages/marker on an unedited PR", async () => {
+    const current = originalBody();
+    const { client, pulls, commentPosts, tokenMints } = fake({ prBody: current });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      tests: NEW_TESTS,
+      packages: [{ ecosystem: "npm", name: "zod", version: "4.0.0" }],
+      baseline: baseline(current),
+    });
+
+    expect(pulls).toHaveLength(1);
+    const patched = pulls[0];
+    expect(patched.startsWith(`<!-- wardby:${ROOT} -->\n`)).toBe(true);
+    expect(patched).toContain(NEW_SUMMARY);
+    expect(patched).not.toContain(OLD_SUMMARY);
+    expect(patched).toContain("`npm test`: passed");
+    expect(patched).not.toContain("`npm test`: failed");
+    expect(patched).toContain("- npm `zod@4.0.0`");
+    expect(patched.endsWith(`<!-- wardby-latest:${RUN} -->`)).toBe(true);
+    expect(result).toEqual({ kind: "replaced", sha256: descriptionSha256(patched), agentTextRunId: RUN });
+    expect(commentPosts).toHaveLength(0);
+    expect(tokenMints()).toBe(1);
+  });
+
+  it("keeps previous agent text and refreshes sections when the final message is empty", async () => {
+    const current = originalBody();
+    const { client, pulls } = fake({ prBody: current });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: "   ",
+      tests: NEW_TESTS,
+      baseline: baseline(current),
+    });
+
+    expect(pulls).toHaveLength(1);
+    expect(pulls[0]).toContain(OLD_SUMMARY);
+    expect(pulls[0]).toContain("`npm test`: passed");
+    expect(pulls[0].endsWith(`<!-- wardby-latest:${RUN} -->`)).toBe(true);
+    expect(result).toEqual({
+      kind: "refreshed",
+      reason: "empty",
+      sha256: descriptionSha256(pulls[0]),
+      agentTextRunId: ROOT,
+    });
+  });
+
+  it("keeps previous agent text when the new message drops `Resolves #N`", async () => {
+    const current = originalBody();
+    const { client, pulls } = fake({ prBody: current });
+    const dropped = "Adds the knock-knock joke endpoint, and now also validates the joke id parameter after review.";
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: dropped,
+      tests: NEW_TESTS,
+      baseline: baseline(current),
+    });
+
+    expect(pulls[0]).toContain(OLD_SUMMARY);
+    expect(pulls[0]).not.toContain(dropped);
+    expect(result).toMatchObject({ kind: "refreshed", reason: "missing_closing_keyword", agentTextRunId: ROOT });
+  });
+
+  it("posts (once) a fallback comment and does not PATCH when the hash differs", async () => {
+    const written = originalBody();
+    const current = `${written}\n\nA reviewer's note added by hand.`;
+    const { client, pulls, commentPosts, commentPatches } = fake({ prBody: current });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      tests: NEW_TESTS,
+      baseline: baseline(written),
+    });
+
+    expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
+    expect(pulls).toHaveLength(0);
+    expect(commentPatches).toHaveLength(0);
+    expect(commentPosts).toHaveLength(1);
+    expect(commentPosts[0].startsWith(`<!-- wardby-description:${RUN} -->\n`)).toBe(true);
+    expect(commentPosts[0]).toContain(NEW_SUMMARY);
+  });
+
+  it("a retried run updates its existing fallback comment instead of posting another", async () => {
+    const written = originalBody();
+    const current = `${written}\n\nA reviewer's note added by hand.`;
+    const { client, pulls, commentPosts, commentPatches } = fake({
+      prBody: current,
+      comments: [
+        { id: 98, body: `<!-- wardby-status:${RUN} -->\n\nworking` },
+        { id: 99, body: `<!-- wardby-description:${RUN} -->\n\nold proposal` },
+      ],
+    });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: baseline(written),
+    });
+
+    expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
+    expect(pulls).toHaveLength(0);
+    expect(commentPosts).toHaveLength(0);
+    expect(commentPatches).toHaveLength(1);
+    expect(commentPatches[0].id).toBe("99");
+    expect(commentPatches[0].body).toContain(NEW_SUMMARY);
+  });
+
+  it("preserves the current Related section verbatim", async () => {
+    const written = originalBody({
+      related: {
+        entries: [
+          { repository: "openai/bff", number: 3, state: "open" },
+          { repository: "openai/example", self: true },
+        ],
+      },
+    });
+    // Another run rewrote the section since (not an edit: the hash ignores it).
+    const block = renderRelatedSection({
+      entries: [
+        { repository: "openai/bff", number: 3, state: "merged" },
+        { repository: "openai/example", self: true },
+      ],
+    })!;
+    const current = upsertRelatedSection(written, block)!;
+    expect(current).not.toBe(written);
+    const { client, pulls } = fake({ prBody: current });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      related: { entries: [{ repository: "openai/other", number: 9 }] },
+      baseline: baseline(written),
+    });
+
+    expect(result.kind).toBe("replaced");
+    expect(pulls[0]).toContain(block);
+    expect(pulls[0]).not.toContain("openai/other");
+    expect(pulls[0].indexOf(block)).toBeLessThan(pulls[0].indexOf(NEW_SUMMARY));
+  });
+
+  it("unchanged body → no PATCH, kind unchanged", async () => {
+    const current = originalBody({ latestRunId: RUN, tests: NEW_TESTS });
+    const { client, pulls } = fake({ prBody: current });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      tests: NEW_TESTS,
+      baseline: baseline(current),
+    });
+
+    expect(pulls).toHaveLength(0);
+    expect(result).toEqual({ kind: "unchanged", sha256: descriptionSha256(current), agentTextRunId: ROOT });
+  });
+
+  it("PR closed → skipped:not_open, no PATCH", async () => {
+    const current = originalBody();
+    const { client, pulls, commentPosts } = fake({ prs: [] });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: baseline(current),
+    });
+
+    expect(result).toEqual({ kind: "skipped", reason: "not_open" });
+    expect(pulls).toHaveLength(0);
+    expect(commentPosts).toHaveLength(0);
+  });
+
+  it("body over 65,536 drops Packages, then skips too_long", async () => {
+    const current = originalBody();
+    const packages = Array.from({ length: 100 }, (_, i) => ({
+      ecosystem: "npm",
+      name: `a-fairly-long-package-name-${i}`,
+      version: "1.0.0",
+    }));
+    const { client, pulls } = fake({ prBody: current });
+
+    const fits = `${"x".repeat(63_000)} Resolves #12`;
+    const dropped = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: fits,
+      packages,
+      baseline: baseline(current),
+    });
+    expect(pullRequestBody({ ...base, runId: ROOT, summary: fits, packages, latestRunId: RUN }).length).toBeGreaterThan(
+      65_536,
+    );
+    expect(dropped.kind).toBe("replaced");
+    expect(pulls).toHaveLength(1);
+    expect(pulls[0].length).toBeLessThanOrEqual(65_536);
+    expect(pulls[0]).not.toContain("Packages installed");
+    expect(pulls[0].endsWith(`<!-- wardby-latest:${RUN} -->`)).toBe(true);
+
+    const tooLong = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: `${"x".repeat(70_000)} Resolves #12`,
+      packages,
+      baseline: baseline(current),
+    });
+    expect(tooLong).toEqual({ kind: "skipped", reason: "too_long" });
+    expect(pulls).toHaveLength(1);
+  });
+
+  it("never PATCHes a PR whose body lacks the root marker", async () => {
+    const written = originalBody();
+    const current = `Context a person wrote above the marker.\n\n${written}`;
+    const { client, pulls, commentPosts } = fake({ prBody: current });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      // Even with the hash of the current body recorded.
+      baseline: baseline(current),
+    });
+    expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
+
+    // A legacy PR (no recorded hash) counts as edited too.
+    const legacy = fake({ prBody: written });
+    const legacyResult = await legacy.client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: { recordedSha256: null, previousAgentText: OLD_SUMMARY, agentTextRunId: ROOT },
+    });
+    expect(legacyResult).toEqual({ kind: "edited_by_hand", commentPosted: true });
+
+    expect(pulls).toHaveLength(0);
+    expect(legacy.pulls).toHaveLength(0);
+    expect(commentPosts).toHaveLength(1);
+    expect(legacy.commentPosts).toHaveLength(1);
+  });
+
+  it("PATCH failure → skipped:error, does not throw", async () => {
+    const current = originalBody();
+    const input = {
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: baseline(current),
+    };
+
+    await expect(
+      fake({ prBody: current, patchStatus: 422 }).client.updatePullRequestDescription(input),
+    ).resolves.toEqual({ kind: "skipped", reason: "error" });
+    await expect(
+      fake({ prBody: current, patchThrows: true }).client.updatePullRequestDescription(input),
+    ).resolves.toEqual({ kind: "skipped", reason: "error" });
+    await expect(
+      fake({ prBody: current }).client.updatePullRequestDescription({ ...input, runId: "../bad" }),
+    ).resolves.toEqual({ kind: "skipped", reason: "error" });
   });
 });
