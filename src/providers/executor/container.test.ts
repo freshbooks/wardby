@@ -572,7 +572,9 @@ describe("ContainerExecutor", () => {
 
     it("leaves a fresh run's task without the description note", async () => {
       const { input } = await launched({});
-      expect(input.task as string).not.toContain("your final summary replaces it");
+      expect(input.task).toBe(
+        `Fix the bug and test it.\n\nBase commit: ${"a".repeat(40)} (the commit this workspace was checked out at; the workspace has no git metadata).`,
+      );
     });
 
     it("skips the note when the baseline cannot be loaded", async () => {
