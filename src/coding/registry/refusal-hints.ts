@@ -44,7 +44,7 @@ export function graphLimitMessage(name: string, ecosystem: string, limit: number
 export function graphIncompleteMessage(name: string, ecosystem: string, progress: WalkProgress): string {
   return (
     `${name} (${ecosystem}) is still being checked against the allowed packages' dependency graph after ${packages(progress.walked)}, ` +
-    `${progress.queued.toLocaleString("en-US")} still queued (usually a transient registry problem). Please try again shortly.`
+    `${progress.queued.toLocaleString("en-US")} still queued; the walk timed out before checking it (usually a slow upstream for that package, or another request's walk running out of time). Please try again shortly.`
   );
 }
 
@@ -55,7 +55,7 @@ const HINTS: Record<string, string> = {
   [PACKAGE_NOT_ALLOWED_PENDING]: `The dependency walk ended before reaching the package. Retrying rarely helps. ${OWNER}`,
   [GRAPH_LIMIT]: `The run's dependency graph walk hit REGISTRY_MAX_GRAPH_PACKAGES before reaching the package, so it may not be in the graph at all. Retrying will not help. The agent's owner must allowlist the package directly, or the operator can raise the limit.`,
   [GRAPH_INCOMPLETE]:
-    "The package is still being checked against the allowed packages' dependency graph, usually a transient problem. Try again shortly.",
+    "The walk reached the package but timed out before checking its versions, usually a slow upstream. Try again shortly.",
 };
 
 /** What each refusal code means to someone reading the PR, without the registry's internals. */
