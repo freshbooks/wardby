@@ -7,6 +7,8 @@ export interface PublishInput {
   details?: FinalizeChangesDetails;
   /** Every path the commit changes relative to baseCommit (already validated). */
   changedPaths: readonly string[];
+  /** The commit just pushed (the pull request's new head). */
+  commitSha?: string;
 }
 
 export type PublishResult =
@@ -51,6 +53,12 @@ export interface GitRemote {
   notifyContinuationStarted?: VcsProvider["notifyContinuationStarted"];
   notifyContinuationFinished?: VcsProvider["notifyContinuationFinished"];
   readRepositoryFile?: VcsProvider["readRepositoryFile"];
+  /**
+   * Optional: called after the commit and before the push, with the commit
+   * about to become the head. GitHub writes a continuation's description
+   * comment here, so it exists before the push starts a review. Never throws.
+   */
+  proposeDescriptionBeforePush?(input: PublishInput & { commitSha: string }): Promise<void>;
   /** Optional: re-derive a continuation's PR description without a push (GitHub only). Never throws. */
   refreshDescription?: VcsProvider["refreshPullRequestDescription"];
 }

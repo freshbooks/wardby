@@ -19,6 +19,7 @@ import {
   descriptionAppliedComment,
   descriptionFallbackComment,
   descriptionSha256,
+  supersededDescriptionComment,
 } from "./pr-description.js";
 
 const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
@@ -1341,13 +1342,21 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
   function fake(opts: {
     prBody?: string;
     prs?: unknown[];
-    comments?: Array<{ id: number; body: string; user?: { type: string } }>;
+    comments?: Array<{
+      id: number;
+      body: string;
+      user?: { type: string };
+      performed_via_github_app?: { id: number };
+      html_url?: string;
+    }>;
     patchStatus?: number;
     patchThrows?: boolean;
   }) {
     const pulls: string[] = [];
     const commentPosts: string[] = [];
     const commentPatches: Array<{ id: string; body: string }> = [];
+    const commentPages: string[] = [];
+    const events: string[] = [];
     let tokenMints = 0;
     let requests = 0;
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
@@ -1355,6 +1364,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
       const method = init?.method ?? "GET";
       requests += 1;
       if (url.endsWith("/installation")) return json({ id: 42 });
+      if (url.endsWith("/app")) return json({ id: 123, slug: "wardby", owner: { login: "acme" } });
       if (url.endsWith("/access_tokens")) {
         tokenMints += 1;
         return tokenResponse();
@@ -1369,15 +1379,22 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
         if (opts.patchThrows) throw new Error("connection reset");
         const sent = JSON.parse(bodyText(init?.body)).body as string;
         pulls.push(sent);
+        events.push("pr-patch");
         return json({ number: 7, body: sent }, opts.patchStatus ?? 200);
       }
-      if (url.includes("/issues/7/comments") && method === "GET") return json(opts.comments ?? []);
+      if (url.includes("/issues/7/comments") && method === "GET") {
+        commentPages.push(url);
+        const page = Number(new URL(url).searchParams.get("page") ?? "1");
+        return json((opts.comments ?? []).slice((page - 1) * 100, page * 100));
+      }
       if (url.includes("/issues/7/comments") && method === "POST") {
         commentPosts.push(JSON.parse(bodyText(init?.body)).body);
-        return json({ id: 555 }, 201);
+        events.push("comment-post");
+        return json({ id: 555, html_url: "https://github.com/openai/example/pull/7#issuecomment-555" }, 201);
       }
       const commentPatch = /\/issues\/comments\/(\d+)$/.exec(url);
       if (commentPatch && method === "PATCH") {
+        events.push("comment-patch");
         commentPatches.push({ id: commentPatch[1], body: JSON.parse(bodyText(init?.body)).body });
         return json({ id: Number(commentPatch[1]) });
       }
@@ -1385,7 +1402,16 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
       throw new Error(`unexpected request ${method} ${url}`);
     }) as typeof fetch;
     const client = new GitHubAppClient({ appId: "123", privateKey: privateKeyPem() }, fetchMock, () => NOW);
-    return { client, pulls, commentPosts, commentPatches, tokenMints: () => tokenMints, requests: () => requests };
+    return {
+      client,
+      pulls,
+      commentPosts,
+      commentPatches,
+      commentPages,
+      events,
+      tokenMints: () => tokenMints,
+      requests: () => requests,
+    };
   }
 
   function baseline(body: string) {
@@ -1508,7 +1534,19 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     expect(result).toMatchObject({ kind: "refreshed", reason: "missing_closing_keyword", agentTextRunId: ROOT });
   });
 
-  it("posts (once) a fallback comment and does not PATCH when the hash differs", async () => {
+  const HEAD = "0123456789abcdef0123456789abcdef01234567";
+  /** A comment this App wrote. */
+  const ours = (id: number, body: string) => ({
+    id,
+    body,
+    user: { type: "Bot" },
+    performed_via_github_app: { id: 123 },
+    html_url: `https://github.com/openai/example/pull/7#issuecomment-${id}`,
+  });
+  const chatter = (from: number, count: number) =>
+    Array.from({ length: count }, (_, i) => ({ id: from + i, body: `comment ${from + i}`, user: { type: "User" } }));
+
+  it("posts (once) a fallback comment stamped with the head, and does not PATCH when the hash differs", async () => {
     const written = originalBody();
     const current = `${written}\n\nA reviewer's note added by hand.`;
     const { client, pulls, commentPosts, commentPatches } = fake({ prBody: current });
@@ -1517,6 +1555,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
       ...base,
       rootRunId: ROOT,
       runId: RUN,
+      headSha: HEAD,
       summary: NEW_SUMMARY,
       tests: NEW_TESTS,
       baseline: baseline(written),
@@ -1526,61 +1565,117 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     expect(pulls).toHaveLength(0);
     expect(commentPatches).toHaveLength(0);
     expect(commentPosts).toHaveLength(1);
-    expect(commentPosts[0].startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
+    expect(commentPosts[0].startsWith(`<!-- wardby-description head=${HEAD} -->\n`)).toBe(true);
     expect(commentPosts[0]).toContain(`latest run (\`${RUN}\`)`);
     expect(commentPosts[0]).toContain(NEW_SUMMARY);
   });
 
-  it("a later round edits the same pull-request-level comment in place, never a second one", async () => {
+  it("a later round edits the same comment in place; an identical body is not re-sent", async () => {
     const written = originalBody();
     const current = `${written}\n\nA reviewer's note added by hand.`;
     const { client, commentPosts, commentPatches } = fake({
       prBody: current,
       comments: [
-        { id: 98, body: `<!-- wardby-status:${RUN} -->\n\nworking`, user: { type: "Bot" } },
-        { id: 99, body: descriptionFallbackComment(RUN, "an older proposal"), user: { type: "Bot" } },
+        ours(98, `<!-- wardby-status:${RUN} -->\n\nworking`),
+        ours(99, descriptionFallbackComment(RUN, "an older proposal", HEAD)),
       ],
     });
-
-    const result = await client.updatePullRequestDescription({
+    const input = {
       ...base,
       rootRunId: ROOT,
       runId: "run-3",
+      headSha: HEAD,
       summary: NEW_SUMMARY,
       baseline: baseline(written),
-    });
+    };
 
-    expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
+    await expect(client.updatePullRequestDescription(input)).resolves.toEqual({
+      kind: "edited_by_hand",
+      commentPosted: true,
+    });
     expect(commentPosts).toHaveLength(0);
     expect(commentPatches).toHaveLength(1);
     expect(commentPatches[0].id).toBe("99");
-    expect(commentPatches[0].body.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
     expect(commentPatches[0].body).toContain("latest run (`run-3`)");
     expect(commentPatches[0].body).toContain(NEW_SUMMARY);
-    expect(commentPatches[0].body).not.toContain("an older proposal");
+
+    const again = fake({ prBody: current, comments: [ours(99, commentPatches[0].body)] });
+    await again.client.updatePullRequestDescription(input);
+    expect(again.commentPatches).toHaveLength(0);
+    expect(again.commentPosts).toHaveLength(0);
   });
 
-  it("reuses a comment carrying the earlier per-run marker", async () => {
+  it("finds the comment past the first 100 comments instead of posting a duplicate", async () => {
     const written = originalBody();
-    const { client, commentPosts, commentPatches } = fake({
+    const { client, commentPosts, commentPatches, commentPages } = fake({
       prBody: `${written}\n\nA reviewer's note added by hand.`,
-      comments: [{ id: 99, body: `<!-- wardby-description:${RUN} -->\n\nold proposal`, user: { type: "Bot" } }],
+      comments: [...chatter(1, 150), ours(500, descriptionFallbackComment(RUN, "an older proposal", HEAD))],
     });
 
     await client.updatePullRequestDescription({
       ...base,
       rootRunId: ROOT,
       runId: "run-3",
+      headSha: HEAD,
+      summary: NEW_SUMMARY,
+      baseline: baseline(written),
+    });
+
+    expect(commentPages.length).toBe(2);
+    expect(commentPosts).toHaveLength(0);
+    expect(commentPatches.map((patch) => patch.id)).toEqual(["500"]);
+  });
+
+  it("edits the newest of duplicate comments and points the older ones at it", async () => {
+    const written = originalBody();
+    const { client, commentPosts, commentPatches } = fake({
+      prBody: `${written}\n\nA reviewer's note added by hand.`,
+      comments: [
+        ours(10, descriptionFallbackComment("run-1", "first proposal", HEAD)),
+        ...chatter(11, 5),
+        ours(20, descriptionFallbackComment("run-2", "second proposal", HEAD)),
+      ],
+    });
+
+    await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: "run-3",
+      headSha: HEAD,
       summary: NEW_SUMMARY,
       baseline: baseline(written),
     });
 
     expect(commentPosts).toHaveLength(0);
-    expect(commentPatches.map((patch) => patch.id)).toEqual(["99"]);
-    expect(commentPatches[0].body.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
+    expect(commentPatches.map((patch) => patch.id)).toEqual(["20", "10"]);
+    expect(commentPatches[0].body).toContain(NEW_SUMMARY);
+    expect(commentPatches[1].body).toBe(
+      supersededDescriptionComment("https://github.com/openai/example/pull/7#issuecomment-20"),
+    );
   });
 
-  it("a person's comment carrying the marker is never edited", async () => {
+  it("ignores a comment with the earlier per-run marker and posts the pull-request-level one", async () => {
+    const written = originalBody();
+    const { client, commentPosts, commentPatches } = fake({
+      prBody: `${written}\n\nA reviewer's note added by hand.`,
+      comments: [ours(99, `<!-- wardby-description:${RUN} -->\n\nold proposal`)],
+    });
+
+    await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: "run-3",
+      headSha: HEAD,
+      summary: NEW_SUMMARY,
+      baseline: baseline(written),
+    });
+
+    expect(commentPatches).toHaveLength(0);
+    expect(commentPosts).toHaveLength(1);
+    expect(commentPosts[0].startsWith(`<!-- wardby-description head=${HEAD} -->\n`)).toBe(true);
+  });
+
+  it("never edits a marked comment a person, an unknown author, or another App wrote", async () => {
     const written = originalBody();
     const current = `${written}\n\nA reviewer's note added by hand.`;
     const { client, commentPosts, commentPatches } = fake({
@@ -1588,6 +1683,13 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
       comments: [
         { id: 97, body: `${DESCRIPTION_COMMENT_MARKER}\n\nwritten by a person`, user: { type: "User" } },
         { id: 96, body: `${DESCRIPTION_COMMENT_MARKER}\n\nno author recorded` },
+        {
+          id: 95,
+          body: descriptionFallbackComment("run-x", "another wardby's proposal", HEAD),
+          user: { type: "Bot" },
+          performed_via_github_app: { id: 999 },
+        },
+        { id: 94, body: `${DESCRIPTION_COMMENT_MARKER}\n\na workflow`, user: { type: "Bot" } },
       ],
     });
 
@@ -1595,6 +1697,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
       ...base,
       rootRunId: ROOT,
       runId: RUN,
+      headSha: HEAD,
       summary: NEW_SUMMARY,
       baseline: baseline(written),
     });
@@ -1602,20 +1705,20 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
     expect(commentPatches).toHaveLength(0);
     expect(commentPosts).toHaveLength(1);
-    expect(commentPosts[0].startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
   });
 
   it("applying a description marks an earlier proposal comment as applied", async () => {
     const current = originalBody();
     const { client, pulls, commentPosts, commentPatches } = fake({
       prBody: current,
-      comments: [{ id: 99, body: descriptionFallbackComment("run-0", "an older proposal"), user: { type: "Bot" } }],
+      comments: [ours(99, descriptionFallbackComment("run-0", "an older proposal", HEAD))],
     });
 
     const result = await client.updatePullRequestDescription({
       ...base,
       rootRunId: ROOT,
       runId: RUN,
+      headSha: HEAD,
       summary: NEW_SUMMARY,
       baseline: baseline(current),
     });
@@ -1639,10 +1742,7 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     expect(none.commentPosts).toHaveLength(0);
     expect(none.commentPatches).toHaveLength(0);
 
-    const applied = fake({
-      prBody: current,
-      comments: [{ id: 99, body: descriptionAppliedComment("run-0"), user: { type: "Bot" } }],
-    });
+    const applied = fake({ prBody: current, comments: [ours(99, descriptionAppliedComment("run-0"))] });
     await applied.client.updatePullRequestDescription({
       ...base,
       rootRunId: ROOT,
@@ -1651,6 +1751,87 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
       baseline: baseline(current),
     });
     expect(applied.commentPatches).toHaveLength(0);
+  });
+
+  it("takes the description back once a person copied the latest proposal in", async () => {
+    const written = originalBody();
+    // The previous round's proposal, which the author pasted into the description.
+    const pasted = pullRequestBody({
+      ...base,
+      runId: ROOT,
+      summary: OLD_SUMMARY,
+      tests: NEW_TESTS,
+      latestRunId: "run-2",
+    });
+    const { client, pulls, commentPosts, commentPatches } = fake({
+      prBody: pasted.replace(/\n/g, "\r\n"),
+      comments: [ours(99, descriptionFallbackComment("run-2", pasted, HEAD))],
+    });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: "run-3",
+      headSha: HEAD,
+      summary: NEW_SUMMARY,
+      tests: NEW_TESTS,
+      // The recorded hash is still of what wardby wrote before the person's edit.
+      baseline: baseline(written),
+    });
+
+    expect(result).toMatchObject({ kind: "replaced", agentTextRunId: "run-3" });
+    expect(pulls).toHaveLength(1);
+    expect(pulls[0]).toContain(NEW_SUMMARY);
+    expect(commentPosts).toHaveLength(0);
+    expect(commentPatches).toEqual([{ id: "99", body: descriptionAppliedComment("run-3") }]);
+  });
+
+  it("a proposal that differs from the live description is not taken back", async () => {
+    const written = originalBody();
+    const proposal = pullRequestBody({
+      ...base,
+      runId: ROOT,
+      summary: OLD_SUMMARY,
+      tests: NEW_TESTS,
+      latestRunId: "run-2",
+    });
+    const { client, pulls } = fake({
+      prBody: `${proposal}\n\nAnd a person's note.`,
+      comments: [ours(99, descriptionFallbackComment("run-2", proposal, HEAD))],
+    });
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: "run-3",
+      headSha: HEAD,
+      summary: NEW_SUMMARY,
+      baseline: baseline(written),
+    });
+    expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
+    expect(pulls).toHaveLength(0);
+  });
+
+  it("proposeDescriptionComment writes the stamped comment only for an edited description", async () => {
+    const written = originalBody();
+    const edited = fake({ prBody: `${written}\n\nA reviewer's note added by hand.` });
+    const input = {
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      headSha: HEAD,
+      summary: NEW_SUMMARY,
+      baseline: baseline(written),
+    };
+    await expect(edited.client.proposeDescriptionComment(input)).resolves.toBe(true);
+    expect(edited.commentPosts).toHaveLength(1);
+    expect(edited.commentPosts[0].startsWith(`<!-- wardby-description head=${HEAD} -->\n`)).toBe(true);
+    expect(edited.pulls).toHaveLength(0);
+
+    const unedited = fake({ prBody: written });
+    await expect(unedited.client.proposeDescriptionComment(input)).resolves.toBe(false);
+    expect(unedited.commentPosts).toHaveLength(0);
+    expect(unedited.pulls).toHaveLength(0);
+    await expect(unedited.client.proposeDescriptionComment({ ...input, headSha: "not-a-sha" })).resolves.toBe(false);
   });
 
   it("legacy PR (no recorded hash) matching the reconstructed root body is rewritten", async () => {

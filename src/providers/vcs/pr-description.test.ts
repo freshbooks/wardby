@@ -12,9 +12,11 @@ import {
   descriptionAppliedComment,
   descriptionFallbackComment,
   descriptionSha256,
-  extractProposedDescription,
-  isDescriptionComment,
   extractRelatedBlock,
+  findDescriptionComments,
+  MAX_DESCRIPTION_COMMENT_PAGES,
+  parseDescriptionComment,
+  supersededDescriptionComment,
   hasClosingKeyword,
   isUneditedDescription,
   normalizeDescriptionForHash,
@@ -245,48 +247,67 @@ describe("pullRequestBody latest marker", () => {
   });
 });
 
+const HEAD = "0123456789abcdef0123456789abcdef01234567";
+
 describe("descriptionFallbackComment", () => {
-  it("starts with the pull-request-level marker and names the latest run", () => {
-    const comment = descriptionFallbackComment("run-2", SUMMARY);
-    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
-    expect(comment).not.toContain("<!-- wardby-description:");
+  it("starts with the pull-request-level marker stamped with the head it describes", () => {
+    const comment = descriptionFallbackComment("run-2", SUMMARY, HEAD);
+    expect(comment.startsWith(`<!-- wardby-description head=${HEAD} -->\n`)).toBe(true);
     expect(comment).toContain("current description proposed by wardby's latest run (`run-2`)");
-    expect(comment).toContain("not applied because a person edited the description");
+    expect(comment).toContain("couldn't confirm the description is unchanged since it wrote it");
     expect(comment).toContain("can copy it into the description");
     expect(comment).toContain("<details><summary>Proposed description</summary>");
     expect(comment).toContain(`\`\`\`markdown\n${SUMMARY}\n\`\`\``);
     expect(comment.trimEnd().endsWith("</details>")).toBe(true);
-    expect(isDescriptionComment(comment)).toBe(true);
+    expect(parseDescriptionComment(comment)).toEqual({
+      headSha: HEAD,
+      applied: false,
+      runId: "run-2",
+      proposed: SUMMARY,
+    });
+  });
+
+  it("without a head, uses the plain marker", () => {
+    const comment = descriptionFallbackComment("run-2", SUMMARY);
+    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
+    expect(parseDescriptionComment(comment)).toMatchObject({ applied: false, proposed: SUMMARY });
+    expect(parseDescriptionComment(comment)).not.toHaveProperty("headSha");
   });
 
   it("fences a body containing triple backticks safely", () => {
     const proposed = "Example:\n\n```ts\nconst a = 1;\n```\n\nAnd ````four```` too.";
-    const comment = descriptionFallbackComment("run-2", proposed);
+    const comment = descriptionFallbackComment("run-2", proposed, HEAD);
     expect(comment).toContain(`\`\`\`\`\`markdown\n${proposed}\n\`\`\`\`\``);
-    expect(extractProposedDescription(comment)).toBe(proposed);
+    expect(parseDescriptionComment(comment)?.proposed).toBe(proposed);
+  });
+
+  it("a proposal quoting the applied marker is still a pending proposal", () => {
+    const proposed = `${SUMMARY}\n\n${DESCRIPTION_COMMENT_APPLIED_MARKER}`;
+    expect(parseDescriptionComment(descriptionFallbackComment("run-2", proposed, HEAD))).toMatchObject({
+      applied: false,
+      proposed,
+    });
   });
 
   it("is capped under 60,000 characters", () => {
-    const comment = descriptionFallbackComment("run-2", "word ".repeat(30_000));
+    const comment = descriptionFallbackComment("run-2", "word ".repeat(30_000), HEAD);
     expect(comment.length).toBeLessThan(60_000);
-    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
     expect(comment.trimEnd().endsWith("</details>")).toBe(true);
     expect(comment).toContain("truncated");
   });
 
-  it("refuses an unsafe run id", () => {
-    expect(() => descriptionFallbackComment("bad -->", SUMMARY)).toThrow();
+  it("refuses an unsafe run id or head", () => {
+    expect(() => descriptionFallbackComment("bad -->", SUMMARY, HEAD)).toThrow();
+    expect(() => descriptionFallbackComment("run-2", SUMMARY, "x --> y")).toThrow();
   });
 });
 
 describe("descriptionAppliedComment", () => {
-  it("keeps the marker, carries the applied marker, and holds no proposal", () => {
+  it("keeps the marker, carries the applied marker on its second line, and holds no proposal", () => {
     const comment = descriptionAppliedComment("run-3");
-    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
-    expect(comment).toContain(DESCRIPTION_COMMENT_APPLIED_MARKER);
+    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n${DESCRIPTION_COMMENT_APPLIED_MARKER}\n`)).toBe(true);
     expect(comment).toContain("`run-3`");
-    expect(isDescriptionComment(comment)).toBe(true);
-    expect(extractProposedDescription(comment)).toBeUndefined();
+    expect(parseDescriptionComment(comment)).toEqual({ applied: true });
   });
 
   it("refuses an unsafe run id", () => {
@@ -294,17 +315,60 @@ describe("descriptionAppliedComment", () => {
   });
 });
 
-describe("isDescriptionComment / extractProposedDescription", () => {
-  it("recognizes the pull-request-level marker and the earlier per-run one, at the start only", () => {
-    expect(isDescriptionComment(`${DESCRIPTION_COMMENT_MARKER}\n\ntext`)).toBe(true);
-    expect(isDescriptionComment("<!-- wardby-description:run-2 -->\n\ntext")).toBe(true);
-    expect(isDescriptionComment(`> ${DESCRIPTION_COMMENT_MARKER}\n> quoted`)).toBe(false);
-    expect(isDescriptionComment("<!-- wardby-status:run-2 -->")).toBe(false);
+describe("parseDescriptionComment", () => {
+  it("only recognizes the pull-request-level marker as the first line", () => {
+    expect(parseDescriptionComment("<!-- wardby-description:run-2 -->\n\nold per-run comment")).toBeUndefined();
+    expect(parseDescriptionComment(`> ${DESCRIPTION_COMMENT_MARKER}\n> quoted`)).toBeUndefined();
+    expect(parseDescriptionComment("just a comment")).toBeUndefined();
+    expect(parseDescriptionComment(supersededDescriptionComment("https://github.com/o/r/pull/1#c2"))).toBeUndefined();
+    expect(parseDescriptionComment(`${DESCRIPTION_COMMENT_MARKER}\n\nno proposal here`)).toEqual({ applied: false });
+  });
+});
+
+describe("findDescriptionComments", () => {
+  const ours = (id: number, body: string) => ({
+    id,
+    body,
+    html_url: `https://github.com/o/r/pull/7#c${id}`,
+    mine: true,
+  });
+  const page = (from: number, count: number) =>
+    Array.from({ length: count }, (_, i) => ({ id: from + i, body: `chatter ${from + i}`, mine: true }));
+
+  it("pages past the first 100 and picks the newest of ours", async () => {
+    const pages = [
+      [ours(1, descriptionFallbackComment("run-1", SUMMARY, HEAD)), ...page(2, 99)],
+      [
+        ...page(200, 50),
+        ours(300, descriptionAppliedComment("run-2")),
+        { id: 301, body: descriptionFallbackComment("run-x", SUMMARY), mine: false },
+      ],
+    ];
+    const fetched: number[] = [];
+    const found = await findDescriptionComments(
+      async (n) => {
+        fetched.push(n);
+        return pages[n - 1] ?? [];
+      },
+      (c) => c.mine === true,
+    );
+    expect(fetched).toEqual([1, 2]);
+    expect(found.newest).toMatchObject({ id: 300, url: "https://github.com/o/r/pull/7#c300" });
+    expect(found.newest?.parsed).toEqual({ applied: true });
+    expect(found.older.map((c) => c.id)).toEqual([1]);
   });
 
-  it("returns the proposal of a fallback comment, undefined for anything else", () => {
-    expect(extractProposedDescription(descriptionFallbackComment("run-2", SUMMARY))).toBe(SUMMARY);
-    expect(extractProposedDescription("just a comment")).toBeUndefined();
+  it("stops at MAX_DESCRIPTION_COMMENT_PAGES and ignores per-run legacy comments", async () => {
+    let calls = 0;
+    const found = await findDescriptionComments(
+      async () => {
+        calls += 1;
+        return [ours(calls, `<!-- wardby-description:run-${calls} -->\n\nlegacy`), ...page(1000 * calls, 99)];
+      },
+      () => true,
+    );
+    expect(calls).toBe(MAX_DESCRIPTION_COMMENT_PAGES);
+    expect(found).toEqual({ newest: null, older: [] });
   });
 });
 

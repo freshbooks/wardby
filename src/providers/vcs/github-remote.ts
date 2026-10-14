@@ -7,6 +7,7 @@ import {
   type GitHubRepositoryAccess,
   type PullRequestResult,
   type RepositoryFileInput,
+  type UpdateDescriptionInput,
 } from "./github.js";
 import type { GitRemote, PublishInput, PublishResult } from "./remote.js";
 import type {
@@ -112,7 +113,30 @@ export class GitHubRemote implements GitRemote {
     if (!open) throw new Error(CONTINUATION_CLOSED_ERROR);
   }
 
-  async publish({ workspace: prepared, details, changedPaths }: PublishInput): Promise<PublishResult> {
+  /** A continuation's description comment, written before the push (see GitRemote.proposeDescriptionBeforePush). Never throws. */
+  async proposeDescriptionBeforePush({
+    workspace: prepared,
+    details,
+    changedPaths,
+    commitSha,
+  }: PublishInput & { commitSha: string }): Promise<void> {
+    const github = this.options.github;
+    if (!prepared.continuation || !details?.description || !github.proposeDescriptionComment) return;
+    try {
+      await github.proposeDescriptionComment(
+        this.descriptionInput(
+          { ...prepared, continuation: prepared.continuation },
+          { ...details, description: details.description },
+          changedPaths,
+          commitSha,
+        ),
+      );
+    } catch (error) {
+      logger.warn({ err: error, runId: prepared.runId }, "pre-push description comment failed");
+    }
+  }
+
+  async publish({ workspace: prepared, details, changedPaths, commitSha }: PublishInput): Promise<PublishResult> {
     // Revision-in-place: identify the PR by the run that originally opened
     // it (createOrFindDraftPullRequest's marker-based lookup keys on that
     // run's id), not this run's own -- this finds the existing open PR and
@@ -139,7 +163,7 @@ export class GitHubRemote implements GitRemote {
     });
     let description: DescriptionWriteOutcome | undefined;
     if (prepared.continuation) {
-      description = await this.updateDescription(prepared, details, changedPaths);
+      description = await this.updateDescription(prepared, details, changedPaths, commitSha);
     } else if (pullRequest.descriptionSha256) {
       description = { kind: "written", sha256: pullRequest.descriptionSha256 };
     }
@@ -156,7 +180,8 @@ export class GitHubRemote implements GitRemote {
     workspace: PreparedWorkspace,
     details: FinalizeChangesDetails,
   ): Promise<DescriptionWriteOutcome | undefined> {
-    return this.updateDescription(workspace, details, []);
+    // No push: the head is the commit the workspace was checked out at.
+    return this.updateDescription(workspace, details, [], workspace.baseCommit);
   }
 
   /** Never throws: a description problem must not fail an already-pushed run. */
@@ -164,30 +189,48 @@ export class GitHubRemote implements GitRemote {
     prepared: PreparedWorkspace,
     details: FinalizeChangesDetails | undefined,
     changedPaths: readonly string[],
+    headSha: string | undefined,
   ): Promise<DescriptionWriteOutcome | undefined> {
     const github = this.options.github;
     if (!prepared.continuation || !details?.description || !github.updatePullRequestDescription) return undefined;
     try {
-      return await github.updatePullRequestDescription({
-        rootRunId: prepared.continuation.rootRunId,
-        runId: prepared.runId,
-        repository: prepared.repository,
-        baseRef: prepared.baseRef,
-        headRef: prepared.headRef,
-        summary: details.summary,
-        tests: details.tests,
-        tag: details.tag,
-        packages: details.packages,
-        packageRefusals: details.packageRefusals,
-        ...(details.restoredDependencies?.length ? { restoredDependencies: details.restoredDependencies } : {}),
-        changedLockfiles: changedPaths.filter(isLockfilePath),
-        ...(details.issue ? { issue: details.issue } : {}),
-        baseline: details.description.baseline,
-      });
+      return await github.updatePullRequestDescription(
+        this.descriptionInput(
+          { ...prepared, continuation: prepared.continuation },
+          { ...details, description: details.description },
+          changedPaths,
+          headSha,
+        ),
+      );
     } catch (error) {
       logger.warn({ err: error, runId: prepared.runId }, "pull request description update failed");
       return { kind: "skipped", reason: "error" };
     }
+  }
+
+  private descriptionInput(
+    prepared: PreparedWorkspace & { continuation: { rootRunId: string } },
+    details: FinalizeChangesDetails & { description: NonNullable<FinalizeChangesDetails["description"]> },
+    changedPaths: readonly string[],
+    headSha: string | undefined,
+  ): UpdateDescriptionInput {
+    return {
+      rootRunId: prepared.continuation.rootRunId,
+      runId: prepared.runId,
+      repository: prepared.repository,
+      baseRef: prepared.baseRef,
+      headRef: prepared.headRef,
+      ...(headSha && /^[0-9a-f]{40}$/.test(headSha) ? { headSha } : {}),
+      summary: details.summary,
+      tests: details.tests,
+      tag: details.tag,
+      packages: details.packages,
+      packageRefusals: details.packageRefusals,
+      ...(details.restoredDependencies?.length ? { restoredDependencies: details.restoredDependencies } : {}),
+      changedLockfiles: changedPaths.filter(isLockfilePath),
+      ...(details.issue ? { issue: details.issue } : {}),
+      baseline: details.description.baseline,
+    };
   }
 
   /**

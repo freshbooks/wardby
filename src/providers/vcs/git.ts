@@ -512,8 +512,12 @@ export class GitVcsProvider implements VcsProvider {
     }
 
     await this.remote.assertContinuationOpen(prepared);
+    // Before the push: a description comment must already exist when the push starts a review.
+    await this.remote
+      .proposeDescriptionBeforePush?.({ workspace: prepared, details, changedPaths: changed, commitSha })
+      .catch(() => undefined);
     await this.pushOnce(prepared, commitSha);
-    const published = await this.remote.publish({ workspace: prepared, details, changedPaths: changed });
+    const published = await this.remote.publish({ workspace: prepared, details, changedPaths: changed, commitSha });
     if (published.kind === "branch") {
       if (published.branch !== prepared.headRef) throw new Error("vcs_head_ref_mismatch");
       return {

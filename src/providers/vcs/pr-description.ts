@@ -16,14 +16,19 @@ export const RELATED_SECTION_END = "<!-- wardby-related:end -->";
 export const LATEST_RUN_MARKER_PREFIX = "<!-- wardby-latest:";
 /**
  * The first line of the one description comment per pull request (edited in
- * place on later runs). Pull-request level, never per run, so there is only
- * ever one.
+ * place on later runs). Pull-request level, never per run. A proposal is
+ * stamped with the head commit it describes: `<!-- wardby-description head=<sha> -->`.
  */
 export const DESCRIPTION_COMMENT_MARKER = "<!-- wardby-description -->";
-/** An earlier per-run form of the marker (`<!-- wardby-description:<runId> -->`); such a comment is reused. */
-const PER_RUN_DESCRIPTION_COMMENT_MARKER_PREFIX = "<!-- wardby-description:";
-/** In the description comment once a later run applied its description directly: no proposal is pending. */
+/** The marker line, plain or stamped with a head; anchored to the whole first line. */
+const DESCRIPTION_COMMENT_MARKER_LINE = /^<!-- wardby-description(?: head=([0-9a-f]{40}))? -->$/;
+/** The second line of the description comment once a later run applied its description directly. */
 export const DESCRIPTION_COMMENT_APPLIED_MARKER = "<!-- wardby-description-applied -->";
+/** The first line of a duplicate description comment, rewritten to point at the one in use. */
+export const DESCRIPTION_COMMENT_SUPERSEDED_MARKER = "<!-- wardby-description-superseded -->";
+/** The description comment is searched for on at most this many pages of 100 comments. */
+export const MAX_DESCRIPTION_COMMENT_PAGES = 10;
+const HEAD_SHA = /^[0-9a-f]{40}$/;
 const PROPOSAL_SUMMARY = "<details><summary>Proposed description</summary>";
 /** A final message with fewer non-whitespace characters can't replace the description. */
 export const MIN_PR_BODY_CHARS = 80;
@@ -139,20 +144,40 @@ function fenceFor(text: string): string {
   return "`".repeat(Math.max(3, longest + 1));
 }
 
-/** Whether a comment is wardby's description comment: it starts with the marker (either form). */
-export function isDescriptionComment(body: string): boolean {
-  const text = body.replace(/\r\n/g, "\n");
-  return text.startsWith(DESCRIPTION_COMMENT_MARKER) || text.startsWith(PER_RUN_DESCRIPTION_COMMENT_MARKER_PREFIX);
+export interface ParsedDescriptionComment {
+  /** The head commit the proposal describes; absent on an unstamped or applied comment. */
+  headSha?: string;
+  /** A later run applied its description directly: no proposal is pending. */
+  applied: boolean;
+  /** The run that proposed it, when named. */
+  runId?: string;
+  /** The proposed description; absent when the comment holds none. */
+  proposed?: string;
 }
 
 /**
- * The proposed description a fallback comment carries (the fenced block under
- * "Proposed description"); undefined when the comment holds none (an applied
- * comment, or any other text).
+ * wardby's description comment, parsed; undefined for any other comment.
+ * Only the first line (the marker) and second line (the applied marker) are
+ * structural, so text inside a proposal can't change its state.
  */
-export function extractProposedDescription(commentBody: string): string | undefined {
-  const text = commentBody.replace(/\r\n/g, "\n");
-  if (text.includes(DESCRIPTION_COMMENT_APPLIED_MARKER)) return undefined;
+export function parseDescriptionComment(body: string): ParsedDescriptionComment | undefined {
+  const text = body.replace(/\r\n/g, "\n");
+  const lines = text.split("\n");
+  const marker = DESCRIPTION_COMMENT_MARKER_LINE.exec(lines[0] ?? "");
+  if (!marker) return undefined;
+  if (lines[1] === DESCRIPTION_COMMENT_APPLIED_MARKER) return { applied: true };
+  const proposed = proposalOf(text);
+  const runId = proposed === undefined ? undefined : proposingRunId(text);
+  return {
+    ...(marker[1] ? { headSha: marker[1] } : {}),
+    applied: false,
+    ...(runId ? { runId } : {}),
+    ...(proposed !== undefined ? { proposed } : {}),
+  };
+}
+
+/** The fenced block under "Proposed description"; undefined when absent. */
+function proposalOf(text: string): string | undefined {
   const at = text.indexOf(PROPOSAL_SUMMARY);
   if (at === -1) return undefined;
   const open = /\n(`{3,})markdown\n/.exec(text.slice(at));
@@ -165,28 +190,76 @@ export function extractProposedDescription(commentBody: string): string | undefi
   return proposal || undefined;
 }
 
-/** The run a fallback comment names as its proposer; undefined when it names none. */
-export function proposingRunId(commentBody: string): string | undefined {
-  const named = /latest run \(`([^`\n]+)`\)/.exec(commentBody)?.[1];
+/** The run a fallback comment names as its proposer (in its header, before the proposal). */
+function proposingRunId(text: string): string | undefined {
+  const header = text.slice(0, Math.max(0, text.indexOf(PROPOSAL_SUMMARY)));
+  const named = /latest run \(`([^`\n]+)`\)/.exec(header)?.[1];
   return named && SAFE_RUN_ID.test(named) ? named : undefined;
+}
+
+export interface DescriptionCommentRecord {
+  id: number;
+  body: string;
+  url?: string;
+  parsed: ParsedDescriptionComment;
+}
+
+/**
+ * wardby's description comments on a pull request, read the same way by the
+ * writer and the reviewer: up to MAX_DESCRIPTION_COMMENT_PAGES pages of 100
+ * (oldest first), only comments `isOurs` accepts that start with the
+ * pull-request-level marker. `newest` is the one in use; `older` are
+ * duplicates (oldest first).
+ */
+export async function findDescriptionComments(
+  fetchPage: (page: number) => Promise<unknown[]>,
+  isOurs: (comment: Record<string, unknown>) => boolean,
+): Promise<{ newest: DescriptionCommentRecord | null; older: DescriptionCommentRecord[] }> {
+  const found: DescriptionCommentRecord[] = [];
+  for (let page = 1; page <= MAX_DESCRIPTION_COMMENT_PAGES; page++) {
+    const comments = await fetchPage(page);
+    for (const item of comments) {
+      if (!item || typeof item !== "object") continue;
+      const comment = item as Record<string, unknown>;
+      if (typeof comment.body !== "string" || typeof comment.id !== "number") continue;
+      const parsed = parseDescriptionComment(comment.body);
+      if (!parsed || !isOurs(comment)) continue;
+      found.push({
+        id: comment.id,
+        body: comment.body,
+        ...(typeof comment.html_url === "string" ? { url: comment.html_url } : {}),
+        parsed,
+      });
+    }
+    if (comments.length < 100) break;
+  }
+  return { newest: found.at(-1) ?? null, older: found.slice(0, -1) };
+}
+
+/** What a duplicate description comment becomes: a pointer to the one in use. */
+export function supersededDescriptionComment(url: string | undefined): string {
+  const link = url && /^https:\/\/[^\s)]+$/.test(url) ? `[the current one](${url})` : "a newer comment";
+  return `${DESCRIPTION_COMMENT_SUPERSEDED_MARKER}\n\nSuperseded by ${link}.`;
 }
 
 /**
  * The pull request's description comment, carrying the description wardby's
- * latest run proposed when it could not apply it because a person edited the
- * description. There is one per pull request (DESCRIPTION_COMMENT_MARKER),
- * edited in place by later runs. Holds the body in a collapsed fenced block,
+ * latest run proposed when it could not apply it (it couldn't confirm the
+ * description is still its own text). There is one per pull request,
+ * edited in place by later runs, its marker stamped with `headSha`, the head
+ * commit the proposal describes. Holds the body in a collapsed fenced block,
  * and stays under MAX_DESCRIPTION_COMMENT_CHARS (a long body is truncated).
- * Throws on a run id that isn't safe to quote.
+ * Throws on a run id or head that isn't safe to quote.
  */
-export function descriptionFallbackComment(runId: string, proposedBody: string): string {
+export function descriptionFallbackComment(runId: string, proposedBody: string, headSha?: string): string {
   if (!SAFE_RUN_ID.test(runId)) throw new Error("description_comment_run_id_invalid");
+  if (headSha !== undefined && !HEAD_SHA.test(headSha)) throw new Error("description_comment_head_invalid");
   const head = [
-    DESCRIPTION_COMMENT_MARKER,
+    headSha ? `<!-- wardby-description head=${headSha} -->` : DESCRIPTION_COMMENT_MARKER,
     "",
-    `This is the current description proposed by wardby's latest run (\`${runId}\`). ` +
-      "It was not applied because a person edited the description by hand since wardby last wrote it, and wardby never overwrites a person's edits. " +
-      "The pull request author can copy it into the description. Later runs update this comment.",
+    `This is the current description proposed by wardby's latest run (\`${runId}\`)${headSha ? ` for commit ${headSha.slice(0, 12)}` : ""}. ` +
+      "It was not applied because wardby couldn't confirm the description is unchanged since it wrote it (for example, a person edited it), and wardby never overwrites a person's edits. " +
+      "The pull request author can copy it into the description; wardby then keeps it up to date again. Later runs update this comment.",
     "",
     PROPOSAL_SUMMARY,
     "",

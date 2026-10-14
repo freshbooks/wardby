@@ -81,6 +81,19 @@ class FakeGitHub implements GitHubRepositoryAccess {
     return this.descriptionResult;
   }
 
+  proposeCalls: UpdateDescriptionInput[] = [];
+  /** Set by the test: called when the comment is proposed, to observe what happened before it. */
+  onPropose?: () => void;
+  proposeThrows = false;
+
+  async proposeDescriptionComment(input: UpdateDescriptionInput): Promise<boolean> {
+    this.order.push("propose");
+    this.proposeCalls.push(structuredClone(input));
+    this.onPropose?.();
+    if (this.proposeThrows) throw new Error("boom");
+    return true;
+  }
+
   async createOrFindDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
     this.order.push("create");
     this.pullRequestCalls.push(structuredClone(input));
@@ -526,7 +539,7 @@ describe("GitVcsProvider", () => {
       git.remoteSha = BASE_SHA;
       await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
       await provider.finalizeChanges(prepared, { summary: "new", description: { baseline: BASELINE } });
-      expect(github.order).toEqual(["create", "update"]);
+      expect(github.order).toEqual(["propose", "create", "update"]);
       expect(github.descriptionCalls[0]).toMatchObject({
         rootRunId: "run-1",
         runId: "run-2",
@@ -535,6 +548,48 @@ describe("GitVcsProvider", () => {
         summary: "new",
         baseline: BASELINE,
       });
+    });
+
+    it("proposes the description comment for the new head before the push, then updates after it", async () => {
+      const { provider, github, git } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      git.remoteSha = BASE_SHA;
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      let pushedBeforePropose: boolean | undefined;
+      github.onPropose = () => {
+        pushedBeforePropose = git.calls.some((call) => call.args.includes("push"));
+      };
+      const result = await provider.finalizeChanges(prepared, { summary: "new", description: { baseline: BASELINE } });
+      expect(pushedBeforePropose).toBe(false);
+      expect(github.order).toEqual(["propose", "create", "update"]);
+      expect(result.outcome === "pull_request_updated" && result.commitSha).toBeTruthy();
+      const commitSha = result.outcome === "pull_request_updated" ? result.commitSha : "";
+      expect(github.proposeCalls[0]).toMatchObject({
+        rootRunId: "run-1",
+        runId: "run-2",
+        headSha: commitSha,
+        summary: "new",
+      });
+      expect(github.descriptionCalls[0]).toMatchObject({ headSha: commitSha });
+    });
+
+    it("a failed pre-push proposal never stops the push", async () => {
+      const { provider, github, git } = await harness();
+      github.proposeThrows = true;
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      git.remoteSha = BASE_SHA;
+      await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+      const result = await provider.finalizeChanges(prepared, { summary: "new", description: { baseline: BASELINE } });
+      expect(result.outcome).toBe("pull_request_updated");
+      expect(git.calls.some((call) => call.args.includes("push"))).toBe(true);
+    });
+
+    it("a no-change refresh stamps the workspace's head", async () => {
+      const { provider, github } = await harness();
+      const prepared = await provider.prepareWorkspace(continuationInput());
+      await provider.refreshPullRequestDescription?.(prepared, { description: { baseline: BASELINE } });
+      expect(github.descriptionCalls[0]).toMatchObject({ headSha: prepared.baseCommit });
+      expect(github.proposeCalls).toHaveLength(0);
     });
 
     it("a continuation without details.description never touches the description", async () => {
@@ -604,6 +659,7 @@ describe("GitVcsProvider", () => {
         description: { kind: "written", sha256: "h".repeat(64) },
       });
       expect(github.descriptionCalls).toHaveLength(0);
+      expect(github.proposeCalls).toHaveLength(0);
     });
 
     it("never asks for a fresh run", async () => {
