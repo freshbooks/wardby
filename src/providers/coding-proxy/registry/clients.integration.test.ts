@@ -27,11 +27,12 @@ import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { strToU8, zipSync } from "fflate";
 import tar from "tar-stream";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PackageAllowlist } from "../../../coding/registry/allowlist.js";
+import { BUILTIN_COLLECT_EXCLUDE_NAMES } from "../../../coding/collect-exclude.js";
 import { REGISTRY_ADAPTERS } from "../../../coding/registry/adapters.js";
 import { normalizeRegistryLockfiles } from "../../../coding/registry/lockfiles.js";
 import { npmAdapter } from "../../../coding/registry/npm.js";
@@ -658,6 +659,36 @@ async function shimDirectory(): Promise<string> {
   return shimDir;
 }
 
+/** What would show the proxy in a collected file: its host and port, plain
+ *  or percent-encoded (yarn writes locators encoded), and the run's token. */
+function leakNeedles(registryUrl: string, token: string): string[] {
+  const host = new URL(registryUrl).host;
+  return [host, encodeURIComponent(host), token];
+}
+
+/** Every file the run would collect (collection skips node_modules, .cache
+ *  and the other built-in names) whose name or content (gunzipped for a
+ *  .gz) contains one of `needles`. */
+async function collectedLeaks(root: string, needles: string[]): Promise<string[]> {
+  const leaks: string[] = [];
+  const walk = async (relative: string): Promise<void> => {
+    for (const entry of await readdir(join(root, relative), { withFileTypes: true })) {
+      const path = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!(BUILTIN_COLLECT_EXCLUDE_NAMES as readonly string[]).includes(entry.name)) await walk(path);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      let content = await readFile(join(root, path));
+      if (path.endsWith(".gz")) content = gunzipSync(content);
+      const text = content.toString("latin1");
+      if (needles.some((needle) => path.includes(needle) || text.includes(needle))) leaks.push(path);
+    }
+  };
+  await walk("");
+  return leaks;
+}
+
 describe.skipIf(!RUN)("pnpm and yarn through the shim: a resolving install, then a frozen one with no walk", () => {
   /**
    * One client's round trip, as a run would go: a resolving install
@@ -676,6 +707,8 @@ describe.skipIf(!RUN)("pnpm and yarn through the shim: a resolving install, then
     env?: Record<string, string>;
     /** yarn Berry's Plug'n'Play linker: no node_modules folder. */
     pnp?: boolean;
+    /** Lockfiles the collection rewrite is expected to change. */
+    rewrittenAtCollection?: string[];
   }) {
     const shimDir = await shimDirectory();
     // Real paths (here and for the cache): yarn's PnP map records the
@@ -727,13 +760,17 @@ describe.skipIf(!RUN)("pnpm and yarn through the shim: a resolving install, then
 
     const resolving = await phase(options.resolve);
     const lockfilePath = join(projectDir, options.lockfile);
-    await normalizeRegistryLockfiles({
+    const rewritten = await normalizeRegistryLockfiles({
       workspace: projectDir,
       proxyBaseUrl: resolving.registryUrl.replace(/\/registry\/npm\/$/, ""),
     });
+    // The proxy serves downloads at the registry's usual path, so only yarn
+    // classic (which records every download URL) needs its lockfile rewritten.
+    expect(rewritten).toEqual(options.rewrittenAtCollection ?? []);
     const committed = await readFile(lockfilePath, "utf8");
-    expect(committed).not.toContain("127.0.0.1");
-    expect(committed).not.toContain(resolving.token);
+    // No file the run would collect names the proxy or carries the token:
+    // the lockfile, and yarn's .pnp.cjs, install state and cache names too.
+    expect(await collectedLeaks(projectDir, leakNeedles(resolving.registryUrl, resolving.token))).toEqual([]);
 
     for (const leftover of ["node_modules", ".yarn", ".pnp.cjs", ".pnp.loader.mjs"])
       await rm(join(projectDir, leftover), { recursive: true, force: true });
@@ -762,6 +799,7 @@ describe.skipIf(!RUN)("pnpm and yarn through the shim: a resolving install, then
     expect(child.manifest).toMatchObject({ name: "wardby-lock-child", version: "1.0.0" });
     // The frozen install left the committed lockfile as it was.
     expect(await readFile(lockfilePath, "utf8")).toBe(committed);
+    expect(await collectedLeaks(projectDir, leakNeedles(frozen.registryUrl, frozen.token))).toEqual([]);
     return { committed };
   }
 
@@ -780,6 +818,7 @@ describe.skipIf(!RUN)("pnpm and yarn through the shim: a resolving install, then
       lockfile: "yarn.lock",
       resolve: ["install", "--non-interactive"],
       frozen: ["install", "--frozen-lockfile", "--non-interactive"],
+      rewrittenAtCollection: ["yarn.lock"],
     });
     expect(committed).toContain('resolved "https://registry.yarnpkg.com/wardby-lock-root/-/wardby-lock-root-1.0.0.tgz');
   });
@@ -806,7 +845,8 @@ describe.skipIf(!RUN)("pnpm and yarn through the shim: a resolving install, then
       manifest: { packageManager: `yarn@${berry}` },
       resolve: ["install"],
       frozen: ["install", "--immutable"],
-      env: { COREPACK_HOME: COREPACK_CACHE, YARN_NODE_LINKER: "pnp" },
+      // The cache in the project (as a zero-install repository commits it).
+      env: { COREPACK_HOME: COREPACK_CACHE, YARN_NODE_LINKER: "pnp", YARN_ENABLE_GLOBAL_CACHE: "false" },
       pnp: true,
     });
   });

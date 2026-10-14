@@ -457,13 +457,17 @@ mapped back to the host the original used. A yarn classic install that
 bypasses the shim (the real `yarn` called by its full path) gets neither this
 nor the token, and fails.
 
-**What a run commits.** Before a run's changes are collected, Wardby rewrites what each
-client recorded of the proxy in its lockfile: npm's and yarn classic's
-`resolved` URLs become public registry URLs (yarn classic's on
-`registry.yarnpkg.com`), a pnpm `tarball` pointing at the proxy is dropped
-(or made public when it has no `integrity`), and a Berry resolution's
-`__archiveUrl` naming the proxy is dropped. A committed lockfile never
-names the proxy or the token.
+**What a run commits.** The proxy serves each download at the registry's
+usual path (`<proxy>/registry/npm/<name>/-/<name>-<version>.tgz`), and pnpm
+and yarn 2 or later record a download URL only when it isn't the usual one,
+so their lockfiles, yarn's `.pnp.cjs` and install state, and the names in
+`.yarn/cache` name nothing of the proxy: a zero-install repository can
+commit them as they are. npm and yarn classic record every download URL, so
+before a run's changes are collected Wardby rewrites their `resolved` URLs
+to public registry URLs (yarn classic's on `registry.yarnpkg.com`). It
+also drops a pnpm `tarball` or a yarn 2+ `__archiveUrl` that still names the
+proxy (from an older Wardby). A committed lockfile never names the proxy or
+the token.
 
 ### Metadata requests are answered at once
 

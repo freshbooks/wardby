@@ -111,6 +111,15 @@ function standardTarball(name: string, filename: string): DownloadRoute | null {
   return { kind: "download", name, version, filename: `${version}.tgz` };
 }
 
+/** The download URL the proxy hands out: the registry's usual tarball path,
+ *  `<name>/-/<unscoped>-<version>.tgz`, under the proxy's base (routed by
+ *  `standardTarball`). pnpm and yarn 2+ record a download URL in their
+ *  lockfile (and yarn in .pnp.cjs and its cache names) only when it isn't
+ *  that usual one, so they record nothing of the proxy. */
+function proxyTarballUrl(proxyBase: string, name: string, version: string): string {
+  return `${proxyBase}${name}/-/${name.slice(name.indexOf("/") + 1)}-${version}.tgz`;
+}
+
 function validName(name: string): string {
   if (!NAME.test(name)) throw new AllowlistEntryError(`"${name}" is not a valid npm package name`);
   return name;
@@ -265,7 +274,7 @@ export const npmAdapter: RegistryAdapter = {
       const info = JSON.parse(manifest) as Packument["versions"][string];
       versions[version] = {
         ...info,
-        dist: { ...info.dist, tarball: `${proxyBase}-/tarball/${encodeURIComponent(meta.name)}/${version}` },
+        dist: { ...info.dist, tarball: proxyTarballUrl(proxyBase, meta.name, version) },
       };
       const published = raw.times.get(version);
       if (published !== undefined) time[version] = published;
@@ -289,7 +298,7 @@ export const npmAdapter: RegistryAdapter = {
       contentType: "application/json",
       body: JSON.stringify({
         ...info,
-        dist: { ...info.dist, tarball: `${proxyBase}-/tarball/${encodeURIComponent(meta.name)}/${version}` },
+        dist: { ...info.dist, tarball: proxyTarballUrl(proxyBase, meta.name, version) },
       }),
     };
   },

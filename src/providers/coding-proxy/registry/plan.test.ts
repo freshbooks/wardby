@@ -1247,7 +1247,7 @@ describe("version documents (corepack's /<name>/<version>)", () => {
       name: "a",
       version: "1.0.0",
       dependencies: { b: "^1.0.0" },
-      dist: { tarball: "http://wardby-proxy:8787/registry/npm/-/tarball/a/1.0.0", integrity: sri("a", "1.0.0") },
+      dist: { tarball: "http://wardby-proxy:8787/registry/npm/a/-/a-1.0.0.tgz", integrity: sri("a", "1.0.0") },
     });
     // Too new for the release age, and not published at all.
     for (const subpath of ["a/1.1.0", "a/9.9.9"]) {

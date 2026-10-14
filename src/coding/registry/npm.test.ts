@@ -81,8 +81,11 @@ describe("npmAdapter protocol", () => {
         .body,
     );
     expect(Object.keys(doc.versions)).toEqual([versions[0]]);
+    // The registry's usual path under the proxy: a client that records a
+    // download URL only when it isn't the usual one (pnpm, yarn 2+)
+    // records none.
     expect(doc.versions[versions[0]].dist.tarball).toBe(
-      `http://wardby-proxy:8787/registry/npm/-/tarball/left-pad/${versions[0]}`,
+      `http://wardby-proxy:8787/registry/npm/left-pad/-/left-pad-${versions[0]}.tgz`,
     );
     expect(doc["dist-tags"].latest).toBe(versions[0]);
   });
@@ -227,8 +230,12 @@ describe("npmAdapter version documents (corepack)", () => {
     expect(rendered && JSON.parse(rendered.body)).toEqual({
       name: "pnpm",
       version: "10.4.1",
-      dist: { tarball: `${proxyBase}-/tarball/pnpm/10.4.1`, integrity: "sha512-x" },
+      dist: { tarball: `${proxyBase}pnpm/-/pnpm-10.4.1.tgz`, integrity: "sha512-x" },
     });
+    const scoped = { ...meta, name: "@yarnpkg/cli-dist" };
+    expect(
+      JSON.parse(npmAdapter.renderVersion!(scoped, "10.4.1", new Set(["10.4.1.tgz"]), proxyBase)!.body).dist.tarball,
+    ).toBe(`${proxyBase}@yarnpkg/cli-dist/-/cli-dist-10.4.1.tgz`);
     expect(npmAdapter.renderVersion!(meta, "10.4.1", new Set(), proxyBase)).toBeNull();
     expect(npmAdapter.renderVersion!(meta, "9.0.0", new Set(["9.0.0.tgz"]), proxyBase)).toBeNull();
   });
