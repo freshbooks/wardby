@@ -81,14 +81,15 @@ stages:
               command -v bzip2 >/dev/null || apt-get install -y -qq bzip2
               npm run prisma:generate
               npm run prisma:migrate
-              # TEMPORARY diagnostic: remove once the SECRET_APP_KEY failure is understood.
-              echo "SECRET_APP_KEY=${SECRET_APP_KEY:-}"
+              # Public deterministic fixture material for tests only; never a deployment key. Exported
+              # here because the step's env: block did not deliver it to the shell on this agent pool,
+              # although DATABASE_URL in the same block arrived.
+              export SECRET_APP_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+              echo "SECRET_APP_KEY length: ${#SECRET_APP_KEY}"
               npm test
             displayName: Run tests
             env:
               DATABASE_URL: postgresql://wardby:test-only@localhost:55432/security
-              # Public deterministic fixture material for tests only; never a deployment key.
-              SECRET_APP_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           - script: docker rm -f wardby-test-db
             displayName: Stop Postgres
             condition: always()
