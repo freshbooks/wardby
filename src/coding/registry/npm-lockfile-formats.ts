@@ -33,7 +33,13 @@ export function parseNpmClientLockfile(
   );
 }
 
-export const npmClientLockfilePlan: LockfilePlanSupport = { ...npmLockfilePlan, parse: parseNpmClientLockfile };
+export const npmClientLockfilePlan: LockfilePlanSupport = {
+  ...npmLockfilePlan,
+  parse: parseNpmClientLockfile,
+  // npm's JSON parses in milliseconds on the event loop; pnpm's and yarn's
+  // formats go to a worker thread (registry/lockfile-parse.ts).
+  parsesOffThread: (body) => !body.trimStart().startsWith("{"),
+};
 
 export const npmClientLockfiles = {
   names: ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"],

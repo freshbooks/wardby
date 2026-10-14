@@ -77,19 +77,26 @@ export function entryOf(
 /** What a descriptor names: an entry, or a local package (null). */
 export type Target = LockfileEntry | null;
 
+/** The client's resolution rule (`resolve`) and, for each entry, the
+ *  dependency keys the lockfile lists for it (`dependencyKeys`): `resolve`
+ *  answers only for those keys, which is what lets a parse made in a
+ *  worker thread be shipped back as a plain edge table. */
 export function buildResolve(
   byPath: ReadonlyMap<string, { dependencies: ReadonlyMap<string, string> }>,
   byDescriptor: ReadonlyMap<string, Target>,
   candidates: (key: string, range: string) => string[],
-): ParsedLockfile["resolve"] {
-  return (fromPath, key) => {
-    const range = byPath.get(fromPath)?.dependencies.get(key);
-    if (range === undefined) return undefined;
-    for (const descriptor of candidates(key, range)) {
-      const target = byDescriptor.get(descriptor);
-      if (target !== undefined) return target ?? undefined;
-    }
-    return undefined;
+): Required<Pick<ParsedLockfile, "resolve" | "dependencyKeys">> {
+  return {
+    resolve: (fromPath, key) => {
+      const range = byPath.get(fromPath)?.dependencies.get(key);
+      if (range === undefined) return undefined;
+      for (const descriptor of candidates(key, range)) {
+        const target = byDescriptor.get(descriptor);
+        if (target !== undefined) return target ?? undefined;
+      }
+      return undefined;
+    },
+    dependencyKeys: (path) => [...(byPath.get(path)?.dependencies.keys() ?? [])],
   };
 }
 

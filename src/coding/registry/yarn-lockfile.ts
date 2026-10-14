@@ -179,7 +179,7 @@ export function parseYarnClassicLockfile(
     // yarn classic records no project section: the root's declarations
     // live only in package.json.
     projects: [],
-    resolve: buildResolve(byPath, byDescriptor, (key, range) => [`${key}@${range}`]),
+    ...buildResolve(byPath, byDescriptor, (key, range) => [`${key}@${range}`]),
   };
 }
 
@@ -289,7 +289,7 @@ export function parseYarnBerryLockfile(
     entries,
     projects,
     integrity: "registry",
-    resolve: buildResolve(byPath, byDescriptor, berryCandidates),
+    ...buildResolve(byPath, byDescriptor, berryCandidates),
   };
 }
 

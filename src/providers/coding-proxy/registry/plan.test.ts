@@ -102,6 +102,7 @@ function setup(
     upstream?: UpstreamFetch;
     planMaxEntries?: number;
     planTimeoutMs?: number;
+    planParseTimeoutMs?: number;
     now?: () => Date;
     planConcurrency?: number;
     planMaxPerRun?: number;
@@ -146,6 +147,7 @@ function setup(
     now: options.now ?? (() => NOW),
     planMaxEntries: options.planMaxEntries,
     planTimeoutMs: options.planTimeoutMs,
+    planParseTimeoutMs: options.planParseTimeoutMs,
     planConcurrency: options.planConcurrency,
     planMaxPerRun: options.planMaxPerRun,
   });
@@ -1187,6 +1189,24 @@ ${extraEdge ? '\n"evil@npm:^1.0.0":\n  version: 1.0.0\n  resolution: "evil@npm:1
     });
     await expect(drain(response)).rejects.toThrow();
     expect(store.fetches.at(-1)).toMatchObject({ name: "c", outcome: "refused", reason: "wardby_integrity_mismatch" });
+  });
+
+  it("reads a pnpm or yarn lockfile off the event loop, answering a slow read as incomplete and falling back", async () => {
+    const { plan, service } = setup(
+      { ...chain, a: { "1.0.0": { deps: { b: "^1.0.0", d: "^1.0.0" } } }, d: { "1.0.0": {} } },
+      { planParseTimeoutMs: 1 },
+    );
+    const { status, json } = await plan(pnpmV9());
+    expect(status).toBe(503);
+    expect(json).toMatchObject({ error: expect.stringContaining("wardby_plan_incomplete") as unknown });
+    const response = await service.handle({
+      method: "GET",
+      ecosystem: "npm",
+      subpath: "d",
+      token: "rrg_token",
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(200);
   });
 
   it("refuses text that is no supported lockfile as unsupported, and falls back for the run", async () => {

@@ -194,6 +194,11 @@ export interface ParsedLockfile {
    *  to (npm: the nearest ancestor `node_modules/<key>`), or undefined
    *  (not installed, or a local project). */
   resolve(fromPath: string, key: string): LockfileEntry | undefined;
+  /** The dependency keys the lockfile itself lists for the entry at
+   *  `path`, when `resolve` answers only for those (pnpm, yarn). Such a
+   *  lockfile can be parsed in a worker thread and shipped back as an edge
+   *  table; npm's rule (any ancestor folder) cannot. */
+  dependencyKeys?(path: string): readonly string[];
 }
 
 /** Immutable facts about one published version, read from the registry
@@ -242,6 +247,10 @@ export interface LockfilePlanSupport {
   /** Whether a dependency declared as `range` accepts `version`, as the
    *  client itself decides it when it reuses a locked version. */
   edgeSatisfies(version: string, range: string): boolean;
+  /** Whether `body` should be parsed in a worker thread rather than on the
+   *  proxy's event loop (a YAML or yarn lockfile, which is far costlier to
+   *  read than JSON). Its parse must provide `dependencyKeys`. */
+  parsesOffThread?(body: string): boolean;
 }
 
 export interface WorkerConfigInput {

@@ -154,7 +154,7 @@ export function parsePnpmLockfile(
     if (reference.startsWith("/")) return [reference];
     return /^\d/.test(reference) ? [`/${key}@${reference}`] : [reference];
   };
-  return { entries, projects, resolve: buildResolve(byPath, byKey, candidates) };
+  return { entries, projects, ...buildResolve(byPath, byKey, candidates) };
 }
 
 /** Whether `body` is a pnpm lockfile: a top-level `lockfileVersion:` key

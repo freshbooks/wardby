@@ -42,6 +42,7 @@ import { capabilityHash } from "../proxy.js";
 import type { OsvAudit } from "./audit.js";
 import { DEPENDENCY_CACHE_ECOSYSTEM, MAX_DEPENDENCY_CACHE_LOCK_HASHES, sha256Hex } from "../dependency-cache/key.js";
 import { boundedMetadataFetch, DEFAULT_MAX_METADATA_BYTES, DEFAULT_METADATA_TIMEOUT_MS } from "./bounded-fetch.js";
+import { parseLockfileOffThread } from "./lockfile-parse.js";
 import { DEFAULT_PLAN_MAX_ENTRIES, DEFAULT_PLAN_TIMEOUT_MS, verifyLockfilePlan, type PlanRefusal } from "./plan.js";
 import type { RegistryRunContext, RegistryStore } from "./store.js";
 
@@ -534,6 +535,9 @@ export class RegistryService {
       planMaxEntries?: number;
       /** Time one lockfile plan may take (default 120 s). */
       planTimeoutMs?: number;
+      /** Time reading one pnpm or yarn lockfile (in a worker thread) may
+       *  take (default 15 s). */
+      planParseTimeoutMs?: number;
       /** Lockfile plans read and verified at once across every run (default 2). */
       planConcurrency?: number;
       /** Lockfile plans one run may make (default 20). */
@@ -618,10 +622,18 @@ export class RegistryService {
         // The dependency cache's lockHash: computed here, from the bytes the
         // proxy itself verified, never from anything a client claims.
         const lockHash = context.dependencyCache && adapter.id === DEPENDENCY_CACHE_ECOSYSTEM ? sha256Hex(body) : null;
-        const lockfile = support.parse(body, {
+        const parseOptions = {
           maxEntries: this.options.planMaxEntries ?? DEFAULT_PLAN_MAX_ENTRIES,
           proxyRegistryUrl: `${this.options.proxyBase}${adapter.id}/`,
-        });
+        };
+        // A YAML or yarn lockfile is read in a worker thread with a time
+        // bound (lockfile-parse.ts); npm's JSON stays on the event loop.
+        const lockfile = support.parsesOffThread?.(body)
+          ? await parseLockfileOffThread(adapter.id, body, parseOptions, {
+              timeoutMs: this.options.planParseTimeoutMs,
+              signal: request.signal,
+            })
+          : support.parse(body, parseOptions);
         return this.verifyPlan(request, adapter, support, lockfile, auditVersions, context, lockHash);
       });
     } finally {
