@@ -1,0 +1,97 @@
+parameters:
+  - name: mode # ci | cd
+    type: string
+  - name: project_name # repo folder name, used by the env-vars, versioning and comms jobs
+    type: string
+  - name: images
+    type: object
+
+stages:
+  - stage: GenerateEnvVars
+    displayName: Generate Environment Variables
+    dependsOn: []
+    jobs:
+      - template: azure_pipelines/templates/jobs/generate_env_vars_job.yaml@fresh-cli
+        parameters:
+          project_name: ${{ parameters.project_name }}
+
+  # Outputs calverVersion. The bump commit starts with "build:", which skips the run it triggers.
+  - ${{ if eq(parameters.mode, 'cd') }}:
+      - stage: Versioning
+        displayName: Versioning
+        dependsOn: GenerateEnvVars
+        condition: >-
+          and(
+          succeeded(),
+          eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+          not(startsWith(dependencies.GenerateEnvVars.outputs['Execute.ExportCommitMessage.COMMIT_MESSAGE'], 'build:'))
+          )
+        jobs:
+          - template: azure_pipelines/templates/jobs/bump_version_job.yaml@fresh-cli
+            parameters:
+              project_name: ${{ parameters.project_name }}
+
+  # generate_artifact_job.yaml hard-codes its job name, so each image gets its own stage.
+  - ${{ each image in parameters.images }}:
+      - stage: Build_${{ replace(image.name, '-', '_') }}
+        displayName: Build ${{ image.name }}
+        ${{ if eq(parameters.mode, 'cd') }}:
+          dependsOn:
+            - GenerateEnvVars
+            - Versioning
+          condition: in(dependencies.Versioning.result, 'Succeeded')
+          variables:
+            calverVersion: $[ stageDependencies.Versioning.UpdateVersioning.outputs['ExportCalverVersion.calverVersion'] ]
+        ${{ else }}:
+          dependsOn: GenerateEnvVars
+        jobs:
+          - template: azure_pipelines/templates/jobs/generate_artifact_job.yaml@fresh-cli
+            parameters:
+              project_name: ${{ image.name }}
+              relative_dockerfile_path: ${{ image.dockerfile }}
+              targets:
+                - ${{ image.target }}
+              default_target: ${{ image.target }}
+              ${{ if eq(parameters.mode, 'ci') }}:
+                git_ref: $(Build.SourceVersion)
+                docker_image_tag: $(Build.SourceVersion)
+                registry_path: freshbooks-builds
+
+  - stage: CommunicationAndAlerts
+    displayName: Communication & Alerts
+    dependsOn:
+      - GenerateEnvVars
+      - ${{ if eq(parameters.mode, 'cd') }}:
+          - Versioning
+      - ${{ each image in parameters.images }}:
+          - Build_${{ replace(image.name, '-', '_') }}
+    ${{ if eq(parameters.mode, 'cd') }}:
+      condition: >-
+        and(
+        always(),
+        not(startsWith(dependencies.GenerateEnvVars.outputs['Execute.ExportCommitMessage.COMMIT_MESSAGE'], 'build:'))
+        )
+    ${{ else }}:
+      condition: always()
+    variables:
+      slackChannels: $[ stageDependencies.GenerateEnvVars.Execute.outputs['Toml.TOOL_FRESH_PROJECT_NOTIFICATIONS_SLACK_CHANNELS'] ]
+      deployNotifySlackOnStatuses: $[ stageDependencies.GenerateEnvVars.Execute.outputs['Toml.TOOL_FRESH_PROJECT_NOTIFICATIONS_DEPLOYMENT_NOTIFY_CHANNELS_ON'] ]
+      prNotifySlackOnStatuses: $[ stageDependencies.GenerateEnvVars.Execute.outputs['Toml.TOOL_FRESH_PROJECT_NOTIFICATIONS_PR_NOTIFY_CHANNELS_ON'] ]
+      prTitle: $[ stageDependencies.GenerateEnvVars.Execute.outputs['PrInfo.TITLE'] ]
+      isPullRequestByDependabot: $[ startsWith(variables['System.PullRequest.SourceBranch'], 'dependabot/') ]
+      hotfixBranchExists: "False"
+      isPulseCheckPipeline: "False"
+      checkProductionImageIntegrity: "true"
+      ignoreTrivyImageScanErrors: "false"
+      ${{ if eq(parameters.mode, 'cd') }}:
+        isPullRequest: "False"
+        calverVersion: $[ stageDependencies.Versioning.UpdateVersioning.outputs['ExportCalverVersion.calverVersion'] ]
+        beforeAppProductionVersion: $[ stageDependencies.GenerateEnvVars.Execute.outputs['GetBeforeAppProductionVersion.BEFORE_APP_PRODUCTION_VERSION'] ]
+      ${{ else }}:
+        isPullRequest: $[ and(eq(variables.isMain, 'False'), in(variables['Build.Reason'], 'PullRequest', 'Manual')) ]
+        calverVersion: ""
+        beforeAppProductionVersion: ""
+    jobs:
+      - template: azure_pipelines/templates/jobs/comm_and_alerts_job.yaml@fresh-cli
+        parameters:
+          project_name: ${{ parameters.project_name }}

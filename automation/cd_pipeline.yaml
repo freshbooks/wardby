@@ -1,0 +1,59 @@
+# CD: on every push to main, bumps the calver version and builds every wardby image,
+# pushing calver-tagged images to gcr.io/freshbooks-builds and gcr.io/freshbooks-software
+# through the FreshCLI job templates.
+
+parameters:
+  - name: freshcli_ref
+    type: string
+    default: refs/tags/6.10.0
+  - name: images
+    type: object
+    default:
+      - { name: wardby-runtime, dockerfile: deploy/Dockerfile, target: runtime }
+      - { name: wardby-migration, dockerfile: deploy/Dockerfile, target: migration }
+      - { name: wardby-coding-worker, dockerfile: src/coding-worker/Dockerfile, target: runtime }
+      - {
+          name: wardby-coding-worker-node-python,
+          dockerfile: src/coding-worker/Dockerfile.node-python,
+          target: runtime,
+        }
+      - { name: wardby-claude-coding-worker, dockerfile: src/claude-coding-worker/Dockerfile, target: runtime }
+      - { name: wardby-claude-tool-runner, dockerfile: src/claude-tool-runner/Dockerfile, target: runtime }
+      - {
+          name: wardby-claude-tool-runner-node-python,
+          dockerfile: src/claude-tool-runner/Dockerfile,
+          target: node-python,
+        }
+      - { name: wardby-native-worker, dockerfile: src/native-worker/Dockerfile, target: runtime }
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+
+pr: none
+
+resources:
+  repositories:
+    - repository: fresh-cli
+      type: github
+      endpoint: TheBakery
+      name: freshbooks/fresh-cli
+      ref: ${{ parameters.freshcli_ref }}
+
+variables:
+  - group: artifactory
+  - group: github
+  - group: docker-hub
+  - name: src_folder
+    value: src
+  - name: dockerfile_dir_path
+    value: deploy
+
+stages:
+  - template: templates/image_build_stages.yaml
+    parameters:
+      mode: cd
+      project_name: wardby
+      images: ${{ parameters.images }}
