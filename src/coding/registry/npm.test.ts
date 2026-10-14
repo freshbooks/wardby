@@ -187,6 +187,48 @@ describe("npmAdapter worker config for pnpm, yarn and corepack", () => {
   });
 });
 
+describe("npmAdapter download URLs for versions the usual path can't spell", () => {
+  it("renders a version with build metadata at a URL the adapter routes back to that version", () => {
+    const proxyBase = "http://wardby-proxy:8787/registry/npm/";
+    const manifests = new Map(
+      ["1.0.0", "1.0.0+build.5"].map((version) => [
+        version,
+        JSON.stringify({
+          name: "pkg",
+          version,
+          dist: { tarball: `https://registry.npmjs.org/pkg/-/pkg-${version}.tgz` },
+        }),
+      ]),
+    );
+    const meta = {
+      name: "pkg",
+      versions: new Map(),
+      raw: { name: "pkg", distTags: { latest: "1.0.0" }, manifests, times: new Map() },
+    };
+    const keep = new Set(["1.0.0", "1.0.0+build.5"]);
+    const doc = JSON.parse(
+      npmAdapter.renderMetadata(meta, keep, new Set(["1.0.0.tgz", "1.0.0+build.5.tgz"]), proxyBase).body,
+    ) as { versions: Record<string, { dist: { tarball: string } }> };
+    for (const version of keep) {
+      const url = doc.versions[version].dist.tarball;
+      expect(url.startsWith(proxyBase), url).toBe(true);
+      expect(npmAdapter.route("GET", url.slice(proxyBase.length), new Headers()), url).toEqual({
+        kind: "download",
+        name: "pkg",
+        version,
+        filename: `${version}.tgz`,
+      });
+    }
+    // The usual path wherever it can spell the version.
+    expect(doc.versions["1.0.0"].dist.tarball).toBe(`${proxyBase}pkg/-/pkg-1.0.0.tgz`);
+    const single = npmAdapter.renderVersion!(meta, "1.0.0+build.5", new Set(["1.0.0+build.5.tgz"]), proxyBase)!;
+    const url = (JSON.parse(single.body) as { dist: { tarball: string } }).dist.tarball;
+    expect(npmAdapter.route("GET", url.slice(proxyBase.length), new Headers())).toMatchObject({
+      version: "1.0.0+build.5",
+    });
+  });
+});
+
 describe("npmAdapter version documents (corepack)", () => {
   const route = (subpath: string) => npmAdapter.route("GET", subpath, new Headers());
 

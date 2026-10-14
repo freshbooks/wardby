@@ -50,7 +50,10 @@ export function parseProxyPath(path: string): { name: string; version: string } 
     const prefix = `${unscoped(name)}-`;
     version = file.startsWith(prefix) ? file.slice(prefix.length) : null;
   }
-  if (!name || !version || !PACKAGE_NAME.test(name) || semver.valid(version) !== version) return null;
+  // A valid semver version, build metadata allowed (the proxy serves such a
+  // version on its own route), made only of version characters.
+  if (!name || !version || !PACKAGE_NAME.test(name) || !semver.valid(version) || !/^[0-9A-Za-z.+-]+$/.test(version))
+    return null;
   return { name, version };
 }
 

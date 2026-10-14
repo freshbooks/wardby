@@ -117,6 +117,11 @@ function standardTarball(name: string, filename: string): DownloadRoute | null {
  *  lockfile (and yarn in .pnp.cjs and its cache names) only when it isn't
  *  that usual one, so they record nothing of the proxy. */
 function proxyTarballUrl(proxyBase: string, name: string, version: string): string {
+  // The usual path routes only a canonically spelled version (standardTarball);
+  // any other kept version (build metadata, `1.0.0+build`) keeps the proxy's
+  // own route, which the collection rewrite turns public all the same.
+  if (semver.valid(version) !== version)
+    return `${proxyBase}-/tarball/${encodeURIComponent(name)}/${encodeURIComponent(version)}`;
   return `${proxyBase}${name}/-/${name.slice(name.indexOf("/") + 1)}-${version}.tgz`;
 }
 

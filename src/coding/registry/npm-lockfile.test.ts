@@ -14,6 +14,8 @@ describe("normalizeNpmLockfile", () => {
   it.each([
     [`${PROXY}-/tarball/left-pad/1.3.0`, "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"],
     [`${PROXY}-/tarball/JSONStream/1.3.5`, "https://registry.npmjs.org/JSONStream/-/JSONStream-1.3.5.tgz"],
+    // A version with build metadata, which the proxy serves on its own route.
+    [`${PROXY}-/tarball/pkg/1.0.0%2Bbuild.5`, "https://registry.npmjs.org/pkg/-/pkg-1.0.0+build.5.tgz"],
     [
       `${PROXY}-/tarball/%40react-aria%2Flive-announcer/3.5.1`,
       "https://registry.npmjs.org/@react-aria/live-announcer/-/live-announcer-3.5.1.tgz",
