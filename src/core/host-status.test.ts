@@ -392,8 +392,8 @@ describe("completeHostStatus", () => {
       id: "501",
       body: expect.stringContaining("Opened #73"),
     });
-    expect(d.runHostStatus.update).toHaveBeenCalledWith({
-      where: { runId: "r1" },
+    expect(d.runHostStatus.updateMany).toHaveBeenCalledWith({
+      where: { runId: "r1", completedAt: null },
       data: { commentId: "501", completedAt: expect.any(Date) },
     });
   });
@@ -470,7 +470,7 @@ describe("completeHostStatus", () => {
     const d = db({ row: row({ commentId: null }) });
     await completeHostStatus(d as never, { id: "r1", status: "lost", finalText: null }, { github: h });
     expect(h.comment).not.toHaveBeenCalled();
-    expect(d.runHostStatus.update).not.toHaveBeenCalled();
+    expect(d.runHostStatus.updateMany).not.toHaveBeenCalled();
 
     await completeHostStatus(
       d as never,
@@ -484,8 +484,8 @@ describe("completeHostStatus", () => {
       number: 71,
       body: expect.stringMatching(/^❌ Interrupted before it finished/),
     });
-    expect(d.runHostStatus.update).toHaveBeenCalledWith({
-      where: { runId: "r1" },
+    expect(d.runHostStatus.updateMany).toHaveBeenCalledWith({
+      where: { runId: "r1", completedAt: null },
       data: { commentId: "501", completedAt: expect.any(Date) },
     });
   });
@@ -511,7 +511,7 @@ describe("completeHostStatus", () => {
       await completeHostStatus(d as never, finished, { github: h }, { postIfMissing: true });
       expect(h.editComment).not.toHaveBeenCalled();
       expect(h.comment).not.toHaveBeenCalled();
-      expect(d.runHostStatus.update).not.toHaveBeenCalled();
+      expect(d.runHostStatus.updateMany).not.toHaveBeenCalled();
     }
   });
 
@@ -530,7 +530,7 @@ describe("completeHostStatus", () => {
     h.editComment.mockRejectedValue(new Error("boom"));
     const d = db({ row: row() });
     await expect(completeHostStatus(d as never, finished, { github: h })).resolves.toBeUndefined();
-    expect(d.runHostStatus.update).not.toHaveBeenCalled();
+    expect(d.runHostStatus.updateMany).not.toHaveBeenCalled();
   });
 
   it("does nothing without hosts", async () => {
@@ -705,8 +705,8 @@ describe("full replies", () => {
       expect(status).not.toContain("> ");
       expect(h.comment).toHaveBeenCalledTimes(1);
       expect(h.comment).toHaveBeenCalledWith(REPO, { number: 71, body: `**Reply, part 1 of 1**\n\n${reply}` });
-      expect(d.runHostStatus.update).toHaveBeenCalledWith({
-        where: { runId: "r1" },
+      expect(d.runHostStatus.updateMany).toHaveBeenCalledWith({
+        where: { runId: "r1", completedAt: null },
         data: { commentId: "501", completedAt: expect.any(Date) },
       });
     });
@@ -772,7 +772,10 @@ describe("full replies", () => {
       expect(body).not.toMatch(/@(?!\u200b)\w/);
     });
 
-    /** A status row that remembers each update, so a second call sees what the first one wrote. */
+    /**
+     * A status row that remembers each write, so a second call sees what the first one wrote. updateMany
+     * matches its `where` and writes in one step, as the database does, so only one of two racing claims wins.
+     */
     const statefulDb = (initial: StatusRow) => {
       const d = db({ row: initial });
       let current: StatusRow = { ...initial };
@@ -781,8 +784,49 @@ describe("full replies", () => {
         current = { ...current, ...args.data };
         return Promise.resolve(undefined);
       });
-      return { d: { ...d, runHostStatus: { ...d.runHostStatus, update } }, current: () => current };
+      const updateMany = vi.fn((args: { where: Partial<StatusRow>; data: Partial<StatusRow> }) => {
+        const matches = Object.entries(args.where).every(([k, v]) => current[k as keyof StatusRow] === v);
+        if (matches) current = { ...current, ...args.data };
+        return Promise.resolve({ count: matches ? 1 : 0 });
+      });
+      return { d: { ...d, runHostStatus: { ...d.runHostStatus, update, updateMany } }, current: () => current };
     };
+
+    it("posts the parts once when two completions race: only the one that claims the row posts them", async () => {
+      const h = host();
+      const { d, current } = statefulDb(row());
+      const run = succeeded(plan(150_000));
+      await Promise.all([
+        completeHostStatus(d as never, run, { github: h }),
+        completeHostStatus(d as never, run, { github: h }, { postIfMissing: true }),
+      ]);
+      const parts = h.comment.mock.calls.filter((c) => /^\*\*Reply, part/.test((c[1] as { body: string }).body));
+      expect(parts).toHaveLength(3);
+      expect(current().completedAt).toBeInstanceOf(Date);
+    });
+
+    it("claims the row before posting any part, and posts none when another completion claimed it", async () => {
+      const h = host();
+      const d = db({ row: row() });
+      await completeHostStatus(d as never, succeeded(plan(11_000)), { github: h });
+      expect(h.comment).toHaveBeenCalledTimes(1);
+      expect(d.runHostStatus.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
+        h.comment.mock.invocationCallOrder[0],
+      );
+      expect(d.runHostStatus.updateMany).toHaveBeenCalledWith({
+        where: { runId: "r1", completedAt: null },
+        data: { commentId: "501", completedAt: expect.any(Date) },
+      });
+      expect(d.runHostStatus.update).not.toHaveBeenCalled();
+
+      const lost = host();
+      const taken = db({ row: row(), claimed: 0 });
+      await expect(
+        completeHostStatus(taken as never, succeeded(plan(11_000)), { github: lost }),
+      ).resolves.toBeUndefined();
+      expect(lost.editComment).toHaveBeenCalledTimes(1);
+      expect(lost.comment).not.toHaveBeenCalled();
+    });
 
     it("posts each part once: a failed part is logged, the row completed, and a retry posts nothing", async () => {
       const h = host();
@@ -809,7 +853,15 @@ describe("full replies", () => {
       expect(h.comment).toHaveBeenCalledTimes(2);
       expect((h.comment.mock.calls[0][1] as { body: string }).body).toMatch(/^✅ .*The full reply follows/);
       expect(h.comment.mock.calls[1][1]).toEqual({ number: 71, body: `**Reply, part 1 of 1**\n\n${reply}` });
-      expect(d.runHostStatus.update).toHaveBeenNthCalledWith(1, { where: { runId: "r1" }, data: { commentId: "700" } });
+      // The claim saves the id with the completion, before any part, so a retry edits it instead of re-posting.
+      expect(d.runHostStatus.updateMany).toHaveBeenCalledTimes(1);
+      expect(d.runHostStatus.updateMany).toHaveBeenCalledWith({
+        where: { runId: "r1", completedAt: null },
+        data: { commentId: "700", completedAt: expect.any(Date) },
+      });
+      expect(d.runHostStatus.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
+        h.comment.mock.invocationCallOrder[1],
+      );
       expect(current()).toMatchObject({ commentId: "700", completedAt: expect.any(Date) });
     });
 

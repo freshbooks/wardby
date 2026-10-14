@@ -12,7 +12,7 @@ export interface ReplyParts {
 
 /** "@" + U+200B before a word character, so a quoted reply pings nobody. */
 export function defuseMentions(text: string): string {
-  return text.replace(/@(?=[\w-])/g, "@​");
+  return text.replace(/@(?=[\w-])/g, "@\u200b");
 }
 
 const FENCE_LINE = /^\s{0,3}(```|~~~)/;

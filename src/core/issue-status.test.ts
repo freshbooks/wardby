@@ -112,7 +112,7 @@ describe("completeIssueStatus after the agent was unlinked", () => {
     expect(md).not.toContain("Agent spend");
     expect(md.trimEnd().split("\n").pop()).toMatch(/wardby run/);
     expect(isStatusComment(adfToText(markdownToAdf(md)))).toBe(true);
-    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalled();
   });
 
   it("never posts a new comment into an unlinked project; it completes the row", async () => {
@@ -121,8 +121,8 @@ describe("completeIssueStatus after the agent was unlinked", () => {
     await completeIssueStatus(d, finished, { jira: t }, { postIfMissing: true });
     expect(t.comment).not.toHaveBeenCalled();
     expect(t.editComment).not.toHaveBeenCalled();
-    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
-      where: { runId: "r1" },
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalledWith({
+      where: { runId: "r1", completedAt: null },
       data: { commentId: null, completedAt: expect.any(Date) },
     });
   });
@@ -174,7 +174,7 @@ describe("completeIssueStatus after the link was downgraded to read", () => {
     expect(md).not.toContain("Agent spend");
     expect(md.trimEnd().split("\n").pop()).toMatch(/^_wardby run `r1`_$/);
     expect(isStatusComment(adfToText(markdownToAdf(md)))).toBe(true);
-    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalled();
   });
 
   it("never posts a new comment for a read link; it completes the row", async () => {
@@ -183,8 +183,8 @@ describe("completeIssueStatus after the link was downgraded to read", () => {
     await completeIssueStatus(d, finished, { jira: t }, { postIfMissing: true });
     expect(t.comment).not.toHaveBeenCalled();
     expect(t.editComment).not.toHaveBeenCalled();
-    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
-      where: { runId: "r1" },
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalledWith({
+      where: { runId: "r1", completedAt: null },
       data: { commentId: null, completedAt: expect.any(Date) },
     });
   });
@@ -228,8 +228,8 @@ describe("completeIssueStatus", () => {
       markdown: expect.stringContaining("All done"),
       issueKeyProjects: ["PROJ"],
     });
-    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
-      where: { runId: "r1" },
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalledWith({
+      where: { runId: "r1", completedAt: null },
       data: { commentId: "c-1", completedAt: expect.any(Date) },
     });
   });
@@ -313,7 +313,7 @@ describe("completeIssueStatus", () => {
     await expect(
       completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: null }, { jira: t }),
     ).resolves.toBeUndefined();
-    expect((d as any).runIssueStatus.update).not.toHaveBeenCalled();
+    expect((d as any).runIssueStatus.updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -336,8 +336,8 @@ describe("completeIssueStatus with a long reply", () => {
       expect(c[1].markdown.length).toBeLessThanOrEqual(JIRA_REPLY_MAX_CHARS);
       if (i === 0) expect(c[1].markdown).toContain("Paragraph 0 ");
     });
-    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
-      where: { runId: "r1" },
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalledWith({
+      where: { runId: "r1", completedAt: null },
       data: { commentId: "c-1", completedAt: expect.any(Date) },
     });
   });
@@ -380,17 +380,18 @@ describe("completeIssueStatus with a long reply", () => {
       completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: long }, { jira: t }),
     ).resolves.toBeUndefined();
     expect(t.comment).toHaveBeenCalledTimes(2);
-    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
-      where: { runId: "r1" },
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalledWith({
+      where: { runId: "r1", completedAt: null },
       data: { commentId: "c-1", completedAt: expect.any(Date) },
     });
   });
-  it("saves a newly created status comment's id before posting any part", async () => {
+  it("saves a newly created status comment's id with the claim, before posting any part", async () => {
     const t = tracker();
     const d = db({ ...row, commentId: null });
     const order: string[] = [];
-    (d as any).runIssueStatus.update.mockImplementation(async (a: any) => {
-      order.push(a.data.completedAt ? "complete" : "save");
+    (d as any).runIssueStatus.updateMany.mockImplementation(async () => {
+      order.push("claim");
+      return { count: 1 };
     });
     (t.comment as any).mockImplementation(async () => {
       order.push("comment");
@@ -402,9 +403,48 @@ describe("completeIssueStatus with a long reply", () => {
       { jira: t },
       { postIfMissing: true },
     );
-    expect(order.slice(0, 3)).toEqual(["comment", "save", "comment"]);
-    expect(order.at(-1)).toBe("complete");
-    expect((d as any).runIssueStatus.update.mock.calls[0][0].data).toEqual({ commentId: "c-new" });
+    expect(order.slice(0, 3)).toEqual(["comment", "claim", "comment"]);
+    expect(order.filter((o) => o === "claim")).toHaveLength(1);
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalledWith({
+      where: { runId: "r1", completedAt: null },
+      data: { commentId: "c-new", completedAt: expect.any(Date) },
+    });
+    expect((d as any).runIssueStatus.update).not.toHaveBeenCalled();
+  });
+
+  it("posts no part when another completion claimed the row first", async () => {
+    const t = tracker();
+    const d = db(row);
+    (d as any).runIssueStatus.updateMany.mockResolvedValue({ count: 0 });
+    await expect(
+      completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: long }, { jira: t }),
+    ).resolves.toBeUndefined();
+    expect(t.editComment).toHaveBeenCalledTimes(1);
+    expect(t.comment).not.toHaveBeenCalled();
+  });
+
+  it("posts the parts once when two completions race", async () => {
+    const t = tracker();
+    let current: Record<string, unknown> = { ...row };
+    const d = db(row);
+    (d as any).runIssueStatus.findUnique.mockImplementation(async () => ({ ...current }));
+    (d as any).runIssueStatus.update.mockImplementation(async (a: any) => {
+      current = { ...current, ...a.data };
+    });
+    // Matches its where and writes in one step, as the database does.
+    (d as any).runIssueStatus.updateMany.mockImplementation(async (a: any) => {
+      const matches = Object.entries(a.where).every(([k, v]) => current[k] === v);
+      if (matches) current = { ...current, ...a.data };
+      return { count: matches ? 1 : 0 };
+    });
+    const run = { id: "r1", status: "succeeded" as const, finalText: long };
+    await Promise.all([
+      completeIssueStatus(d, run, { jira: t }),
+      completeIssueStatus(d, run, { jira: t }, { postIfMissing: true }),
+    ]);
+    const parts = (t.comment as any).mock.calls.filter((c: any[]) => /^\*\*Reply, part 1 of/.test(c[1].markdown));
+    expect(parts).toHaveLength(1);
+    expect(current.completedAt).toBeInstanceOf(Date);
   });
 });
 
@@ -418,6 +458,7 @@ describe("closeOrphanedIssueStatuses", () => {
         findMany: vi.fn(async () => rows.map((r) => ({ run: { id: r.runId, status: "lost", finalText: null } }))),
         findUnique: vi.fn(async ({ where }: any) => rows.find((r) => r.runId === where.runId) ?? null),
         update: vi.fn(async () => undefined),
+        updateMany: vi.fn(async () => ({ count: 1 })),
       },
       run: { findUnique: vi.fn(async () => ({ agentId: "a1" })), findMany: vi.fn(async () => []) },
       agentIssueProject: { findUnique: vi.fn(async () => ({ access: "write", commentVisibilityRole: "Dev" })) },
@@ -456,8 +497,8 @@ describe("closeOrphanedIssueStatuses", () => {
       issueKeyProjects: ["PROJ"],
       visibilityRole: "Dev",
     });
-    expect((d as any).runIssueStatus.update).toHaveBeenCalledWith({
-      where: { runId: "r1" },
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalledWith({
+      where: { runId: "r1", completedAt: null },
       data: { commentId: "c-1", completedAt: expect.any(Date) },
     });
   });
@@ -557,7 +598,7 @@ describe("completeIssueStatus bridging pull requests to the issue", () => {
     expect(md).not.toContain("nope");
     expect(md.trimEnd().split("\n").pop()).toMatch(/^_wardby run `r1`_$/);
     expect(isStatusComment(adfToText(markdownToAdf(md)))).toBe(true);
-    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalled();
   });
 
   it("survives a failing store or remote link", async () => {
@@ -567,7 +608,7 @@ describe("completeIssueStatus bridging pull requests to the issue", () => {
     (d as any).issuePullRequest.findUnique.mockRejectedValue(new Error("db"));
     await completeIssueStatus(d, finished, { jira: t });
     expect(t.editComment).toHaveBeenCalled();
-    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalled();
   });
 
   it("does not bridge a PR whose coding run continued another issue's pull request", async () => {
@@ -589,7 +630,7 @@ describe("completeIssueStatus bridging pull requests to the issue", () => {
     expect(t.addRemoteLink).not.toHaveBeenCalled();
     expect(t.transitionTo).not.toHaveBeenCalled();
     expect(t.editComment).toHaveBeenCalled();
-    expect((d as any).runIssueStatus.update).toHaveBeenCalled();
+    expect((d as any).runIssueStatus.updateMany).toHaveBeenCalled();
   });
 
   it("bridges a continuation of this issue's own pull request, or of one with no issue", async () => {

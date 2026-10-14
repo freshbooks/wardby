@@ -283,15 +283,26 @@ export async function completeIssueStatus(
           ...(link.commentVisibilityRole ? { visibilityRole: link.commentVisibilityRole } : {}),
         })
       ).id;
-      // Saved at once, so a retry edits this comment instead of posting a second one.
-      await db.runIssueStatus.update({ where: { runId: run.id }, data: { commentId } });
+    }
+    // Unlinked or read-only with no status comment yet: complete the row
+    // without posting; never create content where the agent may not write.
+    // Claims the row in one step, saving a posted comment's id at once so a retry edits it instead of
+    // posting a second one. Only the completion that claims it posts the full reply, so two racing
+    // completions (the run's own and the reconciler's) never post it twice.
+    const claimed = await db.runIssueStatus.updateMany({
+      where: { runId: run.id, completedAt: null },
+      data: { commentId, completedAt: new Date() },
+    });
+    if (claimed.count !== 1) {
+      log.warn(
+        { runId: run.id },
+        "the issue status comment was completed meanwhile; leaving any full reply to that completion",
+      );
+      return;
     }
     if (writable && fullReply !== null) {
       await postFullReply(tracker, status.issueKey, run.id, fullReply, issueKeyProjects, link.commentVisibilityRole);
     }
-    // Unlinked or read-only with no status comment yet: complete the row
-    // without posting; never create content where the agent may not write.
-    await db.runIssueStatus.update({ where: { runId: run.id }, data: { commentId, completedAt: new Date() } });
   } catch (err) {
     log.warn({ err, runId: run.id }, "could not complete the issue status comment");
   }

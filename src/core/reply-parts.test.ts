@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defuseMentions, splitReply } from "./reply-parts.js";
 
-const ZWSP = "​";
+const ZWSP = "\u200b";
 
 /** Every part fits, and the parts put back together are the defused input. */
 function expectLossless(text: string, parts: string[], maxChars: number): void {

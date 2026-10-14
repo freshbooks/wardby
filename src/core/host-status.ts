@@ -32,8 +32,12 @@ const MAX_REPLY_CHARS = 2000;
 export const GITHUB_REPLY_MAX_CHARS = 60_000;
 /** The most follow-up comments a full reply is posted as; the rest is cut, and stays on the run. */
 export const REPLY_MAX_PARTS = 4;
-/** The most a Jira follow-up comment holds, header and cut note included (Jira's limit is exactly 32,767 characters). */
-export const JIRA_REPLY_MAX_CHARS = 30_000;
+/**
+ * The most a Jira follow-up comment holds, header and cut note included. Jira Cloud's limit is 32,767
+ * characters, but it may apply to the serialized ADF body markdownToAdf produces rather than to this
+ * Markdown (unverified), and ADF's JSON is longer than the text; so keep a wide margin.
+ */
+export const JIRA_REPLY_MAX_CHARS = 15_000;
 /** The status comment's line when the full reply follows. */
 const FULL_REPLY_FOLLOWS = "The full reply follows in the next comment(s).";
 /** The same, for a status in a review thread: the follow-ups go to the pull request's conversation. */
@@ -329,7 +333,8 @@ export async function collectRunOutcome(
  * outcome as a new comment only if `postIfMissing` (the reconciler, well after
  * the run ended), and otherwise leaves the row for postMentionStatus, which
  * is about to post it. A failed host call leaves the row open for the
- * reconciler to retry.
+ * reconciler to retry. The row is then claimed (completed) in one step, and
+ * only the claiming call posts a full reply's follow-up comments.
  */
 export async function completeHostStatus(
   db: HostStatusDb,
@@ -366,11 +371,22 @@ export async function completeHostStatus(
           ...(status.replyToReviewCommentId ? { replyToReviewCommentId: status.replyToReviewCommentId } : {}),
         })
       ).id;
-      // Saved at once, so a retry edits this comment instead of posting a second one.
-      await db.runHostStatus.update({ where: { runId: run.id }, data: { commentId } });
+    }
+    // Claims the row in one step, saving a posted comment's id at once so a retry edits it instead of
+    // posting a second one. Only the completion that claims it posts the full reply, so two racing
+    // completions (the run's own and the reconciler's) never post it twice.
+    const claimed = await db.runHostStatus.updateMany({
+      where: { runId: run.id, completedAt: null },
+      data: { commentId, completedAt: new Date() },
+    });
+    if (claimed.count !== 1) {
+      log.warn(
+        { runId: run.id },
+        "the run's status comment was completed meanwhile; leaving any full reply to that completion",
+      );
+      return;
     }
     if (fullReply !== null) await postFullReply(host, status, run.id, fullReply);
-    await db.runHostStatus.update({ where: { runId: run.id }, data: { commentId, completedAt: new Date() } });
   } catch (err) {
     log.warn({ err, runId: run.id }, "could not complete the run's status comment");
   }
