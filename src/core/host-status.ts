@@ -179,6 +179,28 @@ export function fullReplyComments(reply: string, opts: { maxChars: number; maxPa
   );
 }
 
+/**
+ * Whether package refusals blocked the run: it succeeded, but nothing reached a pull request, a coding
+ * sub-run made no changes or failed, and packages were refused. The GitHub and Jira status comments and
+ * the Slack `run_blocked` event all use it, so they always agree.
+ */
+export function isBlockedByRefusals(
+  run: Pick<FinishedRun, "status">,
+  outcome: {
+    pullRequests: readonly PullRequestOutcome[];
+    failedChildren: readonly FailedChild[];
+    packageRefusals?: readonly RegistryRefusalSummary[];
+    noChanges?: boolean;
+  },
+): boolean {
+  return (
+    run.status === "succeeded" &&
+    outcome.pullRequests.length === 0 &&
+    (outcome.noChanges === true || outcome.failedChildren.length > 0) &&
+    (outcome.packageRefusals?.length ?? 0) > 0
+  );
+}
+
 export function outcomeBody(
   run: FinishedRun,
   repository: string,
@@ -209,14 +231,15 @@ export function outcomeBody(
   });
   const partial = links.length > 0 ? `\n\n${links.join(", ")}.` : "";
   const refusals = opts.packageRefusals ?? [];
-  const blocked =
-    run.status === "succeeded" &&
-    links.length === 0 &&
-    (opts.noChanges || failedChildren.length > 0) &&
-    refusals.length > 0;
+  const blocked = isBlockedByRefusals(run, {
+    pullRequests,
+    failedChildren,
+    packageRefusals: refusals,
+    noChanges: opts.noChanges,
+  });
   const warning =
     !blocked && (links.length > 0 || run.status === "succeeded") && refusals.length > 0
-      ? packageRefusalWording(refusals, false)
+      ? packageRefusalWording(refusals, { blocked: false })
       : "";
   const footer = warning + (warning ? "\n\n" : "") + runLine(run.id);
   if (blocked) return packageRefusalWording(refusals) + "\n\n" + footer;
@@ -392,7 +415,10 @@ export async function completeHostStatus(
       db,
       run,
     );
-    const fullReply = fullReplyOf(run, pullRequests, failedChildren);
+    // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
+    const fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
+      ? null
+      : fullReplyOf(run, pullRequests, failedChildren);
     const body = outcomeBody(run, status.repository, pullRequests, failedChildren, {
       budgetSentence,
       packageRefusals,

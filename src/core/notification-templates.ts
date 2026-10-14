@@ -1,10 +1,10 @@
-import { packageRefusalWording } from "../coding/registry/refusal-wording.js";
 /**
  * Deterministic Slack text for workflow notifications. Pure functions: no
  * I/O, no model output. Every string that came from a person or a model
  * (titles, agent names, reasons) is escaped so it cannot become a link or a
  * mention; only canonical tracker/host URLs are formatted as links.
  */
+import { packageRefusalWording } from "../coding/registry/refusal-wording.js";
 import type { ThreadSubject, WorkflowPayload } from "./workflow-events.js";
 
 export type ThreadStatus =
@@ -108,7 +108,7 @@ export function renderEvent(p: WorkflowPayload, spend: string | null): { text: s
         : `⚪ ${link(p.prUrl, p.prLabel)} closed without merging`;
       break;
     case "run_blocked":
-      line = escapeMrkdwn(packageRefusalWording(p.packageRefusals));
+      line = packageRefusalWording(p.packageRefusals, { slack: true });
       break;
     case "run_failed": {
       const who = `*${escapeMrkdwn(p.agentName)}*`;

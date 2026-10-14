@@ -15,6 +15,7 @@ import {
   collectRunOutcome,
   fullReplyComments,
   fullReplyOf,
+  isBlockedByRefusals,
   JIRA_REPLY_MAX_CHARS,
   outcomeBody,
   REPLY_MAX_PARTS,
@@ -257,7 +258,10 @@ export async function completeIssueStatus(
               pullRequests: bridged,
             })
           : { notes: [] };
-      fullReply = fullReplyOf(run, pullRequests, failedChildren);
+      // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
+      fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
+        ? null
+        : fullReplyOf(run, pullRequests, failedChildren);
       const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
         budgetSentence,
         packageRefusals,

@@ -1,4 +1,3 @@
-import { collectRunOutcome } from "./host-status.js";
 /**
  * Workflow notifications a run's finalizer emits: run_failed for a top-level
  * run that did not succeed, run_blocked for package refusals without changes
@@ -7,6 +6,7 @@ import { collectRunOutcome } from "./host-status.js";
  * only by the finalizer that made the run terminal. Never throws.
  */
 import type { PrismaClient } from "#prisma";
+import { collectRunOutcome, isBlockedByRefusals } from "./host-status.js";
 import { logger } from "./logger.js";
 import { dedupeKeys, emitWorkflowEvent, shortReason } from "./workflow-events.js";
 
@@ -24,13 +24,12 @@ export async function emitRunFinishedEvents(
   try {
     const agentName =
       (await db.agent.findUnique({ where: { id: run.agentId }, select: { name: true } }))?.name ?? run.agentId;
-    let blocked = false;
     if (!run.parentRunId) {
       try {
-        // Only child outcomes are needed here, not the parent's budget sentence.
-        const outcome = await collectRunOutcome(db, { id: run.id, status: "succeeded", finalText: null });
-        blocked = run.status === "succeeded" && outcome.pullRequests.length === 0 && outcome.packageRefusals.length > 0;
-        if (blocked) {
+        // Only a succeeded run can be blocked (isBlockedByRefusals), so only it needs its children read.
+        const succeeded = { id: run.id, status: "succeeded" as const, finalText: null };
+        const outcome = run.status === "succeeded" ? await collectRunOutcome(db, succeeded) : null;
+        if (outcome && isBlockedByRefusals(succeeded, outcome)) {
           await emitWorkflowEvent({
             dedupeKey: dedupeKeys.runBlocked(run.id),
             runId: run.id,

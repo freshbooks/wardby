@@ -14,19 +14,20 @@ wardby exposes no new inbound endpoint for it.
 
 Seven kinds of lifecycle event can post to a linked channel:
 
-| Kind              | Posts when                                                                              | Content                                                                      |
-| ----------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `issue_picked_up` | A Jira event starts a run on a linked issue                                             | Issue key, title, and link; agent name; trigger kind                         |
-| `run_failed`      | A top-level run ends `failed`, `refused`, `budget_exhausted`, `cancelled`, or `lost`    | Agent name, status, a short first-line reason (never the full error)         |
-| `run_blocked`     | A top-level run has coding-child package refusals and no pull request or pushed changes | ⛔ Blocked status, refused packages, and code-specific fixes                 |
-| `pr_opened`       | A coding run opens a pull request                                                       | Repository#number and link, the issue it is for, any Jira status move        |
-| `review_posted`   | wardby's own review check posts a verdict                                               | `APPROVE` / `CHANGES_REQUESTED` / `COMMENT`, the reviewer agent, the PR link |
-| `review_fix`      | An automatic [fix round](../help/review-fix-rounds.md) starts or hits the cap           | Round number of the cap, started or capped                                   |
-| `pr_closed`       | A pull request is merged or closed                                                      | Merged or closed, any Jira status move                                       |
+| Kind              | Posts when                                                                                                         | Content                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `issue_picked_up` | A Jira event starts a run on a linked issue                                                                        | Issue key, title, and link; agent name; trigger kind                         |
+| `run_failed`      | A top-level run ends `failed`, `refused`, `budget_exhausted`, `cancelled`, or `lost`                               | Agent name, status, a short first-line reason (never the full error)         |
+| `run_blocked`     | A top-level run succeeds without a pull request, but a coding child refused packages and made no changes or failed | ⛔ Blocked status, refused packages, and code-specific fixes                 |
+| `pr_opened`       | A coding run opens a pull request                                                                                  | Repository#number and link, the issue it is for, any Jira status move        |
+| `review_posted`   | wardby's own review check posts a verdict                                                                          | `APPROVE` / `CHANGES_REQUESTED` / `COMMENT`, the reviewer agent, the PR link |
+| `review_fix`      | An automatic [fix round](../help/review-fix-rounds.md) starts or hits the cap                                      | Round number of the cap, started or capped                                   |
+| `pr_closed`       | A pull request is merged or closed                                                                                 | Merged or closed, any Jira status move                                       |
 
 A successful run normally shows up as `pr_opened` or `review_posted`. A run
 blocked by package refusals instead emits `run_blocked`, once per run, using
-the same guidance as [status comments](../help/status-comments.md). Child
+the same rule and guidance as [status comments](../help/status-comments.md): a
+run that answered, or worked around a refusal, is not blocked. Child
 coding runs surface through their parent's events.
 
 Some runs do not post `run_failed` at all:
