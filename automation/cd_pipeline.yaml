@@ -1,8 +1,3 @@
-# Azure Pipelines CD for the freshbooks/wardby fork: on main, build the images and push them with the
-# prod tags (<sha>-prod, cd-prod-<sha>, <sha>) to freshbooks-builds. It only builds and pushes; it does
-# not deploy. Shaped like fresh-cli's cd_stages.yaml (main-only guard, then generate artifact) minus
-# versioning, deployment and tests; steps/build_images.yaml has the build.
-
 trigger:
   batch: true
   branches:
@@ -48,6 +43,18 @@ stages:
         timeoutInMinutes: 100
         cancelTimeoutInMinutes: 1
         steps:
+          # Full history so every existing version tag is visible to the tagging step.
           - checkout: self
-            fetchDepth: 1
+            fetchDepth: 0
+          - script: |
+              set -euo pipefail
+              PREV=$(git tag | grep -E '^[0-9]{4}\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+              VERSION=$(uvx bumpver test "${PREV:-$(date -u +%y%m).0.0}" 'YY0M.MINOR.PATCH' --minor | sed -n 's/^New Version: *//p')
+              [ -n "$VERSION" ] || { echo "##vso[task.logissue type=error]bumpver produced no version"; exit 1; }
+              echo "Previous version: ${PREV:-none}; new version: $VERSION"
+              echo "##vso[task.setvariable variable=version]$VERSION"
+              echo "##vso[build.addbuildtag]current version - $VERSION"
+              git tag "$VERSION"
+              git push origin "$VERSION"
+            displayName: Generate and Push Version Tag
           - template: ./steps/build_images.yaml
