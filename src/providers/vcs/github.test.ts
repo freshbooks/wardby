@@ -14,7 +14,12 @@ import {
   upsertRelatedSection,
   type PullRequestInput,
 } from "./github.js";
-import { descriptionSha256 } from "./pr-description.js";
+import {
+  DESCRIPTION_COMMENT_MARKER,
+  descriptionAppliedComment,
+  descriptionFallbackComment,
+  descriptionSha256,
+} from "./pr-description.js";
 
 const TOKEN = "ghs_abcdefghijklmnopqrstuvwxyz-1234567890.example";
 const NOW = new Date("2026-09-06T12:00:00.000Z");
@@ -1521,45 +1526,68 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     expect(pulls).toHaveLength(0);
     expect(commentPatches).toHaveLength(0);
     expect(commentPosts).toHaveLength(1);
-    expect(commentPosts[0].startsWith(`<!-- wardby-description:${RUN} -->\n`)).toBe(true);
+    expect(commentPosts[0].startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
+    expect(commentPosts[0]).toContain(`latest run (\`${RUN}\`)`);
     expect(commentPosts[0]).toContain(NEW_SUMMARY);
   });
 
-  it("a retried run updates its existing fallback comment instead of posting another", async () => {
+  it("a later round edits the same pull-request-level comment in place, never a second one", async () => {
     const written = originalBody();
     const current = `${written}\n\nA reviewer's note added by hand.`;
-    const { client, pulls, commentPosts, commentPatches } = fake({
+    const { client, commentPosts, commentPatches } = fake({
       prBody: current,
       comments: [
-        { id: 98, body: `<!-- wardby-status:${RUN} -->\n\nworking` },
-        { id: 99, body: `<!-- wardby-description:${RUN} -->\n\nold proposal`, user: { type: "Bot" } },
+        { id: 98, body: `<!-- wardby-status:${RUN} -->\n\nworking`, user: { type: "Bot" } },
+        { id: 99, body: descriptionFallbackComment(RUN, "an older proposal"), user: { type: "Bot" } },
       ],
     });
 
     const result = await client.updatePullRequestDescription({
       ...base,
       rootRunId: ROOT,
-      runId: RUN,
+      runId: "run-3",
       summary: NEW_SUMMARY,
       baseline: baseline(written),
     });
 
     expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
-    expect(pulls).toHaveLength(0);
     expect(commentPosts).toHaveLength(0);
     expect(commentPatches).toHaveLength(1);
     expect(commentPatches[0].id).toBe("99");
+    expect(commentPatches[0].body.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
+    expect(commentPatches[0].body).toContain("latest run (`run-3`)");
     expect(commentPatches[0].body).toContain(NEW_SUMMARY);
+    expect(commentPatches[0].body).not.toContain("an older proposal");
   });
 
-  it("a human comment quoting the description marker is not overwritten", async () => {
+  it("reuses a comment carrying the earlier per-run marker", async () => {
+    const written = originalBody();
+    const { client, commentPosts, commentPatches } = fake({
+      prBody: `${written}\n\nA reviewer's note added by hand.`,
+      comments: [{ id: 99, body: `<!-- wardby-description:${RUN} -->\n\nold proposal`, user: { type: "Bot" } }],
+    });
+
+    await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: "run-3",
+      summary: NEW_SUMMARY,
+      baseline: baseline(written),
+    });
+
+    expect(commentPosts).toHaveLength(0);
+    expect(commentPatches.map((patch) => patch.id)).toEqual(["99"]);
+    expect(commentPatches[0].body.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
+  });
+
+  it("a person's comment carrying the marker is never edited", async () => {
     const written = originalBody();
     const current = `${written}\n\nA reviewer's note added by hand.`;
     const { client, commentPosts, commentPatches } = fake({
       prBody: current,
       comments: [
-        { id: 97, body: `> <!-- wardby-description:${RUN} -->\n> quoted by a person`, user: { type: "User" } },
-        { id: 96, body: `<!-- wardby-description:${RUN} -->\n\nno author recorded` },
+        { id: 97, body: `${DESCRIPTION_COMMENT_MARKER}\n\nwritten by a person`, user: { type: "User" } },
+        { id: 96, body: `${DESCRIPTION_COMMENT_MARKER}\n\nno author recorded` },
       ],
     });
 
@@ -1574,7 +1602,123 @@ describe("GitHubAppClient.updatePullRequestDescription", () => {
     expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
     expect(commentPatches).toHaveLength(0);
     expect(commentPosts).toHaveLength(1);
-    expect(commentPosts[0].startsWith(`<!-- wardby-description:${RUN} -->\n`)).toBe(true);
+    expect(commentPosts[0].startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
+  });
+
+  it("applying a description marks an earlier proposal comment as applied", async () => {
+    const current = originalBody();
+    const { client, pulls, commentPosts, commentPatches } = fake({
+      prBody: current,
+      comments: [{ id: 99, body: descriptionFallbackComment("run-0", "an older proposal"), user: { type: "Bot" } }],
+    });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: baseline(current),
+    });
+
+    expect(result.kind).toBe("replaced");
+    expect(pulls).toHaveLength(1);
+    expect(commentPosts).toHaveLength(0);
+    expect(commentPatches).toEqual([{ id: "99", body: descriptionAppliedComment(RUN) }]);
+  });
+
+  it("applying a description posts no comment when there is none, and leaves an applied one alone", async () => {
+    const current = originalBody();
+    const none = fake({ prBody: current });
+    await none.client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: baseline(current),
+    });
+    expect(none.commentPosts).toHaveLength(0);
+    expect(none.commentPatches).toHaveLength(0);
+
+    const applied = fake({
+      prBody: current,
+      comments: [{ id: 99, body: descriptionAppliedComment("run-0"), user: { type: "Bot" } }],
+    });
+    await applied.client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: baseline(current),
+    });
+    expect(applied.commentPatches).toHaveLength(0);
+  });
+
+  it("legacy PR (no recorded hash) matching the reconstructed root body is rewritten", async () => {
+    const written = originalBody();
+    const { client, pulls, commentPosts } = fake({ prBody: written });
+
+    const result = await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      baseline: {
+        recordedSha256: null,
+        legacySha256: descriptionSha256(written),
+        previousAgentText: OLD_SUMMARY,
+        agentTextRunId: ROOT,
+      },
+    });
+
+    expect(result).toMatchObject({ kind: "replaced", agentTextRunId: RUN });
+    expect(pulls).toHaveLength(1);
+    expect(pulls[0]).toContain(NEW_SUMMARY);
+    expect(commentPosts).toHaveLength(0);
+  });
+
+  it("legacy PR with a person's addition, or without a reconstruction, gets the comment", async () => {
+    const written = originalBody();
+    for (const [prBody, legacySha256] of [
+      [`${written}\n\nA reviewer's note added by hand.`, descriptionSha256(written)],
+      [written, undefined],
+    ] as const) {
+      const { client, pulls, commentPosts } = fake({ prBody });
+      const result = await client.updatePullRequestDescription({
+        ...base,
+        rootRunId: ROOT,
+        runId: RUN,
+        summary: NEW_SUMMARY,
+        baseline: {
+          recordedSha256: null,
+          ...(legacySha256 ? { legacySha256 } : {}),
+          previousAgentText: OLD_SUMMARY,
+          agentTextRunId: ROOT,
+        },
+      });
+      expect(result).toEqual({ kind: "edited_by_hand", commentPosted: true });
+      expect(pulls).toHaveLength(0);
+      expect(commentPosts).toHaveLength(1);
+    }
+  });
+
+  it("titles the Packages section for every run on the pull request", async () => {
+    const current = originalBody();
+    const { client, pulls } = fake({ prBody: current });
+
+    await client.updatePullRequestDescription({
+      ...base,
+      rootRunId: ROOT,
+      runId: RUN,
+      summary: NEW_SUMMARY,
+      packages: [
+        { ecosystem: "npm", name: "zod", version: "4.0.0" },
+        { ecosystem: "npm", name: "vitest", version: "3.2.0" },
+      ],
+      baseline: baseline(current),
+    });
+
+    expect(pulls[0]).toContain("<summary>Packages installed by wardby's runs on this pull request (2)</summary>");
+    expect(pulls[0]).not.toContain("during this run");
   });
 
   it("headRef not wardby/run-<root> → skipped:error, no requests", async () => {

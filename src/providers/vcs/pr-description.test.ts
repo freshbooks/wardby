@@ -3,12 +3,16 @@ import { describe, expect, it } from "vitest";
 import { appMarkerRunId } from "../review-host/github-events.js";
 import { RELATED_SECTION_END, RELATED_SECTION_START, pullRequestBody, upsertRelatedSection } from "./github.js";
 import {
-  DESCRIPTION_COMMENT_MARKER_PREFIX,
+  DESCRIPTION_COMMENT_APPLIED_MARKER,
+  DESCRIPTION_COMMENT_MARKER,
   LATEST_RUN_MARKER_PREFIX,
   MIN_PR_BODY_CHARS,
   assessFinalMessage,
+  descriptionAppliedComment,
   descriptionFallbackComment,
   descriptionSha256,
+  extractProposedDescription,
+  isDescriptionComment,
   extractRelatedBlock,
   hasClosingKeyword,
   isUneditedDescription,
@@ -158,42 +162,56 @@ describe("isUneditedDescription", () => {
     ).toBe(false);
   });
 
-  it("legacy (no hash) body is always treated as edited", () => {
+  it("legacy (no hash) body with no reconstruction is treated as edited", () => {
+    const legacy = pullRequestBody({ ...base, summary: SUMMARY });
+    expect(
+      isUneditedDescription({
+        currentBody: legacy,
+        rootRunId: "run-root",
+        recordedSha256: null,
+        previousAgentText: SUMMARY,
+      }),
+    ).toBe(false);
+  });
+
+  it("legacy (no hash): matches the reconstructed root body's hash, Related block and CRLF aside", () => {
     const legacy = pullRequestBody({ ...base, summary: SUMMARY });
     const withRelated = upsertRelatedSection(legacy, relatedBlock("- openai/other#4 (open)"))!;
-    // Contains the previous agent text, untouched: still edited, since a person may have added text.
     expect(
       isUneditedDescription({
         currentBody: withRelated.replace(/\n/g, "\r\n"),
         rootRunId: "run-root",
         recordedSha256: null,
+        legacySha256: descriptionSha256(legacy),
         previousAgentText: SUMMARY,
       }),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it("legacy (no hash): a person's addition anywhere is edited", () => {
+    const legacy = pullRequestBody({ ...base, summary: SUMMARY, tests: [{ command: "npm test", outcome: "passed" }] });
+    const legacySha256 = descriptionSha256(legacy);
+    const variants = [
+      `${legacy}\n\nA reviewer's added note.`,
+      legacy.replace(SUMMARY, `${SUMMARY} Also touches the checkout page.`),
+      legacy.replace("**Tests:**", "Note from the author.\n\n**Tests:**"),
+      legacy.replace("<!-- wardby:run-root -->", "<!-- wardby:run-root -->\n\nPlease review carefully."),
+    ];
+    for (const currentBody of variants) {
+      expect(isUneditedDescription({ currentBody, rootRunId: "run-root", recordedSha256: null, legacySha256 })).toBe(
+        false,
+      );
+    }
+  });
+
+  it("a recorded hash wins over a legacy reconstruction", () => {
+    const legacy = pullRequestBody({ ...base, summary: SUMMARY });
     expect(
       isUneditedDescription({
-        currentBody: `${legacy}\n\nA reviewer's added note.`,
+        currentBody: legacy,
         rootRunId: "run-root",
-        recordedSha256: null,
-        previousAgentText: SUMMARY,
-      }),
-    ).toBe(false);
-    // Missing it, or no previous text at all: edited.
-    const rewritten = pullRequestBody({ ...base, summary: "A hand-rewritten description of the change." });
-    expect(
-      isUneditedDescription({
-        currentBody: rewritten,
-        rootRunId: "run-root",
-        recordedSha256: null,
-        previousAgentText: SUMMARY,
-      }),
-    ).toBe(false);
-    expect(
-      isUneditedDescription({
-        currentBody: rewritten,
-        rootRunId: "run-root",
-        recordedSha256: null,
-        previousAgentText: undefined,
+        recordedSha256: "0".repeat(64),
+        legacySha256: descriptionSha256(legacy),
       }),
     ).toBe(false);
   });
@@ -227,32 +245,64 @@ describe("pullRequestBody latest marker", () => {
 });
 
 describe("descriptionFallbackComment", () => {
-  it("starts with the run's marker", () => {
+  it("starts with the pull-request-level marker and names the latest run", () => {
     const comment = descriptionFallbackComment("run-2", SUMMARY);
-    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER_PREFIX}run-2 -->`)).toBe(true);
-    expect(comment).toContain(
-      "Updated description from run `run-2` — not applied because the description was edited by hand since wardby last wrote it.",
-    );
+    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
+    expect(comment).not.toContain("<!-- wardby-description:");
+    expect(comment).toContain("current description proposed by wardby's latest run (`run-2`)");
+    expect(comment).toContain("not applied because a person edited the description");
+    expect(comment).toContain("can copy it into the description");
     expect(comment).toContain("<details><summary>Proposed description</summary>");
     expect(comment).toContain(`\`\`\`markdown\n${SUMMARY}\n\`\`\``);
     expect(comment.trimEnd().endsWith("</details>")).toBe(true);
+    expect(isDescriptionComment(comment)).toBe(true);
   });
 
   it("fences a body containing triple backticks safely", () => {
     const proposed = "Example:\n\n```ts\nconst a = 1;\n```\n\nAnd ````four```` too.";
     const comment = descriptionFallbackComment("run-2", proposed);
     expect(comment).toContain(`\`\`\`\`\`markdown\n${proposed}\n\`\`\`\`\``);
+    expect(extractProposedDescription(comment)).toBe(proposed);
   });
 
   it("is capped under 60,000 characters", () => {
     const comment = descriptionFallbackComment("run-2", "word ".repeat(30_000));
     expect(comment.length).toBeLessThan(60_000);
-    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER_PREFIX}run-2 -->`)).toBe(true);
+    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
     expect(comment.trimEnd().endsWith("</details>")).toBe(true);
     expect(comment).toContain("truncated");
   });
 
   it("refuses an unsafe run id", () => {
     expect(() => descriptionFallbackComment("bad -->", SUMMARY)).toThrow();
+  });
+});
+
+describe("descriptionAppliedComment", () => {
+  it("keeps the marker, carries the applied marker, and holds no proposal", () => {
+    const comment = descriptionAppliedComment("run-3");
+    expect(comment.startsWith(`${DESCRIPTION_COMMENT_MARKER}\n`)).toBe(true);
+    expect(comment).toContain(DESCRIPTION_COMMENT_APPLIED_MARKER);
+    expect(comment).toContain("`run-3`");
+    expect(isDescriptionComment(comment)).toBe(true);
+    expect(extractProposedDescription(comment)).toBeUndefined();
+  });
+
+  it("refuses an unsafe run id", () => {
+    expect(() => descriptionAppliedComment("bad -->")).toThrow();
+  });
+});
+
+describe("isDescriptionComment / extractProposedDescription", () => {
+  it("recognizes the pull-request-level marker and the earlier per-run one, at the start only", () => {
+    expect(isDescriptionComment(`${DESCRIPTION_COMMENT_MARKER}\n\ntext`)).toBe(true);
+    expect(isDescriptionComment("<!-- wardby-description:run-2 -->\n\ntext")).toBe(true);
+    expect(isDescriptionComment(`> ${DESCRIPTION_COMMENT_MARKER}\n> quoted`)).toBe(false);
+    expect(isDescriptionComment("<!-- wardby-status:run-2 -->")).toBe(false);
+  });
+
+  it("returns the proposal of a fallback comment, undefined for anything else", () => {
+    expect(extractProposedDescription(descriptionFallbackComment("run-2", SUMMARY))).toBe(SUMMARY);
+    expect(extractProposedDescription("just a comment")).toBeUndefined();
   });
 });

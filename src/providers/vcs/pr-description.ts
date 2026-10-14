@@ -14,8 +14,17 @@ export const RELATED_SECTION_START = "<!-- wardby-related:start -->";
 export const RELATED_SECTION_END = "<!-- wardby-related:end -->";
 /** The last line of a description a fix round rewrote: `<!-- wardby-latest:<runId> -->`. */
 export const LATEST_RUN_MARKER_PREFIX = "<!-- wardby-latest:";
-/** The first line of the fallback comment: `<!-- wardby-description:<runId> -->`. */
-export const DESCRIPTION_COMMENT_MARKER_PREFIX = "<!-- wardby-description:";
+/**
+ * The first line of the one description comment per pull request (edited in
+ * place on later runs). Pull-request level, never per run, so there is only
+ * ever one.
+ */
+export const DESCRIPTION_COMMENT_MARKER = "<!-- wardby-description -->";
+/** An earlier per-run form of the marker (`<!-- wardby-description:<runId> -->`); such a comment is reused. */
+const PER_RUN_DESCRIPTION_COMMENT_MARKER_PREFIX = "<!-- wardby-description:";
+/** In the description comment once a later run applied its description directly: no proposal is pending. */
+export const DESCRIPTION_COMMENT_APPLIED_MARKER = "<!-- wardby-description-applied -->";
+const PROPOSAL_SUMMARY = "<details><summary>Proposed description</summary>";
 /** A final message with fewer non-whitespace characters can't replace the description. */
 export const MIN_PR_BODY_CHARS = 80;
 /** The fallback comment stays under this many characters (GitHub's limit is 65,536). */
@@ -88,20 +97,23 @@ export function assessFinalMessage(next: string | undefined, previous: string | 
  * Whether the PR description is still what wardby last wrote. It must start
  * with the root run's marker, and its normalized hash must match the recorded
  * one. Without a recorded hash (a description written before hashes were
- * recorded) it always counts as edited: containing the previous agent text
- * doesn't rule out a person's additions, and those are never overwritten.
+ * recorded), it must match `legacySha256`, the hash of the body wardby would
+ * have written for the root run, rebuilt from stored records; without that
+ * either it counts as edited, so a person's text is never overwritten.
  * `previousAgentText` does not decide edit status; it is carried for callers.
  */
 export function isUneditedDescription(input: {
   currentBody: string;
   rootRunId: string;
   recordedSha256: string | null;
-  previousAgentText: string | undefined;
+  legacySha256?: string;
+  previousAgentText?: string | undefined;
 }): boolean {
   const body = input.currentBody.replace(/\r\n/g, "\n");
   if (!body.startsWith(`${RUN_MARKER_PREFIX}${input.rootRunId} -->`)) return false;
-  if (input.recordedSha256 === null) return false;
-  return descriptionSha256(body) === input.recordedSha256;
+  const expected = input.recordedSha256 ?? input.legacySha256;
+  if (!expected) return false;
+  return descriptionSha256(body) === expected;
 }
 
 /** A backtick fence one longer than the longest backtick run in `text` (at least three). */
@@ -110,21 +122,50 @@ function fenceFor(text: string): string {
   return "`".repeat(Math.max(3, longest + 1));
 }
 
+/** Whether a comment is wardby's description comment: it starts with the marker (either form). */
+export function isDescriptionComment(body: string): boolean {
+  const text = body.replace(/\r\n/g, "\n");
+  return text.startsWith(DESCRIPTION_COMMENT_MARKER) || text.startsWith(PER_RUN_DESCRIPTION_COMMENT_MARKER_PREFIX);
+}
+
 /**
- * The PR comment carrying a proposed description that was not applied
- * because a person edited the description. Starts with the run's marker,
- * holds the body in a collapsed fenced block, and stays under
- * MAX_DESCRIPTION_COMMENT_CHARS (a long body is truncated). Throws on a run id
- * that isn't safe to put in the marker.
+ * The proposed description a fallback comment carries (the fenced block under
+ * "Proposed description"); undefined when the comment holds none (an applied
+ * comment, or any other text).
+ */
+export function extractProposedDescription(commentBody: string): string | undefined {
+  const text = commentBody.replace(/\r\n/g, "\n");
+  if (text.includes(DESCRIPTION_COMMENT_APPLIED_MARKER)) return undefined;
+  const at = text.indexOf(PROPOSAL_SUMMARY);
+  if (at === -1) return undefined;
+  const open = /\n(`{3,})markdown\n/.exec(text.slice(at));
+  if (!open) return undefined;
+  const start = at + open.index + open[0].length;
+  const close = text.indexOf(`\n${open[1]}\n`, start - 1);
+  const end = close === -1 ? text.indexOf(`\n${open[1]}`, start - 1) : close;
+  if (end < start - 1) return undefined;
+  const proposal = text.slice(start, Math.max(start, end)).trimEnd();
+  return proposal || undefined;
+}
+
+/**
+ * The pull request's description comment, carrying the description wardby's
+ * latest run proposed when it could not apply it because a person edited the
+ * description. There is one per pull request (DESCRIPTION_COMMENT_MARKER),
+ * edited in place by later runs. Holds the body in a collapsed fenced block,
+ * and stays under MAX_DESCRIPTION_COMMENT_CHARS (a long body is truncated).
+ * Throws on a run id that isn't safe to quote.
  */
 export function descriptionFallbackComment(runId: string, proposedBody: string): string {
   if (!SAFE_RUN_ID.test(runId)) throw new Error("description_comment_run_id_invalid");
   const head = [
-    `${DESCRIPTION_COMMENT_MARKER_PREFIX}${runId} -->`,
+    DESCRIPTION_COMMENT_MARKER,
     "",
-    `Updated description from run \`${runId}\` — not applied because the description was edited by hand since wardby last wrote it.`,
+    `This is the current description proposed by wardby's latest run (\`${runId}\`). ` +
+      "It was not applied because a person edited the description by hand since wardby last wrote it, and wardby never overwrites a person's edits. " +
+      "The pull request author can copy it into the description. Later runs update this comment.",
     "",
-    "<details><summary>Proposed description</summary>",
+    PROPOSAL_SUMMARY,
     "",
   ].join("\n");
   const truncatedNote = "\n\n_The proposed description was truncated to fit in a comment._";
@@ -143,4 +184,19 @@ export function descriptionFallbackComment(runId: string, proposedBody: string):
     comment = render();
   }
   return comment;
+}
+
+/**
+ * What the description comment becomes once a later run applied its
+ * description directly: no proposal is pending, so nobody (a person or a
+ * reviewer) acts on a stale one.
+ */
+export function descriptionAppliedComment(runId: string): string {
+  if (!SAFE_RUN_ID.test(runId)) throw new Error("description_comment_run_id_invalid");
+  return [
+    DESCRIPTION_COMMENT_MARKER,
+    DESCRIPTION_COMMENT_APPLIED_MARKER,
+    "",
+    `wardby's latest run (\`${runId}\`) updated the pull request description directly, so it is current. No proposed description is pending here.`,
+  ].join("\n");
 }

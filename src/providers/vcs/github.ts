@@ -4,14 +4,16 @@ import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
 import { DEPENDENCY_CACHE_PATH, normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 import {
-  DESCRIPTION_COMMENT_MARKER_PREFIX,
   LATEST_RUN_MARKER_PREFIX,
   RELATED_SECTION_END,
   RELATED_SECTION_START,
   assessFinalMessage,
+  descriptionAppliedComment,
   descriptionFallbackComment,
   descriptionSha256,
+  extractProposedDescription,
   extractRelatedBlock,
+  isDescriptionComment,
   isUneditedDescription,
 } from "./pr-description.js";
 
@@ -101,6 +103,12 @@ export interface PullRequestInput {
    * stays first. Dropped when it isn't a safe run id.
    */
   latestRunId?: string;
+  /**
+   * What the packages list covers: this run (the default), or every run on
+   * the pull request (a later run's description update, whose `packages` are
+   * cumulative). Only the section title differs.
+   */
+  packagesScope?: "run" | "pull_request";
 }
 
 export interface PullRequestResult {
@@ -117,6 +125,13 @@ export interface PullRequestResult {
 export interface DescriptionBaseline {
   /** Null = legacy pull request (no recorded write). */
   recordedSha256: string | null;
+  /**
+   * Legacy pull requests only: the hash of the body wardby would have written
+   * for the root run, rebuilt from stored records. A current body with this
+   * hash is unedited. Absent when the records can't rebuild it (then the
+   * description counts as edited).
+   */
+  legacySha256?: string;
   /** Stored summary of the run whose text the description carries (root run for legacy). */
   previousAgentText?: string;
   /** That run's id. */
@@ -535,7 +550,9 @@ function packagesSection(input: PullRequestInput): string | undefined {
   return [
     ...(restored ? [restored, ""] : []),
     "<details>",
-    `<summary>Packages installed during this run (${packages.length})</summary>`,
+    input.packagesScope === "pull_request"
+      ? `<summary>Packages installed by wardby's runs on this pull request (${packages.length})</summary>`
+      : `<summary>Packages installed during this run (${packages.length})</summary>`,
     "",
     ...cappedList(packages.map((pkg) => `- ${pkg.ecosystem} \`${pkg.name}@${pkg.version}\``)),
     ...(refusals.length > 0
@@ -1058,6 +1075,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
           currentBody,
           rootRunId: input.rootRunId,
           recordedSha256: input.baseline.recordedSha256,
+          ...(input.baseline.legacySha256 ? { legacySha256: input.baseline.legacySha256 } : {}),
           previousAgentText: input.baseline.previousAgentText,
         });
         if (!unedited) {
@@ -1087,6 +1105,8 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
         );
         const written = record(await response.json()).body;
         if (typeof written !== "string") throw new Error("github_api_invalid_response");
+        // A proposal left from an earlier round is stale now; a failure here never undoes the write.
+        await this.markDescriptionCommentApplied(token, repository, pr.number, input.runId).catch(() => undefined);
         return { ...outcome, sha256: descriptionSha256(written), agentTextRunId };
       });
     } catch {
@@ -1122,6 +1142,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
           tests: input.tests,
           tag: input.tag,
           packages: input.packages,
+          packagesScope: "pull_request",
           packageRefusals: input.packageRefusals,
           restoredDependencies: input.restoredDependencies,
           changedLockfiles: input.changedLockfiles,
@@ -1137,7 +1158,11 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     return { full, proposed: trimmed.length <= MAX_PULL_REQUEST_BODY_CHARS ? trimmed : undefined };
   }
 
-  /** Creates the run's fallback description comment, or updates it if this run already posted one. */
+  /**
+   * Creates the pull request's one description comment, or edits it in place
+   * when a bot already wrote one (a person's comment carrying the marker is
+   * never edited).
+   */
   private async upsertDescriptionComment(
     token: string,
     repository: string,
@@ -1146,14 +1171,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     proposedBody: string,
   ): Promise<void> {
     const body = descriptionFallbackComment(runId, proposedBody);
-    const existing = await this.findMarkedComment(
-      token,
-      repository,
-      pullRequestNumber,
-      `${DESCRIPTION_COMMENT_MARKER_PREFIX}${runId} -->`,
-      // A person's comment quoting the marker is never overwritten.
-      { botAuthorOnly: true },
-    );
+    const existing = await this.findDescriptionComment(token, repository, pullRequestNumber);
     const [owner, name] = repository.split("/");
     if (existing) {
       await this.requestJson(
@@ -1170,6 +1188,36 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
         [201],
       );
     }
+  }
+
+  /** Once a run applied its description, an earlier proposal in the description comment is marked applied. */
+  private async markDescriptionCommentApplied(
+    token: string,
+    repository: string,
+    pullRequestNumber: number,
+    runId: string,
+  ): Promise<void> {
+    const existing = await this.findDescriptionComment(token, repository, pullRequestNumber);
+    if (!existing || extractProposedDescription(existing.body) === undefined) return;
+    const [owner, name] = repository.split("/");
+    await this.requestJson(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/comments/${existing.id}`,
+      token,
+      { method: "PATCH", body: JSON.stringify({ body: descriptionAppliedComment(runId) }) },
+      [200],
+    );
+  }
+
+  /** The bot-written comment starting with the description marker (either form), if any. */
+  private async findDescriptionComment(
+    token: string,
+    repository: string,
+    pullRequestNumber: number,
+  ): Promise<{ id: number; body: string } | null> {
+    return this.findMarkedComment(token, repository, pullRequestNumber, isDescriptionComment, {
+      // A person's comment carrying the marker is never overwritten.
+      botAuthorOnly: true,
+    });
   }
 
   private async appJwt(): Promise<string> {
@@ -1332,20 +1380,21 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     pullRequestNumber: number,
     runId: string,
   ): Promise<{ id: number } | null> {
-    return this.findMarkedComment(token, repository, pullRequestNumber, `${STATUS_COMMENT_MARKER_PREFIX}${runId} -->`);
+    const marker = `${STATUS_COMMENT_MARKER_PREFIX}${runId} -->`;
+    return this.findMarkedComment(token, repository, pullRequestNumber, (body) => body.includes(marker));
   }
 
   /**
-   * The first comment on the pull request whose body contains `marker`; with
+   * The first comment on the pull request whose body `matches`; with
    * `botAuthorOnly`, only among comments a bot account wrote.
    */
   private async findMarkedComment(
     token: string,
     repository: string,
     pullRequestNumber: number,
-    marker: string,
+    matches: (body: string) => boolean,
     options: { botAuthorOnly?: boolean } = {},
-  ): Promise<{ id: number } | null> {
+  ): Promise<{ id: number; body: string } | null> {
     const [owner, name] = repository.split("/");
     const response = await this.requestJson(
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${pullRequestNumber}/comments?per_page=100`,
@@ -1355,12 +1404,12 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     if (!Array.isArray(payload)) throw new Error("github_api_invalid_response");
     for (const item of payload) {
       const candidate = record(item);
-      if (typeof candidate.body !== "string" || !candidate.body.includes(marker)) continue;
+      if (typeof candidate.body !== "string" || !matches(candidate.body)) continue;
       if (options.botAuthorOnly) {
         const user = candidate.user;
         if (!user || typeof user !== "object" || (user as Record<string, unknown>).type !== "Bot") continue;
       }
-      return { id: positiveInteger(candidate.id) };
+      return { id: positiveInteger(candidate.id), body: candidate.body };
     }
     return null;
   }
