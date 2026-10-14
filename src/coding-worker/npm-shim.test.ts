@@ -183,6 +183,7 @@ async function toolLayout(tool: "pnpm" | "yarn", real: string[]) {
         'let lock; try { lock = fs.readFileSync("yarn.lock", "utf8"); } catch {}',
         `fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({ name: ${JSON.stringify(name)}, args: process.argv.slice(2), active: process.env.WARDBY_NPM_SHIM_ACTIVE, alwaysAuth: process.env.npm_config_always_auth, lock }) + "\\n");`,
         'if (process.env.FAKE_WRITE_LOCK) fs.writeFileSync("yarn.lock", process.env.FAKE_WRITE_LOCK);',
+        "if (process.env.FAKE_SLEEP_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_SLEEP_MS));",
         "process.exit(Number(process.env.FAKE_EXIT ?? 0));",
       ].join("\n"),
     );
@@ -339,6 +340,23 @@ describe("package-manager shim for yarn", () => {
     expect((await run(shim, ["install"], { cwd: project, env })).code).toBe(0);
     expect((await calls())[0].alwaysAuth).toBe("true");
   });
+
+  it("restores the lockfile when the install is killed", async () => {
+    const { shim, project, env } = await toolLayout("yarn", ["yarn"]);
+    const original = classic("https://registry.yarnpkg.com/");
+    await writeFile(join(project, "yarn.lock"), original);
+    const child = spawn(shim, ["install"], { cwd: project, env: { ...env, FAKE_SLEEP_MS: "5000" } });
+    // Once the plan is made the lockfile points at the proxy; then kill.
+    for (let waited = 0; waited < 5000; waited += 50) {
+      if ((await readFile(join(project, "yarn.lock"), "utf8")) !== original) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(await readFile(join(project, "yarn.lock"), "utf8")).not.toBe(original);
+    child.kill("SIGTERM");
+    const signal = await new Promise((resolve) => child.once("close", (_code, signal) => resolve(signal)));
+    expect(signal).toBe("SIGTERM");
+    expect(await readFile(join(project, "yarn.lock"), "utf8")).toBe(original);
+  }, 15_000);
 
   it("passes yarn's exit code through and still restores the lockfile", async () => {
     const { shim, project, env } = await toolLayout("yarn", ["yarn"]);

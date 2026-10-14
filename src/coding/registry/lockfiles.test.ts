@@ -66,4 +66,47 @@ describe("normalizeRegistryLockfiles", () => {
     expect(rewritten).toEqual(["pnpm-lock.yaml", "web/yarn.lock"]);
     for (const path of rewritten) expect(await readFile(join(workspace, path), "utf8")).not.toContain(PROXY_BASE);
   });
+
+  it("turns each client's lockfile written through the proxy back into what a public install writes", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "wardby-lockfiles-"));
+    const npmBase = `${PROXY_BASE}/registry/npm/`;
+    const fixture = (name: string) => readFile(new URL(`./fixtures/lockfiles/${name}`, import.meta.url), "utf8");
+    // What each client recorded through the proxy (seen with the real
+    // clients in clients.integration.test.ts): pnpm a `tarball` on the
+    // proxy's own route, yarn classic proxy `resolved` URLs, yarn Berry an
+    // `__archiveUrl` naming the proxy.
+    const pnpm = await fixture("pnpm-lock-v9.yaml");
+    const pnpmProxied = pnpm.replace(
+      /resolution: \{integrity: ([^}]+)\}\n(\s+engines: [^\n]+\n)?/,
+      (match, integrity: string) =>
+        match.replace(
+          `{integrity: ${integrity}}`,
+          `{integrity: ${integrity}, tarball: ${npmBase}-/tarball/%40sindresorhus%2Fis/4.6.0}`,
+        ),
+    );
+    const classic = await fixture("yarn-v1.lock");
+    const classicProxied = classic.replaceAll("https://registry.yarnpkg.com/", npmBase);
+    const berry = await fixture("yarn-berry.lock");
+    const berryProxied = berry.replace(
+      'resolution: "debug@npm:4.4.3"',
+      `resolution: "debug@npm:4.4.3::__archiveUrl=${encodeURIComponent(`${npmBase}-/tarball/debug/4.4.3`)}"`,
+    );
+    expect(pnpmProxied).not.toBe(pnpm);
+    expect(berryProxied).not.toBe(berry);
+    await write(workspace, "pnpm-lock.yaml", pnpmProxied);
+    await write(workspace, "classic/yarn.lock", classicProxied);
+    await write(workspace, "berry/yarn.lock", berryProxied);
+
+    const rewritten = await normalizeRegistryLockfiles({ workspace, proxyBaseUrl: PROXY_BASE });
+
+    expect(rewritten).toEqual(["berry/yarn.lock", "classic/yarn.lock", "pnpm-lock.yaml"]);
+    expect(await readFile(join(workspace, "pnpm-lock.yaml"), "utf8")).toBe(pnpm);
+    expect(await readFile(join(workspace, "classic/yarn.lock"), "utf8")).toBe(classic);
+    expect(await readFile(join(workspace, "berry/yarn.lock"), "utf8")).toBe(berry);
+    for (const path of rewritten) {
+      const content = await readFile(join(workspace, path), "utf8");
+      expect(content).not.toContain("wardby-proxy");
+      expect(content).not.toContain("rrg_");
+    }
+  });
 });
