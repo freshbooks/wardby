@@ -428,12 +428,21 @@ with pnpm 8 or later. The YAML lockfiles are read as plain strings, and one
 using YAML anchors or aliases (which pnpm and yarn never write) is refused.
 The proxy reads a `pnpm-lock.yaml` or `yarn.lock` in a separate worker
 thread, never on the thread that serves every run's registry and model
-traffic, with a 15-second bound and a 512 MiB memory bound: a lockfile not
-read in time is answered with `503 wardby_plan_incomplete`, and one that
-needs more memory with `413 wardby_lockfile_too_large`. A real lockfile at
-the entry bound reads in well under a second. Either answer means the
-install falls back to the walk, as for any failed plan; a retry of the same
-lockfile fails the same way.
+traffic. The read is bounded to 15 seconds and to 384 MiB of memory for
+every 5000 entries `REGISTRY_PLAN_MAX_ENTRIES` allows (384 MiB at the
+default). A lockfile not read in time is answered with
+`503 wardby_plan_incomplete`, and one that needs more memory with
+`413 wardby_lockfile_too_large`; a retry of the same lockfile fails the same
+way, and the install falls back to the walk, as for any failed plan. A
+reader that fails for any other reason is the proxy's own failure: it is
+logged (`registry.failed`) and answered with `502 wardby_upstream_error`.
+A realistic lockfile at the default entry bound (a 3.4 MiB
+`pnpm-lock.yaml`) reads in under a second using about 160 MiB.
+
+**Proxy memory.** Each lockfile plan being read can use that bound on top of
+the proxy's own memory, and two plans are read at once, so allow about
+800 MiB of headroom for lockfile reads at the default settings (more if you
+raise `REGISTRY_PLAN_MAX_ENTRIES`).
 
 **yarn Berry's `checksum` is not npm's integrity.** It is yarn's own hash
 of its cache archive, so the plan can't compare it with the registry's.

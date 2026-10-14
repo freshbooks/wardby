@@ -27,7 +27,9 @@ export interface ShippedLockfile {
 }
 
 export type ParseResponse =
-  { ok: true; lockfile: ShippedLockfile } | { ok: false; status: number; code: string; message: string };
+  | { ok: true; lockfile: ShippedLockfile }
+  | { ok: false; status: number; code: string; message: string }
+  | { ok: false; unexpected: true; message: string };
 
 /** At most this many edges per entry are shipped (far above any real
  *  package's dependency count), so a crafted entry with a huge dependency
@@ -67,18 +69,20 @@ export function parseAndShip(request: ParseRequest): ShippedLockfile {
   };
 }
 
+/** The answer for one parse: the lockfile, the parser's refusal, or (a bug,
+ *  not a verdict about the lockfile) the unexpected error's message, which
+ *  the main thread logs. */
+export function responseFor(parse: () => ShippedLockfile): ParseResponse {
+  try {
+    return { ok: true, lockfile: parse() };
+  } catch (error) {
+    if (error instanceof RegistryError)
+      return { ok: false, status: error.status, code: error.code, message: error.message };
+    return { ok: false, unexpected: true, message: error instanceof Error ? String(error) : "unknown error" };
+  }
+}
+
 if (parentPort) {
   const port = parentPort;
-  port.on("message", (request: ParseRequest) => {
-    let response: ParseResponse;
-    try {
-      response = { ok: true, lockfile: parseAndShip(request) };
-    } catch (error) {
-      response =
-        error instanceof RegistryError
-          ? { ok: false, status: error.status, code: error.code, message: error.message }
-          : { ok: false, status: 400, code: "wardby_bad_request", message: "the lockfile could not be read" };
-    }
-    port.postMessage(response);
-  });
+  port.on("message", (request: ParseRequest) => port.postMessage(responseFor(() => parseAndShip(request))));
 }

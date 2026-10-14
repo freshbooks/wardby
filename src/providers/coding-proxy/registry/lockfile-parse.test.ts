@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseNpmClientLockfile } from "../../../coding/registry/npm-lockfile-formats.js";
 import { RegistryError } from "../../../coding/registry/types.js";
-import { parseLockfileOffThread } from "./lockfile-parse.js";
+import { parseLockfileOffThread, parseWorkerHeapMb } from "./lockfile-parse.js";
+import { responseFor } from "./lockfile-parse-worker.js";
 
 const PROXY = "http://wardby-proxy:8787/registry/npm/";
 const OPTIONS = { maxEntries: 100, proxyRegistryUrl: PROXY };
@@ -89,4 +90,47 @@ describe("parseLockfileOffThread", () => {
     setTimeout(() => controller.abort(), 100);
     expect(await failure(parse)).toEqual([503, "wardby_plan_incomplete"]);
   }, 10_000);
+
+  it("answers a reader that runs out of memory as a lockfile too large", async () => {
+    expect(
+      await failure(
+        parseLockfileOffThread("npm", slowLockfile(), OPTIONS, { timeoutMs: 10_000, maxOldGenerationSizeMb: 64 }),
+      ),
+    ).toEqual([413, "wardby_lockfile_too_large"]);
+  }, 15_000);
+
+  it("fails a reader that can't load, or hits a bug, as an error with its cause, not as a refusal", async () => {
+    const workers = new URL("./fixtures/parse-workers/", import.meta.url);
+    for (const [file, cause] of [
+      ["fails-to-load.mjs", "the worker module could not load"],
+      ["unexpected.mjs", "TypeError: fixture parser bug"],
+    ]) {
+      const outcome = parseLockfileOffThread("npm", fixture("yarn-v1.lock"), OPTIONS, {
+        timeoutMs: 10_000,
+        workerUrl: new URL(file, workers),
+      });
+      await expect(outcome).rejects.toThrow(cause);
+      await expect(outcome).rejects.not.toBeInstanceOf(RegistryError);
+    }
+  });
+
+  it("reports a parser bug in the worker as unexpected, a refusal as a refusal", () => {
+    expect(
+      responseFor(() => {
+        throw new TypeError("x is undefined");
+      }),
+    ).toEqual({ ok: false, unexpected: true, message: "TypeError: x is undefined" });
+    expect(
+      responseFor(() => {
+        throw new RegistryError(400, "wardby_bad_request", "not YAML");
+      }),
+    ).toEqual({ ok: false, status: 400, code: "wardby_bad_request", message: "not YAML" });
+  });
+
+  it("bounds a reader's heap by the entry bound: 384 MiB at the default 5000, more for a raised bound", () => {
+    // A realistic 5000-entry pnpm-lock.yaml (3.4 MiB) needs 129 to 160 MiB.
+    expect(parseWorkerHeapMb(5000)).toBe(384);
+    expect(parseWorkerHeapMb(100)).toBe(384);
+    expect(parseWorkerHeapMb(20_000)).toBe(1536);
+  });
 });
