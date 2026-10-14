@@ -1,0 +1,4 @@
+# Services wardby starts next to coding runs for this repository
+# (docs/coding-services.md). PostgreSQL matches deploy/local/docker-compose.yml.
+services:
+  postgres: "16"
