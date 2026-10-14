@@ -15,6 +15,9 @@ describe("Claude tool runner image policy", () => {
     expect(lockfile).not.toContain("@anthropic-ai/");
     expect(dockerfile).toContain("USER 10001:10001");
     expect(dockerfile).toContain("COPY src/coding-worker/npm-shim.mjs /opt/wardby/bin/npm-shim.mjs");
+    // The same shim acts as pnpm and yarn (lockfile plans for theirs too).
+    expect(dockerfile).toContain("ln -s npm-shim.mjs /opt/wardby/bin/pnpm");
+    expect(dockerfile).toContain("ln -s npm-shim.mjs /opt/wardby/bin/yarn");
     expect(dockerfile).toContain("/etc/profile.d/wardby-shims.sh");
     // main.mjs imports ../coding-worker/dependency-cache.mjs on a dependency-cache run.
     expect(dockerfile).toContain(

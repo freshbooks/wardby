@@ -4,13 +4,17 @@
  * lockfile claims is trusted:
  *
  * - every entry's integrity must equal the registry's own for that exact
- *   version (a per-version fact read from the registry, stored forever);
+ *   version (a per-version fact read from the registry, stored forever),
+ *   unless the format records no npm integrity at all (yarn Berry): then
+ *   the approval is the exact name@version, and the download is checked
+ *   against the registry's integrity alone;
  * - edges come from the registry too: a parent version's declared
  *   dependencies, resolved to lockfile entries by the client's own rule
  *   (npm: nearest ancestor node_modules), and kept only when the entry is
  *   the declared package at a version inside the declared range;
- * - reachability starts at the projects' dependencies that are allowlist
- *   roots (at a version inside the root's range) and follows only verified
+ * - reachability starts at every lockfile entry that is an allowlist root
+ *   (at a version inside the root's range), wherever it sits and whether or
+ *   not a project declares it, and follows only verified
  *   edges, through versions old enough and without a HIGH/CRITICAL advisory
  *   (one the run's accepted set waives does not count; malware always does).
  *
@@ -126,18 +130,22 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
       });
   }
 
-  // Starting points: what the projects themselves declare, when it is an
-  // allowlist root at a version inside the root's range.
+  // Starting points: every registry entry that is an allowlist root at a
+  // version inside the root's range, wherever it sits in the lockfile and
+  // whether or not a project declares it. An allowlisted name may be
+  // installed by name anyway (the download path allows the same name@version:
+  // `authorize` matches the name with `matchRoot`, and `keptVersions`
+  // applies the root's range, release age and advisories), so an `overrides`-forced version of it, which no parent's
+  // declared range reaches, is a start in its own right. Every start still
+  // passes the fact checks below (integrity, release age, advisories), and
+  // edges are still followed only inside declared ranges.
   const starts = new Set<LockfileEntry>();
-  for (const project of lockfile.projects) {
-    for (const dependency of project.dependencies) {
-      const entry = lockfile.resolve(project.path, dependency.key);
-      if (!entry || entry.kind !== "registry" || entry.name !== dependency.name) continue;
-      const root = matchRoot(input.roots, adapter.normalizeName(entry.name));
-      if (!root) continue;
-      if (root.range && !safeSatisfies(adapter, entry.version, root.range)) continue;
-      starts.add(entry);
-    }
+  for (const entry of lockfile.entries) {
+    if (entry.kind !== "registry") continue;
+    const root = matchRoot(input.roots, adapter.normalizeName(entry.name));
+    if (!root) continue;
+    if (root.range && !safeSatisfies(adapter, entry.version, root.range)) continue;
+    starts.add(entry);
   }
 
   // Breadth first over verified edges, fetching facts one layer at a time
@@ -158,7 +166,10 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
         continue;
       }
       const { fact } = outcome;
-      if (entry.integrity === null || entry.integrity.trim() !== fact.integrity) {
+      if (
+        lockfile.integrity !== "registry" &&
+        (entry.integrity === null || entry.integrity.trim() !== fact.integrity)
+      ) {
         refusals.set(entry, {
           code: "wardby_lockfile_integrity_mismatch",
           reason: `the lockfile's integrity is not the registry's for ${entry.name}@${entry.version}`,

@@ -47,8 +47,9 @@ tfplan
 # generated Prisma client (npm run build / prepare: prisma generate)
 src/generated/
 
-# Wardby local runtime and credentials
-.wardby/
+# Wardby local runtime and credentials; the services declaration is committed
+.wardby/*
+!.wardby/services.yaml
 .vscode/numbered-bookmarks.json
 
 # Tilt dev loop: generated dev login key

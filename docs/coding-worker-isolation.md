@@ -450,18 +450,20 @@ inert until an operator explicitly raises the ceiling above `CODING_DISK_MB`.
 A coding agent's profile carries an optional `workspaceDiskMb` (MiB; `null`
 means "use the deployment default `CODING_DISK_MB`"). It is snapshotted onto
 the `CodingRun` at dispatch time, so a later profile edit never changes an
-in-flight run's size, and it is capped by `CODING_MAX_DISK_MB`: a run whose
-snapshotted `workspaceDiskMb` exceeds the ceiling fails with
-`coding_workspace_disk_exceeds_limit`
-(`src/providers/executor/container.ts`, the `jobSpec()` check). This check
-runs after the workspace has already been cloned onto the control plane, so
-an over-ceiling agent still pays for a clone before failing, and the failure
-reaches the run record only as the sanitized `coding_failure_workspace:<id>`
-(the same generic bucketing every workspace/git-related failure gets) — not
-a distinctly labeled "refused" outcome, and not currently logged anywhere
-more diagnosable on the control plane. This is a known rough edge, not a
-security gap: no run ever exceeds the ceiling, it
-just fails less legibly than it could.
+in-flight run's size, and it is capped by `CODING_MAX_DISK_MB`.
+`create_agent` refuses a coding profile above the effective ceiling.
+`update_agent` checks the ceiling when setting a numeric `workspaceDiskMb`
+or changing an agent's kind to coding. Unrelated edits to an already-saved
+over-cap coding agent remain allowed. The error names the requested MiB, the cap, and
+`CODING_MAX_DISK_MB`, which the operator must raise to allow that size.
+A value exactly at the cap is allowed; `null` restores the deployment default.
+
+Agents already saved above the cap (including after an operator lowers it)
+still fail at run time with `coding_workspace_disk_exceeds_limit`.
+The run-time check runs after the workspace has been cloned onto the control
+plane and before the worker starts; the run record shows the sanitized
+`coding_failure_workspace:<id>`. Lower the profile's size or raise the
+operator ceiling before running the agent again.
 
 `CODING_MAX_CONCURRENT` (default `4`) caps coding runs that hold a slot at
 once, across every control-plane replica: the cap is enforced in Postgres
@@ -552,7 +554,9 @@ the model, and a tag that breaks it is normalized to a lowercase slug (or
 dropped) instead of failing an otherwise finished run. GitHub finalization
 re-validates the tag independently. Linking an issue is not the tag's job: put
 a closing keyword such as `Resolves #37` in the task so the worker includes it
-in the summary, which becomes the pull request body.
+in the summary, which becomes the pull request body on every run,
+including follow-ups (see
+[How the pull request description is kept current](code-review-agents.md#how-the-pull-request-description-is-kept-current)).
 
 Some workspace folders are never collected from a run: `node_modules`, `.venv`,
 `venv`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.tox`,
@@ -1136,7 +1140,7 @@ values. The list is kept only when every entry matches
 - **No end-to-end backpressure or host-side archive-size cap** once the
   exec WebSocket for a seed/collect transfer is connected — pre-existing,
   documented, not a regression of this milestone.
-- **An over-ceiling `workspaceDiskMb` fails late and generically** — see
+- **An already-saved over-ceiling `workspaceDiskMb` fails at run time** — see
   "Control Plane Configuration" above.
 - **Namespace handling must remain explicit in every overlay.**
   `deploy/kind-coding/manifests/base/kustomization.yaml`

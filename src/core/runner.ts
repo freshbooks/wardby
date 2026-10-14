@@ -374,6 +374,7 @@ export type RunnerDb = Pick<
   | "agentSubAgent"
   | "resourceGrant"
   | "codingRun"
+  | "registryFetch"
   | "task"
   | "webhook"
   | "$transaction"

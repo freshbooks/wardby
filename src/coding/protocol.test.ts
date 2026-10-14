@@ -187,6 +187,11 @@ describe("CodingTaskInputSchema", () => {
       "HTTPS_PROXY",
       "PIP_INDEX_URL",
       "WARDBY_RUN_CAPABILITY",
+      // The registry settings for yarn and corepack.
+      "YARN_NPM_REGISTRY_SERVER",
+      "YARN_NPM_AUTH_TOKEN",
+      "COREPACK_NPM_REGISTRY",
+      "PNPM_HOME",
     ]) {
       expect(isReservedServiceEnvName(name)).toBe(true);
     }

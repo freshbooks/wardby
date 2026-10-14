@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -34,7 +34,7 @@ import {
   readRegularFile,
   scanArchive,
   sealUploadWindow,
-  verifyTree,
+  verifyLinks,
   type DependencyCacheEvent,
   type PrepareDependenciesResult,
   type PrepareResult,
@@ -149,7 +149,13 @@ interface ProxyState {
   blobs: Map<string, Buffer>;
   shaOverride?: string;
   lengthOverride?: number;
-  uploads: { body: Buffer; contentLength: string | undefined }[];
+  uploads: {
+    body: Buffer;
+    contentLength: string | undefined;
+    scanVersion: string | undefined;
+    entries: string | undefined;
+    unpackedBytes: string | undefined;
+  }[];
   sealed: boolean;
   hang?: string;
   /** Delays the plan answer (a slow proxy with a cold package-fact cache). */
@@ -248,7 +254,13 @@ function startProxy(): Promise<void> {
       }
       if (route === "PUT /cache/npm/blob") {
         const body = await readBody(request);
-        state.uploads.push({ body, contentLength: request.headers["content-length"] });
+        state.uploads.push({
+          body,
+          contentLength: request.headers["content-length"],
+          scanVersion: request.headers["x-wardby-archive-scan-version"] as string | undefined,
+          entries: request.headers["x-wardby-archive-entries"] as string | undefined,
+          unpackedBytes: request.headers["x-wardby-archive-unpacked-bytes"] as string | undefined,
+        });
         json(201, { stored: true, sha256: sha256(body), sizeBytes: body.length });
         return;
       }
@@ -468,6 +480,30 @@ describe("prepareDependencies", () => {
     expect(JSON.stringify(events)).not.toContain("run-token");
   });
 
+  it("hit: skips the duplicate scan only with manifest metadata bound to the archive digest", async () => {
+    const blob = await realTarSnapshot(LOCKFILE);
+    const archive = join(root, "validated.tgz");
+    await writeFile(archive, blob);
+    const validation = await scanArchive(archive, { budgetBytes: Number.MAX_SAFE_INTEGER });
+    hitWith(blob);
+    state.lookupAnswer = () => ({
+      status: 200,
+      body: {
+        key: "a".repeat(64),
+        hit: true,
+        maxBytes: 64 * 1024 * 1024,
+        manifest: {
+          scanVersion: 1,
+          sha256: sha256(blob),
+          entries: validation.entries,
+          unpackedBytes: validation.unpackedBytes,
+        },
+      },
+    });
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(events.some((event) => event.event === "restore_phase" && event.stage === "scan")).toBe(false);
+  });
+
   it("cold: npm ci through the shim, consistency, snapshot uploaded with content-length, then seal", async () => {
     const result = await prepare();
     expect(result).toMatchObject({ result: "cold" });
@@ -475,6 +511,11 @@ describe("prepareDependencies", () => {
     expect(await npmCalls()).toEqual([["ci", "--ignore-scripts", "--no-audit", "--no-fund"]]);
     expect(state.uploads).toHaveLength(1);
     expect(state.uploads[0].contentLength).toBe(String(state.uploads[0].body.length));
+    expect(state.uploads[0]).toMatchObject({
+      scanVersion: "1",
+      entries: expect.any(String),
+      unpackedBytes: expect.any(String),
+    });
     expect(result.sizeBytes).toBe(state.uploads[0].body.length);
     expect(state.calls.slice(-2)).toEqual(["PUT /cache/npm/blob", "POST /cache/npm/seal"]);
     expect(await exists(join(workspace, "node_modules/alpha/package.json"))).toBe(true);
@@ -738,6 +779,23 @@ describe("untrusted archives", () => {
     expect(await readdir(outside)).toEqual([]);
   });
 
+  it("a restore verifies the links it extracted: one changed before the check rejects the hit", async () => {
+    hitWith(await realTarSnapshot(LOCKFILE));
+    const outside = join(root, "outside-link");
+    await writeFile(outside, "x");
+    const reason = await prepareRefusedHit({
+      testHooks: {
+        beforeVerifyLinks: async (temp) => {
+          const link = join(temp, "node_modules/.bin/beta");
+          expect(await readlink(link)).toBe("../beta/index.js");
+          await rm(link);
+          await symlink(outside, link);
+        },
+      },
+    });
+    expect(reason).toBe("unsafe_archive");
+  });
+
   it("restores files over 1 MiB (streamed) and up to 1 MiB (buffered) byte for byte", async () => {
     const { randomBytes } = await import("node:crypto");
     const large = randomBytes(1024 * 1024 + 4097);
@@ -783,47 +841,109 @@ describe("untrusted archives", () => {
     expect(await readdir(outside)).toEqual([]);
   });
 
-  it("verifyTree still refuses a hard link and a fifo in the written tree", async () => {
-    const tree = join(root, "tree-types");
-    await mkdir(join(tree, "node_modules/a"), { recursive: true });
-    await writeFile(join(tree, "node_modules/a/f"), "x");
-    await expect(verifyTree(tree)).resolves.toBeUndefined();
-    const { link } = await import("node:fs/promises");
-    await link(join(tree, "node_modules/a/f"), join(tree, "node_modules/a/g"));
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
-    await rm(join(tree, "node_modules/a/g"));
-    expect(spawnSync("mkfifo", [join(tree, "node_modules/a/pipe")]).status).toBe(0);
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+  it("extraction returns the links it made, and never writes over or beside an existing entry", async () => {
+    const destination = join(root, "dest-links");
+    await mkdir(destination);
+    const archive = join(root, "links.tgz");
+    await writeFile(
+      archive,
+      rawTar([
+        { name: "node_modules/a/f", body: "x" },
+        { name: "node_modules/.bin/a", type: "2", link: "../a/f" },
+        { name: "node_modules/b", type: "2", link: "a" },
+      ]),
+    );
+    const { links } = await extractArchive(archive, destination, { budgetBytes: 1024 * 1024 });
+    expect(links).toEqual([join(destination, "node_modules/.bin/a"), join(destination, "node_modules/b")]);
+    await expect(verifyLinks(destination, links)).resolves.toBeUndefined();
+
+    // A file is only ever created (O_EXCL): a planted file where one goes is refused, never replaced,
+    // so every written file is new and has a single link.
+    const again = join(root, "dest-planted");
+    await mkdir(join(again, "node_modules/a"), { recursive: true });
+    await writeFile(join(again, "node_modules/a/f"), "planted");
+    await expect(extractArchive(archive, again, { budgetBytes: 1024 * 1024 })).rejects.toBeDefined();
+    expect(await readFile(join(again, "node_modules/a/f"), "utf8")).toBe("planted");
   });
 
-  it("verifyTree rejects a written tree with a link out of node_modules, even through a linked folder", async () => {
+  it("an archive of files only reports no links and writes each file with a single link", async () => {
+    // Extraction refuses tar hard-link entries (see the table above) and creates every file with O_EXCL,
+    // so verifyLinks only needs the links extraction reports.
+    const destination = join(root, "dest-nolinks");
+    await mkdir(destination);
+    const archive = join(root, "files.tgz");
+    await writeFile(archive, rawTar([{ name: "node_modules/a/f", body: "x" }]));
+    const { links } = await extractArchive(archive, destination, { budgetBytes: 1024 * 1024 });
+    expect(links).toEqual([]);
+    const { stat } = await import("node:fs/promises");
+    expect((await stat(join(destination, "node_modules/a/f"))).nlink).toBe(1);
+  });
+
+  it("verifyLinks refuses a listed path that is no longer a link", async () => {
+    const tree = join(root, "tree-kinds");
+    await mkdir(join(tree, "node_modules/a"), { recursive: true });
+    await writeFile(join(tree, "node_modules/a/f"), "x");
+    await expect(verifyLinks(tree, [join(tree, "node_modules/a/f")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+    await expect(verifyLinks(tree, [join(tree, "node_modules/missing")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+  });
+
+  it("verifyLinks rejects a written tree with a link out of node_modules, even through a linked folder", async () => {
     const tree = join(root, "tree");
     await mkdir(join(tree, "node_modules/p"), { recursive: true });
     await symlink("..", join(tree, "node_modules/p/q"));
-    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    const links = [join(tree, "node_modules/p/q")];
+    await expect(verifyLinks(tree, links)).resolves.toBeUndefined();
     await symlink("../..", join(tree, "node_modules/r")); // what p/q/r -> ../.. really is
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
-    await rm(join(tree, "node_modules/r"));
+    await expect(verifyLinks(tree, [...links, join(tree, "node_modules/r")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
     await symlink("/etc", join(tree, "node_modules/abs"));
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+    await expect(verifyLinks(tree, [...links, join(tree, "node_modules/abs")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
   });
 
-  it("verifyTree rejects a written link that escapes once the kernel follows the links before it", async () => {
+  it("verifyLinks rejects a written link that escapes once the kernel follows the links before it", async () => {
     const tree = join(root, "tree");
     await mkdir(join(tree, "node_modules/a/b"), { recursive: true });
     await symlink("../..", join(tree, "node_modules/a/b/s")); // -> node_modules: inside
-    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    const links = [join(tree, "node_modules/a/b/s")];
+    await expect(verifyLinks(tree, links)).resolves.toBeUndefined();
     await symlink("a/b/s/../..", join(tree, "node_modules/t")); // lexically node_modules/a; really tree's parent
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+    await expect(verifyLinks(tree, [...links, join(tree, "node_modules/t")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
   });
 
-  it("verifyTree allows a dangling link only when its target is plainly inside", async () => {
+  it("verifyLinks resolves each link on disk: a target the text rule accepts still fails if it lands outside", async () => {
+    // Extraction never makes a folder that is a link (safeDirectory), so this can't come from an archive;
+    // it's the realpath check alone that refuses it.
+    const tree = join(root, "tree-swapped");
+    const outside = join(root, "outside-swapped");
+    await mkdir(join(tree, "node_modules"), { recursive: true });
+    await mkdir(outside);
+    await writeFile(join(outside, "y"), "x");
+    await symlink("y", join(outside, "x"));
+    await symlink(outside, join(tree, "node_modules/p"));
+    await expect(verifyLinks(tree, [join(tree, "node_modules/p/x")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
+  });
+
+  it("verifyLinks allows a dangling link only when its target is plainly inside", async () => {
     const tree = join(root, "tree");
     await mkdir(join(tree, "node_modules/.bin"), { recursive: true });
     await symlink("../missing/cli.js", join(tree, "node_modules/.bin/tool"));
-    await expect(verifyTree(tree)).resolves.toBeUndefined();
+    const links = [join(tree, "node_modules/.bin/tool")];
+    await expect(verifyLinks(tree, links)).resolves.toBeUndefined();
     await symlink("nothere/../.bin", join(tree, "node_modules/odd"));
-    await expect(verifyTree(tree)).rejects.toMatchObject({ reason: "unsafe_archive" });
+    await expect(verifyLinks(tree, [...links, join(tree, "node_modules/odd")])).rejects.toMatchObject({
+      reason: "unsafe_archive",
+    });
   });
 
   it("scanArchive accepts a real tar snapshot and counts its bytes", async () => {
@@ -851,6 +971,103 @@ describe("untrusted archives", () => {
     expect(result.result).toBe("cold");
     expect(state.uploads).toHaveLength(0);
     expect(events.some((entry) => entry.event === "snapshot_skipped" && entry.reason === "unsafe_archive")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- archive manifest
+
+/** The scan result the proxy returns as `manifest` for a snapshot uploaded with it. */
+async function manifestFor(blob: Buffer) {
+  const archive = join(root, `manifest-${randomUUID()}.tgz`);
+  await writeFile(archive, blob);
+  const { entries, unpackedBytes } = await scanArchive(archive, { budgetBytes: Number.MAX_SAFE_INTEGER });
+  await rm(archive);
+  return { scanVersion: 1, sha256: sha256(blob), entries, unpackedBytes };
+}
+
+function hitWithManifest(blob: Buffer, manifest: unknown, id = "a".repeat(64)) {
+  state.blobs.set(id, blob);
+  state.lookupAnswer = () => ({ status: 200, body: { key: id, hit: true, maxBytes: 64 * 1024 * 1024, manifest } });
+}
+
+/** The restore stages logged, in order. */
+const restoreStages = () => events.filter((event) => event.event === "restore_phase").map((event) => event.stage);
+
+describe("archive manifest (scan recorded at upload)", () => {
+  it("logs each restore stage with its duration", async () => {
+    hitWith(await realTarSnapshot(LOCKFILE));
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(restoreStages()).toEqual(["download", "scan", "extract", "verify_links", "check_consistency"]);
+    for (const event of events.filter((entry) => entry.event === "restore_phase"))
+      expect(typeof event.ms).toBe("number");
+  });
+
+  it("a lookup without a manifest (a legacy snapshot) runs the full scan", async () => {
+    hitWith(await realTarSnapshot(LOCKFILE));
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(restoreStages()).toContain("scan");
+  });
+
+  it("refuses a manifest bound to another digest: download_failed, nothing scanned or extracted", async () => {
+    const blob = await realTarSnapshot(LOCKFILE);
+    hitWithManifest(blob, { ...(await manifestFor(blob)), sha256: "0".repeat(64) });
+    expect(await prepareRefusedHit()).toBe("download_failed");
+    // The refused hit's restore stopped at the download; the cold install's tree is the only one.
+    expect(restoreStages()).toEqual(["download"]);
+    expect(await cacheLeftovers()).toEqual([]);
+  });
+
+  it.each([
+    ["a wrong scanVersion", { scanVersion: 2 }],
+    ["a sha256 that is not lowercase hex", { sha256: "Z".repeat(64) }],
+    ["a short sha256", { sha256: "a".repeat(63) }],
+    ["non-integer entries", { entries: 1.5 }],
+    ["zero entries", { entries: 0 }],
+    ["entries as a string", { entries: "3" }],
+    ["negative unpackedBytes", { unpackedBytes: -1 }],
+    ["non-integer unpackedBytes", { unpackedBytes: 0.5 }],
+  ])("ignores a manifest with %s and runs the full scan", async (_label, change) => {
+    const blob = await realTarSnapshot(LOCKFILE);
+    hitWithManifest(blob, { ...(await manifestFor(blob)), ...change });
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(restoreStages()).toContain("scan");
+  });
+
+  it.each([
+    ["null", null],
+    ["an array", []],
+    ["a string", "manifest"],
+  ])("ignores a manifest that is %s and runs the full scan", async (_label, manifest) => {
+    hitWithManifest(await realTarSnapshot(LOCKFILE), manifest);
+    expect(await prepare()).toMatchObject({ result: "hit" });
+    expect(restoreStages()).toContain("scan");
+  });
+
+  it("nearest: uses nearest.manifest when the digest matches (no second scan)", async () => {
+    const nearest = await realTarSnapshot(LOCKFILE);
+    await writeRepo(LOCKFILE_V2);
+    state.blobs.set("b".repeat(64), nearest);
+    const manifest = await manifestFor(nearest);
+    state.lookupAnswer = () => ({
+      status: 200,
+      body: { key: "c".repeat(64), hit: false, nearest: { id: "b".repeat(64), manifest }, maxBytes: 64 * 1024 * 1024 },
+    });
+    expect(await prepare()).toMatchObject({ result: "nearest" });
+    expect(restoreStages()).toEqual(["download", "extract", "verify_links"]);
+  });
+
+  it("a manifest understating unpackedBytes does not lift the bound: extraction still refuses over_budget", async () => {
+    // Claims one small file; the archive holds a 7 GiB entry.
+    const blob = rawTar([
+      { name: "node_modules/", type: "5" },
+      { name: "node_modules/big", size: 7 * 1024 * 1024 * 1024 },
+    ]);
+    hitWithManifest(blob, { scanVersion: 1, sha256: sha256(blob), entries: 2, unpackedBytes: 1 });
+    expect(await prepare({ budgetBytes: 1024 * 1024 * 1024 })).toEqual({ result: "skipped", reason: "over_budget" });
+    // The scan was skipped (the manifest was trusted), so extractArchive's budget refused it.
+    expect(restoreStages()).toEqual(["download", "extract"]);
+    expect(await exists(join(workspace, "node_modules"))).toBe(false);
+    expect(await cacheLeftovers()).toEqual([]);
   });
 });
 

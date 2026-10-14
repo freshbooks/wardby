@@ -126,6 +126,48 @@ them. The proxy also needs `wardby_proxy` access to the `DependencySnapshot`
 table, which `up.sh` grants before the rollout (see
 [Upgrading an existing deployment](../../docs/getting-started-gke.md#upgrading-an-existing-deployment)).
 
+## Coding workspace disk
+
+A coding run's workspace is 2048 MiB unless the agent sets `workspaceDiskMb`,
+and by default an agent can't ask for more than that. To let agents ask for
+more (for example, for a large dependency install), deploy with
+`CODING_MAX_DISK_MB`:
+
+```bash
+CODING_MAX_DISK_MB=8192 deploy/gke/up.sh
+```
+
+`up.sh` adds it to the control plane only, which launches the coding runs. It
+must be an integer between 2048 and 32768. On Autopilot the control plane also
+refuses at startup a value that doesn't leave room for the worker's 1 GiB
+inside the 10 GiB pod ephemeral-storage ceiling (see
+[Coding worker isolation](../../docs/coding-worker-isolation.md)). Leaving it
+unset keeps the 2048 MiB limit. A run whose agent asks for more than the limit
+fails with `coding_workspace_disk_exceeds_limit`.
+
+## Coding pod memory and CPU
+
+Every coding run's pod gets 2048 MiB of memory and 1 CPU by default. In a Codex
+run the agent and the commands it runs (installs, linters, tests) share that
+pod. A repository with a large lint or test suite can run out of memory, which
+fails the run with `coding_failure_executor`. To give every coding run more,
+deploy with `CODING_MEMORY_MB` and `CODING_CPUS`:
+
+```bash
+CODING_MEMORY_MB=6144 CODING_CPUS=2 deploy/gke/up.sh
+```
+
+`up.sh` adds them to the control plane only, which builds the coding pods.
+`CODING_MEMORY_MB` must be an integer between 1024 and 32768, and `CODING_CPUS`
+a number between 0.25 and 16. On Autopilot the control plane fits each pod to the
+platform's memory-per-CPU range (about 1 to 6.5 GiB per CPU), so keep the two in
+proportion. Autopilot bills pods by what they request, so larger values cost
+more for every coding run while it runs. Leaving them unset keeps the defaults.
+
+In a Claude Code run, the commands run in a separate tool-runner container whose
+share of the pod is limited (at most 512 MiB and 0.25 CPU), so raising these
+values mostly benefits Codex runs.
+
 ## Egress
 
 The namespace is default-deny. The control plane, the coding proxy, and the

@@ -18,6 +18,7 @@ import {
   MAX_DEBUG_TRACE_MAX_MB,
   isLocalRepository,
 } from "../../coding/protocol.js";
+import { loadContainerExecutorConfig } from "../../config/providers.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { ACCEPTED_ADVISORY_ID, MAX_ACCEPTED_ADVISORIES } from "../../coding/registry/allowlist.js";
 import { assertAgentModelAvailable } from "../../core/run-pricing.js";
@@ -48,6 +49,17 @@ import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
+
+function validateWorkspaceDiskMb(workspaceDiskMb: number | null | undefined): void {
+  if (workspaceDiskMb == null) return;
+  const { maxDiskMb } = loadContainerExecutorConfig();
+  if (workspaceDiskMb > maxDiskMb) {
+    throw new McpError(
+      400,
+      `workspaceDiskMb (${workspaceDiskMb} MiB) exceeds the deployment cap (${maxDiskMb} MiB). Raise CODING_MAX_DISK_MB to allow this size.`,
+    );
+  }
+}
 
 // workerImageRef is the BYO-arbitrary-image escape hatch (see
 // resolveCodingWorkerImage/resolveCodingToolImage in container.ts). For a Codex agent it
@@ -570,6 +582,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       requireModelAvailable(ctx, args.model, args.kind);
       validateEffort(args.kind, args.model, args.effort);
       validateNativeExecutionMode(ctx, args.kind, args.nativeExecutionMode);
+      validateWorkspaceDiskMb(args.codingProfile?.workspaceDiskMb);
       if (args.codingProfile) await requireCatalogServiceNames(ctx.db, args.codingProfile.services);
       if (args.budgetGroupId) {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
@@ -829,6 +842,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...profilePatch });
             if (!profileResult.success) throw invalidArguments("coding profile", profileResult.error);
             nextProfile = profileResult.data;
+            if (typeof args.codingProfile?.workspaceDiskMb === "number" || nextKind !== existing.kind) {
+              validateWorkspaceDiskMb(nextProfile.workspaceDiskMb);
+            }
             if (args.codingProfile?.services !== undefined) await requireCatalogServiceNames(tx, nextProfile.services);
             const nextModel = args.model ?? existing.model;
             const pairingChanges =

@@ -113,8 +113,17 @@ async function setup(
     startPod,
     lookup: (params: Record<string, string | undefined> = { lock: LOCK }, token?: string) =>
       fetch(`${base}/cache/npm/lookup${query(params)}`, { headers: auth(token) }).then(json),
-    upload: (body: Uint8Array, params: Record<string, string | undefined> = { lock: LOCK }, token?: string) =>
-      fetch(`${base}/cache/npm/blob${query(params)}`, { method: "PUT", headers: auth(token), body }).then(json),
+    upload: (
+      body: Uint8Array,
+      params: Record<string, string | undefined> = { lock: LOCK },
+      token?: string,
+      headers: Record<string, string> = {},
+    ) =>
+      fetch(`${base}/cache/npm/blob${query(params)}`, {
+        method: "PUT",
+        headers: { ...auth(token), ...headers },
+        body,
+      }).then(json),
     download: (id: string, params: Record<string, string | undefined> = { lock: LOCK }, token?: string) =>
       fetch(`${base}/cache/npm/blob/${id}${query(params)}`, { headers: auth(token) }),
     seal: (token?: string) => fetch(`${base}/cache/npm/seal`, { method: "POST", headers: auth(token) }).then(json),
@@ -298,6 +307,89 @@ describe("dependency cache upload and download", () => {
     expect(response.headers.get("content-length")).toBe(String(archive.byteLength));
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(archive);
     expect(store.rows[0].lastUsedAt.getTime()).toBeGreaterThan(before.getTime());
+  });
+
+  it("returns a digest-bound manifest only for uploads with complete validated metadata", async () => {
+    const { upload, lookup, store } = await setup();
+    const headers = {
+      "x-wardby-archive-scan-version": "1",
+      "x-wardby-archive-entries": "42",
+      "x-wardby-archive-unpacked-bytes": "123456",
+    };
+    expect((await upload(archive, { lock: LOCK }, undefined, headers)).status).toBe(201);
+    expect(store.rows[0]).toMatchObject({ archiveScanVersion: 1, archiveEntries: 42, unpackedBytes: 123456 });
+    expect((await lookup()).body).toMatchObject({
+      hit: true,
+      manifest: { scanVersion: 1, sha256: hex(archive), entries: 42, unpackedBytes: 123456 },
+    });
+  });
+
+  it("returns no manifest for a row without validation metadata (a legacy snapshot), hit or nearest", async () => {
+    const { upload, lookup, store } = await setup({ lockHashes: [LOCK, LOCK_TWO] });
+    expect((await upload(archive)).status).toBe(201);
+    expect(store.rows[0]).toMatchObject({ archiveScanVersion: null, archiveEntries: null, unpackedBytes: null });
+    const hit = (await lookup()).body as Record<string, unknown>;
+    expect(hit.hit).toBe(true);
+    expect(hit).not.toHaveProperty("manifest");
+    const near = (await lookup({ lock: LOCK_TWO })).body as { nearest: Record<string, unknown> };
+    expect(near).toMatchObject({ hit: false, nearest: { id: store.rows[0].id } });
+    expect(near).not.toHaveProperty("manifest");
+    expect(near.nearest).not.toHaveProperty("manifest");
+  });
+
+  it("returns nearest.manifest for a nearest row uploaded with validation metadata", async () => {
+    const { upload, lookup, store } = await setup({ lockHashes: [LOCK, LOCK_TWO] });
+    const headers = {
+      "x-wardby-archive-scan-version": "1",
+      "x-wardby-archive-entries": "7",
+      "x-wardby-archive-unpacked-bytes": "4096",
+    };
+    expect((await upload(archive, { lock: LOCK_TWO }, undefined, headers)).status).toBe(201);
+    const { body } = await lookup({ lock: LOCK });
+    expect(body).toMatchObject({
+      hit: false,
+      nearest: {
+        id: store.rows[0].id,
+        manifest: { scanVersion: 1, sha256: hex(archive), entries: 7, unpackedBytes: 4096 },
+      },
+    });
+    // The manifest belongs to the nearest snapshot, not to the (missing) hit.
+    expect(body).not.toHaveProperty("manifest");
+  });
+
+  it("binds the manifest to the row's recorded sha256, never to a client value", async () => {
+    const manifestSha256 = (body: unknown) => (body as { manifest: { sha256: string } }).manifest.sha256;
+    const { upload, lookup, store } = await setup();
+    const headers = {
+      "x-wardby-archive-scan-version": "1",
+      "x-wardby-archive-entries": "3",
+      "x-wardby-archive-unpacked-bytes": "10",
+      // Not part of the protocol: a client cannot choose the digest.
+      "x-wardby-archive-sha256": "0".repeat(64),
+      "x-wardby-sha256": "0".repeat(64),
+    };
+    expect((await upload(archive, { lock: LOCK }, undefined, headers)).status).toBe(201);
+    expect(store.rows[0].sha256).toBe(hex(archive));
+    expect(manifestSha256((await lookup()).body)).toBe(hex(archive));
+    // The manifest follows what the database recorded for the row.
+    store.rows[0].sha256 = "f".repeat(64);
+    expect(manifestSha256((await lookup()).body)).toBe("f".repeat(64));
+  });
+
+  it("refuses partial or malformed validation metadata", async () => {
+    const { upload, store } = await setup();
+    expect(await upload(archive, { lock: LOCK }, undefined, { "x-wardby-archive-scan-version": "1" })).toEqual({
+      status: 400,
+      body: { error: "bad_request" },
+    });
+    expect(
+      await upload(archive, { lock: LOCK }, undefined, {
+        "x-wardby-archive-scan-version": "1",
+        "x-wardby-archive-entries": "0",
+        "x-wardby-archive-unpacked-bytes": "1",
+      }),
+    ).toEqual({ status: 400, body: { error: "bad_request" } });
+    expect(store.rows).toEqual([]);
   });
 
   it("accepts one upload per project per run; another project is allowed", async () => {

@@ -110,6 +110,10 @@ export interface FetchMetadataOptions {
 export interface MetadataRoute {
   kind: "metadata";
   name: string;
+  /** One exact version's document instead of the whole package's
+   *  (npm's `/<name>/<version>`, which corepack reads); only for adapters
+   *  with `renderVersion`. */
+  version?: string;
 }
 
 export interface DownloadRoute {
@@ -172,16 +176,29 @@ export interface LockfileEntry {
   unsupportedReason?: string;
 }
 
-/** A parsed lockfile: its entries, the projects whose declared
- *  dependencies are where reachability starts (the root, workspaces), and
- *  the client's own rule for which entry a declared dependency uses. */
+/** A parsed lockfile: its entries, the projects it declares (the root and
+ *  workspaces; kept for parsing and diagnostics, no longer where plan
+ *  reachability starts), and the client's own rule for which entry a
+ *  declared dependency uses. */
 export interface ParsedLockfile {
   entries: readonly LockfileEntry[];
   projects: readonly { path: string; dependencies: readonly DeclaredDependency[] }[];
+  /** What an entry's integrity is checked against. `lockfile` (the
+   *  default): the entry's own `integrity` must equal the registry's, and
+   *  one without any is refused. `registry`: the lockfile records no npm
+   *  integrity at all (yarn Berry's `checksum` is yarn's hash of its own
+   *  cache archive), so entries are approved as exact name@version pairs
+   *  and each download is checked against the registry's integrity alone. */
+  integrity?: "lockfile" | "registry";
   /** The entry that `key`, declared by the package at `fromPath`, resolves
    *  to (npm: the nearest ancestor `node_modules/<key>`), or undefined
    *  (not installed, or a local project). */
   resolve(fromPath: string, key: string): LockfileEntry | undefined;
+  /** The dependency keys the lockfile itself lists for the entry at
+   *  `path`, when `resolve` answers only for those (pnpm, yarn). Such a
+   *  lockfile can be parsed in a worker thread and shipped back as an edge
+   *  table; npm's rule (any ancestor folder) cannot. */
+  dependencyKeys?(path: string): readonly string[];
 }
 
 /** Immutable facts about one published version, read from the registry
@@ -230,6 +247,10 @@ export interface LockfilePlanSupport {
   /** Whether a dependency declared as `range` accepts `version`, as the
    *  client itself decides it when it reuses a locked version. */
   edgeSatisfies(version: string, range: string): boolean;
+  /** Whether `body` should be parsed in a worker thread rather than on the
+   *  proxy's event loop (a YAML or yarn lockfile, which is far costlier to
+   *  read than JSON). Its parse must provide `dependencyKeys`. */
+  parsesOffThread?(body: string): boolean;
 }
 
 export interface WorkerConfigInput {
@@ -259,14 +280,19 @@ export interface RegistryAdapter {
   /** Whether fetchMetadata's VersionInfo.dependencies is complete (npm's
    *  packuments carry every version's dependencies). When true, the core
    *  may resolve a run's approved dependency graph from metadata alone,
-   *  on demand, before refusing a name (a lockfile install requests
-   *  tarballs without first requesting each parent's metadata). False for
+   *  on demand, before refusing a download (a lockfile install requests
+   *  tarballs without first requesting each parent's metadata; a metadata
+   *  request never walks). False for
    *  ecosystems whose indexes omit dependencies (PyPI), where such a walk
    *  would only make upstream calls and find nothing. */
   readonly dependenciesInMetadata: boolean;
   /** Lockfile names this ecosystem's client writes, and a rewrite of the proxy download URLs it records in one back to
    *  public URLs, applied before the workspace is collected (lockfiles.ts). Omitted when the client records none. */
-  readonly lockfiles?: { names: readonly string[]; normalize(content: string, registryUrl: string): string };
+  readonly lockfiles?: {
+    names: readonly string[];
+    /** `name` is the lockfile's file name (one of `names`). */
+    normalize(content: string, registryUrl: string, name: string): string;
+  };
   /** Lockfile verification (`POST /registry/<id>/-/plan`); omitted when the
    *  ecosystem has none. */
   readonly lockfilePlan?: LockfilePlanSupport;
@@ -307,6 +333,16 @@ export interface RegistryAdapter {
     keptFiles: ReadonlySet<string>,
     proxyBase: string,
   ): RenderedDocument;
+  /** The client-facing document for one kept version (a metadata route
+   *  with `version`), its download rewritten to a proxy route; null when
+   *  the version or its file is not kept. Omitted when the ecosystem has
+   *  no per-version documents. */
+  renderVersion?(
+    meta: PackageMetadata,
+    version: string,
+    keptFiles: ReadonlySet<string>,
+    proxyBase: string,
+  ): RenderedDocument | null;
   /** Map a download route to a file in metadata the proxy fetched itself.
    *  Returns null if the route names no known file. */
   resolveDownload(route: DownloadRoute, meta: PackageMetadata): FileRef | null;
