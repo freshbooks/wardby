@@ -285,7 +285,7 @@ with npm 7 or later):
   `@heroui/*` counts here, since the lockfile names the exact package. From
   there it follows only verified edges, each inside the declared range. An
   entry nothing reaches is refused with `wardby_package_not_allowed`.
-- **Overrides.** An npm `overrides` entry installs a version that its parent's
+- **Overrides.** An npm `overrides` entry can install a version that its parent's
   declared range doesn't allow, so the plan can't reach it through that
   parent. It's approved, with its own dependencies, when the overridden
   package's name is on the allowlist (and the version is inside the

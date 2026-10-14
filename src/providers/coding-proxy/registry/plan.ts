@@ -9,8 +9,9 @@
  *   dependencies, resolved to lockfile entries by the client's own rule
  *   (npm: nearest ancestor node_modules), and kept only when the entry is
  *   the declared package at a version inside the declared range;
- * - reachability starts at the projects' dependencies that are allowlist
- *   roots (at a version inside the root's range) and follows only verified
+ * - reachability starts at every lockfile entry that is an allowlist root
+ *   (at a version inside the root's range), wherever it sits and whether or
+ *   not a project declares it, and follows only verified
  *   edges, through versions old enough and without a HIGH/CRITICAL advisory
  *   (one the run's accepted set waives does not count; malware always does).
  *
@@ -129,8 +130,9 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
   // Starting points: every registry entry that is an allowlist root at a
   // version inside the root's range, wherever it sits in the lockfile and
   // whether or not a project declares it. An allowlisted name may be
-  // installed by name anyway (the download path's `authorize` matches roots
-  // the same way), so an `overrides`-forced version of it, which no parent's
+  // installed by name anyway (the download path allows the same name@version:
+  // `authorize` matches the name with `matchRoot`, and `keptVersions`
+  // applies the root's range, release age and advisories), so an `overrides`-forced version of it, which no parent's
   // declared range reaches, is a start in its own right. Every start still
   // passes the fact checks below (integrity, release age, advisories), and
   // edges are still followed only inside declared ranges.

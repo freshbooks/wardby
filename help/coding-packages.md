@@ -17,11 +17,12 @@ and vulnerability filtering.
 
 An empty allowlist keeps registry mode off. Approve only top-level packages;
 Wardby validates and permits the required transitive dependency graph for the
-run.
+run. Changing a package allowlist or policy needs `packages:approve` (or
+`agents:admin`) and a Wardby `admin` or `package-approver` role.
+
 If the repository uses npm `overrides`, also approve each overridden package:
 an override installs a version its parent doesn't ask for, so Wardby approves
-it, and what it depends on, only when its name is on the allowlist. Changing a package allowlist or policy needs `packages:approve` (or
-`agents:admin`) and a Wardby `admin` or `package-approver` role.
+it, and what it depends on, only when its name is on the allowlist.
 
 Registry mode works for Codex and Claude Code runs alike, on the `node`
 toolchain (npm) and the `node-python` toolchain (npm and pip). Claude Code runs
