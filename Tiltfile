@@ -71,9 +71,11 @@ if observability and not env_value('OPENAI_API_KEY'):
 if observability or coding:
     # Compose only demands a non-empty value; the proxy reads a provider key when a run references
     # it, so a missing key gets a placeholder (runs on that provider would fail).
+    # Check before the placeholder goes in: env_value reads the environment first.
+    anthropic_key = env_value('ANTHROPIC_API_KEY')
     os.putenv('OPENAI_API_KEY', env_value('OPENAI_API_KEY') or 'not-set-placeholder')
-    os.putenv('ANTHROPIC_API_KEY', env_value('ANTHROPIC_API_KEY') or 'not-set-placeholder')
-    if coding and not env_value('ANTHROPIC_API_KEY'):
+    os.putenv('ANTHROPIC_API_KEY', anthropic_key or 'not-set-placeholder')
+    if coding and not anthropic_key:
         warn('ANTHROPIC_API_KEY is not set: Claude Code coding runs will fail (Codex needs OPENAI_API_KEY).')
     compose_files = ['deploy/local/docker-compose.yml', 'deploy/local/docker-compose.phase5.yml']
     if observability:
@@ -158,13 +160,18 @@ if coding:
 
     local_resource(
         'coding-images',
-        # The script's default tag is phase5-smoke, so the tag the control plane resolves is passed explicitly.
-        cmd='npm run claude:images:local && node scripts/build-local-coding-worker.mjs src/coding-worker/Dockerfile wardby-coding-worker:phase5 >/dev/null',
+        # The Codex runtime Dockerfile inherits a published driver by digest, so the driver is built from this
+        # checkout and the runtime's FROM is swapped for it; its hardening checks and entrypoint are kept.
+        cmd=' && '.join([
+            'npm run claude:images:local',
+            'docker build -q -f src/coding-worker/Dockerfile.driver -t wardby-coding-worker-driver:phase5-local . >/dev/null',
+            "sed -E 's#^FROM [^ ]+ AS runtime#FROM wardby-coding-worker-driver:phase5-local AS runtime#' src/coding-worker/Dockerfile | docker build -q -f - -t wardby-coding-worker:phase5 . >/dev/null",
+        ]),
         deps=[
             'src/claude-coding-worker',
             'src/claude-tool-runner',
+            'src/coding',
             'src/coding-worker',
-            'scripts/build-local-coding-worker.mjs',
         ],
         labels=['coding'],
     )
