@@ -12,7 +12,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
@@ -26,8 +26,12 @@ function readEnvFile(path) {
 
 function writeSecretFile(path, content) {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, content, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  // Write a sibling file, then rename it into place: a crash or Ctrl-C mid-write must not leave
+  // .env.local truncated (it holds the generated SECRET_APP_KEY), and Tilt must never read a partial file.
+  const temp = `${path}.${process.pid}.tmp`;
+  writeFileSync(temp, content, { mode: 0o600 });
+  chmodSync(temp, 0o600);
+  renameSync(temp, path);
 }
 
 /** Generates the missing secrets into `<root>/.env.local`; existing values are never touched. */
@@ -66,7 +70,7 @@ export function removeEnvEntries(text, names) {
   const kept = [];
   for (let i = 0; i < lines.length; i += 1) {
     const start = i;
-    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(lines[i]);
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\r?$/.exec(lines[i]);
     if (match) {
       // A quoted value may continue over several lines; those lines belong to this entry, kept or not.
       const quote = match[2][0];
@@ -85,14 +89,14 @@ function formatEnvValue(name, value) {
   if (value.includes('"') || value.includes("\\")) {
     throw new Error(`the value for ${name} contains a quote or backslash, which .env.local cannot hold safely.`);
   }
-  return /[\r\n\s#']/.test(value) ? `"${value}"` : value;
+  return /[\r\n\s#'`]/.test(value) ? `"${value}"` : value;
 }
 
 function accessGcloudSecret(project, secret) {
   const result = spawnSync(
     "gcloud",
     ["secrets", "versions", "access", "latest", "--secret", secret, "--project", project],
-    { encoding: "utf8", maxBuffer: 1024 * 1024 },
+    { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 30_000 },
   );
   if (result.error) throw new Error(`could not run gcloud: ${result.error.message}`);
   // stderr carries the error text, never a secret value.

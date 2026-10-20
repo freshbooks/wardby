@@ -186,6 +186,19 @@ test("removeEnvEntries does not treat assignment-like text inside a kept multi-l
   assert.equal(removeEnvEntries(text, new Set(["GITHUB_APP_ID"])), `KEEP="first\nGITHUB_APP_ID=literal\nlast"\n`);
 });
 
+test("removeEnvEntries removes entries from a CRLF file instead of duplicating them", () => {
+  assert.equal(removeEnvEntries("KEEP=1\r\nGITHUB_APP_ID=old\r\n", new Set(["GITHUB_APP_ID"])), "KEEP=1\r\n");
+});
+
+test("a value starting with a backtick is quoted so the parser keeps it whole", () =>
+  withRoot((root) => {
+    const access = (_project, secret) => (secret.endsWith("anthropic-api-key") ? "`abc" : "v");
+    quietly(() => pullSharedSecrets(root, { WARDBY_GSM_PROJECT: "p" }, access));
+    const parsed = parseEnv(readFileSync(join(root, ".env.local"), "utf8"));
+    assert.equal(parsed.ANTHROPIC_API_KEY, "`abc");
+    assert.equal(parsed.GITHUB_APP_ID, "v");
+  }));
+
 test("removeEnvEntries keeps unrelated multi-line values intact", () => {
   const text = `A="x\ny"\nB=1\nC='p\nq'\n`;
   assert.equal(removeEnvEntries(text, new Set(["B"])), `A="x\ny"\nC='p\nq'\n`);

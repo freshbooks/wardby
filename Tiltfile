@@ -65,7 +65,7 @@ def env_value(name):
 # Tilt refuses `local()` while kubectl points at a cluster it does not know to be local. This Tiltfile
 # deploys nothing to Kubernetes and the script never calls kubectl, so whatever context is current is fine.
 allow_k8s_contexts(k8s_context())
-local('node scripts/dev-bootstrap.mjs secrets', quiet=True)
+local('node scripts/dev-bootstrap.mjs secrets')
 
 local_repo_roots = env_value('LOCAL_REPO_ROOTS')
 # Coding runs turn on for local repositories (LOCAL_REPO_ROOTS) or for GitHub repositories (a configured GitHub App).
