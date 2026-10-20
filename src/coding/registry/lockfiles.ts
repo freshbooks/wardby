@@ -14,6 +14,7 @@ import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BUILTIN_COLLECT_EXCLUDE_NAMES } from "../collect-exclude.js";
 import { REGISTRY_ADAPTERS } from "./adapters.js";
+import type { EcosystemId, RegistryAdapter } from "./types.js";
 import { registryUrlFor } from "./worker-config.js";
 
 const MAX_LOCKFILE_BYTES = 64 * 1024 * 1024;
@@ -53,9 +54,13 @@ async function normalizeFile(path: string, normalize: Normalize): Promise<boolea
 export async function normalizeRegistryLockfiles(input: {
   workspace: string;
   proxyBaseUrl: string;
+  /** The adapters whose lockfile hooks run (default: the public registries').
+   *  The host passes the ones built from its JFrog settings, so a private
+   *  scope's entries are rewritten back to the private registry's URLs. */
+  adapters?: ReadonlyMap<EcosystemId, RegistryAdapter>;
 }): Promise<string[]> {
   const byName = new Map<string, Normalize>();
-  for (const adapter of REGISTRY_ADAPTERS.values()) {
+  for (const adapter of (input.adapters ?? REGISTRY_ADAPTERS).values()) {
     const lockfiles = adapter.lockfiles;
     if (!lockfiles) continue;
     const registryUrl = registryUrlFor(input.proxyBaseUrl, adapter.id);

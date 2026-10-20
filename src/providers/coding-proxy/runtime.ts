@@ -1,7 +1,8 @@
 import type { PrismaClient } from "#prisma";
 import { loadDependencyCacheConfig } from "../../config/dependency-cache.js";
 import { logger } from "../../core/logger.js";
-import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
+import { createRegistryAdapters } from "../../coding/registry/adapters.js";
+import { loadJfrogCredentials, loadJfrogRegistryConfig, type JfrogCredentials } from "../../coding/registry/jfrog.js";
 import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
 import { createBlobStore, type BlobStoreConfig } from "../storage/index.js";
@@ -42,7 +43,7 @@ function positiveInt(value: string | undefined, fallback: number): number {
  *  body is present (every registry/OSV upstream call sends or expects
  *  JSON). Exported so its header-mapping can be unit-tested directly,
  *  without needing a live upstream. */
-export function createRegistryUpstream(pinned: typeof globalThis.fetch): UpstreamFetch {
+export function createRegistryUpstream(pinned: typeof globalThis.fetch, credentials?: JfrogCredentials): UpstreamFetch {
   return (url, init = {}) =>
     pinned(url, {
       method: init.method ?? "GET",
@@ -53,8 +54,18 @@ export function createRegistryUpstream(pinned: typeof globalThis.fetch): Upstrea
         ...(init.accept ? { accept: init.accept } : {}),
         ...(init.acceptEncoding ? { "accept-encoding": init.acceptEncoding } : {}),
         ...(init.body ? { "content-type": "application/json" } : {}),
+        // The upstream credential goes only to its own host: never to public registries or OSV.
+        ...(credentials && hostOf(url) === credentials.host ? { authorization: credentials.authorization } : {}),
       },
     });
+}
+
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 export interface CodingProxyRuntimeOptions {
@@ -96,14 +107,18 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     ? (event) => options.audit?.({ ...event, mockUpstream: true })
     : options.audit;
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
-  const upstreamHosts = [...new Set([...REGISTRY_ADAPTERS.values()].flatMap((adapter) => adapter.upstreamHosts))];
+  // Throws on an invalid or incomplete JFrog setting, or a missing credential, before anything listens.
+  const jfrog = loadJfrogRegistryConfig(env);
+  const jfrogCredentials = loadJfrogCredentials(jfrog, env);
+  const registryAdapters = createRegistryAdapters(jfrog);
+  const upstreamHosts = [...new Set([...registryAdapters.values()].flatMap((adapter) => adapter.upstreamHosts))];
   const pinned = buildPinnedFetch({ allowedHosts: [...upstreamHosts, "api.osv.dev"] });
-  const upstream = createRegistryUpstream(pinned);
+  const upstream = createRegistryUpstream(pinned, jfrogCredentials);
   const metadataTimeoutMs = positiveInt(env.REGISTRY_METADATA_TIMEOUT_MS, 30_000);
   const maxMetadataBytes = positiveInt(env.REGISTRY_MAX_METADATA_MB, 64) * MIB;
   const registryStore = new PrismaRegistryStore(options.registryDb ?? options.db);
   const registry = new RegistryService({
-    adapters: REGISTRY_ADAPTERS,
+    adapters: registryAdapters,
     store: registryStore,
     audit: new OsvAudit({
       fetch: upstream,

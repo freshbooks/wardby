@@ -1003,6 +1003,83 @@ collected either.
   The one exception is the [dependency cache](#dependency-cache)'s
   `npm rebuild`, which Wardby runs itself before the agent starts.
 
+## Private packages from JFrog Artifactory
+
+By default the proxy reads public npm and PyPI. An operator can point it at a
+JFrog Artifactory instead, so runs can install private packages. The
+credential stays in the proxy process: the worker and tool runner never hold
+it and still reach only the proxy. With none of the settings below, behaviour
+is unchanged.
+
+**Scope.** Claude Code runs. Codex runs install through the proxy as usual,
+but the Codex driver rewrites lockfile download URLs back to public registry
+URLs when it collects the workspace, so a lockfile entry for a private scope
+would be rewritten wrongly. Use Claude Code for repositories with private
+packages until that is lifted.
+
+**npm is scope-routed.** Names in the configured scopes (for example
+`@your-org`) resolve only from the Artifactory npm repository, with the
+credential. Every other name resolves from public npm, with no credential. A
+name in a configured scope never falls back to public npm, and a name outside
+them is never fetched from Artifactory. A download URL must be on the host of
+its own package's upstream: a public document cannot point the proxy at the
+Artifactory host, or the reverse.
+
+**PyPI replaces the public index.** An Artifactory PyPI repository serves
+public packages too, so when one is configured it replaces public PyPI and
+`pypi.org` and `files.pythonhosted.org` are no longer reachable. The index
+must answer the JSON Simple API (PEP 691); an index that answers only HTML is
+refused with a message saying so.
+
+| Setting                      | Set on                  | Meaning                                                                                   |
+| ---------------------------- | ----------------------- | ----------------------------------------------------------------------------------------- |
+| `REGISTRY_JFROG_URL`         | proxy and launcher host | Base URL with its context path, e.g. `https://your-org.jfrog.io/your-context`. HTTPS.     |
+| `REGISTRY_JFROG_NPM_REPO`    | proxy and launcher host | npm repository key, e.g. `npm-local`. Unset: all npm comes from public npm.               |
+| `REGISTRY_JFROG_NPM_SCOPES`  | proxy and launcher host | Comma-separated scopes served by that repository, e.g. `@your-org`. Required with a repo. |
+| `REGISTRY_JFROG_PYPI_REPO`   | proxy                   | PyPI repository key, e.g. `pypi`. Unset: public PyPI.                                     |
+| `REGISTRY_UPSTREAM_USERNAME` | proxy only              | `env:NAME` reference to the username, e.g. `env:ARTIFACTORY_USER`.                        |
+| `REGISTRY_UPSTREAM_PASSWORD` | proxy only              | `env:NAME` reference to the password or token. Sent as Basic auth.                        |
+
+The derived upstreams are `<url>/api/npm/<repo>/` and
+`<url>/api/pypi/<repo>/simple/`. The proxy refuses to start on an invalid
+combination: a URL that is not HTTPS or embeds credentials or a query, a
+repository key that is a path or URL, an npm repository without scopes, a
+repository without a URL, a repository without credentials (there is no
+anonymous mode), or credentials with no repository. The credential is sent
+only to the Artifactory host, never to public registries or OSV, and a
+redirect is never followed. Use a dedicated read-only identity limited to the
+repositories listed, and rotate it with a proxy restart.
+
+**Policy is unchanged for Artifactory packages.** The per-agent allowlist
+(use a scope wildcard such as `@your-org/*`), the minimum release age and the
+OSV audit all still apply. One difference: when OSV gives no answer, an
+install of a name in a configured scope does not fail, while a public name
+keeps the `REGISTRY_AUDIT_FAIL_OPEN` behaviour. Private package names are
+still sent to `api.osv.dev`, and a version with no publish time in the
+Artifactory metadata is refused by the release-age rule like any other.
+
+**Lockfiles.** A lockfile may record the Artifactory URL for names in the
+configured scopes and public npm URLs for every other name; the reverse is
+`unsupported`. When the collected lockfiles are normalized, each package is
+rewritten to its own upstream, so a run does not change `resolved` URLs.
+
+**Known limitations.**
+
+- A repository's own `.npmrc` that maps a scope to the Artifactory URL
+  (`@your-org:registry=…`) takes precedence over the proxy setting inside the
+  tool runner, so installs of that scope do not reach the proxy and fail.
+  There is no workaround in this release; the worker setup does not yet pin
+  configured scopes to the proxy.
+- Not verified against Artifactory: yarn classic and yarn Berry install-time
+  URL rewriting, corepack, npm's `replace-registry-host` for lockfiles that
+  record Artifactory URLs, pnpm `tarball:` URLs, and root `preinstall`
+  scripts. Prefer lockfiles that record only public URLs plus the private
+  scope's.
+- Artifactory "redirect download" is not supported: the proxy refuses any
+  redirect, so downloads fail when it is on for the repository.
+- Dependencies are installed into the run's workspace and are visible to the
+  agent while it works, private package source included.
+
 ## Operator limits
 
 These per-run limits protect the proxy process and are configured with

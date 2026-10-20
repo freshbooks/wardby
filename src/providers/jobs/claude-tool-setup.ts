@@ -8,6 +8,7 @@
  * with the value in the CLI's own environment.
  */
 import { serviceEnvironment } from "../../coding-worker/driver.js";
+import { configuredRegistryAdapters } from "../../coding/registry/adapters.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT } from "./docker-isolation.js";
 import type { JobSpec } from "./types.js";
@@ -38,12 +39,14 @@ export interface ClaudeToolSetup {
   diskMb?: number;
 }
 
-export function claudeToolSetup(spec: JobSpec, capability: string): string {
+export function claudeToolSetup(spec: JobSpec, capability: string, env: NodeJS.ProcessEnv = process.env): string {
   if (spec.provider !== "claude-code") throw new Error("claude_tool_setup_provider");
   const registry = registryWorkerSetup({
     proxyBaseUrl: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
     capability,
     cacheRoot: `${TOOL_WORKSPACE}/.cache`,
+    // Only the non-secret JFrog settings are read; the upstream credential is the proxy's alone.
+    adapters: configuredRegistryAdapters(env),
   });
   const setup: ClaudeToolSetup = {
     schemaVersion: 1,

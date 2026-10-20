@@ -700,7 +700,12 @@ downloaded tarball, so treat it as a documented limit rather than a
 guarantee; and the OSV vulnerability audit fails **closed**
 (`503 wardby_audit_unavailable`) when OSV can't be reached, unless the
 operator explicitly sets `REGISTRY_AUDIT_FAIL_OPEN=true` to allow installs
-through unaudited during an OSV outage.
+through unaudited during an OSV outage. For names in a configured private
+scope, OSV being unreachable never fails an install (see the private
+packages section of `docs/coding-packages.md`). The private registry's
+credential (`REGISTRY_UPSTREAM_USERNAME` / `_PASSWORD`) is read only by the
+proxy and sent only to the private registry's host; it is never placed in a
+worker's or tool runner's environment.
 
 ## Native sandbox
 

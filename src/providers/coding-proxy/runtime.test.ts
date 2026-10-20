@@ -354,3 +354,94 @@ describe("configured coding proxy runtime: load-test mock upstream", () => {
     }
   });
 });
+
+describe("createRegistryUpstream with an upstream credential", () => {
+  const credentials = { host: "example.jfrog.io", authorization: "Basic c3ZjOnB3" };
+  const capture = () => {
+    const seen: { url: string; headers: Headers }[] = [];
+    const pinned = vi.fn(async (url: string, init?: RequestInit) => {
+      seen.push({ url, headers: new Headers(init?.headers) });
+      return new Response("{}");
+    }) as unknown as typeof globalThis.fetch;
+    return { seen, upstream: createRegistryUpstream(pinned, credentials) };
+  };
+
+  it("sends the credential to the JFrog host only, never to public registries or OSV", async () => {
+    const { seen, upstream } = capture();
+    await upstream("https://example.jfrog.io/acme/api/npm/npm-local/@acme%2fui");
+    await upstream("https://registry.npmjs.org/left-pad");
+    await upstream("https://pypi.org/simple/requests/");
+    await upstream("https://api.osv.dev/v1/query", { method: "POST", body: "{}" });
+    await upstream("https://example.jfrog.io.evil.test/x");
+    expect(seen.map((call) => call.headers.get("authorization"))).toEqual(["Basic c3ZjOnB3", null, null, null, null]);
+  });
+
+  it("sends no authorization header without a credential", async () => {
+    const seen: Headers[] = [];
+    const pinned = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers));
+      return new Response("{}");
+    }) as unknown as typeof globalThis.fetch;
+    await createRegistryUpstream(pinned)("https://example.jfrog.io/x");
+    expect(seen[0].has("authorization")).toBe(false);
+  });
+});
+
+describe("configured coding proxy runtime with a JFrog registry", () => {
+  const jfrogEnv = {
+    OPENAI_API_KEY: "test-secret",
+    REGISTRY_JFROG_URL: "https://example.jfrog.io/acme",
+    REGISTRY_JFROG_NPM_REPO: "npm-local",
+    REGISTRY_JFROG_NPM_SCOPES: "@acme",
+    REGISTRY_JFROG_PYPI_REPO: "pypi",
+    REGISTRY_UPSTREAM_USERNAME: "env:JFROG_USER",
+    REGISTRY_UPSTREAM_PASSWORD: "env:JFROG_PASS",
+    JFROG_USER: "svc",
+    JFROG_PASS: "s3cret",
+  };
+  const start = (
+    env: Record<string, string>,
+    createPinnedFetch: (options: { allowedHosts: string[] }) => typeof globalThis.fetch = () =>
+      vi.fn(async () => new Response("{}")),
+  ) => {
+    const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    return {
+      startServer,
+      createPinnedFetch,
+      started: startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env,
+        startServer,
+        startDenyPort,
+        createPinnedFetch,
+      }),
+    };
+  };
+
+  it("allows the JFrog host alongside public npm and OSV, and no longer allows the public PyPI hosts", async () => {
+    let allowedHosts: string[] = [];
+    const createPinnedFetch = vi.fn((options: { allowedHosts: string[] }) => {
+      allowedHosts = options.allowedHosts;
+      return vi.fn(async () => new Response("{}"));
+    });
+    await start(jfrogEnv, createPinnedFetch).started;
+    expect(allowedHosts).toEqual(expect.arrayContaining(["api.osv.dev", "registry.npmjs.org", "example.jfrog.io"]));
+    expect(allowedHosts).not.toContain("pypi.org");
+    expect(allowedHosts).not.toContain("files.pythonhosted.org");
+  });
+
+  it.each([
+    ["an invalid setting", { ...jfrogEnv, REGISTRY_JFROG_URL: "http://example.jfrog.io/acme" }],
+    ["a missing credential", { ...jfrogEnv, REGISTRY_UPSTREAM_PASSWORD: undefined }],
+    ["a credential reference to an unset variable", { ...jfrogEnv, JFROG_PASS: undefined }],
+    [
+      "a credential with no repo configured",
+      { OPENAI_API_KEY: "x", REGISTRY_UPSTREAM_USERNAME: "env:A", REGISTRY_UPSTREAM_PASSWORD: "env:B" },
+    ],
+  ])("fails before listening on %s", async (_label, env) => {
+    const { started, startServer } = start(env as Record<string, string>);
+    await expect(started).rejects.toThrow(/registry_jfrog_config_invalid/);
+    expect(startServer).not.toHaveBeenCalled();
+  });
+});

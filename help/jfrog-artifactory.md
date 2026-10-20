@@ -1,0 +1,40 @@
+---
+id: jfrog-artifactory
+title: Private packages from JFrog Artifactory
+summary: Let Claude Code runs install private npm and PyPI packages from a JFrog Artifactory through Wardby's registry proxy, with the credential kept on the proxy.
+audience: operator
+tags: [packages, artifactory, jfrog, private-packages, npm, pypi, scopes, credentials]
+appliesTo: ">=0.6.1"
+---
+
+# Private packages from JFrog Artifactory
+
+Set these on the coding proxy (and the first three also on the launcher host)
+to install private packages in Claude Code runs. Nothing set means public npm
+and PyPI, as before.
+
+| Setting                      | Meaning                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `REGISTRY_JFROG_URL`         | HTTPS base URL with the context path, e.g. `https://your-org.jfrog.io/ctx`. |
+| `REGISTRY_JFROG_NPM_REPO`    | npm repository key, e.g. `npm-local`.                                       |
+| `REGISTRY_JFROG_NPM_SCOPES`  | Scopes served by it, e.g. `@your-org`. Required with the repository.        |
+| `REGISTRY_JFROG_PYPI_REPO`   | PyPI repository key, e.g. `pypi`. Replaces public PyPI.                     |
+| `REGISTRY_UPSTREAM_USERNAME` | Proxy only: `env:NAME` reference to the username.                           |
+| `REGISTRY_UPSTREAM_PASSWORD` | Proxy only: `env:NAME` reference to the password or token (Basic auth).     |
+
+- npm names in the listed scopes come only from Artifactory, with the
+  credential; every other name comes from public npm without it.
+- The credential never reaches the worker or tool runner, and is sent only to
+  the Artifactory host.
+- The allowlist, release-age rule and OSV audit still apply. If OSV does not
+  answer, a private-scope name is not refused.
+- The proxy refuses to start on an invalid or incomplete setting.
+
+Limitations: Codex runs are not covered yet (use Claude Code), and a
+repository's own `.npmrc` that maps a scope to Artifactory is not routed
+through the proxy, so those installs fail. Redirect downloads are refused.
+The PyPI index must serve the JSON Simple API (PEP 691).
+
+Read [`docs/coding-packages.md`](../docs/coding-packages.md#private-packages-from-jfrog-artifactory)
+for the full behaviour, and [Approve packages for coding agents](coding-packages.md)
+for allowlists. A refused host shows as `wardby_upstream_host_not_allowed`.
