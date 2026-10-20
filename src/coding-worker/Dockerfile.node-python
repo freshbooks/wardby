@@ -6,15 +6,28 @@ FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:0bafbd9e93952cf29a
 # PIP_* environment the driver sets. The system pip is still removed:
 # Debian's system Python refuses `pip install` outside a venv (PEP 668), and
 # the root filesystem is read-only at run time anyway.
+#
+# uv and poetry run a project's own checks. uv also picks the interpreter: a run cannot download one
+# (it reaches only the registry proxy), so uv's managed CPython builds are installed here, at build
+# time, into /opt/uv-python, and uv is told to look there and never download. uv reaches the proxy
+# through the UV_* settings the worker gets (src/coding/registry/pypi.ts); poetry has no such
+# setting, so it installs only from a project's own configuration.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
-    && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 \
+    && python3 -m pip install --no-cache-dir --break-system-packages \
+        pytest==8.3.4 ruff==0.16.7 uv==0.13.1 poetry==2.5.1 \
     && apt-get purge -y --auto-remove python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     # Most Python projects (and their own docs) say `python`, not `python3`.
     # Without this alias a task that runs `python -m pytest` reports a failed
     # command even when the suite is green -- observed in a live smoke run.
-    && ln -s /usr/bin/python3 /usr/bin/python
+    && ln -s /usr/bin/python3 /usr/bin/python \
+    && UV_NO_CACHE=1 UV_PYTHON_INSTALL_DIR=/opt/uv-python uv python install --no-bin 3.12 3.13 3.14 \
+    # Login shells too (the driver's /etc/profile.d shims are there for the same reason).
+    && printf '%s\n' \
+        'export UV_PYTHON_INSTALL_DIR=/opt/uv-python' \
+        'export UV_PYTHON_DOWNLOADS=never' \
+        > /etc/profile.d/wardby-uv.sh
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
@@ -34,8 +47,16 @@ RUN test ! -e /usr/bin/docker \
     && python -m venv --system-site-packages /tmp/venv-check \
     && /tmp/venv-check/bin/python -m pip --version \
     && /tmp/venv-check/bin/python -m pytest --version \
-    && rm -rf /tmp/venv-check
+    && rm -rf /tmp/venv-check \
+    && uv --version \
+    && poetry --version \
+    # uv must pick each baked interpreter offline.
+    && UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never uv venv --python 3.12 /tmp/uv-check \
+    && /tmp/uv-check/bin/python -c "import sys; assert sys.version_info[:2] == (3, 12)" \
+    && UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never uv venv --python 3.13 /tmp/uv-check13 \
+    && UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never uv venv --python 3.14 /tmp/uv-check14 \
+    && rm -rf /tmp/uv-check /tmp/uv-check13 /tmp/uv-check14
 USER 10001:10001
-ENV NODE_ENV=production HOME=/home/wardby
+ENV NODE_ENV=production HOME=/home/wardby UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never
 WORKDIR /workspace
 ENTRYPOINT ["node", "/opt/wardby/coding-worker/main.js"]

@@ -22,7 +22,7 @@ workspace and runs every other shell command — the agent container never runs
 one. The toolchain picks the tool-runner image: `node` uses
 `CODING_CLAUDE_TOOL_RUNNER_IMAGE`, and `node-python` with toolchain version
 `3.12` uses `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (Python with
-pytest and ruff, the same packages as the Codex `node-python` worker). As with
+pytest, ruff, uv and poetry, the same packages as the Codex `node-python` worker). As with
 Codex, pip installs go into a virtual environment
 (`python -m venv --system-site-packages .venv`), and pip there reaches only the
 registry. The lockfile check
@@ -368,6 +368,36 @@ back to the dependency-graph walk below (after a plan with any refusal, this
 applies to metadata requests as well as downloads). That can make a failing install take
 minutes and use much more proxy memory; fix the refusals (wait out the release
 age or adjust the agent's policy) rather than retrying.
+
+### uv and poetry
+
+The `node-python` images ship `uv` and `poetry` next to pytest and ruff, plus
+CPython 3.12, 3.13 and 3.14 as uv's managed interpreters (in `/opt/uv-python`,
+which uv is pointed at). A run cannot download an interpreter, because it reaches
+only the registry, so `uv python install` has nothing to fetch: pick one of the
+shipped versions.
+
+```sh
+uv venv --python 3.13        # or: uv python pin 3.13
+uv pip install -r requirements.txt
+uv pip install -e '.[test]'
+```
+
+The worker points uv at the proxy with the run's registry token (`UV_DEFAULT_INDEX`;
+uv reads none of pip's `PIP_*` settings), keeps its cache under the workspace's
+`.cache`, and turns interpreter downloads off. As with pip, installs draw on the
+agent's PyPI allowlist and the registry serves wheels only.
+
+- Lock files are not verified before an install the way npm's are (see
+  [Lockfile installs](#lockfile-installs-verified-then-approved-exactly)). A
+  `uv.lock` or `poetry.lock` that records download URLs outside the registry
+  has those requests refused, like any request that bypasses the proxy.
+- Poetry has no setting for its package index, so the worker cannot point it at
+  the registry: a project's own `pyproject.toml` sources decide where it
+  installs from. Poetry is there to run a project whose dependencies are already
+  installed (for example in a [custom image](coding-worker-byo-images.md)). Its
+  cache goes under `.cache` and its virtual environment in the project's
+  `.venv`, neither of which is collected.
 
 ### pnpm and yarn
 

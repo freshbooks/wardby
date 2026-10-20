@@ -54,4 +54,19 @@ describe("coding worker image policy", () => {
       expect(dockerfile).toContain(`test ! -e /usr/bin/${executable}`);
     }
   });
+
+  it("the node-python images pin uv and poetry and bake the CPython builds uv can select offline", async () => {
+    const codex = await readFile(new URL("./Dockerfile.node-python", import.meta.url), "utf8");
+    const claude = await readFile(new URL("../claude-tool-runner/Dockerfile", import.meta.url), "utf8");
+    for (const dockerfile of [codex, claude]) {
+      expect(dockerfile).toMatch(/\buv==\d+\.\d+\.\d+/);
+      expect(dockerfile).toMatch(/\bpoetry==\d+\.\d+\.\d+/);
+      expect(dockerfile).toContain("uv python install --no-bin 3.12 3.13 3.14");
+      expect(dockerfile).toContain("UV_PYTHON_INSTALL_DIR=/opt/uv-python");
+      expect(dockerfile).toContain("UV_PYTHON_DOWNLOADS=never");
+    }
+    // The two images carry the same pins, package for package.
+    const pins = (text: string) => text.match(/\b(?:uv|poetry|pytest|ruff)==[\d.]+/g)?.sort();
+    expect(pins(claude)).toEqual(pins(codex));
+  });
 });

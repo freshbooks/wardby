@@ -3,7 +3,7 @@ id: coding-packages
 title: Approve packages for coding agents
 summary: Let coding workers install vetted npm (also with pnpm or yarn) and PyPI dependencies through Wardby's registry proxy.
 audience: operator
-tags: [coding-agents, packages, npm, pnpm, yarn, pypi, supply-chain, refusals, lockfile, extras, pip-extras]
+tags: [coding-agents, packages, npm, pnpm, yarn, pypi, uv, poetry, supply-chain, refusals, lockfile, extras, pip-extras]
 appliesTo: >=0.2.1
 ---
 
@@ -30,7 +30,10 @@ an override installs a version its parent doesn't ask for, so Wardby approves
 it, and what it depends on, only when its name is on the allowlist.
 
 Registry mode works for Codex and Claude Code runs alike, on the `node`
-toolchain (npm) and the `node-python` toolchain (npm and pip). Claude Code runs
+toolchain (npm) and the `node-python` toolchain (npm, pip and uv; the image also
+has poetry, which cannot reach the registry and works only with dependencies
+already installed). The `node-python` image ships CPython 3.12, 3.13 and 3.14 for
+`uv venv --python <version>`, since a run cannot download an interpreter. Claude Code runs
 its shell commands in a separate, credential-free tool-runner container that
 reaches the registry through the run's proxy network. Use a pinned custom
 worker image when an agent needs system packages, another runtime, or
