@@ -35,6 +35,23 @@ describe("loadJfrogRegistryConfig", () => {
     expect(jfrogPypiIndex(loaded)).toBe("https://example.jfrog.io/acme/api/pypi/pypi/simple/");
   });
 
+  it("trusts the PyPI repository only when asked", () => {
+    const base = { REGISTRY_JFROG_URL: URL_SETTING, REGISTRY_JFROG_PYPI_REPO: "pypi" };
+    expect(config(base)?.pypi?.trustAll).toBe(false);
+    expect(config({ ...base, REGISTRY_JFROG_PYPI_TRUST_ALL: "true" })?.pypi?.trustAll).toBe(true);
+    expect(config({ ...base, REGISTRY_JFROG_PYPI_TRUST_ALL: "false" })?.pypi?.trustAll).toBe(false);
+  });
+
+  it.each([
+    ["a non-boolean value", { REGISTRY_JFROG_PYPI_REPO: "pypi", REGISTRY_JFROG_PYPI_TRUST_ALL: "yes" }],
+    [
+      "trust-all without a PyPI repo",
+      { REGISTRY_JFROG_NPM_REPO: "npm", REGISTRY_JFROG_NPM_SCOPES: "@a", REGISTRY_JFROG_PYPI_TRUST_ALL: "true" },
+    ],
+  ])("rejects trust-all with %s", (_label, env) => {
+    expect(() => config({ REGISTRY_JFROG_URL: URL_SETTING, ...env })).toThrow(JfrogConfigError);
+  });
+
   it("allows PyPI alone, without npm scopes", () => {
     const loaded = config({ REGISTRY_JFROG_URL: URL_SETTING, REGISTRY_JFROG_PYPI_REPO: "pypi" });
     expect(jfrogNpmRegistry(loaded)).toBeUndefined();

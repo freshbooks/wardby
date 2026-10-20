@@ -303,6 +303,9 @@ export interface RegistryAdapter {
   /** Whether `name` is served from a private registry. The OSV audit does
    *  not fail an install for such a name when OSV gives no answer. */
   isPrivateName?(name: string): boolean;
+  /** Allowlist roots every agent has in addition to its own entries (a
+   *  wildcard with an empty prefix allows every name). The operator opts in. */
+  implicitRoots?: readonly AllowlistEntry[];
   /** Extra folder names skipped at collection, e.g. "vendor" for Composer. */
   readonly collectExclude: readonly string[];
   /** Whether fetchMetadata's VersionInfo.dependencies is complete (npm's

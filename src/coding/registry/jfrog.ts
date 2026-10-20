@@ -26,7 +26,8 @@ export interface JfrogRegistryConfig {
   /** Lower-case host of `url`; the only host the credential is ever sent to. */
   host: string;
   npm?: { repo: string; scopes: readonly string[] };
-  pypi?: { repo: string };
+  /** `trustAll`: every package the JFrog PyPI repo serves is allowed, without an allowlist entry. */
+  pypi?: { repo: string; trustAll: boolean };
 }
 
 const REPO_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -64,7 +65,8 @@ export function loadJfrogRegistryConfig(env: NodeJS.ProcessEnv = process.env): J
   const pypiRepo = repoKey(env, "REGISTRY_JFROG_PYPI_REPO");
   const rawScopes = setting(env, "REGISTRY_JFROG_NPM_SCOPES");
   if (rawUrl === undefined) {
-    if (npmRepo || pypiRepo || rawScopes) throw new JfrogConfigError("a repository is set without REGISTRY_JFROG_URL");
+    if (npmRepo || pypiRepo || rawScopes || setting(env, "REGISTRY_JFROG_PYPI_TRUST_ALL"))
+      throw new JfrogConfigError("a repository is set without REGISTRY_JFROG_URL");
     return undefined;
   }
   if (!npmRepo && !pypiRepo) throw new JfrogConfigError("REGISTRY_JFROG_URL is set without a repository");
@@ -85,7 +87,12 @@ export function loadJfrogRegistryConfig(env: NodeJS.ProcessEnv = process.env): J
   } else if (rawScopes) {
     throw new JfrogConfigError("REGISTRY_JFROG_NPM_SCOPES needs REGISTRY_JFROG_NPM_REPO");
   }
-  if (pypiRepo) config.pypi = { repo: pypiRepo };
+  const trustAll = setting(env, "REGISTRY_JFROG_PYPI_TRUST_ALL");
+  if (trustAll !== undefined && trustAll !== "true" && trustAll !== "false")
+    throw new JfrogConfigError("REGISTRY_JFROG_PYPI_TRUST_ALL must be true or false");
+  if (trustAll === "true" && !pypiRepo)
+    throw new JfrogConfigError("REGISTRY_JFROG_PYPI_TRUST_ALL needs REGISTRY_JFROG_PYPI_REPO");
+  if (pypiRepo) config.pypi = { repo: pypiRepo, trustAll: trustAll === "true" };
   return config;
 }
 

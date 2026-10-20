@@ -13,14 +13,15 @@ Set these on the coding proxy (and the first three also on the launcher host)
 to install private packages in Claude Code runs. Nothing set means public npm
 and PyPI, as before.
 
-| Setting                      | Meaning                                                                     |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| `REGISTRY_JFROG_URL`         | HTTPS base URL with the context path, e.g. `https://your-org.jfrog.io/ctx`. |
-| `REGISTRY_JFROG_NPM_REPO`    | npm repository key, e.g. `npm-local`.                                       |
-| `REGISTRY_JFROG_NPM_SCOPES`  | Scopes served by it, e.g. `@your-org`. Required with the repository.        |
-| `REGISTRY_JFROG_PYPI_REPO`   | PyPI repository key, e.g. `pypi`. Replaces public PyPI.                     |
-| `REGISTRY_UPSTREAM_USERNAME` | Proxy only: `env:NAME` reference to the username.                           |
-| `REGISTRY_UPSTREAM_PASSWORD` | Proxy only: `env:NAME` reference to the password or token (Basic auth).     |
+| Setting                         | Meaning                                                                     |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| `REGISTRY_JFROG_URL`            | HTTPS base URL with the context path, e.g. `https://your-org.jfrog.io/ctx`. |
+| `REGISTRY_JFROG_NPM_REPO`       | npm repository key, e.g. `npm-local`.                                       |
+| `REGISTRY_JFROG_NPM_SCOPES`     | Scopes served by it, e.g. `@your-org`. Required with the repository.        |
+| `REGISTRY_JFROG_PYPI_REPO`      | PyPI repository key, e.g. `pypi`. Replaces public PyPI.                     |
+| `REGISTRY_JFROG_PYPI_TRUST_ALL` | `true` allows every package the PyPI repository serves (default `false`).   |
+| `REGISTRY_UPSTREAM_USERNAME`    | Proxy only: `env:NAME` reference to the username.                           |
+| `REGISTRY_UPSTREAM_PASSWORD`    | Proxy only: `env:NAME` reference to the password or token (Basic auth).     |
 
 - npm names in the listed scopes come only from Artifactory, with the
   credential; every other name comes from public npm without it.
@@ -28,6 +29,11 @@ and PyPI, as before.
   the Artifactory host.
 - The allowlist, release-age rule and OSV audit still apply. If OSV does not
   answer, a private-scope name is not refused.
+- By default every PyPI package needs an allowlist entry. With
+  `REGISTRY_JFROG_PYPI_TRUST_ALL=true` the whole PyPI repository is trusted for
+  every agent on the proxy: use it only for a curated repository, since one
+  that proxies public PyPI unfiltered would allow all of PyPI. Release age, OSV
+  and wheels-only still apply.
 - The proxy refuses to start on an invalid or incomplete setting.
 
 Limitations: Codex runs are not covered yet (use Claude Code), and a

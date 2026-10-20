@@ -1031,14 +1031,27 @@ public packages too, so when one is configured it replaces public PyPI and
 must answer the JSON Simple API (PEP 691); an index that answers only HTML is
 refused with a message saying so.
 
-| Setting                      | Set on                  | Meaning                                                                                   |
-| ---------------------------- | ----------------------- | ----------------------------------------------------------------------------------------- |
-| `REGISTRY_JFROG_URL`         | proxy and launcher host | Base URL with its context path, e.g. `https://your-org.jfrog.io/your-context`. HTTPS.     |
-| `REGISTRY_JFROG_NPM_REPO`    | proxy and launcher host | npm repository key, e.g. `npm-local`. Unset: all npm comes from public npm.               |
-| `REGISTRY_JFROG_NPM_SCOPES`  | proxy and launcher host | Comma-separated scopes served by that repository, e.g. `@your-org`. Required with a repo. |
-| `REGISTRY_JFROG_PYPI_REPO`   | proxy                   | PyPI repository key, e.g. `pypi`. Unset: public PyPI.                                     |
-| `REGISTRY_UPSTREAM_USERNAME` | proxy only              | `env:NAME` reference to the username, e.g. `env:ARTIFACTORY_USER`.                        |
-| `REGISTRY_UPSTREAM_PASSWORD` | proxy only              | `env:NAME` reference to the password or token. Sent as Basic auth.                        |
+| Setting                         | Set on                  | Meaning                                                                                           |
+| ------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `REGISTRY_JFROG_URL`            | proxy and launcher host | Base URL with its context path, e.g. `https://your-org.jfrog.io/your-context`. HTTPS.             |
+| `REGISTRY_JFROG_NPM_REPO`       | proxy and launcher host | npm repository key, e.g. `npm-local`. Unset: all npm comes from public npm.                       |
+| `REGISTRY_JFROG_NPM_SCOPES`     | proxy and launcher host | Comma-separated scopes served by that repository, e.g. `@your-org`. Required with a repo.         |
+| `REGISTRY_JFROG_PYPI_REPO`      | proxy                   | PyPI repository key, e.g. `pypi`. Unset: public PyPI.                                             |
+| `REGISTRY_JFROG_PYPI_TRUST_ALL` | proxy                   | `true` allows every package the PyPI repository serves, with no allowlist entry. Default `false`. |
+| `REGISTRY_UPSTREAM_USERNAME`    | proxy only              | `env:NAME` reference to the username, e.g. `env:ARTIFACTORY_USER`.                                |
+| `REGISTRY_UPSTREAM_PASSWORD`    | proxy only              | `env:NAME` reference to the password or token. Sent as Basic auth.                                |
+
+**Trusting the whole PyPI repository.** By default every PyPI package, from
+Artifactory or not, needs an allowlist entry. With
+`REGISTRY_JFROG_PYPI_TRUST_ALL=true`, every agent on that proxy may install
+any package the repository serves, so repositories need no PyPI allowlist.
+Only do this when the repository is curated, for example a virtual repository
+with an approval or curation layer in front of its public remote: if it
+proxies public PyPI unfiltered, this allows all of PyPI. The release-age rule,
+the OSV audit (malware is still refused), the wheels-only rule and the host
+binding still apply to every package. An agent's own PyPI entries still work
+and still narrow nothing: they are additional, not exclusive. The setting is
+proxy-wide; there is no per-agent form.
 
 The derived upstreams are `<url>/api/npm/<repo>/` and
 `<url>/api/pypi/<repo>/simple/`. The proxy refuses to start on an invalid

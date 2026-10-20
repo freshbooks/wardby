@@ -216,6 +216,7 @@ export function createPypiAdapter(jfrog?: JfrogRegistryConfig): RegistryAdapter 
     upstreamHosts: jfrogIndex && jfrog ? [jfrog.host] : ["pypi.org", "files.pythonhosted.org"],
     collectExclude: [".venv", "venv", "__pycache__"],
     dependenciesInMetadata: false,
+    ...(jfrog?.pypi?.trustAll ? { implicitRoots: [{ name: "", wildcard: true }] } : {}),
 
     parseAllowlistEntry(raw) {
       const match = raw.trim().match(ENTRY);
