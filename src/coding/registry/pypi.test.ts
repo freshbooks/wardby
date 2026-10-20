@@ -284,4 +284,18 @@ describe("pypiAdapter protocol", () => {
     expect(config.env.PIP_ONLY_BINARY).toBe(":all:");
     expect(config.files).toEqual([]);
   });
+
+  it("points uv at the registry with its state under the cache directory and no interpreter downloads", () => {
+    const config = pypiAdapter.workerConfig({
+      registryUrl: "http://wardby-proxy:8787/registry/pypi/",
+      token: "rrg_example",
+      cacheDir: "/workspace/.cache/pypi",
+    });
+    expect(config.env.UV_DEFAULT_INDEX).toBe("http://wardby:rrg_example@wardby-proxy:8787/registry/pypi/simple/");
+    expect(config.env.UV_DEFAULT_INDEX).toBe(config.env.PIP_INDEX_URL);
+    expect(config.env.UV_CACHE_DIR).toBe("/workspace/.cache/pypi/uv");
+    expect(config.env.UV_PYTHON_DOWNLOADS).toBe("never");
+    expect(config.env.POETRY_CACHE_DIR).toBe("/workspace/.cache/pypi/poetry");
+    expect(config.env.POETRY_VIRTUALENVS_IN_PROJECT).toBe("true");
+  });
 });

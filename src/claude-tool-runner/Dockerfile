@@ -51,15 +51,28 @@ ENTRYPOINT ["node", "/opt/wardby/claude-tool-runner/main.mjs"]
 # `python -m venv --system-site-packages .venv && .venv/bin/python -m pip install ...`, and pip there
 # reaches only the proxy's registry through the PIP_* settings in WARDBY_TOOL_SETUP. The system pip is
 # removed (Debian refuses `pip install` outside a venv, and the root filesystem is read-only anyway).
+#
+# uv and poetry run a Python project's own checks. uv also picks the interpreter: a run cannot
+# download one (it reaches only the registry proxy), so uv's managed CPython builds are installed
+# here, at build time, into /opt/uv-python, and uv is told to look there and never download. Commands
+# run under `sh -l`, where Dockerfile ENV does not apply, so profile.d carries those two settings.
+# uv reaches the proxy through the UV_* settings in WARDBY_TOOL_SETUP (src/coding/registry/pypi.ts);
+# poetry has no such setting, so it installs only from a project's own configuration.
 FROM base AS node-python
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
-    && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 \
+    && python3 -m pip install --no-cache-dir --break-system-packages \
+        pytest==8.3.4 ruff==0.16.7 uv==0.13.1 poetry==2.5.1 \
     && apt-get purge -y --auto-remove python3-pip \
     && rm -rf /var/lib/apt/lists/* \
     # Most Python projects (and their own docs) say `python`, not `python3`.
-    && ln -s /usr/bin/python3 /usr/bin/python
+    && ln -s /usr/bin/python3 /usr/bin/python \
+    && UV_NO_CACHE=1 UV_PYTHON_INSTALL_DIR=/opt/uv-python uv python install --no-bin 3.12 3.13 3.14 \
+    && printf '%s\n' \
+        'export UV_PYTHON_INSTALL_DIR=/opt/uv-python' \
+        'export UV_PYTHON_DOWNLOADS=never' \
+        > /etc/profile.d/wardby-uv.sh
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
@@ -78,7 +91,14 @@ RUN test ! -e /usr/bin/docker \
     && /tmp/venv-check/bin/python -m pip --version \
     && /tmp/venv-check/bin/python -m pytest --version \
     && rm -rf /tmp/venv-check \
-    && test "$(sh -lc 'command -v python')" = /usr/bin/python
+    && test "$(sh -lc 'command -v python')" = /usr/bin/python \
+    && uv --version \
+    && poetry --version \
+    # uv must pick each baked interpreter offline, from a login shell (as a run's commands are).
+    && sh -lc 'uv venv --python 3.12 /tmp/uv-check && /tmp/uv-check/bin/python -c "import sys; assert sys.version_info[:2] == (3, 12)"' \
+    && sh -lc 'uv venv --python 3.13 /tmp/uv-check13 && /tmp/uv-check13/bin/python --version' \
+    && sh -lc 'uv venv --python 3.14 /tmp/uv-check14 && /tmp/uv-check14/bin/python --version' \
+    && rm -rf /tmp/uv-check /tmp/uv-check13 /tmp/uv-check14
 USER 10001:10001
 
 # The plain Node tool runner: the default target, so `docker build` without --target builds it.
