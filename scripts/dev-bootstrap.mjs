@@ -4,6 +4,8 @@
  *
  *   node scripts/dev-bootstrap.mjs env    generate the missing local secrets into .env.local
  *   node scripts/dev-bootstrap.mjs user   create (or repair) a dev admin login for self-hosted auth
+ *   node scripts/dev-bootstrap.mjs secrets  pull the shared dev secrets from Google Secret Manager
+ *                                         into .env.local (WARDBY_GSM_PULL=0 skips it)
  *
  * Both steps are idempotent and never print a secret: values go to owner-only
  * files and the log only names what was written and where.
@@ -44,6 +46,99 @@ export function bootstrapEnv(root = defaultRoot, processEnv = process.env) {
   const separator = current === "" || current.endsWith("\n") ? "" : "\n";
   writeSecretFile(envLocal, `${current}${separator}${lines.join("\n")}\n`);
   console.log(`dev-bootstrap: generated ${missing.join(", ")} into .env.local (owner-only).`);
+}
+
+// Secret Manager entry (after the prefix) -> the variable it fills in .env.local.
+const SHARED_SECRETS = [
+  ["github-app-id", "GITHUB_APP_ID"],
+  ["github-app-private-key", "GITHUB_APP_PRIVATE_KEY"],
+  ["github-app-client-id", "GITHUB_APP_CLIENT_ID"],
+  ["github-app-client-secret", "GITHUB_APP_CLIENT_SECRET"],
+  ["anthropic-api-key", "ANTHROPIC_API_KEY"],
+];
+const DEFAULT_SECRET_PREFIX = "wardby-dev-";
+// Where the shared dev secrets live; WARDBY_GSM_PROJECT overrides it.
+const DEFAULT_GSM_PROJECT = "freshbooks-builds";
+
+/** Drops the given variables from dotenv text, including quoted values that span several lines. */
+export function removeEnvEntries(text, names) {
+  const lines = text.split("\n");
+  const kept = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(lines[i]);
+    if (match && names.has(match[1])) {
+      const value = match[2];
+      const quote = value[0];
+      if ((quote === '"' || quote === "'" || quote === "`") && value.indexOf(quote, 1) === -1) {
+        while (i + 1 < lines.length && !lines[i + 1].includes(quote)) i += 1;
+        i += 1; // the line holding the closing quote
+      }
+      continue;
+    }
+    kept.push(lines[i]);
+  }
+  return kept.join("\n");
+}
+
+function formatEnvValue(name, value) {
+  if (value.includes('"') || value.includes("\\")) {
+    throw new Error(`the value for ${name} contains a quote or backslash, which .env.local cannot hold safely.`);
+  }
+  return /[\r\n\s#']/.test(value) ? `"${value}"` : value;
+}
+
+function accessGcloudSecret(project, secret) {
+  const result = spawnSync(
+    "gcloud",
+    ["secrets", "versions", "access", "latest", "--secret", secret, "--project", project],
+    { encoding: "utf8", maxBuffer: 1024 * 1024 },
+  );
+  if (result.error) throw new Error(`could not run gcloud: ${result.error.message}`);
+  // stderr carries the error text, never a secret value.
+  if (result.status !== 0) throw new Error(`gcloud could not read ${secret}: ${result.stderr.trim()}`);
+  return result.stdout;
+}
+
+/**
+ * Pulls the shared dev secrets from Google Secret Manager into `<root>/.env.local`. The project is
+ * WARDBY_GSM_PROJECT or the default above; WARDBY_GSM_PULL=0 skips the pull. A failure on the default
+ * project only warns, an explicit WARDBY_GSM_PROJECT fails. Values travel in memory only and are never
+ * logged or passed as arguments; the log names the variables written.
+ */
+export function pullSharedSecrets(root = defaultRoot, processEnv = process.env, access = accessGcloudSecret) {
+  const envLocal = join(root, ".env.local");
+  const settings = { ...readEnvFile(join(root, ".env")), ...readEnvFile(envLocal), ...processEnv };
+  if (settings.WARDBY_GSM_PULL?.trim() === "0") {
+    console.log("dev-bootstrap: WARDBY_GSM_PULL=0, skipping the shared secrets pull.");
+    return;
+  }
+  const explicitProject = settings.WARDBY_GSM_PROJECT?.trim();
+  const project = explicitProject || DEFAULT_GSM_PROJECT;
+  const prefix = settings.WARDBY_GSM_SECRET_PREFIX?.trim() || DEFAULT_SECRET_PREFIX;
+  let entries;
+  try {
+    entries = SHARED_SECRETS.map(([suffix, variable]) => {
+      const value = access(project, `${prefix}${suffix}`).trim();
+      if (!value) throw new Error(`${prefix}${suffix} is empty in Secret Manager project ${project}.`);
+      return [variable, formatEnvValue(variable, value)];
+    });
+  } catch (error) {
+    // The default project is only a convenience: without gcloud access, keep whatever .env.local holds.
+    if (explicitProject) throw error;
+    console.warn(
+      `dev-bootstrap: skipped the shared secrets pull from ${project} (${error instanceof Error ? error.message : error}). ` +
+        "Set WARDBY_GSM_PULL=0 to silence this.",
+    );
+    return;
+  }
+  const current = existsSync(envLocal) ? readFileSync(envLocal, "utf8") : "";
+  const kept = removeEnvEntries(current, new Set(entries.map(([variable]) => variable)));
+  const separator = kept === "" || kept.endsWith("\n") ? "" : "\n";
+  const next = `${kept}${separator}${entries.map(([variable, value]) => `${variable}=${value}`).join("\n")}\n`;
+  if (next !== current) writeSecretFile(envLocal, next);
+  console.log(
+    `dev-bootstrap: pulled ${entries.map(([variable]) => variable).join(", ")} from Secret Manager into .env.local (owner-only).`,
+  );
 }
 
 /** Runs `wardby auth ...` through the CLI, which loads .env/.env.local itself. */
@@ -100,7 +195,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     if (step === "env") bootstrapEnv();
     else if (step === "user") bootstrapUser();
-    else throw new Error("Usage: dev-bootstrap.mjs env|user");
+    else if (step === "secrets") pullSharedSecrets();
+    else throw new Error("Usage: dev-bootstrap.mjs env|user|secrets");
   } catch (error) {
     console.error(`dev-bootstrap: ${error instanceof Error ? error.message : error}`);
     process.exit(1);
