@@ -125,9 +125,10 @@ export function pullSharedSecrets(root = defaultRoot, processEnv = process.env, 
   } catch (error) {
     // The default project is only a convenience: without gcloud access, keep whatever .env.local holds.
     if (explicitProject) throw error;
+    // Fixed text on purpose: nothing derived from the environment or from gcloud's output is logged.
     console.warn(
-      `dev-bootstrap: skipped the shared secrets pull from ${project} (${error instanceof Error ? error.message : error}). ` +
-        "Set WARDBY_GSM_PULL=0 to silence this.",
+      `dev-bootstrap: skipped the shared secrets pull from ${DEFAULT_GSM_PROJECT}: gcloud could not read them. ` +
+        "Sign in with `gcloud auth login` and check access, or set WARDBY_GSM_PULL=0 to silence this.",
     );
     return;
   }
