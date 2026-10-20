@@ -371,6 +371,19 @@ export function createPypiAdapter(jfrog?: JfrogRegistryConfig): RegistryAdapter 
           PIP_CACHE_DIR: cacheDir,
           PIP_DISABLE_PIP_VERSION_CHECK: "1",
           PIP_NO_INPUT: "1",
+          // uv reads none of the PIP_* settings: the same index, its cache under cacheDir, and no
+          // interpreter downloads (a run reaches only this registry; the images ship their CPython
+          // builds, see their Dockerfiles).
+          UV_DEFAULT_INDEX: index.toString(),
+          UV_CACHE_DIR: `${cacheDir}/uv`,
+          UV_PYTHON_DOWNLOADS: "never",
+          UV_NO_PROGRESS: "1",
+          // poetry has no setting for the index (a project's own sources decide), but its cache and
+          // virtualenv stay out of the read-only root and out of the collected result: .venv is
+          // never collected.
+          POETRY_CACHE_DIR: `${cacheDir}/poetry`,
+          POETRY_VIRTUALENVS_IN_PROJECT: "true",
+          POETRY_NO_INTERACTION: "1",
         },
         files: [],
       };

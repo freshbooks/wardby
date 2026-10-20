@@ -54,3 +54,4 @@ src/generated/
 
 # Tilt dev loop: generated dev login key
 /.tilt/
+.vscode/settings.json

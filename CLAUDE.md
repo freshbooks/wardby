@@ -161,6 +161,30 @@ file, a commit message, or a doc. If a real test surfaces a genuine bug or
 missing piece in the module itself, fix the module (variables, resource
 definitions, docs) — never the specific values used to exercise it.
 
+## Where FreshBooks' own deployment config lives
+
+`deploy/` is generic reference IaC (above). FreshBooks' real deployment of
+wardby is configured in two other FreshBooks repositories, both sibling
+checkouts of this one (ask for the local path if you need it). Make
+FreshBooks-specific changes there, never in `deploy/`:
+
+- **`terraspace`** — GCP infrastructure. The wardby stack is
+  `app/stacks/application_wardby/` (Cloud SQL, IAM service accounts, database
+  grants, per-environment tfvars). Use it when a change needs a new or changed
+  GCP resource: a database, a GCP identity, or a network resource.
+- **`gcp-fluxcd`** — what runs in the Kubernetes clusters, applied by Flux. The
+  wardby manifests are under `clusters/<cluster>/wardby/` (Deployments, network
+  policies, Gateway), and its Secrets are under
+  `clusters/<cluster>/infrastructure/wardby-secrets/`. Use it for env vars,
+  Secrets, image versions, replica counts and anything else about the
+  workload. Follow that repository's own `CLAUDE.md`.
+
+Secrets and app config (for example the `WARDBY_JIRA_*` variables, which the
+Deployments already read from the optional `wardby-jira-env` Secret) go through
+`gcp-fluxcd`, not `terraspace`. Never commit a plaintext secret in either
+repository; they use Sealed Secrets or External Secrets backed by GCP Secret
+Manager. Validate a change on staging before adding or changing production.
+
 ## Public docs are for operators — STRICT
 
 Everything tracked under `docs/`, `help/`, `README.md`, and `deploy/**/*.md` is read by
