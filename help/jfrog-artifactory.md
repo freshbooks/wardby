@@ -34,6 +34,9 @@ and PyPI, as before.
   every agent on the proxy: use it only for a curated repository, since one
   that proxies public PyPI unfiltered would allow all of PyPI. Release age, OSV
   and wheels-only still apply.
+- The credential settings are `env:NAME` references: the variables they name
+  must be set in the proxy's environment too. The `deploy/local/` Compose files
+  pass them through from the shell or `.env.local`. Pass them to the proxy only.
 - The proxy refuses to start on an invalid or incomplete setting.
 
 Limitations: Codex runs are not covered yet (use Claude Code), and a
