@@ -1097,9 +1097,10 @@ repositories listed, and rotate it with a proxy restart.
 `REGISTRY_UPSTREAM_PASSWORD` hold `env:NAME` references, so the variables they
 name (for example `ARTIFACTORY_USER` and `ARTIFACTORY_TOKEN`) must be set in
 the proxy's own environment too. The Docker Compose files in `deploy/local/`
-pass all of these through to the `coding-proxy` container from the shell or
-`.env.local`, empty meaning public registries. Keep the credential values in
-`.env.local` (git-ignored) and restart the proxy after changing them. Your own
+pass all of these through to the `coding-proxy` container from the shell
+environment, empty meaning public registries. Export them before you start
+Tilt or Compose: Compose reads the shell, not `.env.local`. Restart the proxy
+after changing them. Your own
 deployment must pass them to the proxy process and nowhere else: never to the
 worker, the tool runner or the main server.
 
