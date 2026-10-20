@@ -137,6 +137,8 @@ export function pullSharedSecrets(root = defaultRoot, processEnv = process.env, 
   const separator = kept === "" || kept.endsWith("\n") ? "" : "\n";
   const next = `${kept}${separator}${entries.map(([variable, value]) => `${variable}=${value}`).join("\n")}\n`;
   if (next !== current) writeSecretFile(envLocal, next);
+  // Unchanged content skips the write above, so harden an older, looser file here without rewriting it.
+  else chmodSync(envLocal, 0o600);
   console.log(
     `dev-bootstrap: pulled ${entries.map(([variable]) => variable).join(", ")} from Secret Manager into .env.local (owner-only).`,
   );

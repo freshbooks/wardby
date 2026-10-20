@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
@@ -149,6 +149,18 @@ test("is idempotent and honours WARDBY_GSM_SECRET_PREFIX", () =>
     quietly(() => pullSharedSecrets(root, env, fakeAccess(calls)));
     assert.equal(readFileSync(join(root, ".env.local"), "utf8"), first);
     assert.equal(calls[0][1], "team-github-app-id");
+  }));
+
+test("tightens a looser .env.local to owner-only even when its contents already match", () =>
+  withRoot((root) => {
+    const env = { WARDBY_GSM_PROJECT: "p" };
+    quietly(() => pullSharedSecrets(root, env, fakeAccess()));
+    const file = join(root, ".env.local");
+    const before = readFileSync(file, "utf8");
+    chmodSync(file, 0o644);
+    quietly(() => pullSharedSecrets(root, env, fakeAccess()));
+    assert.equal(readFileSync(file, "utf8"), before);
+    assert.equal(statSync(file).mode & 0o777, 0o600);
   }));
 
 test("fails without printing a value and leaves .env.local untouched when a secret cannot be read", () =>
