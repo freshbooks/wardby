@@ -69,7 +69,8 @@ local('node scripts/dev-bootstrap.mjs secrets')
 
 local_repo_roots = env_value('LOCAL_REPO_ROOTS')
 # Coding runs turn on for local repositories (LOCAL_REPO_ROOTS) or for GitHub repositories (a configured GitHub App).
-github_app = bool(env_value('GITHUB_APP_ID')) and bool(env_value('GITHUB_APP_PRIVATE_KEY'))
+# The App id is numeric; a leftover placeholder such as the .env.example text must not start the coding setup.
+github_app = env_value('GITHUB_APP_ID').isdigit() and bool(env_value('GITHUB_APP_PRIVATE_KEY'))
 coding = bool(local_repo_roots) or github_app
 
 if observability and not env_value('OPENAI_API_KEY'):
