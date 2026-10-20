@@ -10,7 +10,15 @@
 #   viewer    -> the desktop UI (apps/viewer, Tauri) via `tauri dev`; needs Rust (rustup) and the Xcode
 #                CLI tools. It opens already pointed at http://127.0.0.1:<port>; sign in with the key in
 #                .tilt/dev-login-key. Set WARDBY_VIEWER=0 to skip it.
-#   grafana/prometheus/coding-proxy -> on by default; WARDBY_OBSERVABILITY=0 skips them (see below)
+#   grafana/prometheus -> on by default; WARDBY_OBSERVABILITY=0 skips them (see below)
+#   coding-proxy -> the trusted proxy coding runs use; started with observability or coding (see below)
+#   coding-images -> builds the Claude Code and Codex worker/tool-runner images; coding only
+#   coding-preflight -> `wardby coding preflight` (images, proxy container, isolation); coding only
+#
+# Coding runs (Claude Code and Codex on a local git repo, Docker job launcher) turn on when
+# LOCAL_REPO_ROOTS (":"-separated trusted folders) is set in the shell, .env.local or .env. `local:`
+# repos need no GitHub App. The control plane stays a host process; Docker runs the proxy and
+# per-run containers.
 #
 # Auth is self-hosted (wardby is its own authorization server), so no identity provider is
 # needed. The only value you must supply is a model provider key (OPENAI_API_KEY, or
@@ -50,27 +58,31 @@ def env_value(name):
                         value = file_value
     return value
 
-if observability:
-    if not env_value('OPENAI_API_KEY'):
-        message = 'Observability needs OPENAI_API_KEY (set in the shell, .env.local or .env).'
-        if observability_flag == '1':
-            fail(message)
-        warn(message + ' Skipping Prometheus/Grafana; set WARDBY_OBSERVABILITY=0 to silence this.')
-        observability = False
-    else:
-        os.putenv('OPENAI_API_KEY', env_value('OPENAI_API_KEY'))
-        # Compose only demands a non-empty value; the proxy reads a provider key when a run
-        # references it, so an OpenAI-only setup gets a fake Anthropic key (Claude runs would fail).
-        os.putenv('ANTHROPIC_API_KEY', env_value('ANTHROPIC_API_KEY') or 'not-set-placeholder')
+local_repo_roots = env_value('LOCAL_REPO_ROOTS')
+coding = bool(local_repo_roots)
 
-if observability:
-    docker_compose([
-        'deploy/local/docker-compose.yml',
-        'deploy/local/docker-compose.phase5.yml',
-        'deploy/observability/docker-compose.grafana.yml',
-    ])
-    for service in ['migration', 'coding-proxy', 'prometheus', 'grafana']:
-        dc_resource(service, labels=['observability'])
+if observability and not env_value('OPENAI_API_KEY'):
+    message = 'Observability needs OPENAI_API_KEY (set in the shell, .env.local or .env).'
+    if observability_flag == '1':
+        fail(message)
+    warn(message + ' Skipping Prometheus/Grafana; set WARDBY_OBSERVABILITY=0 to silence this.')
+    observability = False
+
+if observability or coding:
+    # Compose only demands a non-empty value; the proxy reads a provider key when a run references
+    # it, so a missing key gets a placeholder (runs on that provider would fail).
+    os.putenv('OPENAI_API_KEY', env_value('OPENAI_API_KEY') or 'not-set-placeholder')
+    os.putenv('ANTHROPIC_API_KEY', env_value('ANTHROPIC_API_KEY') or 'not-set-placeholder')
+    if coding and not env_value('ANTHROPIC_API_KEY'):
+        warn('ANTHROPIC_API_KEY is not set: Claude Code coding runs will fail (Codex needs OPENAI_API_KEY).')
+    compose_files = ['deploy/local/docker-compose.yml', 'deploy/local/docker-compose.phase5.yml']
+    if observability:
+        compose_files.append('deploy/observability/docker-compose.grafana.yml')
+    docker_compose(compose_files)
+    dc_resource('coding-proxy', labels=['coding' if coding else 'observability'])
+    if observability:
+        for service in ['migration', 'prometheus', 'grafana']:
+            dc_resource(service, labels=['observability'])
 else:
     docker_compose('deploy/local/docker-compose.yml')
 dc_resource('postgres', labels=['infra'])
@@ -115,11 +127,7 @@ local_resource(
     labels=['setup'],
 )
 
-local_resource(
-    'wardby',
-    cmd='npm run build:vendor',
-    serve_cmd='npm run cli -- serve',
-    serve_env={
+serve_env = {
         'DATABASE_URL': database_url,
         'MCP_TRANSPORT': 'http',
         'AUTH_PROVIDER': 'self-hosted',
@@ -127,11 +135,58 @@ local_resource(
         # Loopback HTTP is the one allowed plain-HTTP canonical URI. AUTH_AUDIENCE must match it.
         'MCP_CANONICAL_URI': 'http://127.0.0.1:' + mcp_port,
         'AUTH_AUDIENCE': 'http://127.0.0.1:' + mcp_port,
-    },
+}
+wardby_deps = ['migrate', 'bootstrap-env', 'dev-user']
+serve_cmd = 'npm run cli -- serve'
+
+if coding:
+    serve_env.update({
+        'JOB_LAUNCHER': 'docker',
+        'CODING_PROXY_CONTAINER': 'wardby-coding-proxy',
+        'LOCAL_REPO_ROOTS': local_repo_roots,
+    })
+    # Image IDs only exist after the build, but Tilt evaluates env at load time, so they are resolved
+    # in the shell. The runtime rejects mutable tags: it needs the immutable local image ID.
+    image_id = "$(docker image inspect -f '{{.Id}}' %s)"
+    coding_env = '; '.join([
+        'export CODING_CLAUDE_WORKER_IMAGE=' + image_id % 'wardby-claude-coding-worker:phase5',
+        'export CODING_CLAUDE_TOOL_RUNNER_IMAGE=' + image_id % 'wardby-claude-tool-runner:phase5',
+        'export CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12=' + image_id % 'wardby-claude-tool-runner:phase5-node-python',
+        'export CODING_WORKER_IMAGE=' + image_id % 'wardby-coding-worker:phase5',
+    ])
+    serve_cmd = coding_env + '; ' + serve_cmd
+
+    local_resource(
+        'coding-images',
+        # The script's default tag is phase5-smoke, so the tag the control plane resolves is passed explicitly.
+        cmd='npm run claude:images:local && node scripts/build-local-coding-worker.mjs src/coding-worker/Dockerfile wardby-coding-worker:phase5 >/dev/null',
+        deps=[
+            'src/claude-coding-worker',
+            'src/claude-tool-runner',
+            'src/coding-worker',
+            'scripts/build-local-coding-worker.mjs',
+        ],
+        labels=['coding'],
+    )
+
+    local_resource(
+        'coding-preflight',
+        cmd=coding_env + '; npm run cli -- coding preflight',
+        env=serve_env,
+        resource_deps=['deps', 'coding-images', 'coding-proxy'],
+        labels=['coding'],
+    )
+    wardby_deps += ['coding-images', 'coding-proxy', 'coding-preflight']
+
+local_resource(
+    'wardby',
+    cmd='npm run build:vendor',
+    serve_cmd=serve_cmd,
+    serve_env=serve_env,
     deps=['src', 'scripts', 'help', '.env', '.env.local'],
     # build:vendor writes into src/sandbox/generated, so watching it would retrigger itself forever.
     ignore=['src/generated', 'src/sandbox/generated', '**/*.test.ts', '**/*.test.mjs', 'scripts/dev-*.mjs'],
-    resource_deps=['migrate', 'bootstrap-env', 'dev-user'],
+    resource_deps=wardby_deps,
     # 127.0.0.1, not localhost: the server rejects any Host other than MCP_CANONICAL_URI's.
     links=['http://127.0.0.1:' + mcp_port],
     labels=['app'],

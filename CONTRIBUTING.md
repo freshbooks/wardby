@@ -41,6 +41,22 @@ proxy needs `OPENAI_API_KEY` (from the shell, `.env.local` or `.env`); a missing
 Without `OPENAI_API_KEY`, Tilt warns and skips the stack (`WARDBY_OBSERVABILITY=1`
 makes that an error instead).
 
+Tilt can also run Claude Code and Codex coding agents against a local git
+repository on the Docker job launcher. Set `LOCAL_REPO_ROOTS` (`:`-separated
+trusted folders; each repository must be a git top level, git 2.24 or later) in
+the shell, `.env.local` or `.env`. Tilt then builds the worker and tool-runner
+images (`coding-images`), starts the coding proxy (`coding-proxy`), runs
+`wardby coding preflight` (`coding-preflight`) and starts `wardby serve` with
+`JOB_LAUNCHER=docker`, resolving each image to its local `sha256:` ID. No GitHub
+App or webhook is needed for `local:/absolute/path` repositories; see
+[Coding agent setup](docs/coding-agent-setup.md). The proxy needs
+`ANTHROPIC_API_KEY` for Claude Code and `OPENAI_API_KEY` for Codex; a missing key
+gets a placeholder, so runs on that provider fail. Without `LOCAL_REPO_ROOTS`,
+none of this starts. Two limits: the proxy image is not rebuilt on source
+changes (re-run `coding-proxy` from the Tilt UI), and `wardby serve` restarts on
+every `src/` change, so a run in flight during a restart can be reported lost.
+Wait for runs to finish before editing.
+
 The `wardby` resource has a **Run a task** button in the Tilt UI. Fill in the
 task, model, budget cap (at most 5 USD) and a name prefix; it creates a fresh
 native agent and runs it once, streaming the output to the resource's log. It
