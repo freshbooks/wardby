@@ -65,17 +65,18 @@ export function removeEnvEntries(text, names) {
   const lines = text.split("\n");
   const kept = [];
   for (let i = 0; i < lines.length; i += 1) {
+    const start = i;
     const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(lines[i]);
-    if (match && names.has(match[1])) {
-      const value = match[2];
-      const quote = value[0];
-      if ((quote === '"' || quote === "'" || quote === "`") && value.indexOf(quote, 1) === -1) {
+    if (match) {
+      // A quoted value may continue over several lines; those lines belong to this entry, kept or not.
+      const quote = match[2][0];
+      if ((quote === '"' || quote === "'" || quote === "`") && match[2].indexOf(quote, 1) === -1) {
         while (i + 1 < lines.length && !lines[i + 1].includes(quote)) i += 1;
-        i += 1; // the line holding the closing quote
+        i = Math.min(i + 1, lines.length - 1); // the line holding the closing quote
       }
-      continue;
+      if (names.has(match[1])) continue;
     }
-    kept.push(lines[i]);
+    kept.push(...lines.slice(start, i + 1));
   }
   return kept.join("\n");
 }

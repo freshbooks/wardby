@@ -181,6 +181,11 @@ test("rejects an empty secret and a value that .env.local cannot hold", () =>
     assert.throws(() => pullSharedSecrets(root, { WARDBY_GSM_PROJECT: "p" }, () => 'a"b'), /quote or backslash/);
   }));
 
+test("removeEnvEntries does not treat assignment-like text inside a kept multi-line value as an entry", () => {
+  const text = `KEEP="first\nGITHUB_APP_ID=literal\nlast"\nGITHUB_APP_ID=real\n`;
+  assert.equal(removeEnvEntries(text, new Set(["GITHUB_APP_ID"])), `KEEP="first\nGITHUB_APP_ID=literal\nlast"\n`);
+});
+
 test("removeEnvEntries keeps unrelated multi-line values intact", () => {
   const text = `A="x\ny"\nB=1\nC='p\nq'\n`;
   assert.equal(removeEnvEntries(text, new Set(["B"])), `A="x\ny"\nC='p\nq'\n`);
