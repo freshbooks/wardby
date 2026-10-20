@@ -200,13 +200,25 @@ function bootstrapUser(root = defaultRoot) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const step = process.argv[2];
-  try {
-    if (step === "env") bootstrapEnv();
-    else if (step === "user") bootstrapUser();
-    else if (step === "secrets") pullSharedSecrets();
-    else throw new Error("Usage: dev-bootstrap.mjs env|user|secrets");
-  } catch (error) {
-    console.error(`dev-bootstrap: ${error instanceof Error ? error.message : error}`);
-    process.exit(1);
+  if (step === "secrets") {
+    try {
+      pullSharedSecrets();
+    } catch {
+      // Fixed text on purpose: the error carries the secret name, which comes from the environment.
+      console.error(
+        "dev-bootstrap: the shared secrets pull failed. Read one secret by hand to see why: " +
+          "gcloud secrets versions access latest --secret=<prefix>github-app-id --project=<project>",
+      );
+      process.exit(1);
+    }
+  } else {
+    try {
+      if (step === "env") bootstrapEnv();
+      else if (step === "user") bootstrapUser();
+      else throw new Error("Usage: dev-bootstrap.mjs env|user|secrets");
+    } catch (error) {
+      console.error(`dev-bootstrap: ${error instanceof Error ? error.message : error}`);
+      process.exit(1);
+    }
   }
 }
