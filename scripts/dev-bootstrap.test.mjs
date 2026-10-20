@@ -163,6 +163,20 @@ test("tightens a looser .env.local to owner-only even when its contents already 
     assert.equal(statSync(file).mode & 0o777, 0o600);
   }));
 
+test("leaves an unchanged owner-only .env.local completely untouched, so Tilt's file watcher sees nothing", () =>
+  withRoot((root) => {
+    const env = { WARDBY_GSM_PROJECT: "p" };
+    quietly(() => pullSharedSecrets(root, env, fakeAccess()));
+    const file = join(root, ".env.local");
+    const before = statSync(file);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+    quietly(() => pullSharedSecrets(root, env, fakeAccess()));
+    const after = statSync(file);
+    // A chmod, even to the same mode, bumps ctime and would trigger a Tiltfile reload.
+    assert.equal(after.ctimeMs, before.ctimeMs);
+    assert.equal(after.mtimeMs, before.mtimeMs);
+  }));
+
 test("fails without printing a value and leaves .env.local untouched when a secret cannot be read", () =>
   withRoot((root) => {
     const file = join(root, ".env.local");

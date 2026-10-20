@@ -12,7 +12,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
@@ -143,7 +143,9 @@ export function pullSharedSecrets(root = defaultRoot, processEnv = process.env, 
   const next = `${kept}${separator}${entries.map(([variable, value]) => `${variable}=${value}`).join("\n")}\n`;
   if (next !== current) writeSecretFile(envLocal, next);
   // Unchanged content skips the write above, so harden an older, looser file here without rewriting it.
-  else chmodSync(envLocal, 0o600);
+  // Only touch the mode when it is wrong: Tilt watches .env.local, and even a no-op chmod counts as a
+  // change that reloads the Tiltfile, which runs this pull again, forever.
+  else if ((statSync(envLocal).mode & 0o777) !== 0o600) chmodSync(envLocal, 0o600);
   console.log(
     `dev-bootstrap: pulled ${entries.map(([variable]) => variable).join(", ")} from Secret Manager into .env.local (owner-only).`,
   );
