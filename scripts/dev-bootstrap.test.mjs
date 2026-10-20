@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
 import { test } from "vitest";
-import { bootstrapEnv, pullSharedSecrets, removeEnvEntries, storedKeyIsUsable } from "./dev-bootstrap.mjs";
+import {
+  bootstrapEnv,
+  hashKeyFingerprint,
+  pullSharedSecrets,
+  removeEnvEntries,
+  storedKeyIsUsable,
+} from "./dev-bootstrap.mjs";
 
 const NAMES = ["SECRET_APP_KEY", "AUTH_SIGNING_KEY", "AUTH_CREDENTIAL_HASH_KEY"];
 
@@ -61,6 +67,21 @@ test("leaves the file untouched when every key is already set, in .env, .env.loc
     writeFileSync(join(root, ".env.local"), "AUTH_SIGNING_KEY=b\n");
     quietly(() => bootstrapEnv(root, { AUTH_CREDENTIAL_HASH_KEY: "c" }));
     assert.equal(readFileSync(join(root, ".env.local"), "utf8"), "AUTH_SIGNING_KEY=b\n");
+  }));
+
+test("the hash-key fingerprint follows AUTH_CREDENTIAL_HASH_KEY and never contains it", () =>
+  withRoot((root) => {
+    const a = "a".repeat(64);
+    const b = "b".repeat(64);
+    writeFileSync(join(root, ".env.local"), `AUTH_CREDENTIAL_HASH_KEY=${a}\n`);
+    const first = hashKeyFingerprint(root, {});
+    assert.match(first, /^[a-f0-9]{16}$/);
+    assert.equal(first, hashKeyFingerprint(root, {}));
+    assert.ok(!first.includes(a.slice(0, 8)));
+    writeFileSync(join(root, ".env.local"), `AUTH_CREDENTIAL_HASH_KEY=${b}\n`);
+    assert.notEqual(hashKeyFingerprint(root, {}), first);
+    assert.equal(hashKeyFingerprint(root, { AUTH_CREDENTIAL_HASH_KEY: a }), first);
+    assert.equal(hashKeyFingerprint(mkdtempSync(join(tmpdir(), "wardby-empty-")), {}), "");
   }));
 
 const PEM = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\nBBBB\n-----END RSA PRIVATE KEY-----";

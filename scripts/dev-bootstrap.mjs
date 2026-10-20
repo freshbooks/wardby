@@ -11,7 +11,7 @@
  * files and the log only names what was written and where.
  */
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -173,8 +173,20 @@ export function storedKeyIsUsable(storedKey, keys, now = new Date()) {
   return Boolean(key && !key.revokedAt && new Date(key.expiresAt) > now);
 }
 
+/**
+ * Short fingerprint of AUTH_CREDENTIAL_HASH_KEY (same precedence as the app). Login keys are stored as an
+ * HMAC under that key, so a key file written under another value no longer signs in. Never the key itself.
+ */
+export function hashKeyFingerprint(root = defaultRoot, processEnv = process.env) {
+  const settings = { ...readEnvFile(join(root, ".env")), ...readEnvFile(join(root, ".env.local")), ...processEnv };
+  const key = settings.AUTH_CREDENTIAL_HASH_KEY?.trim();
+  return key ? createHash("sha256").update(key).digest("hex").slice(0, 16) : "";
+}
+
 function bootstrapUser(root = defaultRoot) {
   const loginKeyFile = join(root, ".tilt", "dev-login-key");
+  const fingerprintFile = join(root, ".tilt", "dev-login-key.fingerprint");
+  const fingerprint = hashKeyFingerprint(root);
   const subject = process.env.WARDBY_DEV_SUBJECT || "dev-admin";
   const users = JSON.parse(auth(root, ["user", "list"]));
   const user = users.find((candidate) => candidate.principal.subject === subject);
@@ -182,6 +194,7 @@ function bootstrapUser(root = defaultRoot) {
   if (!user) {
     const created = JSON.parse(auth(root, ["user", "create", "--subject", subject, "--role", "admin"]));
     writeSecretFile(loginKeyFile, `${created.loginKey}\n`);
+    writeSecretFile(fingerprintFile, `${fingerprint}\n`);
     console.log(`dev-bootstrap: created admin user "${subject}"; login key written to .tilt/dev-login-key.`);
     return;
   }
@@ -192,8 +205,12 @@ function bootstrapUser(root = defaultRoot) {
   // A key file left over from another subject, or revoked/expired since, is replaced. The key is only
   // shown once at creation, so a replacement means issuing a new one.
   const keys = JSON.parse(auth(root, ["key", "list", "--subject", subject]));
-  if (!existsSync(loginKeyFile) || !storedKeyIsUsable(readFileSync(loginKeyFile, "utf8"), keys)) {
+  // A key issued under a different AUTH_CREDENTIAL_HASH_KEY (for example after .env.local was recreated) is
+  // still listed as valid but no longer signs in, so the fingerprint written with the key must match too.
+  const sameHashKey = existsSync(fingerprintFile) && readFileSync(fingerprintFile, "utf8").trim() === fingerprint;
+  if (!existsSync(loginKeyFile) || !sameHashKey || !storedKeyIsUsable(readFileSync(loginKeyFile, "utf8"), keys)) {
     writeSecretFile(loginKeyFile, `${auth(root, ["key", "create", "--subject", subject])}\n`);
+    writeSecretFile(fingerprintFile, `${fingerprint}\n`);
     console.log(`dev-bootstrap: issued a new login key for "${subject}" into .tilt/dev-login-key.`);
     return;
   }
