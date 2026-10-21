@@ -43,6 +43,16 @@ interface SimpleIndex {
   files: SimpleFile[];
 }
 
+/** `url` resolved against the index page it came from; an unparseable one is
+ *  left as-is so the host check refuses it. */
+function resolveFileUrl(url: string, base: string): string {
+  try {
+    return new URL(url, base).toString();
+  } catch {
+    return url;
+  }
+}
+
 function uploadTime(file: SimpleFile): Date | null {
   const time = file["upload-time"] ? Date.parse(file["upload-time"]) : NaN;
   return Number.isNaN(time) ? null : new Date(time);
@@ -276,7 +286,14 @@ export function createPypiAdapter(jfrog?: JfrogRegistryConfig): RegistryAdapter 
           "wardby_upstream_error",
           "the PyPI index answered HTML; the JSON Simple API (PEP 691) is required",
         );
-      const index = (await response.json()) as SimpleIndex;
+      const parsed = (await response.json()) as SimpleIndex;
+      // PEP 691 lets a file URL be relative to the index (Artifactory's are, e.g. "../../packages/…").
+      // Resolve once so the host check, the download and the .metadata URL all see an absolute URL.
+      const base = `${upstreamIndex}${name}/`;
+      const index: SimpleIndex = {
+        ...parsed,
+        files: parsed.files.map((file) => ({ ...file, url: resolveFileUrl(file.url, base) })),
+      };
       const versions = new Map<string, VersionInfo & { files: FileRef[] }>();
       for (const file of index.files) {
         const version = versionOf(file.filename);
