@@ -15,10 +15,10 @@
 #   coding-images -> builds the Claude Code and Codex worker/tool-runner images; coding only
 #   coding-preflight -> `wardby coding preflight` (images, proxy container, isolation); coding only
 #
-# Coding runs (Claude Code and Codex on a local git repo, Docker job launcher) turn on when
-# LOCAL_REPO_ROOTS (":"-separated trusted folders) is set in the shell, .env.local or .env. `local:`
-# repos need no GitHub App. The control plane stays a host process; Docker runs the proxy and
-# per-run containers.
+# Coding runs (Claude Code and Codex, Docker job launcher) turn on when either
+# LOCAL_REPO_ROOTS (":"-separated trusted folders, for `local:` repos, which need no GitHub App) or
+# both GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY (GitHub repos) are set in the shell, .env.local or
+# .env. The control plane stays a host process; Docker runs the proxy and per-run containers.
 #
 # Auth is self-hosted (wardby is its own authorization server), so no identity provider is
 # needed. The only value you must supply is a model provider key (OPENAI_API_KEY, or
@@ -58,8 +58,20 @@ def env_value(name):
                         value = file_value
     return value
 
+# Pull the shared dev secrets (GitHub App, Anthropic key) from Google Secret Manager into .env.local.
+# Runs while the Tiltfile loads, before anything below reads .env.local, so the values are there for
+# compose and for the coding switch. Needs `gcloud` signed in, otherwise it warns and keeps the file as
+# is. WARDBY_GSM_PULL=0 skips it; restart Tilt to refresh after a rotation.
+# Tilt refuses `local()` while kubectl points at a cluster it does not know to be local. This Tiltfile
+# deploys nothing to Kubernetes and the script never calls kubectl, so whatever context is current is fine.
+allow_k8s_contexts(k8s_context())
+local('node scripts/dev-bootstrap.mjs secrets')
+
 local_repo_roots = env_value('LOCAL_REPO_ROOTS')
-coding = bool(local_repo_roots)
+# Coding runs turn on for local repositories (LOCAL_REPO_ROOTS) or for GitHub repositories (a configured GitHub App).
+# The App id is numeric; a leftover placeholder such as the .env.example text must not start the coding setup.
+github_app = env_value('GITHUB_APP_ID').isdigit() and bool(env_value('GITHUB_APP_PRIVATE_KEY'))
+coding = bool(local_repo_roots) or github_app
 
 if observability and not env_value('OPENAI_API_KEY'):
     message = 'Observability needs OPENAI_API_KEY (set in the shell, .env.local or .env).'
@@ -145,8 +157,9 @@ if coding:
     serve_env.update({
         'JOB_LAUNCHER': 'docker',
         'CODING_PROXY_CONTAINER': 'wardby-coding-proxy',
-        'LOCAL_REPO_ROOTS': local_repo_roots,
     })
+    if local_repo_roots:
+        serve_env['LOCAL_REPO_ROOTS'] = local_repo_roots
     # Image IDs only exist after the build, but Tilt evaluates env at load time, so they are resolved
     # in the shell. The runtime rejects mutable tags: it needs the immutable local image ID.
     image_id = "$(docker image inspect -f '{{.Id}}' %s)"
