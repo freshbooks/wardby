@@ -36,7 +36,11 @@ and PyPI, as before.
   and wheels-only still apply.
 - The credential settings are `env:NAME` references: the variables they name
   must be set in the proxy's environment too. The `deploy/local/` Compose files
-  pass them through from the shell: export them before starting Tilt or Compose. Pass them to the proxy only.
+  pass them through to the proxy. Tilt reads them from the shell, `.env.local`
+  or `.env`, and fills `ARTIFACTORY_USER` / `ARTIFACTORY_TOKEN` from
+  `ARTIFACTORY_CREDENTIALS_USR` / `ARTIFACTORY_CREDENTIALS_PSW` (it stops with
+  an error if they are empty); plain Compose reads only the shell, so export
+  them first. Pass them to the proxy only.
 - The proxy refuses to start on an invalid or incomplete setting.
 
 Limitations: Codex runs are not covered yet (use Claude Code), and a
