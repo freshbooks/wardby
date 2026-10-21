@@ -41,8 +41,19 @@ and PyPI, as before.
 
 Limitations: Codex runs are not covered yet (use Claude Code), and a
 repository's own `.npmrc` that maps a scope to Artifactory is not routed
-through the proxy, so those installs fail. Redirect downloads are refused.
-The PyPI index must serve the JSON Simple API (PEP 691).
+through the proxy, so those installs fail. The PyPI index must serve the JSON
+Simple API (PEP 691).
+
+`uv sync` and `uv run` go straight to an index named in a project's `uv.lock`
+or `pyproject.toml`, not through the proxy: export the locked versions and run
+`uv pip install --no-config` from outside the repository instead. A locked
+version with a blocking advisory is withheld, and uv reports it as
+unsatisfiable until the advisory is accepted for the agent. Details in
+[`docs/coding-packages.md`](../docs/coding-packages.md#uv-and-poetry).
+
+Redirect downloads: if Artifactory answers a download with a redirect to a
+signed cloud-storage URL, the proxy follows that one redirect to an HTTPS URL,
+without the credential. Any other redirect, or one from that URL, is refused.
 
 Read [`docs/coding-packages.md`](../docs/coding-packages.md#private-packages-from-jfrog-artifactory)
 for the full behaviour, and [Approve packages for coding agents](coding-packages.md)

@@ -392,6 +392,20 @@ agent's PyPI allowlist and the registry serves wheels only.
   [Lockfile installs](#lockfile-installs-verified-then-approved-exactly)). A
   `uv.lock` or `poetry.lock` that records download URLs outside the registry
   has those requests refused, like any request that bypasses the proxy.
+- `uv sync` and `uv run` read the project's `uv.lock` and `pyproject.toml`, so a
+  project whose lock or `[[tool.uv.index]]` names a private index (for example
+  an Artifactory with `authenticate = "always"`) goes straight to that index and
+  not through the proxy. `uv pip install` reads the same `[[tool.uv.index]]`
+  when it runs inside the project. To install the locked versions through the
+  proxy, export them (`uv export --frozen --no-hashes --no-emit-project`), then
+  run `uv pip install --no-config -r <file>` from a directory outside the
+  repository, with `--python` pointing at the project's environment.
+- A locked version with a blocking advisory is withheld by the proxy, so the
+  install fails with an unsatisfiable-requirement error from uv, not a refusal
+  naming the advisory. The version is absent from the index the worker sees.
+  Accept the advisory in the agent's `packagePolicy.acceptedAdvisories` (see
+  [Accepting advisories](#accepting-advisories)) or move the lock to a fixed
+  release.
 - Poetry has no setting for its package index, so the worker cannot point it at
   the registry: a project's own `pyproject.toml` sources decide where it
   installs from. Poetry is there to run a project whose dependencies are already
@@ -1089,8 +1103,14 @@ combination: a URL that is not HTTPS or embeds credentials or a query, a
 repository key that is a path or URL, an npm repository without scopes, a
 repository without a URL, a repository without credentials (there is no
 anonymous mode), or credentials with no repository. The credential is sent
-only to the Artifactory host, never to public registries or OSV, and a
-redirect is never followed. Use a dedicated read-only identity limited to the
+only to the Artifactory host, never to public registries or OSV. A redirect is
+followed in one case only: a GET to the Artifactory host that answers with a
+redirect, which Artifactory does when it serves downloads from cloud storage
+through signed URLs. The proxy follows that one redirect to an HTTPS URL on any
+public host, without the credential, and refuses a redirect from that second
+hop. Private, loopback and metadata addresses stay blocked, and the connection
+is pinned to the address the proxy checked. The downloaded file is still
+verified against the `sha256` in the index. Use a dedicated read-only identity limited to the
 repositories listed, and rotate it with a proxy restart.
 
 **Passing the settings to a local proxy.** `REGISTRY_UPSTREAM_USERNAME` and
@@ -1129,8 +1149,13 @@ rewritten to its own upstream, so a run does not change `resolved` URLs.
   record Artifactory URLs, pnpm `tarball:` URLs, and root `preinstall`
   scripts. Prefer lockfiles that record only public URLs plus the private
   scope's.
-- Artifactory "redirect download" is not supported: the proxy refuses any
-  redirect, so downloads fail when it is on for the repository.
+- Artifactory "redirect download" (a 302 to signed cloud-storage URL) works:
+  the proxy follows that one redirect without the credential. Any other
+  redirect is refused, including one from the storage URL, and a redirect to a
+  plain-HTTP URL, one with embedded credentials, or one with no `Location`
+  fails the download. The index is not hash-checked, so an Artifactory that
+  redirects index requests to an unexpected host makes the proxy fetch from it:
+  keep the repository under your control.
 - Dependencies are installed into the run's workspace and are visible to the
   agent while it works, private package source included.
 

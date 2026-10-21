@@ -687,8 +687,10 @@ Enabling a coding agent's package allowlist widens the trusted proxy's own
 egress, not the worker's: the proxy (the only host any worker can reach) is
 additionally permitted to reach `registry.npmjs.org`, `pypi.org`,
 `files.pythonhosted.org`, and `api.osv.dev`, through the same pinned HTTPS
-fetch used for everything else it calls out to (no redirects, no private or
-IP-literal addresses). The worker's own network reachability is unchanged: it
+fetch used for everything else it calls out to (no private or IP-literal
+addresses, and no redirects, except the one signed-URL redirect a configured
+Artifactory may answer a download with, which is followed once without the
+credential: see [Installing packages in coding runs](coding-packages.md)). The worker's own network reachability is unchanged: it
 still reaches only `wardby-proxy:8787`. See
 [Installing packages in coding runs](coding-packages.md) for the full model,
 including its per-run download limits.

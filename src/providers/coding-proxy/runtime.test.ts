@@ -387,6 +387,79 @@ describe("createRegistryUpstream with an upstream credential", () => {
   });
 });
 
+describe("createRegistryUpstream redirect following", () => {
+  const credentials = { host: "example.jfrog.io", authorization: "Basic c3ZjOnB3" };
+  const file = "https://example.jfrog.io/acme/api/pypi/pypi/packages/packages/ab/cd/x-1.0-py3-none-any.whl";
+  const redirect = (location: string | null, status = 302) =>
+    new Response(null, { status, headers: location ? { location } : {} });
+
+  const setup = (first: Response, second: Response = new Response("wheel")) => {
+    const calls: { fetcher: "pinned" | "redirect"; url: string; init?: RequestInit }[] = [];
+    const pinned = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ fetcher: "pinned", url, init });
+      return first;
+    }) as unknown as typeof globalThis.fetch;
+    const redirectFetch = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ fetcher: "redirect", url, init });
+      return second;
+    }) as unknown as typeof globalThis.fetch;
+    return { calls, upstream: createRegistryUpstream(pinned, credentials, redirectFetch) };
+  };
+
+  it("follows one redirect from JFrog to the target, without the credential", async () => {
+    const { calls, upstream } = setup(redirect("https://storage.googleapis.com/bucket/x.whl?X-Goog-Signature=abc"));
+    const response = await upstream(file, { accept: "application/octet-stream" });
+    expect(await response.text()).toBe("wheel");
+    expect(calls.map((call) => call.fetcher)).toEqual(["pinned", "redirect"]);
+    expect(new Headers(calls[0].init?.headers).get("authorization")).toBe("Basic c3ZjOnB3");
+    expect(calls[0].init?.redirect).toBe("manual");
+    expect(calls[1].url).toBe("https://storage.googleapis.com/bucket/x.whl?X-Goog-Signature=abc");
+    expect(new Headers(calls[1].init?.headers).has("authorization")).toBe(false);
+    expect(new Headers(calls[1].init?.headers).get("accept")).toBe("application/octet-stream");
+    expect(calls[1].init?.redirect).toBe("error");
+  });
+
+  it("resolves a relative Location against the JFrog URL", async () => {
+    const { calls, upstream } = setup(redirect("/other/path/x.whl"));
+    await upstream(file);
+    expect(calls[1].url).toBe("https://example.jfrog.io/other/path/x.whl");
+  });
+
+  it.each([
+    ["a plain-http target", "http://storage.googleapis.com/x.whl"],
+    ["a target with embedded credentials", "https://user:pw@storage.googleapis.com/x.whl"],
+    ["no Location header", null],
+  ])("refuses a redirect with %s", async (_label, location) => {
+    const { calls, upstream } = setup(redirect(location));
+    await expect(upstream(file)).rejects.toThrow("proxy_egress_blocked");
+    expect(calls.map((call) => call.fetcher)).toEqual(["pinned"]);
+  });
+
+  it("does not follow redirects for other hosts, for non-GET requests, or without a redirect fetch", async () => {
+    const other = setup(redirect("https://storage.googleapis.com/x"));
+    await other.upstream("https://registry.npmjs.org/left-pad");
+    expect(other.calls[0].init?.redirect).toBe("error");
+
+    const post = setup(redirect("https://storage.googleapis.com/x"));
+    await post.upstream(file, { method: "POST", body: "{}" });
+    expect(post.calls[0].init?.redirect).toBe("error");
+
+    const seen: RequestInit[] = [];
+    const pinned = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen.push(init ?? {});
+      return new Response("{}");
+    }) as unknown as typeof globalThis.fetch;
+    await createRegistryUpstream(pinned, credentials)(file);
+    expect(seen[0].redirect).toBe("error");
+  });
+
+  it("returns a non-redirect response from JFrog untouched", async () => {
+    const { calls, upstream } = setup(new Response("index"));
+    expect(await (await upstream(file)).text()).toBe("index");
+    expect(calls.map((call) => call.fetcher)).toEqual(["pinned"]);
+  });
+});
+
 describe("configured coding proxy runtime with a JFrog registry", () => {
   const jfrogEnv = {
     OPENAI_API_KEY: "test-secret",
@@ -420,15 +493,40 @@ describe("configured coding proxy runtime with a JFrog registry", () => {
   };
 
   it("allows the JFrog host alongside public npm and OSV, and no longer allows the public PyPI hosts", async () => {
-    let allowedHosts: string[] = [];
-    const createPinnedFetch = vi.fn((options: { allowedHosts: string[] }) => {
-      allowedHosts = options.allowedHosts;
+    const built: { allowedHosts: string[]; anyPublicHost?: boolean }[] = [];
+    const createPinnedFetch = vi.fn((options: { allowedHosts: string[]; anyPublicHost?: boolean }) => {
+      built.push(options);
       return vi.fn(async () => new Response("{}"));
     });
     await start(jfrogEnv, createPinnedFetch).started;
+    const strict = built.filter((options) => !options.anyPublicHost);
+    expect(strict).toHaveLength(1);
+    const allowedHosts = strict[0].allowedHosts;
     expect(allowedHosts).toEqual(expect.arrayContaining(["api.osv.dev", "registry.npmjs.org", "example.jfrog.io"]));
     expect(allowedHosts).not.toContain("pypi.org");
     expect(allowedHosts).not.toContain("files.pythonhosted.org");
+  });
+
+  it("builds a second, redirect-only fetch for JFrog downloads, never with OSV or the credential's hosts widened", async () => {
+    const built: { allowedHosts: string[]; anyPublicHost?: boolean }[] = [];
+    const createPinnedFetch = vi.fn((options: { allowedHosts: string[]; anyPublicHost?: boolean }) => {
+      built.push(options);
+      return vi.fn(async () => new Response("{}"));
+    });
+    await start(jfrogEnv, createPinnedFetch).started;
+    const open = built.filter((options) => options.anyPublicHost);
+    expect(open).toHaveLength(1);
+    expect(open[0].allowedHosts).not.toContain("api.osv.dev");
+  });
+
+  it("builds no redirect fetch without a JFrog registry", async () => {
+    const built: { anyPublicHost?: boolean }[] = [];
+    const createPinnedFetch = vi.fn((options: { allowedHosts: string[]; anyPublicHost?: boolean }) => {
+      built.push(options);
+      return vi.fn(async () => new Response("{}"));
+    });
+    await start({ OPENAI_API_KEY: "test-secret" }, createPinnedFetch).started;
+    expect(built.some((options) => options.anyPublicHost)).toBe(false);
   });
 
   it.each([

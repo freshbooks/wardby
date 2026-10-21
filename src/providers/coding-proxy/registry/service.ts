@@ -70,7 +70,20 @@ function logRegistryFailure(route: "handle" | "plan", ecosystem: string, error: 
     }
     return;
   }
-  registryLog.error({ event: "registry.failed", route, ecosystem, err: error }, "coding registry request failed");
+  registryLog.error(
+    { event: "registry.failed", route, ecosystem, err: error, cause: describeCause(error) },
+    "coding registry request failed",
+  );
+}
+
+/** What an error wrapped (`proxy_egress_blocked` hides its reason in `cause`,
+ *  which a stack trace does not print). Name, code and message only: never a
+ *  URL or header, which may carry a credential or a signed query. */
+function describeCause(error: unknown): { name: string; code?: unknown; message: string } | undefined {
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (!(cause instanceof Error)) return undefined;
+  const code = (cause as { code?: unknown }).code;
+  return { name: cause.name, ...(code !== undefined ? { code } : {}), message: cause.message };
 }
 
 const DAY_MS = 86_400_000;

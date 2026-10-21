@@ -63,7 +63,9 @@ The proxy accepts a run-scoped capability, resolves only exact configured HTTPS
 hostnames, rejects IP literals and every private, loopback, link-local,
 documentation, transition, multicast, and metadata address, rejects mixed DNS
 answers, and pins the vetted address into the socket lookup. Redirects are
-denied. Injected fetch implementations are a test seam and must not be used in
+denied for model requests; the package registry's one exception, a signed-URL
+redirect from a configured Artifactory, is described in
+[Installing packages in coding runs](coding-packages.md). Injected fetch implementations are a test seam and must not be used in
 production composition.
 
 The Codex worker retries a failed model request, or a response stream that
