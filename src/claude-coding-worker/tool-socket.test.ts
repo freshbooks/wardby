@@ -7,9 +7,11 @@ import { BUDGET_MEASURE_TIMEOUT_MS, DEFAULT_TIMEOUTS } from "../coding-worker/de
 import {
   assertToolRunnerReachable,
   callPrepareDependencies,
+  callRestorePypiLockfiles,
   PREPARE_DEPENDENCIES_TIMEOUT_MS,
   PREPARE_DEPENDENCIES_TOOL,
   prepareDependenciesTimeoutMs,
+  RESTORE_PYPI_LOCKFILES_TOOL,
 } from "./tool-socket.js";
 
 const roots: string[] = [];
@@ -149,5 +151,28 @@ describe("PREPARE_DEPENDENCIES_TIMEOUT_MS", () => {
     expect(PREPARE_DEPENDENCIES_TIMEOUT_MS).toBeGreaterThan(
       BUDGET_MEASURE_TIMEOUT_MS + DEFAULT_TIMEOUTS.totalMs + DEFAULT_TIMEOUTS.settleMs,
     );
+  });
+});
+
+describe("callRestorePypiLockfiles", () => {
+  it("calls the restore tool once with no arguments and returns its JSON", async () => {
+    const restored = { restored: ["uv.lock"], warnings: [] };
+    const { path, seen } = await fakeRunner((message) =>
+      message.method === "initialize"
+        ? mcpAnswer(message)
+        : { result: { content: [{ type: "text", text: JSON.stringify(restored) }] } },
+    );
+    await expect(callRestorePypiLockfiles({ socketPath: path })).resolves.toEqual(restored);
+    expect(seen[2].params).toEqual({ name: RESTORE_PYPI_LOCKFILES_TOOL, arguments: {} });
+    expect(RESTORE_PYPI_LOCKFILES_TOOL).toBe("wardby_restore_pypi_lockfiles");
+  });
+
+  it("a tool runner without the tool is pypi_lockfiles_tool_unavailable; a missing socket is pypi_lockfiles_tool_failed", async () => {
+    const { path } = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : { error: { code: -32602, message: "not found" } },
+    );
+    await expect(callRestorePypiLockfiles({ socketPath: path })).rejects.toThrow("pypi_lockfiles_tool_unavailable");
+    const absent = join(await socketDir(), "runner.sock");
+    await expect(callRestorePypiLockfiles({ socketPath: absent })).rejects.toThrow("pypi_lockfiles_tool_failed");
   });
 });

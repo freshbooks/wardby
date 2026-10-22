@@ -1,3 +1,15 @@
+# The workspace's compiled TypeScript (src/coding), for the node-python target's lockfile session below.
+FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS build
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY tsconfig.json tsconfig.build.json prisma.config.ts ./
+COPY prisma ./prisma
+COPY scripts ./scripts
+COPY help ./help
+COPY src ./src
+RUN npm run build
+
 FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS dependencies
 WORKDIR /runner
 COPY src/claude-tool-runner/package.json src/claude-tool-runner/package-lock.json ./
@@ -60,6 +72,16 @@ ENTRYPOINT ["node", "/opt/wardby/claude-tool-runner/main.mjs"]
 # poetry has no such setting, so it installs only from a project's own configuration.
 FROM base AS node-python
 USER root
+# The uv.lock / poetry.lock session (src/coding/registry/pypi-lockfiles/session.ts): before the first
+# command it points a project's lockfiles at the registry proxy, and the worker has it put the original
+# URLs back once the agent has finished. main.mjs imports it as ../coding/registry/pypi-lockfiles/session.js;
+# every import it has is a Node built-in or in these files. Only this target has uv and poetry.
+COPY --from=build /build/dist/coding/registry/pypi-lockfiles /opt/wardby/coding/registry/pypi-lockfiles
+COPY --from=build /build/dist/coding/registry/pypi-name.js /opt/wardby/coding/registry/pypi-name.js
+COPY --from=build /build/dist/coding/registry/workspace-files.js /opt/wardby/coding/registry/workspace-files.js
+COPY --from=build /build/dist/coding/collect-exclude.js /opt/wardby/coding/collect-exclude.js
+RUN printf '{"type":"module"}\n' > /opt/wardby/coding/package.json \
+    && node --input-type=module -e 'const m = await import("/opt/wardby/coding/registry/pypi-lockfiles/session.js"); if (typeof m.prepareWorkspacePypiLockfiles !== "function" || typeof m.restoreWorkspacePypiLockfiles !== "function") process.exit(1)'
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
     && python3 -m pip install --no-cache-dir --break-system-packages \
@@ -100,6 +122,10 @@ RUN test ! -e /usr/bin/docker \
     && sh -lc 'uv venv --python 3.14 /tmp/uv-check14 && /tmp/uv-check14/bin/python --version' \
     && rm -rf /tmp/uv-check /tmp/uv-check13 /tmp/uv-check14
 USER 10001:10001
+# The tool runner process runs the lockfile session's `poetry lock`, and it is not a login shell, so it does not
+# read /etc/profile.d/wardby-uv.sh. Without these, Poetry sees only the system Python 3.11 and cannot lock a
+# project that needs a newer one. A run's commands still get them from profile.d (same values).
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never
 
 # The plain Node tool runner: the default target, so `docker build` without --target builds it.
 FROM base AS runtime

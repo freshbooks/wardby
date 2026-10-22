@@ -11,8 +11,12 @@ import {
   type DependencyCacheReport,
 } from "../coding/protocol.js";
 import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
+import {
+  prepareWorkspacePypiLockfiles,
+  restoreWorkspacePypiLockfiles,
+} from "../coding/registry/pypi-lockfiles/session.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
-import { registryWorkerSetup } from "../coding/registry/worker-config.js";
+import { registryUrlFor, registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { describeError } from "./debug-trace.js";
 import { safeWorkerErrorCode } from "./errors.js";
 import { disabledCodexSkills } from "./skills.js";
@@ -242,6 +246,11 @@ export function serviceEnvironment(services: CodingTaskInput["services"]): Recor
   return env;
 }
 
+/** The warnings name repository paths, so they reach only an operator's debug trace, never the control plane. */
+function reportPypiLockfileWarnings(options: WorkerRunOptions, step: "prepare" | "restore", warnings: string[]): void {
+  for (const warning of warnings) options.trace?.record(`pypi_lockfiles_${step}_warning`, warning);
+}
+
 export async function runCodingWorker(options: WorkerRunOptions): Promise<CodingWorkerOutput> {
   const registry = registryWorkerSetup({
     proxyBaseUrl: options.proxyBaseUrl,
@@ -253,12 +262,21 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     await writeFile(file.path, file.content, { mode: file.mode });
   }
   await mkdir(workspaceTmpDir(options.workspace), { recursive: true, mode: 0o700 });
-  // What every Codex shell gets; the dependency cache's npm runs with exactly this too.
-  const agentEnvironment = {
+  const baseEnvironment = {
     ...serviceEnvironment(options.input.services),
     ...workerEnvironment(options.workspace),
     ...registry.env,
   };
+  // uv.lock and poetry.lock name their own index, which the sandbox cannot reach: point them at the proxy.
+  const pypiLockfiles = await prepareWorkspacePypiLockfiles({
+    workspace: options.workspace,
+    registryUrl: registryUrlFor(options.proxyBaseUrl, "pypi"),
+    token: deriveRegistryToken(options.capability),
+    env: baseEnvironment,
+  });
+  reportPypiLockfileWarnings(options, "prepare", pypiLockfiles.warnings);
+  // What every Codex shell gets; the dependency cache's npm runs with exactly this too.
+  const agentEnvironment = { ...baseEnvironment, ...pypiLockfiles.env };
   // After the repository and the registry files are in place, before the agent exists.
   const dependencyCache = options.input.dependencyCache
     ? await runDependencyCache(options, agentEnvironment)
@@ -341,6 +359,13 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
   // registry proxy would otherwise commit sandbox-only download URLs.
   if (output.outcome === "changes_ready") {
     await normalizeRegistryLockfiles({ workspace: options.workspace, proxyBaseUrl: options.proxyBaseUrl });
+    const restored = await restoreWorkspacePypiLockfiles({
+      workspace: options.workspace,
+      registryUrl: registryUrlFor(options.proxyBaseUrl, "pypi"),
+    });
+    reportPypiLockfileWarnings(options, "restore", restored.warnings);
+    // A uv.lock the agent changed that still names the proxy cannot install outside the sandbox.
+    if (restored.unresolved.length > 0) throw new Error("coding_pypi_lockfile_unresolved");
   }
   options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "completed", outcome: output.outcome });
   return withCache(output);
