@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -247,7 +247,7 @@ describe("runCodingWorker", () => {
     const lock = (index: string): string =>
       `version = 1\n\n[[package]]\nname = "idna"\nversion = "3.7"\nsource = { registry = "${index}" }\n`;
 
-    async function run(outcome: "changes_ready" | "no_changes") {
+    async function run(outcome: "changes_ready" | "no_changes", agentAppends = "") {
       const workspace = await tempWorkspace();
       await writeFile(join(workspace, "uv.lock"), lock(registered));
       const output = JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome, summary: "Done.", tests: [] });
@@ -263,6 +263,7 @@ describe("runCodingWorker", () => {
             startThread: () => ({
               async runStreamed() {
                 atStart = await readFile(join(workspace, "uv.lock"), "utf8");
+                if (agentAppends) await appendFile(join(workspace, "uv.lock"), agentAppends);
                 return { events: events([{ type: "item.completed", item: { type: "agent_message", text: output } }]) };
               },
             }),
@@ -276,6 +277,11 @@ describe("runCodingWorker", () => {
       const { atStart, final } = await run("changes_ready");
       expect(atStart).toBe(lock("http://proxy:8080/registry/pypi/simple"));
       expect(final).toBe(lock(registered));
+    });
+
+    it("refuses to collect a uv.lock the agent changed to name a proxy-only URL", async () => {
+      const added = `\n[[package]]\nname = "six"\nversion = "1.16.0"\nsource = { registry = "http://proxy:8080/registry/pypi/simple" }\n`;
+      await expect(run("changes_ready", added)).rejects.toThrow("coding_pypi_lockfile_unresolved");
     });
 
     it("leaves a workspace that is not collected as the agent left it", async () => {

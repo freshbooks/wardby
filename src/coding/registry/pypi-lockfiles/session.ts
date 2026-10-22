@@ -10,7 +10,7 @@
  * warning, never a reason to fail the run.
  */
 import { createHash } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readWorkspaceFile, rewriteWorkspaceFile, walkWorkspaceDirectories } from "../workspace-files.js";
 import { runPoetryLock, type PoetryLockResult } from "./poetry-lock-runner.js";
@@ -124,10 +124,23 @@ async function readSnapshot(workspace: string): Promise<{ snapshot: Snapshot | n
 
 async function writeSnapshot(workspace: string, snapshot: Snapshot): Promise<void> {
   const path = join(workspace, SNAPSHOT_PATH);
+  const temporary = `${path}.tmp`;
   await mkdir(join(workspace, ".cache"), { recursive: true, mode: 0o700 });
-  // Removed first and created exclusively: never written through a symlink.
-  await rm(path, { force: true });
-  await writeFile(path, JSON.stringify(snapshot), { mode: 0o600, flag: "wx" });
+  // Created exclusively, then renamed over the old snapshot: never written through a symlink, and a failed
+  // write (a full workspace volume) leaves the previous snapshot, which earlier rewrites depend on, intact.
+  await rm(temporary, { force: true });
+  try {
+    await writeFile(temporary, JSON.stringify(snapshot), { mode: 0o600, flag: "wx" });
+    await rename(temporary, path);
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** Puts the original content back in files this session rewrote; best effort, one failure does not stop the rest. */
+async function rollBack(workspace: string, files: SnapshotFile[]): Promise<void> {
+  for (const file of files) await overwrite(join(workspace, file.path), file.original).catch(() => false);
 }
 
 /** Writes `content` over a file the session owns; whether it took. */
@@ -173,11 +186,13 @@ async function preparePoetry(
     warnings.push(`${pyprojectPath}: could not be rewritten for the proxy; left as found`);
     return [];
   }
-  const result = await input.run({
-    projectDir: join(workspace, directory),
-    env: { ...input.env, ...poetryCredentialEnv(swap.sources, input.token) },
-    timeoutMs: input.lockTimeoutMs,
-  });
+  const result: PoetryLockResult = await input
+    .run({
+      projectDir: join(workspace, directory),
+      env: { ...input.env, ...poetryCredentialEnv(swap.sources, input.token) },
+      timeoutMs: input.lockTimeoutMs,
+    })
+    .catch(() => ({ ok: false, reason: "failed" as const, stderrTail: "" }));
   if (!result.ok) {
     // Back to exactly what the repository had; the lock was not written.
     await overwrite(join(workspace, pyprojectPath), pyproject);
@@ -226,10 +241,13 @@ export async function prepareWorkspacePypiLockfiles(input: {
   lockTimeoutMs?: number;
 }): Promise<{ env: Record<string, string>; prepared: string[]; warnings: string[] }> {
   const warnings: string[] = [];
+  const kept = new Map<string, SnapshotFile>();
+  let known: SnapshotFile[] = [];
+  /** Files this call rewrote, which a failure before their snapshot is saved must put back. */
+  const rewritten = (): SnapshotFile[] => [...kept.values()].filter((file) => !known.includes(file));
   try {
     const { snapshot: previous } = await readSnapshot(input.workspace);
-    const known = previous?.files ?? [];
-    const kept = new Map<string, SnapshotFile>();
+    known = previous?.files ?? [];
     const processEnv: Record<string, string> = {};
     for (const name of AGENT_PASSTHROUGH) {
       const value = process.env[name];
@@ -260,8 +278,7 @@ export async function prepareWorkspacePypiLockfiles(input: {
         }
       }
     });
-    const changed = [...kept.values()].filter((file) => !known.includes(file));
-    if (changed.length > 0) {
+    if (rewritten().length > 0) {
       const merged = new Map(known.map((file) => [file.path, file] as const));
       for (const [path, file] of kept) merged.set(path, file);
       await writeSnapshot(input.workspace, { schemaVersion: SNAPSHOT_VERSION, files: [...merged.values()] });
@@ -275,6 +292,8 @@ export async function prepareWorkspacePypiLockfiles(input: {
       warnings,
     };
   } catch {
+    // Without a saved snapshot the restore could not undo these rewrites, so undo them here.
+    await rollBack(input.workspace, rewritten());
     warnings.push("pypi lockfiles: preparing the workspace failed; files left as found");
     return { env: {}, prepared: [], warnings };
   }
@@ -284,7 +303,7 @@ function restoreContent(
   file: SnapshotFile,
   current: string,
   registryUrl: string,
-): { content: string; warning?: string } {
+): { content: string; warning?: string; unresolved?: boolean } {
   if (sha256(current) === file.writtenSha256) return { content: file.original };
   const index = `${base(registryUrl)}simple`;
   if (file.kind === "uv") {
@@ -297,6 +316,7 @@ function restoreContent(
       ? {
           content,
           warning: `changed during the run; ${unresolved.length} entries still name the proxy (add or upgrade dependencies outside a coding run)`,
+          unresolved: true,
         }
       : { content };
   }
@@ -313,17 +333,22 @@ function restoreContent(
   };
 }
 
-/** Before collection: puts the original URLs back. Files are found by walking the workspace, never by the snapshot's paths. */
+/**
+ * Before collection: puts the original URLs back. Files are found by walking the workspace, never by the snapshot's paths.
+ * `unresolved` names the uv.lock files that still carry proxy-only URLs (a dependency the agent added or upgraded): the
+ * caller must not collect the workspace, since that lock cannot install outside the sandbox.
+ */
 export async function restoreWorkspacePypiLockfiles(input: {
   workspace: string;
   registryUrl: string;
-}): Promise<{ restored: string[]; warnings: string[] }> {
+}): Promise<{ restored: string[]; warnings: string[]; unresolved: string[] }> {
   const restored: string[] = [];
   const warnings: string[] = [];
+  const unresolved: string[] = [];
   try {
     const { snapshot, unreadable } = await readSnapshot(input.workspace);
     if (unreadable) warnings.push("pypi lockfiles: the snapshot is unreadable; files left as found");
-    if (!snapshot) return { restored, warnings };
+    if (!snapshot) return { restored, warnings, unresolved };
     const byPath = new Map(snapshot.files.map((file) => [file.path, file] as const));
     await walkWorkspaceDirectories(input.workspace, async (directory, fileNames) => {
       for (const name of fileNames) {
@@ -331,17 +356,20 @@ export async function restoreWorkspacePypiLockfiles(input: {
         const file = byPath.get(path);
         if (!file || KIND_FILE[file.kind] !== name) continue;
         let warning: string | undefined;
+        let stillProxied = false;
         const changed = await rewriteWorkspaceFile(join(input.workspace, path), (current) => {
           const result = restoreContent(file, current, input.registryUrl);
           warning = result.warning;
+          stillProxied = result.unresolved === true;
           return result.content;
         });
         if (changed) restored.push(path);
         if (warning) warnings.push(`${path}: ${warning}`);
+        if (stillProxied) unresolved.push(path);
       }
     });
   } catch {
     warnings.push("pypi lockfiles: restoring the workspace failed; files left as found");
   }
-  return { restored: restored.sort(), warnings };
+  return { restored: restored.sort(), warnings, unresolved: unresolved.sort() };
 }

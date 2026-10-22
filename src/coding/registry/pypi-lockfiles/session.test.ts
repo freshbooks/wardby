@@ -51,7 +51,7 @@ describe("uv projects", () => {
     expect(result).toEqual({ env: {}, prepared: ["uv.lock"], warnings: [] });
     expect(await read("uv.lock")).toBe(fixture("uv-proxied.lock"));
     expect((await stat(join(workspace, SNAPSHOT_PATH))).mode & 0o777).toBe(0o600);
-    expect(await restore()).toEqual({ restored: ["uv.lock"], warnings: [] });
+    expect(await restore()).toEqual({ restored: ["uv.lock"], warnings: [], unresolved: [] });
     expect(await read("uv.lock")).toBe(fixture("uv.lock"));
   });
 
@@ -85,6 +85,41 @@ describe("uv projects", () => {
     expect((await stat(join(workspace, "uv.lock"))).mode & 0o777).toBe(0o640);
   });
 
+  it("reports nothing unresolved when the agent left the lock as prepared", async () => {
+    await put("uv.lock", fixture("uv.lock"));
+    await prepare();
+    expect((await restore()).unresolved).toEqual([]);
+  });
+
+  it("puts uv.lock back when the snapshot cannot be saved, so restore never needs it", async () => {
+    await put("uv.lock", fixture("uv.lock"));
+    // A file where the snapshot's directory belongs: the save fails after the rewrite.
+    await put(".cache", "not a directory");
+    const result = await prepare();
+    expect(result).toEqual({
+      env: {},
+      prepared: [],
+      warnings: ["pypi lockfiles: preparing the workspace failed; files left as found"],
+    });
+    expect(await read("uv.lock")).toBe(fixture("uv.lock"));
+  });
+
+  it("keeps the previous snapshot when a later prepare cannot save its own", async () => {
+    await put("uv.lock", fixture("uv.lock"));
+    await prepare();
+    const snapshot = await read(SNAPSHOT_PATH);
+    await put("sub/uv.lock", fixture("uv.lock"));
+    // The temporary file's name is taken by a directory, so the new snapshot cannot be written.
+    await mkdir(join(workspace, `${SNAPSHOT_PATH}.tmp`), { recursive: true });
+    expect((await prepare()).prepared).toEqual([]);
+    expect(await read("sub/uv.lock")).toBe(fixture("uv.lock"));
+    expect(await read(SNAPSHOT_PATH)).toBe(snapshot);
+    expect(await read("uv.lock")).toBe(fixture("uv-proxied.lock"));
+    await rm(join(workspace, `${SNAPSHOT_PATH}.tmp`), { recursive: true });
+    expect(await restore()).toMatchObject({ restored: ["uv.lock"], unresolved: [] });
+    expect(await read("uv.lock")).toBe(fixture("uv.lock"));
+  });
+
   it("ignores files that are not uv locks and writes no snapshot when nothing changed", async () => {
     await put("uv.lock", '[[package]]\nname = "x"\n');
     expect(await prepare()).toEqual({ env: {}, prepared: [], warnings: [] });
@@ -98,6 +133,7 @@ describe("uv projects", () => {
     await writeFile(join(workspace, "uv.lock"), (await read("uv.lock")) + added);
     const result = await restore();
     expect(result.restored).toEqual(["uv.lock"]);
+    expect(result.unresolved).toEqual(["uv.lock"]);
     expect(result.warnings).toEqual([
       expect.stringContaining("uv.lock: changed during the run; 1 entries still name the proxy"),
     ]);
@@ -123,7 +159,7 @@ describe("poetry projects", () => {
     });
     expect(await read("pyproject.toml")).toContain(`${REGISTRY}simple/`);
     expect(await read("pyproject.toml")).not.toContain("jfrog");
-    expect(await restore()).toEqual({ restored: ["poetry.lock", "pyproject.toml"], warnings: [] });
+    expect(await restore()).toEqual({ restored: ["poetry.lock", "pyproject.toml"], warnings: [], unresolved: [] });
     expect(await read("pyproject.toml")).toBe(fixture("poetry-pyproject.toml"));
     expect(await read("poetry.lock")).toBe(fixture("poetry.lock"));
   });
@@ -201,7 +237,7 @@ describe("poetry projects", () => {
 describe("restoreWorkspacePypiLockfiles", () => {
   it("does nothing without a snapshot", async () => {
     await put("uv.lock", fixture("uv.lock"));
-    expect(await restore()).toEqual({ restored: [], warnings: [] });
+    expect(await restore()).toEqual({ restored: [], warnings: [], unresolved: [] });
   });
 
   it("warns and changes nothing for a corrupt snapshot", async () => {

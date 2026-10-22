@@ -364,6 +364,8 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
       registryUrl: registryUrlFor(options.proxyBaseUrl, "pypi"),
     });
     reportPypiLockfileWarnings(options, "restore", restored.warnings);
+    // A uv.lock the agent changed that still names the proxy cannot install outside the sandbox.
+    if (restored.unresolved.length > 0) throw new Error("coding_pypi_lockfile_unresolved");
   }
   options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "completed", outcome: output.outcome });
   return withCache(output);

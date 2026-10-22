@@ -165,7 +165,7 @@ function dependencyGate(initialSetup, workspacePath, loadDependencyCache, loadPy
     /** After the agent: the original URLs back. Never prepares; without a snapshot it changes nothing. */
     async restorePypi() {
       const registry = pypiRegistry(initialSetup);
-      if (!registry) return { restored: [], warnings: [] };
+      if (!registry) return { restored: [], warnings: [], unresolved: [] };
       try {
         await pypi;
         const module = await loadPypiLockfiles();
@@ -174,7 +174,11 @@ function dependencyGate(initialSetup, workspacePath, loadDependencyCache, loadPy
           registryUrl: registry.registryUrl,
         });
       } catch {
-        return { restored: [], warnings: ["pypi lockfiles: restoring the workspace failed; files left as found"] };
+        return {
+          restored: [],
+          warnings: ["pypi lockfiles: restoring the workspace failed; files left as found"],
+          unresolved: [],
+        };
       }
     },
     async beforeCommand() {

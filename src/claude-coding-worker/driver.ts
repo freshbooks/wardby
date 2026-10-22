@@ -298,14 +298,24 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   if (output.runId !== options.input.runId) throw new Error("coding_output_run_mismatch");
   // Only a changes_ready workspace is collected into a pull request; lockfiles pointed at the proxy
   // would otherwise commit sandbox-only download URLs. The warnings name repository paths, so they
-  // reach only an operator's debug trace.
+  // reach only an operator's debug trace. The restore runs whether or not a trace is on.
   if (output.outcome === "changes_ready" && options.restorePypiLockfiles) {
+    let restored: unknown;
     try {
-      options.trace?.record("pypi_lockfiles_restore", await options.restorePypiLockfiles());
+      restored = await options.restorePypiLockfiles();
+      options.trace?.record("pypi_lockfiles_restore", restored);
     } catch (error) {
       options.trace?.record("pypi_lockfiles_restore_error", describeError(error));
     }
+    // A uv.lock the agent changed that still names the proxy cannot install outside the sandbox.
+    if (hasUnresolvedLockfiles(restored)) throw new Error("coding_pypi_lockfile_unresolved");
   }
   options.onProgress?.({ schemaVersion: 1, runId: options.input.runId, type: "completed", outcome: output.outcome });
   return withCache(output);
+}
+
+/** The tool runner's restore result (unchecked JSON): whether it named any lockfile still carrying proxy URLs. */
+function hasUnresolvedLockfiles(result: unknown): boolean {
+  const unresolved = (result as { unresolved?: unknown } | null | undefined)?.unresolved;
+  return Array.isArray(unresolved) && unresolved.length > 0;
 }

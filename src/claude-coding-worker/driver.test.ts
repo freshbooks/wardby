@@ -24,7 +24,11 @@ const input: CodingTaskInput = {
 };
 
 describe("runClaudeCodingWorker lockfile restore", () => {
-  const run = async (outcome: "changes_ready" | "no_changes", restore?: () => Promise<unknown>) => {
+  const run = async (
+    outcome: "changes_ready" | "no_changes",
+    restore?: () => Promise<unknown>,
+    { traced = true }: { traced?: boolean } = {},
+  ) => {
     const record = vi.fn();
     const result = await runClaudeCodingWorker({
       input,
@@ -40,7 +44,7 @@ describe("runClaudeCodingWorker lockfile restore", () => {
           };
         })(),
       ...(restore ? { restorePypiLockfiles: restore } : {}),
-      trace: { record, bytesWritten: () => 0 } as never,
+      ...(traced ? { trace: { record, bytesWritten: () => 0 } as never } : {}),
     });
     return { result, record };
   };
@@ -51,6 +55,19 @@ describe("runClaudeCodingWorker lockfile restore", () => {
     expect(result.outcome).toBe("changes_ready");
     expect(restore).toHaveBeenCalledTimes(1);
     expect(record).toHaveBeenCalledWith("pypi_lockfiles_restore", { restored: ["uv.lock"], warnings: [] });
+  });
+
+  it("restores even when debug tracing is off", async () => {
+    const restore = vi.fn(async () => ({ restored: ["uv.lock"], warnings: [], unresolved: [] }));
+    const { result } = await run("changes_ready", restore, { traced: false });
+    expect(result.outcome).toBe("changes_ready");
+    expect(restore).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to collect a workspace whose uv.lock still names the proxy", async () => {
+    const restore = async () => ({ restored: ["uv.lock"], warnings: ["x"], unresolved: ["uv.lock"] });
+    await expect(run("changes_ready", restore)).rejects.toThrow("coding_pypi_lockfile_unresolved");
+    await expect(run("changes_ready", restore, { traced: false })).rejects.toThrow("coding_pypi_lockfile_unresolved");
   });
 
   it("does not restore a workspace that is not collected", async () => {
