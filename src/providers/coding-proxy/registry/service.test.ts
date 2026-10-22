@@ -924,6 +924,67 @@ describe("RegistryService served-byte tally and per-adapter hosts", () => {
   });
 });
 
+describe("RegistryService per-name upstream hosts", () => {
+  /** `app` may be downloaded only from private.test, every other name only from upstream.test. */
+  const bound: RegistryAdapter = {
+    ...fakeAdapter,
+    upstreamHosts: ["upstream.test", "private.test"],
+    hostsFor: (name) => (name === "app" ? ["private.test"] : ["upstream.test"]),
+  };
+  async function download(urlOf: (name: string) => string) {
+    const urls: string[] = [];
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { fake: ["app"] },
+      policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
+    });
+    const registry = new RegistryService({
+      adapters: new Map([
+        [
+          "fake",
+          {
+            ...bound,
+            resolveDownload: (route, m) => {
+              const file = m.versions.get(route.version)?.files[0];
+              return file ? { ...file, upstreamUrl: urlOf(m.name) } : null;
+            },
+          },
+        ],
+      ]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        urls.push(url);
+        return new Response(tarball);
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    return { response: await registry.handle(request("dl/app/1.0.0")), urls, store };
+  }
+
+  it("refuses a download hosted on another allowed host than its own name's, without fetching it", async () => {
+    // A document for the private name that points at the public host (or the reverse).
+    const { response, urls, store } = await download(() => "https://upstream.test/app/1.0.0.tgz");
+    expect(response).toMatchObject({ status: 502 });
+    expect("body" in response && response.body).toContain("wardby_upstream_host_not_allowed");
+    expect(urls).toEqual([]);
+    expect(store.fetches).toMatchObject([{ outcome: "refused", reason: "wardby_upstream_host_not_allowed" }]);
+  });
+
+  it("serves a download hosted on its own name's host", async () => {
+    const { response, urls } = await download(() => "https://private.test/app/1.0.0.tgz");
+    expect(response).toMatchObject({ status: 200 });
+    expect(urls).toEqual(["https://private.test/app/1.0.0.tgz"]);
+  });
+});
+
 describe("RegistryService with the PyPI adapter: malformed paths", () => {
   it.each(["simple/%E0%A4%A/", "files/demo/demo-1.0-py3-none-any%E0%A4%A.whl", "simple/-bad-/", "simple/a%20b/"])(
     "answers %s with a recorded 400 wardby_bad_request",

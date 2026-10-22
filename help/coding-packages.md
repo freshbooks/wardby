@@ -159,6 +159,12 @@ with `create_agent` or `update_agent` (needs `packages:approve` or
 Read [`docs/coding-packages.md`](../docs/coding-packages.md) for allowlist
 syntax (including [PyPI extras](../docs/coding-packages.md#pypi-extras)), package-policy controls, lockfile behavior, and refusal errors.
 
+## Private packages from JFrog Artifactory
+
+An operator can point the proxy at a JFrog Artifactory so runs install private
+packages. See the `jfrog-artifactory` help article, "Private packages from
+JFrog Artifactory".
+
 ## Dependency cache
 
 From Wardby 0.6.1, a coding agent can start with `node_modules` already

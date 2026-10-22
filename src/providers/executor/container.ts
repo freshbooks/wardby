@@ -57,6 +57,7 @@ import {
 import { parseStoredEntry } from "../llm/catalog-types.js";
 import { resolveCodingEntry } from "../../core/run-pricing.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
+import { configuredRegistryAdapters } from "../../coding/registry/adapters.js";
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
 import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
 import type { JobHandle, JobResourceLimits, JobSpec, WorkspaceJobLauncher } from "../jobs/types.js";
@@ -115,13 +116,15 @@ function proxyProtocol(provider: string): ProxyProtocol {
 /**
  * Claude Code's commands run in its tool runner, which never reports back through the agent, so the
  * host rewrites registry-proxy download URLs in collected lockfiles itself (the Codex driver does it
- * in the worker). Best effort and symlink-safe (lockfiles.ts); a Codex workspace is left alone.
+ * in the worker, without the JFrog settings). Best effort and symlink-safe (lockfiles.ts); a Codex workspace is left alone.
  */
 export async function normalizeCollectedLockfiles(provider: string, workspacePath: string): Promise<string[]> {
   if (provider !== "claude-code") return [];
   return normalizeRegistryLockfiles({
     workspace: workspacePath,
     proxyBaseUrl: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+    // The host's own (non-secret) JFrog settings: scoped names go back to the private registry's URLs.
+    adapters: configuredRegistryAdapters(),
   });
 }
 

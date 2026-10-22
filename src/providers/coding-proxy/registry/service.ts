@@ -70,7 +70,20 @@ function logRegistryFailure(route: "handle" | "plan", ecosystem: string, error: 
     }
     return;
   }
-  registryLog.error({ event: "registry.failed", route, ecosystem, err: error }, "coding registry request failed");
+  registryLog.error(
+    { event: "registry.failed", route, ecosystem, err: error, cause: describeCause(error) },
+    "coding registry request failed",
+  );
+}
+
+/** What an error wrapped (`proxy_egress_blocked` hides its reason in `cause`,
+ *  which a stack trace does not print). Name, code and message only: never a
+ *  URL or header, which may carry a credential or a signed query. */
+function describeCause(error: unknown): { name: string; code?: unknown; message: string } | undefined {
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (!(cause instanceof Error)) return undefined;
+  const code = (cause as { code?: unknown }).code;
+  return { name: cause.name, ...(code !== undefined ? { code } : {}), message: cause.message };
 }
 
 const DAY_MS = 86_400_000;
@@ -625,6 +638,7 @@ export class RegistryService {
         const parseOptions = {
           maxEntries: this.options.planMaxEntries ?? DEFAULT_PLAN_MAX_ENTRIES,
           proxyRegistryUrl: `${this.options.proxyBase}${adapter.id}/`,
+          ...(support.privateRegistry ? { privateRegistry: support.privateRegistry } : {}),
         };
         // A YAML or yarn lockfile is read in a worker thread with a time
         // bound (lockfile-parse.ts); npm's JSON stays on the event loop.
@@ -671,7 +685,7 @@ export class RegistryService {
         streamUpstream: this.options.upstream,
         audit: (versions, auditSignal) => auditVersions(adapter, versions, auditSignal),
         accepted: new Set(acceptedAdvisories),
-        hostAllowed: (url) => this.hostAllowed(adapter, url),
+        hostAllowed: (url, name) => this.hostAllowed(adapter, url, name),
         signal,
       });
     } catch (error) {
@@ -786,7 +800,7 @@ export class RegistryService {
           allowed: true,
           publishedAt: null,
         };
-        if (!this.hostAllowed(adapter, file.upstreamUrl)) {
+        if (!this.hostAllowed(adapter, file.upstreamUrl, name)) {
           await this.refuse(context, adapter, name, "wardby_upstream_host_not_allowed", file);
           throw new RegistryError(
             502,
@@ -919,7 +933,7 @@ export class RegistryService {
     }
     // Each adapter may reach only its own upstream hosts, not every host
     // the pinned fetch allows for the registry as a whole.
-    if (!this.hostAllowed(adapter, file.upstreamUrl)) {
+    if (!this.hostAllowed(adapter, file.upstreamUrl, name)) {
       await this.refuse(context, adapter, name, "wardby_upstream_host_not_allowed", file);
       throw new RegistryError(
         502,
@@ -943,10 +957,16 @@ export class RegistryService {
     );
   }
 
-  private hostAllowed(adapter: RegistryAdapter, url: string): boolean {
+  /** Whether `url` is on a host `name` may be downloaded from: the host of
+   *  that name's own upstream when the adapter has one per name (a private
+   *  scope must never be fetched from the public host, nor the reverse, so
+   *  a document from one cannot point at the other), else any of the
+   *  adapter's hosts. */
+  private hostAllowed(adapter: RegistryAdapter, url: string, name: string): boolean {
     try {
       const parsed = new URL(url);
-      return parsed.protocol === "https:" && adapter.upstreamHosts.includes(parsed.hostname.toLowerCase());
+      const hosts = adapter.hostsFor ? adapter.hostsFor(name) : adapter.upstreamHosts;
+      return parsed.protocol === "https:" && hosts.includes(parsed.hostname.toLowerCase());
     } catch {
       return false;
     }

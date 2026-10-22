@@ -91,7 +91,8 @@ export interface PlanInput {
    *  blocking advisories they waive do not refuse a version (see
    *  `isWaived`; malware is never waived). Absent or empty waives nothing. */
   accepted?: ReadonlySet<string>;
-  hostAllowed(url: string): boolean;
+  /** Whether `url` is a host the package `name` may be downloaded from. */
+  hostAllowed(url: string, name: string): boolean;
   signal: AbortSignal;
   factConcurrency?: number;
   timeConcurrency?: number;
@@ -376,7 +377,7 @@ function checkedFact(input: PlanInput, fact: StoredVersionFact): FactOutcome {
         intrinsic: true,
       },
     };
-  if (!input.hostAllowed(fact.downloadUrl))
+  if (!input.hostAllowed(fact.downloadUrl, fact.name))
     return {
       refusal: {
         code: "wardby_upstream_host_not_allowed",

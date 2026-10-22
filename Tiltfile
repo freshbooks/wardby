@@ -87,6 +87,25 @@ if observability or coding:
     anthropic_key = env_value('ANTHROPIC_API_KEY')
     os.putenv('OPENAI_API_KEY', env_value('OPENAI_API_KEY') or 'not-set-placeholder')
     os.putenv('ANTHROPIC_API_KEY', anthropic_key or 'not-set-placeholder')
+    # Private-registry settings for the proxy (docs/coding-packages.md): Compose reads the process
+    # environment, so hand it the values from the shell, .env.local or .env. Unset ones stay unset.
+    for name in ['REGISTRY_JFROG_URL', 'REGISTRY_JFROG_NPM_REPO', 'REGISTRY_JFROG_NPM_SCOPES',
+                 'REGISTRY_JFROG_PYPI_REPO', 'REGISTRY_JFROG_PYPI_TRUST_ALL',
+                 'REGISTRY_UPSTREAM_USERNAME', 'REGISTRY_UPSTREAM_PASSWORD']:
+        registry_value = env_value(name)
+        if registry_value:
+            os.putenv(name, registry_value)
+    if env_value('REGISTRY_JFROG_URL'):
+        # The credential the REGISTRY_UPSTREAM_* env: references point at. Devs normally already
+        # have ARTIFACTORY_CREDENTIALS_USR / _PSW; an explicit ARTIFACTORY_USER / _TOKEN wins.
+        artifactory_user = env_value('ARTIFACTORY_USER') or env_value('ARTIFACTORY_CREDENTIALS_USR')
+        artifactory_token = env_value('ARTIFACTORY_TOKEN') or env_value('ARTIFACTORY_CREDENTIALS_PSW')
+        if not artifactory_user:
+            fail('REGISTRY_JFROG_URL is set but the Artifactory username is empty. Set ARTIFACTORY_CREDENTIALS_USR (or ARTIFACTORY_USER) in the shell or .env.local.')
+        if not artifactory_token:
+            fail('REGISTRY_JFROG_URL is set but the Artifactory token is empty. Set ARTIFACTORY_CREDENTIALS_PSW (or ARTIFACTORY_TOKEN) in the shell or .env.local.')
+        os.putenv('ARTIFACTORY_USER', artifactory_user)
+        os.putenv('ARTIFACTORY_TOKEN', artifactory_token)
     if coding and not anthropic_key:
         warn('ANTHROPIC_API_KEY is not set: Claude Code coding runs will fail (Codex needs OPENAI_API_KEY).')
     compose_files = ['deploy/local/docker-compose.yml', 'deploy/local/docker-compose.phase5.yml']

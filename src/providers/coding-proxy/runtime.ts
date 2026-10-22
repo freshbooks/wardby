@@ -1,7 +1,8 @@
 import type { PrismaClient } from "#prisma";
 import { loadDependencyCacheConfig } from "../../config/dependency-cache.js";
 import { logger } from "../../core/logger.js";
-import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
+import { createRegistryAdapters } from "../../coding/registry/adapters.js";
+import { loadJfrogCredentials, loadJfrogRegistryConfig, type JfrogCredentials } from "../../coding/registry/jfrog.js";
 import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
 import { createBlobStore, type BlobStoreConfig } from "../storage/index.js";
@@ -24,7 +25,12 @@ import {
   DEFAULT_PLAN_MAX_PER_RUN,
   RegistryService,
 } from "./registry/service.js";
-import { createPinnedProxyFetch, type PinnedProxyFetchOptions } from "./secure-fetch.js";
+import {
+  createPinnedProxyFetch,
+  PROXY_EGRESS_ERROR,
+  redirectHost,
+  type PinnedProxyFetchOptions,
+} from "./secure-fetch.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditSink } from "./types.js";
 
@@ -41,20 +47,76 @@ function positiveInt(value: string | undefined, fallback: number): number {
  *  never decompresses; the caller that asks for gzip does), and a `content-type: application/json` header is set whenever a
  *  body is present (every registry/OSV upstream call sends or expects
  *  JSON). Exported so its header-mapping can be unit-tested directly,
- *  without needing a live upstream. */
-export function createRegistryUpstream(pinned: typeof globalThis.fetch): UpstreamFetch {
-  return (url, init = {}) =>
-    pinned(url, {
-      method: init.method ?? "GET",
+ *  without needing a live upstream.
+ *
+ *  With `redirectFetch` (a pinned fetch that accepts any public https host), a GET to the credentialed
+ *  JFrog host that answers a redirect is followed once, to an https URL, WITHOUT the credential: JFrog
+ *  hands out a signed cloud-storage URL for downloads. Every other request, and a redirect from that
+ *  hop, is refused as before. */
+export function createRegistryUpstream(
+  pinned: typeof globalThis.fetch,
+  credentials?: JfrogCredentials,
+  redirectFetch?: typeof globalThis.fetch,
+): UpstreamFetch {
+  const headersFor = (url: string, init: Parameters<UpstreamFetch>[1] = {}, withCredential = true) => ({
+    ...(init.accept ? { accept: init.accept } : {}),
+    ...(init.acceptEncoding ? { "accept-encoding": init.acceptEncoding } : {}),
+    ...(init.body ? { "content-type": "application/json" } : {}),
+    // The upstream credential goes only to its own host: never to public registries or OSV.
+    ...(withCredential && credentials && hostOf(url) === credentials.host
+      ? { authorization: credentials.authorization }
+      : {}),
+  });
+  return async (url, init = {}) => {
+    const method = init.method ?? "GET";
+    const mayRedirect =
+      redirectFetch !== undefined &&
+      credentials !== undefined &&
+      hostOf(url) === credentials.host &&
+      method === "GET" &&
+      !init.body;
+    const first = await pinned(url, {
+      method,
       body: init.body,
       signal: init.signal,
-      redirect: "error",
-      headers: {
-        ...(init.accept ? { accept: init.accept } : {}),
-        ...(init.acceptEncoding ? { "accept-encoding": init.acceptEncoding } : {}),
-        ...(init.body ? { "content-type": "application/json" } : {}),
-      },
+      redirect: mayRedirect ? "manual" : "error",
+      headers: headersFor(url, init),
     });
+    if (!mayRedirect || first.status < 300 || first.status >= 400) return first;
+
+    const location = first.headers.get("location");
+    const target = httpsTarget(location, url);
+    if (!target)
+      throw new Error(PROXY_EGRESS_ERROR, {
+        cause: new Error(`upstream_redirect:${first.status}:${redirectHost(location, url)}`),
+      });
+    // `redirect: "error"` makes a redirect from the target a refusal: one hop only.
+    return redirectFetch(target, {
+      method: "GET",
+      signal: init.signal,
+      redirect: "error",
+      headers: headersFor(target, init, false),
+    });
+  };
+}
+
+/** `location` resolved against `base` when it is an https URL with no embedded credentials. */
+function httpsTarget(location: string | null, base: string): string | undefined {
+  if (!location) return undefined;
+  try {
+    const target = new URL(location, base);
+    return target.protocol === "https:" && !target.username && !target.password ? target.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 export interface CodingProxyRuntimeOptions {
@@ -96,14 +158,23 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     ? (event) => options.audit?.({ ...event, mockUpstream: true })
     : options.audit;
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
-  const upstreamHosts = [...new Set([...REGISTRY_ADAPTERS.values()].flatMap((adapter) => adapter.upstreamHosts))];
+  // Throws on an invalid or incomplete JFrog setting, or a missing credential, before anything listens.
+  const jfrog = loadJfrogRegistryConfig(env);
+  const jfrogCredentials = loadJfrogCredentials(jfrog, env);
+  const registryAdapters = createRegistryAdapters(jfrog);
+  const upstreamHosts = [...new Set([...registryAdapters.values()].flatMap((adapter) => adapter.upstreamHosts))];
   const pinned = buildPinnedFetch({ allowedHosts: [...upstreamHosts, "api.osv.dev"] });
-  const upstream = createRegistryUpstream(pinned);
+  // JFrog downloads may be redirected to a signed cloud-storage URL on another host: that single hop uses
+  // a fetch that accepts any public https host, and never carries the credential.
+  const redirectPinned = jfrogCredentials
+    ? buildPinnedFetch({ allowedHosts: upstreamHosts, anyPublicHost: true })
+    : undefined;
+  const upstream = createRegistryUpstream(pinned, jfrogCredentials, redirectPinned);
   const metadataTimeoutMs = positiveInt(env.REGISTRY_METADATA_TIMEOUT_MS, 30_000);
   const maxMetadataBytes = positiveInt(env.REGISTRY_MAX_METADATA_MB, 64) * MIB;
   const registryStore = new PrismaRegistryStore(options.registryDb ?? options.db);
   const registry = new RegistryService({
-    adapters: REGISTRY_ADAPTERS,
+    adapters: registryAdapters,
     store: registryStore,
     audit: new OsvAudit({
       fetch: upstream,
