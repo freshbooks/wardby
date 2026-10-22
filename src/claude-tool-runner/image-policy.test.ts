@@ -40,5 +40,14 @@ describe("Claude tool runner image policy", () => {
       expect(python).toContain(`test ! -e ${absent}`);
     }
     expect(python).toContain("USER 10001:10001");
+    // The tool runner process (not a login shell) runs `poetry lock`: it needs the baked interpreters' location itself.
+    expect(python).toContain("ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never");
+    // main.mjs imports ../coding/registry/pypi-lockfiles/session.js, which only this target ships (uv and poetry).
+    expect(python).toContain(
+      "COPY --from=build /build/dist/coding/registry/pypi-lockfiles /opt/wardby/coding/registry/pypi-lockfiles",
+    );
+    expect(python).toContain("COPY --from=build /build/dist/coding/registry/workspace-files.js");
+    expect(python).toContain("COPY --from=build /build/dist/coding/collect-exclude.js");
+    expect(dockerfile.slice(0, dockerfile.indexOf(" AS node-python"))).not.toContain("pypi-lockfiles/session.js");
   });
 });

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -240,6 +240,54 @@ describe("runCodingWorker", () => {
     expect(await readFile(join(workspace, "web", "package-lock.json"), "utf8")).toBe(
       `{\n  "resolved": "https://registry.npmjs.org/@react-aria/live-announcer/-/live-announcer-3.5.1.tgz"\n}\n`,
     );
+  });
+
+  describe("uv.lock", () => {
+    const registered = "https://pypi.org/simple";
+    const lock = (index: string): string =>
+      `version = 1\n\n[[package]]\nname = "idna"\nversion = "3.7"\nsource = { registry = "${index}" }\n`;
+
+    async function run(outcome: "changes_ready" | "no_changes", agentAppends = "") {
+      const workspace = await tempWorkspace();
+      await writeFile(join(workspace, "uv.lock"), lock(registered));
+      const output = JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome, summary: "Done.", tests: [] });
+      let atStart = "";
+      await runCodingWorker({
+        input,
+        workspace,
+        proxyBaseUrl: "http://proxy:8080",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createClient: () => {
+          return {
+            startThread: () => ({
+              async runStreamed() {
+                atStart = await readFile(join(workspace, "uv.lock"), "utf8");
+                if (agentAppends) await appendFile(join(workspace, "uv.lock"), agentAppends);
+                return { events: events([{ type: "item.completed", item: { type: "agent_message", text: output } }]) };
+              },
+            }),
+          };
+        },
+      });
+      return { atStart, final: await readFile(join(workspace, "uv.lock"), "utf8") };
+    }
+
+    it("points the lock at the proxy before the agent starts and restores it for a changes_ready run", async () => {
+      const { atStart, final } = await run("changes_ready");
+      expect(atStart).toBe(lock("http://proxy:8080/registry/pypi/simple"));
+      expect(final).toBe(lock(registered));
+    });
+
+    it("refuses to collect a uv.lock the agent changed to name a proxy-only URL", async () => {
+      const added = `\n[[package]]\nname = "six"\nversion = "1.16.0"\nsource = { registry = "http://proxy:8080/registry/pypi/simple" }\n`;
+      await expect(run("changes_ready", added)).rejects.toThrow("coding_pypi_lockfile_unresolved");
+    });
+
+    it("leaves a workspace that is not collected as the agent left it", async () => {
+      const { final } = await run("no_changes");
+      expect(final).toBe(lock("http://proxy:8080/registry/pypi/simple"));
+    });
   });
 
   it("rejects a structured result bound to another run", async () => {

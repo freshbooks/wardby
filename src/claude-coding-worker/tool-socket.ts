@@ -71,13 +71,23 @@ export function prepareDependenciesTimeoutMs(deadlineAt?: string, now = Date.now
  * Fails only with `dependency_cache_tool_unavailable` (a tool runner without the tool) or
  * `dependency_cache_tool_failed`; never with the tool runner's text.
  */
-export async function callPrepareDependencies({
-  socketPath = TOOL_SOCKET_PATH,
-  deadlineAt,
-  timeoutMs = prepareDependenciesTimeoutMs(deadlineAt),
+async function callRunnerTool({
+  socketPath,
+  tool,
+  args,
+  timeoutMs,
   signal,
-}: PrepareDependenciesCall = {}): Promise<unknown> {
-  const failed = () => new Error("dependency_cache_tool_failed");
+  codes,
+}: {
+  socketPath: string;
+  tool: string;
+  args: Record<string, unknown>;
+  timeoutMs: number;
+  signal?: AbortSignal;
+  /** The stable error codes: the tool runner is older than the tool, or the call failed. */
+  codes: { unavailable: string; failed: string };
+}): Promise<unknown> {
+  const failed = () => new Error(codes.failed);
   if (signal?.aborted) throw failed();
   const socket = createConnection(socketPath);
   socket.setEncoding("utf8");
@@ -129,12 +139,12 @@ export async function callPrepareDependencies({
     if (!initialized.result) throw failed();
     socket.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
     const called = await request("tools/call", {
-      name: PREPARE_DEPENDENCIES_TOOL,
-      arguments: deadlineAt === undefined ? {} : { deadline_at: deadlineAt },
+      name: tool,
+      arguments: args,
     });
     const result = called.result as
       { isError?: boolean; content?: Array<{ type?: string; text?: unknown }> } | undefined;
-    if (called.error || !result || result.isError) throw new Error("dependency_cache_tool_unavailable");
+    if (called.error || !result || result.isError) throw new Error(codes.unavailable);
     const text = result.content?.find((item) => item.type === "text")?.text;
     if (typeof text !== "string") throw failed();
     try {
@@ -143,13 +153,55 @@ export async function callPrepareDependencies({
       throw failed();
     }
   } catch (error) {
-    if (error instanceof Error && error.message === "dependency_cache_tool_unavailable") throw error;
+    if (error instanceof Error && error.message === codes.unavailable) throw error;
     throw failed();
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
     socket.destroy();
   }
+}
+
+export async function callPrepareDependencies({
+  socketPath = TOOL_SOCKET_PATH,
+  deadlineAt,
+  timeoutMs = prepareDependenciesTimeoutMs(deadlineAt),
+  signal,
+}: PrepareDependenciesCall = {}): Promise<unknown> {
+  return callRunnerTool({
+    socketPath,
+    tool: PREPARE_DEPENDENCIES_TOOL,
+    args: deadlineAt === undefined ? {} : { deadline_at: deadlineAt },
+    timeoutMs,
+    signal,
+    codes: { unavailable: "dependency_cache_tool_unavailable", failed: "dependency_cache_tool_failed" },
+  });
+}
+
+/** The tool runner's internal tool (claude-tool-runner/main.mjs); the agent's SDK options disallow it (sdk.ts). */
+export const RESTORE_PYPI_LOCKFILES_TOOL = "wardby_restore_pypi_lockfiles";
+/** A walk of the workspace and a few file writes. */
+export const RESTORE_PYPI_LOCKFILES_TIMEOUT_MS = 30_000;
+
+/**
+ * The worker's call once the agent has finished a changes_ready run: the tool runner puts the original
+ * index URLs back in the uv.lock and poetry.lock files it pointed at the proxy. Resolves with the tool's
+ * JSON (`{ restored, warnings }`, unchecked). Fails only with `pypi_lockfiles_tool_unavailable` (a tool
+ * runner without the tool: no registry, or an older image) or `pypi_lockfiles_tool_failed`.
+ */
+export async function callRestorePypiLockfiles({
+  socketPath = TOOL_SOCKET_PATH,
+  timeoutMs = RESTORE_PYPI_LOCKFILES_TIMEOUT_MS,
+  signal,
+}: { socketPath?: string; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<unknown> {
+  return callRunnerTool({
+    socketPath,
+    tool: RESTORE_PYPI_LOCKFILES_TOOL,
+    args: {},
+    timeoutMs,
+    signal,
+    codes: { unavailable: "pypi_lockfiles_tool_unavailable", failed: "pypi_lockfiles_tool_failed" },
+  });
 }
 
 interface JsonRpcResponse {

@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import type { ClaudeQueryFactory, ClaudeQueryOptions, ClaudeSdkMessage } from "./driver.js";
-import { PREPARE_DEPENDENCIES_TOOL } from "./tool-socket.js";
+import { PREPARE_DEPENDENCIES_TOOL, RESTORE_PYPI_LOCKFILES_TOOL } from "./tool-socket.js";
 
 const runtimeRequire = createRequire(import.meta.url);
 const TOOL_NAME = "mcp__wardby_tools__run_command";
@@ -10,6 +10,8 @@ const TOOL_NAME = "mcp__wardby_tools__run_command";
  * dontAsk plus allowedTools would already deny it, this keeps it out of the tool list as well.
  */
 const PREPARE_DEPENDENCIES_TOOL_NAME = `mcp__wardby_tools__${PREPARE_DEPENDENCIES_TOOL}`;
+/** The lockfile restore tool, likewise the worker's own call, after the agent has finished. */
+const RESTORE_PYPI_LOCKFILES_TOOL_NAME = `mcp__wardby_tools__${RESTORE_PYPI_LOCKFILES_TOOL}`;
 
 export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string, unknown> {
   const abortController = new AbortController();
@@ -28,7 +30,7 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     maxBudgetUsd: config.budgetUsd,
     tools: skills ? ["Skill"] : [],
     allowedTools: skills ? [TOOL_NAME, "Skill"] : [TOOL_NAME],
-    disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME],
+    disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME, RESTORE_PYPI_LOCKFILES_TOOL_NAME],
     strictMcpConfig: true,
     mcpServers: {
       wardby_tools: {
