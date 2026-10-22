@@ -8,6 +8,7 @@
 import { clean as pepClean, compare as pepCompare, satisfies as pepSatisfies, validRange } from "@renovatebot/pep440";
 import { unzipSync, strFromU8 } from "fflate";
 import { jfrogPypiIndex, type JfrogRegistryConfig } from "./jfrog.js";
+import { normalizePypiName } from "./pypi-name.js";
 import {
   AllowlistEntryError,
   RegistryError,
@@ -18,6 +19,8 @@ import {
   type RegistryRoute,
   type VersionInfo,
 } from "./types.js";
+
+export { normalizePypiName };
 
 const PUBLIC_INDEX = "https://pypi.org/simple/";
 const SIMPLE_JSON = "application/vnd.pypi.simple.v1+json";
@@ -78,10 +81,6 @@ function projectName(segment: string): string {
   const name = decoded(segment);
   if (!PROJECT_NAME.test(name)) throw new RegistryError(400, "wardby_bad_request", "not a valid Python project name");
   return normalizePypiName(name);
-}
-
-export function normalizePypiName(name: string): string {
-  return name.toLowerCase().replace(/[-_.]+/g, "-");
 }
 
 /** Version from a wheel ("name-1.0-py3-none-any.whl") or sdist ("name-1.0.tar.gz") filename. */
