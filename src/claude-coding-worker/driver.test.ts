@@ -23,6 +23,51 @@ const input: CodingTaskInput = {
   deadlineAt: "2026-09-07T13:00:00.000Z",
 };
 
+describe("runClaudeCodingWorker lockfile restore", () => {
+  const run = async (outcome: "changes_ready" | "no_changes", restore?: () => Promise<unknown>) => {
+    const record = vi.fn();
+    const result = await runClaudeCodingWorker({
+      input,
+      proxyBaseUrl: "http://wardby-proxy:8787/",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createQuery: () =>
+        (async function* () {
+          yield {
+            type: "result",
+            subtype: "success",
+            result: JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome, summary: "Done.", tests: [] }),
+          };
+        })(),
+      ...(restore ? { restorePypiLockfiles: restore } : {}),
+      trace: { record, bytesWritten: () => 0 } as never,
+    });
+    return { result, record };
+  };
+
+  it("asks the tool runner to restore the lockfiles after a changes_ready run, and traces what it says", async () => {
+    const restore = vi.fn(async () => ({ restored: ["uv.lock"], warnings: [] }));
+    const { result, record } = await run("changes_ready", restore);
+    expect(result.outcome).toBe("changes_ready");
+    expect(restore).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledWith("pypi_lockfiles_restore", { restored: ["uv.lock"], warnings: [] });
+  });
+
+  it("does not restore a workspace that is not collected", async () => {
+    const restore = vi.fn(async () => ({}));
+    await run("no_changes", restore);
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it("never fails the run when the restore does", async () => {
+    const { result, record } = await run("changes_ready", async () => {
+      throw new Error("pypi_lockfiles_tool_unavailable");
+    });
+    expect(result.outcome).toBe("changes_ready");
+    expect(record).toHaveBeenCalledWith("pypi_lockfiles_restore_error", expect.anything());
+  });
+});
+
 describe("runClaudeCodingWorker", () => {
   it("pins the proxy, disables built-ins, and permits only the socket relay", async () => {
     let captured: ClaudeQueryOptions | undefined;

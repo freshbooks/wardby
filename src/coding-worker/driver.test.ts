@@ -242,6 +242,48 @@ describe("runCodingWorker", () => {
     );
   });
 
+  describe("uv.lock", () => {
+    const registered = "https://pypi.org/simple";
+    const lock = (index: string): string =>
+      `version = 1\n\n[[package]]\nname = "idna"\nversion = "3.7"\nsource = { registry = "${index}" }\n`;
+
+    async function run(outcome: "changes_ready" | "no_changes") {
+      const workspace = await tempWorkspace();
+      await writeFile(join(workspace, "uv.lock"), lock(registered));
+      const output = JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome, summary: "Done.", tests: [] });
+      let atStart = "";
+      await runCodingWorker({
+        input,
+        workspace,
+        proxyBaseUrl: "http://proxy:8080",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createClient: () => {
+          return {
+            startThread: () => ({
+              async runStreamed() {
+                atStart = await readFile(join(workspace, "uv.lock"), "utf8");
+                return { events: events([{ type: "item.completed", item: { type: "agent_message", text: output } }]) };
+              },
+            }),
+          };
+        },
+      });
+      return { atStart, final: await readFile(join(workspace, "uv.lock"), "utf8") };
+    }
+
+    it("points the lock at the proxy before the agent starts and restores it for a changes_ready run", async () => {
+      const { atStart, final } = await run("changes_ready");
+      expect(atStart).toBe(lock("http://proxy:8080/registry/pypi/simple"));
+      expect(final).toBe(lock(registered));
+    });
+
+    it("leaves a workspace that is not collected as the agent left it", async () => {
+      const { final } = await run("no_changes");
+      expect(final).toBe(lock("http://proxy:8080/registry/pypi/simple"));
+    });
+  });
+
   it("rejects a structured result bound to another run", async () => {
     const output = JSON.stringify({
       schemaVersion: 1,
