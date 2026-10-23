@@ -114,7 +114,26 @@ that holds its owner's tools, secrets, and write access. GitHub's
 `author_association` (owner, member, collaborator) is only a first filter:
 it would admit any organization member, or a read-only collaborator. Mentions
 by bots, and mentions from anyone without write access, are ignored silently
-(no run, no reaction).
+(no run, no reaction, no reply): an outsider cannot use a mention to find out
+what is linked to the repository.
+
+When someone with write access mentions the App and nothing starts, the App
+replies on the issue or pull request (in the review thread, if the mention was
+in one) instead of leaving the mention unanswered. It says which of these
+applies, with no 👀 reaction:
+
+- **No agent answers mentions on the repository** — no agent is linked with
+  the `mention` trigger. Link one (see [Linking an
+  agent](#linking-an-agent-to-a-repository)).
+- **No reviewer is linked** — `@<app-slug> review` was used, but no agent is
+  linked with the `pull_request` trigger and a `checkName`.
+- **The linked agent can no longer use the repository** — the agent owner's
+  GitHub account lost access, or its authorization lapsed. The owner
+  re-authorizes or re-links the agent.
+- **The pull request is closed or comes from a fork** — wardby reviews only
+  open pull requests from branches of the repository.
+
+The reply never names the App, so it cannot be read as a mention of itself.
 
 ### What the mention agent receives
 

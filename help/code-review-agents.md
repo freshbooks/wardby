@@ -38,8 +38,12 @@ A repository can also be linked so wardby fixes its own review's findings on
 such a pull request automatically, up to a round cap — see
 [Automatic review fix rounds](review-fix-rounds.md).
 
-Wardby skips pull requests whose head is in a fork. It also ignores mentions
-from bots and people without write access. Repository links require the
+Wardby skips pull requests whose head is in a fork. It ignores mentions
+from bots and people without write access, with no reply. When someone with
+write access mentions the App and nothing starts (no agent linked for mentions
+or reviews, the linked agent's owner lost access to the repository, or the pull
+request is closed or from a fork), the App replies with the reason instead of
+staying silent. Repository links require the
 agent owner's linked GitHub access, or an explicitly recorded administrator
 approval.
 
